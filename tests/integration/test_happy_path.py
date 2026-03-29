@@ -5,6 +5,7 @@ Two AUTO_SAFE files flow through the complete pipeline:
 INITIALIZED → PLANNING → PLAN_REVIEWING → AUTO_MERGING → JUDGE_REVIEWING
 → GENERATING_REPORT → COMPLETED
 """
+
 from unittest.mock import AsyncMock
 import pytest
 

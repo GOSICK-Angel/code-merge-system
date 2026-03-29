@@ -1,10 +1,9 @@
 import pytest
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 from src.models.config import MergeConfig
 from src.models.state import MergeState
-from src.models.decision import MergeDecision
 from src.tools.patch_applier import apply_with_snapshot
 
 

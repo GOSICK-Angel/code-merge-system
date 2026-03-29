@@ -5,6 +5,7 @@ An AUTO_RISKY file with high-confidence conflict analysis goes through:
 PLAN_REVIEWING → AUTO_MERGING → ANALYZING_CONFLICTS → (semantic merge) →
 JUDGE_REVIEWING → GENERATING_REPORT → COMPLETED
 """
+
 from unittest.mock import AsyncMock
 import pytest
 
@@ -17,7 +18,6 @@ from tests.integration.conftest import (
     PLANNER_JUDGE_APPROVED_1,
     CONFLICT_HIGH_CONFIDENCE,
     SEMANTIC_MERGE_CONTENT,
-    FILE_REVIEW_NO_ISSUES,
     JUDGE_VERDICT_PASS,
 )
 
@@ -144,6 +144,7 @@ async def test_semantic_merge_judge_verdict_is_pass(
     result = await orchestrator.run(state)
 
     from src.models.judge import VerdictType
+
     assert result.judge_verdict is not None
     assert result.judge_verdict.verdict == VerdictType.PASS
 

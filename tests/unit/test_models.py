@@ -1,9 +1,7 @@
-import pytest
 from src.models.config import MergeConfig, AgentLLMConfig
 from src.models.decision import DecisionSource
 from src.models.state import MergeState, SystemStatus
 from src.models.plan import MergePhase
-from src.models.plan_judge import PlanJudgeVerdict
 
 
 def _make_config() -> MergeConfig:
@@ -11,7 +9,7 @@ def _make_config() -> MergeConfig:
 
 
 def test_merge_config_no_timeout_field():
-    config = _make_config()
+    _make_config()
     config_fields = set(MergeConfig.model_fields.keys())
     assert "human_decision_timeout_hours" not in config_fields, (
         "MergeConfig must not have human_decision_timeout_hours"
@@ -19,9 +17,13 @@ def test_merge_config_no_timeout_field():
 
 
 def test_agent_llm_config_requires_env_var():
-    agent_cfg = AgentLLMConfig(provider="anthropic", model="claude-opus-4-6", api_key_env="MY_KEY")
+    agent_cfg = AgentLLMConfig(
+        provider="anthropic", model="claude-opus-4-6", api_key_env="MY_KEY"
+    )
     assert agent_cfg.api_key_env == "MY_KEY"
-    agent_cfg2 = AgentLLMConfig(provider="openai", model="gpt-4o", api_key_env="OPENAI_KEY")
+    agent_cfg2 = AgentLLMConfig(
+        provider="openai", model="gpt-4o", api_key_env="OPENAI_KEY"
+    )
     assert agent_cfg2.api_key_env == "OPENAI_KEY"
     assert agent_cfg2.api_key_env != ""
 
@@ -59,4 +61,6 @@ def test_system_status_new_states():
     status_values = {s.value for s in SystemStatus}
     assert "plan_reviewing" in status_values, "SystemStatus must contain PLAN_REVIEWING"
     assert "plan_revising" in status_values, "SystemStatus must contain PLAN_REVISING"
-    assert "plan_dispute_pending" in status_values, "SystemStatus must contain PLAN_DISPUTE_PENDING"
+    assert "plan_dispute_pending" in status_values, (
+        "SystemStatus must contain PLAN_DISPUTE_PENDING"
+    )

@@ -1,11 +1,10 @@
 import pytest
 from datetime import datetime
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, patch
 from src.models.config import MergeConfig, AgentLLMConfig
 from src.models.state import MergeState, SystemStatus
 from src.models.diff import FileDiff, FileStatus, RiskLevel
 from src.models.decision import MergeDecision
-from src.models.plan_judge import PlanJudgeVerdict, PlanJudgeResult
 from src.core.read_only_state_view import ReadOnlyStateView
 
 
@@ -17,7 +16,9 @@ def _make_state() -> MergeState:
     return MergeState(config=_make_config())
 
 
-def _make_llm_config(provider: str = "anthropic", key_env: str = "TEST_KEY") -> AgentLLMConfig:
+def _make_llm_config(
+    provider: str = "anthropic", key_env: str = "TEST_KEY"
+) -> AgentLLMConfig:
     return AgentLLMConfig(
         provider=provider,
         model="test-model",
@@ -69,6 +70,7 @@ def test_judge_cannot_write_state():
 def test_executor_dispute_does_not_change_risk_level():
     with patch.dict("os.environ", {"TEST_KEY": "fake-key"}):
         from src.agents.executor_agent import ExecutorAgent
+
         agent = ExecutorAgent(_make_llm_config(provider="openai", key_env="TEST_KEY"))
         state = _make_state()
 
@@ -109,15 +111,19 @@ async def test_executor_requires_snapshot_before_write():
         git_tool.repo_path = tmp_path
         state = _make_state()
 
-        record = await apply_with_snapshot("src/module.py", "new content\n", git_tool, state)
+        record = await apply_with_snapshot(
+            "src/module.py", "new content\n", git_tool, state
+        )
         assert record.original_snapshot == original
 
 
 def test_human_interface_never_auto_decides():
     with patch.dict("os.environ", {"TEST_KEY": "fake-key"}):
         from src.agents.human_interface_agent import HumanInterfaceAgent
+
         agent = HumanInterfaceAgent(_make_llm_config(key_env="TEST_KEY"))
         from src.models.human import HumanDecisionRequest, DecisionOption
+
         req = HumanDecisionRequest(
             file_path="src/complex.py",
             priority=1,
@@ -139,13 +145,16 @@ def test_human_interface_never_auto_decides():
         )
 
         assert req.human_decision is None, "New request must have no decision"
-        assert not agent.validate_decision(req), "Request without decision must be invalid"
+        assert not agent.validate_decision(req), (
+            "Request without decision must be invalid"
+        )
 
 
 def test_validate_decision_rejects_escalate_human():
     with patch.dict("os.environ", {"TEST_KEY": "fake-key"}):
         from src.agents.human_interface_agent import HumanInterfaceAgent
-        from src.models.human import HumanDecisionRequest, DecisionOption
+        from src.models.human import HumanDecisionRequest
+
         agent = HumanInterfaceAgent(_make_llm_config(key_env="TEST_KEY"))
 
         req = HumanDecisionRequest(

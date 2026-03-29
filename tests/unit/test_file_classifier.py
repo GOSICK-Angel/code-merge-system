@@ -1,8 +1,6 @@
-import pytest
-from src.models.diff import FileDiff, FileStatus, RiskLevel, DiffHunk
+from src.models.diff import FileDiff, FileStatus, RiskLevel
 from src.models.config import FileClassifierConfig, SecuritySensitiveConfig
-from src.tools.file_classifier import compute_risk_score, classify_file
-from uuid import uuid4
+from src.tools.file_classifier import compute_risk_score
 
 
 def _make_file_diff(

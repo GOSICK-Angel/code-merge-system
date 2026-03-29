@@ -1,4 +1,3 @@
-import pytest
 from src.tools.diff_parser import parse_unified_diff, parse_conflict_markers
 
 
