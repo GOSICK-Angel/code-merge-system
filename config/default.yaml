@@ -1,0 +1,97 @@
+upstream_ref: "upstream/main"
+fork_ref: "feature/my-fork"
+working_branch: "merge/auto-{timestamp}"
+repo_path: "."
+project_context: "Example project context"
+max_files_per_run: 500
+max_plan_revision_rounds: 2
+
+llm:
+  provider: "anthropic"
+  model: "claude-opus-4-6"
+  max_tokens: 8192
+  temperature: 0.2
+  max_retries: 3
+
+agents:
+  planner:
+    provider: "anthropic"
+    model: "claude-opus-4-6"
+    temperature: 0.2
+    max_tokens: 8192
+    max_retries: 3
+    api_key_env: "ANTHROPIC_API_KEY"
+  planner_judge:
+    provider: "openai"
+    model: "gpt-4o"
+    temperature: 0.2
+    max_tokens: 8192
+    max_retries: 3
+    api_key_env: "OPENAI_API_KEY"
+  conflict_analyst:
+    provider: "anthropic"
+    model: "claude-sonnet-4-6"
+    temperature: 0.2
+    max_tokens: 8192
+    max_retries: 3
+    api_key_env: "ANTHROPIC_API_KEY"
+  executor:
+    provider: "openai"
+    model: "gpt-4o"
+    temperature: 0.1
+    max_tokens: 8192
+    max_retries: 3
+    api_key_env: "OPENAI_API_KEY"
+  judge:
+    provider: "anthropic"
+    model: "claude-opus-4-6"
+    temperature: 0.1
+    max_tokens: 8192
+    max_retries: 3
+    api_key_env: "ANTHROPIC_API_KEY"
+  human_interface:
+    provider: "anthropic"
+    model: "claude-haiku-4-5-20251001"
+    temperature: 0.2
+    max_tokens: 4096
+    max_retries: 3
+    api_key_env: "ANTHROPIC_API_KEY"
+
+thresholds:
+  auto_merge_confidence: 0.85
+  human_escalation: 0.60
+  risk_score_low: 0.30
+  risk_score_high: 0.60
+
+file_classifier:
+  excluded_patterns:
+    - "**/*.lock"
+    - "**/node_modules/**"
+    - "**/.git/**"
+  binary_extensions:
+    - ".png"
+    - ".jpg"
+    - ".pdf"
+    - ".zip"
+    - ".tar"
+    - ".whl"
+  always_take_target_patterns: []
+  always_take_current_patterns: []
+  security_sensitive:
+    patterns:
+      - "**/auth/**"
+      - "**/security/**"
+      - "**/*secret*"
+      - "**/*credential*"
+      - "**/*password*"
+      - "**/*.pem"
+      - "**/*.key"
+    always_require_human: true
+
+output:
+  directory: "./outputs"
+  formats:
+    - "json"
+    - "markdown"
+  include_raw_diffs: false
+  include_llm_traces: false

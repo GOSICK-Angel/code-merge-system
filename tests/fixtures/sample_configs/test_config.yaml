@@ -1,0 +1,62 @@
+upstream_ref: "main"
+fork_ref: "feature/test-fork"
+working_branch: "merge/test-{timestamp}"
+repo_path: "."
+project_context: "Test project"
+max_files_per_run: 100
+max_plan_revision_rounds: 2
+
+agents:
+  planner:
+    provider: "anthropic"
+    model: "claude-opus-4-6"
+    temperature: 0.2
+    max_tokens: 4096
+    max_retries: 1
+    api_key_env: "TEST_ANTHROPIC_API_KEY"
+  planner_judge:
+    provider: "openai"
+    model: "gpt-4o"
+    temperature: 0.2
+    max_tokens: 4096
+    max_retries: 1
+    api_key_env: "TEST_OPENAI_API_KEY"
+  conflict_analyst:
+    provider: "anthropic"
+    model: "claude-sonnet-4-6"
+    temperature: 0.2
+    max_tokens: 4096
+    max_retries: 1
+    api_key_env: "TEST_ANTHROPIC_API_KEY"
+  executor:
+    provider: "openai"
+    model: "gpt-4o"
+    temperature: 0.1
+    max_tokens: 4096
+    max_retries: 1
+    api_key_env: "TEST_OPENAI_API_KEY"
+  judge:
+    provider: "anthropic"
+    model: "claude-opus-4-6"
+    temperature: 0.1
+    max_tokens: 4096
+    max_retries: 1
+    api_key_env: "TEST_ANTHROPIC_API_KEY"
+  human_interface:
+    provider: "anthropic"
+    model: "claude-haiku-4-5-20251001"
+    temperature: 0.2
+    max_tokens: 2048
+    max_retries: 1
+    api_key_env: "TEST_ANTHROPIC_API_KEY"
+
+thresholds:
+  auto_merge_confidence: 0.85
+  human_escalation: 0.60
+  risk_score_low: 0.30
+  risk_score_high: 0.60
+
+output:
+  directory: "./test_outputs"
+  formats:
+    - "json"
