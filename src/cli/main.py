@@ -23,15 +23,19 @@ def cli():
 def run_command(config: str, dry_run: bool):
     """Execute complete merge workflow"""
     from src.cli.commands.run import run_command_impl
+
     run_command_impl(config, dry_run)
 
 
 @cli.command("resume")
 @click.option("--run-id", required=False, default=None)
-@click.option("--checkpoint", required=False, type=click.Path(exists=True), default=None)
+@click.option(
+    "--checkpoint", required=False, type=click.Path(exists=True), default=None
+)
 def resume_command(run_id: str | None, checkpoint: str | None):
     """Resume execution from a checkpoint"""
     from src.cli.commands.resume import resume_command_impl
+
     resume_command_impl(run_id, checkpoint)
 
 
@@ -81,7 +85,9 @@ def validate_command(config: str):
             console.print(f"  - {err}")
         sys.exit(1)
     else:
-        console.print("[green]Config is valid. All required environment variables are set.[/green]")
+        console.print(
+            "[green]Config is valid. All required environment variables are set.[/green]"
+        )
 
 
 def validate_config_and_env(config: MergeConfig) -> list[str]:
@@ -90,13 +96,18 @@ def validate_config_and_env(config: MergeConfig) -> list[str]:
     for agent_name, agent_config in config.agents.model_dump().items():
         env_var = agent_config.get("api_key_env", "")
         if env_var and not os.environ.get(env_var):
-            errors.append(f"Agent '{agent_name}' requires env var '{env_var}' (not set)")
+            errors.append(
+                f"Agent '{agent_name}' requires env var '{env_var}' (not set)"
+            )
 
     try:
         from src.tools.git_tool import GitTool
+
         gt = GitTool(config.repo_path)
     except ValueError as e:
-        errors.append(f"repo_path '{config.repo_path}' is not a valid git repository: {e}")
+        errors.append(
+            f"repo_path '{config.repo_path}' is not a valid git repository: {e}"
+        )
         return errors
 
     for ref in (config.upstream_ref, config.fork_ref):

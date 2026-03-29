@@ -58,11 +58,19 @@ def compute_risk_score(file_diff: FileDiff, config: FileClassifierConfig) -> flo
     change_ratio_score = min(1.0, change_ratio * 2)
 
     type_score_map = {
-        ".py": 0.7, ".ts": 0.7, ".js": 0.6,
-        ".java": 0.7, ".go": 0.7, ".rs": 0.8,
-        ".yaml": 0.5, ".json": 0.4, ".toml": 0.4,
-        ".md": 0.1, ".txt": 0.1,
-        ".sql": 0.8, ".sh": 0.7,
+        ".py": 0.7,
+        ".ts": 0.7,
+        ".js": 0.6,
+        ".java": 0.7,
+        ".go": 0.7,
+        ".rs": 0.8,
+        ".yaml": 0.5,
+        ".json": 0.4,
+        ".toml": 0.4,
+        ".md": 0.1,
+        ".txt": 0.1,
+        ".sql": 0.8,
+        ".sh": 0.7,
     }
     ext = Path(file_diff.file_path).suffix.lower()
     type_score = type_score_map.get(ext, 0.5)
@@ -104,10 +112,7 @@ def classify_file(
     if file_diff.file_status == FileStatus.BINARY:
         return RiskLevel.BINARY
 
-    if (
-        file_diff.file_status == FileStatus.DELETED
-        and file_diff.lines_added == 0
-    ):
+    if file_diff.file_status == FileStatus.DELETED and file_diff.lines_added == 0:
         return RiskLevel.DELETED_ONLY
 
     risk_score = file_diff.risk_score

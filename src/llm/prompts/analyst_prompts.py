@@ -15,9 +15,15 @@ def build_conflict_analysis_prompt(
     project_context: str,
 ) -> str:
     language = file_diff.language or "unknown"
-    base_section = f"```{language}\n{base_content}\n```" if base_content else "Not available"
-    current_section = f"```{language}\n{current_content}\n```" if current_content else "Not available"
-    target_section = f"```{language}\n{target_content}\n```" if target_content else "Not available"
+    base_section = (
+        f"```{language}\n{base_content}\n```" if base_content else "Not available"
+    )
+    current_section = (
+        f"```{language}\n{current_content}\n```" if current_content else "Not available"
+    )
+    target_section = (
+        f"```{language}\n{target_content}\n```" if target_content else "Not available"
+    )
 
     return f"""Analyze this Git merge conflict and provide a structured analysis.
 

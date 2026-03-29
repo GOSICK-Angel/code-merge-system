@@ -6,7 +6,10 @@ from src.models.diff import FileDiff
 from src.models.conflict import ConflictAnalysis, ConflictType
 from src.models.decision import MergeDecision
 from src.models.state import MergeState
-from src.llm.prompts.analyst_prompts import ANALYST_SYSTEM, build_conflict_analysis_prompt
+from src.llm.prompts.analyst_prompts import (
+    ANALYST_SYSTEM,
+    build_conflict_analysis_prompt,
+)
 from src.llm.response_parser import parse_conflict_analysis
 from src.tools.git_tool import GitTool
 
@@ -34,12 +37,13 @@ class ConflictAnalystAgent(BaseAgent):
         high_risk_files: list[str] = []
         for batch in state.merge_plan.phases:
             from src.models.diff import RiskLevel
+
             if batch.risk_level in (RiskLevel.HUMAN_REQUIRED, RiskLevel.AUTO_RISKY):
                 high_risk_files.extend(batch.file_paths)
 
         file_diffs_map: dict[str, FileDiff] = {}
         if hasattr(state, "_file_diffs"):
-            for fd in (state._file_diffs or []):
+            for fd in state._file_diffs or []:
                 file_diffs_map[fd.file_path] = fd
 
         for file_path in high_risk_files:
@@ -49,11 +53,13 @@ class ConflictAnalystAgent(BaseAgent):
 
             base_content = target_content = current_content = None
             if self.git_tool and hasattr(state, "_merge_base"):
-                base_content, current_content, target_content = self.git_tool.get_three_way_diff(
-                    state._merge_base or "",
-                    state.config.fork_ref,
-                    state.config.upstream_ref,
-                    file_path,
+                base_content, current_content, target_content = (
+                    self.git_tool.get_three_way_diff(
+                        state._merge_base or "",
+                        state.config.fork_ref,
+                        state.config.upstream_ref,
+                        file_path,
+                    )
                 )
 
             analysis = await self.analyze_file(
@@ -95,9 +101,13 @@ class ConflictAnalystAgent(BaseAgent):
 
         try:
             raw = await self._call_llm_with_retry(messages, system=ANALYST_SYSTEM)
-            return parse_conflict_analysis(str(raw), file_diff.file_path, self.llm_config.model)
+            return parse_conflict_analysis(
+                str(raw), file_diff.file_path, self.llm_config.model
+            )
         except Exception as e:
-            self.logger.error(f"Conflict analysis failed for {file_diff.file_path}: {e}")
+            self.logger.error(
+                f"Conflict analysis failed for {file_diff.file_path}: {e}"
+            )
             return ConflictAnalysis(
                 file_path=file_diff.file_path,
                 conflict_points=[],
@@ -122,7 +132,9 @@ class ConflictAnalystAgent(BaseAgent):
             project_context=project_context,
         )
 
-    def compute_confidence(self, analysis: ConflictAnalysis, has_base_version: bool) -> float:
+    def compute_confidence(
+        self, analysis: ConflictAnalysis, has_base_version: bool
+    ) -> float:
         base_confidence = analysis.confidence
 
         type_adjustment = {
@@ -145,4 +157,5 @@ class ConflictAnalystAgent(BaseAgent):
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus
+
         return state.status == SystemStatus.ANALYZING_CONFLICTS

@@ -9,7 +9,9 @@ Focus on: complete coverage of all files, reasonable risk estimation, identifyin
 Output structured JSON. Risk levels: auto_safe, auto_risky, human_required, deleted_only, binary, excluded."""
 
 
-def build_classification_prompt(file_diffs: list[FileDiff], project_context: str) -> str:
+def build_classification_prompt(
+    file_diffs: list[FileDiff], project_context: str
+) -> str:
     file_list_lines: list[str] = []
     for fd in file_diffs:
         file_list_lines.append(
@@ -76,7 +78,9 @@ Project file summary:
 Please answer in English."""
 
 
-def build_revision_prompt(original_plan: MergePlan, judge_issues: list[PlanIssue]) -> str:
+def build_revision_prompt(
+    original_plan: MergePlan, judge_issues: list[PlanIssue]
+) -> str:
     issues_text = "\n".join(
         f"- File: {issue.file_path}\n"
         f"  Current: {issue.current_classification.value}\n"

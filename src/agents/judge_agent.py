@@ -7,7 +7,11 @@ from src.models.diff import FileDiff, RiskLevel
 from src.models.decision import FileDecisionRecord
 from src.models.judge import JudgeVerdict, JudgeIssue, VerdictType, IssueSeverity
 from src.models.state import MergeState
-from src.llm.prompts.judge_prompts import JUDGE_SYSTEM, build_file_review_prompt, build_verdict_prompt
+from src.llm.prompts.judge_prompts import (
+    JUDGE_SYSTEM,
+    build_file_review_prompt,
+    build_verdict_prompt,
+)
 from src.llm.response_parser import parse_file_review_issues, parse_judge_verdict
 from src.tools.git_tool import GitTool
 
@@ -25,7 +29,7 @@ class JudgeAgent(BaseAgent):
 
         file_diffs_map: dict[str, FileDiff] = {}
         if hasattr(state, "_file_diffs"):
-            for fd in (state._file_diffs or []):
+            for fd in state._file_diffs or []:
                 file_diffs_map[fd.file_path] = fd
 
         high_risk_records: dict[str, FileDecisionRecord] = {}
@@ -52,7 +56,9 @@ class JudgeAgent(BaseAgent):
                 merged_content,
                 record,
                 fd,
-                project_context=state.config.project_context if hasattr(state, "config") else "",
+                project_context=state.config.project_context
+                if hasattr(state, "config")
+                else "",
             )
             all_issues.extend(issues)
             reviewed_files.append(file_path)
@@ -121,7 +127,9 @@ class JudgeAgent(BaseAgent):
     async def _compute_final_verdict(
         self, reviewed_files: list[str], all_issues: list[JudgeIssue]
     ) -> JudgeVerdict:
-        critical_count = sum(1 for i in all_issues if i.issue_level == IssueSeverity.CRITICAL)
+        critical_count = sum(
+            1 for i in all_issues if i.issue_level == IssueSeverity.CRITICAL
+        )
         high_count = sum(1 for i in all_issues if i.issue_level == IssueSeverity.HIGH)
 
         issues_summary = "\n".join(
@@ -129,7 +137,9 @@ class JudgeAgent(BaseAgent):
             for i in all_issues
         )
 
-        prompt = build_verdict_prompt(reviewed_files, issues_summary, critical_count, high_count)
+        prompt = build_verdict_prompt(
+            reviewed_files, issues_summary, critical_count, high_count
+        )
         messages = [{"role": "user", "content": prompt}]
 
         try:
@@ -154,7 +164,9 @@ class JudgeAgent(BaseAgent):
                 high_issues_count=high_count,
                 overall_confidence=0.5,
                 summary=f"Verdict computed with errors: {e}",
-                blocking_issues=[i.issue_id for i in all_issues if i.must_fix_before_merge],
+                blocking_issues=[
+                    i.issue_id for i in all_issues if i.must_fix_before_merge
+                ],
                 timestamp=datetime.now(),
                 judge_model=self.llm_config.model,
             )
@@ -163,4 +175,5 @@ class JudgeAgent(BaseAgent):
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus
+
         return state.status == SystemStatus.JUDGE_REVIEWING

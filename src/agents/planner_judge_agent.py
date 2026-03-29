@@ -5,7 +5,10 @@ from src.models.plan import MergePlan, MergePhase
 from src.models.diff import FileDiff
 from src.models.plan_judge import PlanJudgeVerdict
 from src.models.state import MergeState
-from src.llm.prompts.planner_judge_prompts import PLANNER_JUDGE_SYSTEM, build_plan_review_prompt
+from src.llm.prompts.planner_judge_prompts import (
+    PLANNER_JUDGE_SYSTEM,
+    build_plan_review_prompt,
+)
 from src.llm.response_parser import parse_plan_judge_verdict
 
 
@@ -49,11 +52,14 @@ class PlannerJudgeAgent(BaseAgent):
 
         try:
             raw = await self._call_llm_with_retry(messages, system=PLANNER_JUDGE_SYSTEM)
-            return parse_plan_judge_verdict(str(raw), self.llm_config.model, revision_round)
+            return parse_plan_judge_verdict(
+                str(raw), self.llm_config.model, revision_round
+            )
         except Exception as e:
             self.logger.error(f"Plan review failed: {e}")
             from src.models.plan_judge import PlanJudgeResult
             from datetime import datetime
+
             return PlanJudgeVerdict(
                 result=PlanJudgeResult.APPROVED,
                 revision_round=revision_round,
@@ -67,4 +73,5 @@ class PlannerJudgeAgent(BaseAgent):
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus
+
         return state.status == SystemStatus.PLAN_REVIEWING

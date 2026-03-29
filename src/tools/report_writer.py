@@ -37,17 +37,30 @@ def write_markdown_report(state: MergeState, output_dir: str) -> Path:
 
     if state.file_decision_records:
         lines += ["## File Decision Records", ""]
-        lines += ["| File | Decision | Source | Confidence |", "|------|----------|--------|------------|"]
+        lines += [
+            "| File | Decision | Source | Confidence |",
+            "|------|----------|--------|------------|",
+        ]
         for fp, rec in state.file_decision_records.items():
-            decision_val = rec.decision.value if hasattr(rec.decision, "value") else rec.decision
-            source_val = rec.decision_source.value if hasattr(rec.decision_source, "value") else rec.decision_source
+            decision_val = (
+                rec.decision.value if hasattr(rec.decision, "value") else rec.decision
+            )
+            source_val = (
+                rec.decision_source.value
+                if hasattr(rec.decision_source, "value")
+                else rec.decision_source
+            )
             conf = f"{rec.confidence:.2f}" if rec.confidence is not None else "N/A"
             lines.append(f"| `{fp}` | {decision_val} | {source_val} | {conf} |")
         lines.append("")
 
     if state.judge_verdict:
         verdict = state.judge_verdict
-        verdict_val = verdict.verdict.value if hasattr(verdict.verdict, "value") else verdict.verdict
+        verdict_val = (
+            verdict.verdict.value
+            if hasattr(verdict.verdict, "value")
+            else verdict.verdict
+        )
         lines += [
             "## Judge Verdict",
             f"- **Result**: {verdict_val}",
@@ -95,7 +108,11 @@ def write_human_decision_report(
     ]
 
     for req_id, req in state.human_decision_requests.items():
-        rec_val = req.analyst_recommendation.value if hasattr(req.analyst_recommendation, "value") else req.analyst_recommendation
+        rec_val = (
+            req.analyst_recommendation.value
+            if hasattr(req.analyst_recommendation, "value")
+            else req.analyst_recommendation
+        )
         lines += [
             f"## {req.file_path} (priority={req.priority})",
             "",
@@ -112,7 +129,9 @@ def write_human_decision_report(
             "### Options",
         ]
         for opt in req.options:
-            opt_dec = opt.decision.value if hasattr(opt.decision, "value") else opt.decision
+            opt_dec = (
+                opt.decision.value if hasattr(opt.decision, "value") else opt.decision
+            )
             lines.append(f"- **{opt.option_key}** (`{opt_dec}`): {opt.description}")
             if opt.risk_warning:
                 lines.append(f"  - Warning: {opt.risk_warning}")

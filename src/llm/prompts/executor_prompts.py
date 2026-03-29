@@ -15,9 +15,11 @@ def build_semantic_merge_prompt(
     project_context: str,
 ) -> str:
     language = file_diff.language or "unknown"
-    rec_val = conflict_analysis.recommended_strategy.value if hasattr(
-        conflict_analysis.recommended_strategy, "value"
-    ) else conflict_analysis.recommended_strategy
+    rec_val = (
+        conflict_analysis.recommended_strategy.value
+        if hasattr(conflict_analysis.recommended_strategy, "value")
+        else conflict_analysis.recommended_strategy
+    )
 
     return f"""Perform a semantic merge of the following two versions of a file.
 
@@ -28,7 +30,7 @@ def build_semantic_merge_prompt(
 Language: {language}
 
 # Conflict Analysis
-- Type: {conflict_analysis.conflict_type.value if hasattr(conflict_analysis.conflict_type, 'value') else conflict_analysis.conflict_type}
+- Type: {conflict_analysis.conflict_type.value if hasattr(conflict_analysis.conflict_type, "value") else conflict_analysis.conflict_type}
 - Recommended strategy: {rec_val}
 - Rationale: {conflict_analysis.rationale}
 - Confidence: {conflict_analysis.confidence}

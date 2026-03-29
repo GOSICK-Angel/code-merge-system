@@ -3,7 +3,12 @@ from datetime import datetime
 from uuid import uuid4
 from src.llm.client import ParseError
 from src.models.plan_judge import PlanJudgeVerdict, PlanJudgeResult, PlanIssue
-from src.models.conflict import ConflictAnalysis, ConflictType, ChangeIntent, ConflictPoint
+from src.models.conflict import (
+    ConflictAnalysis,
+    ConflictType,
+    ChangeIntent,
+    ConflictPoint,
+)
 from src.models.decision import MergeDecision
 from src.models.judge import JudgeVerdict, JudgeIssue, VerdictType, IssueSeverity
 from src.models.diff import RiskLevel
@@ -46,11 +51,15 @@ def _validate_confidence(value: float) -> float:
 def _validate_enum(value: str, enum_class: type, field_name: str) -> str:
     valid_values = {e.value for e in enum_class}
     if value not in valid_values:
-        raise ParseError(f"Invalid {field_name} value '{value}'. Must be one of: {valid_values}")
+        raise ParseError(
+            f"Invalid {field_name} value '{value}'. Must be one of: {valid_values}"
+        )
     return value
 
 
-def parse_plan_judge_verdict(raw: str | dict, judge_model: str = "unknown", revision_round: int = 0) -> PlanJudgeVerdict:
+def parse_plan_judge_verdict(
+    raw: str | dict, judge_model: str = "unknown", revision_round: int = 0
+) -> PlanJudgeVerdict:
     data = _extract_json(raw)
 
     result_raw = data.get("result", "")
@@ -85,7 +94,9 @@ def parse_plan_judge_verdict(raw: str | dict, judge_model: str = "unknown", revi
     )
 
 
-def parse_conflict_analysis(raw: str | dict, file_path: str, model: str = "unknown") -> ConflictAnalysis:
+def parse_conflict_analysis(
+    raw: str | dict, file_path: str, model: str = "unknown"
+) -> ConflictAnalysis:
     data = _extract_json(raw)
 
     conflict_type_raw = data.get("conflict_type", "unknown")
@@ -159,7 +170,9 @@ def parse_judge_verdict(
     except ParseError:
         verdict = VerdictType.CONDITIONAL
 
-    critical_count = sum(1 for i in all_issues if i.issue_level == IssueSeverity.CRITICAL)
+    critical_count = sum(
+        1 for i in all_issues if i.issue_level == IssueSeverity.CRITICAL
+    )
     high_count = sum(1 for i in all_issues if i.issue_level == IssueSeverity.HIGH)
 
     passed_files: list[str] = []
@@ -169,7 +182,9 @@ def parse_judge_verdict(
     issue_file_map: dict[str, IssueSeverity] = {}
     for issue in all_issues:
         existing = issue_file_map.get(issue.file_path)
-        if existing is None or _severity_order(issue.issue_level) > _severity_order(existing):
+        if existing is None or _severity_order(issue.issue_level) > _severity_order(
+            existing
+        ):
             issue_file_map[issue.file_path] = issue.issue_level
 
     for fp in reviewed_files:
@@ -214,7 +229,9 @@ def parse_merge_result(raw: str | dict) -> str:
     return text
 
 
-def parse_file_review_issues(raw: str | dict, default_file_path: str) -> list[JudgeIssue]:
+def parse_file_review_issues(
+    raw: str | dict, default_file_path: str
+) -> list[JudgeIssue]:
     data = _extract_json(raw)
     issues: list[JudgeIssue] = []
 

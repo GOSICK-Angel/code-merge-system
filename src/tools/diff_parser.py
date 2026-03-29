@@ -5,7 +5,9 @@ from src.models.diff import FileDiff, DiffHunk, FileStatus, RiskLevel
 
 def parse_unified_diff(raw_diff: str, file_path: str) -> list[DiffHunk]:
     hunks: list[DiffHunk] = []
-    hunk_pattern = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
+    hunk_pattern = re.compile(
+        r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.MULTILINE
+    )
     matches = list(hunk_pattern.finditer(raw_diff))
 
     for i, match in enumerate(matches):
@@ -15,9 +17,9 @@ def parse_unified_diff(raw_diff: str, file_path: str) -> list[DiffHunk]:
         len_current = int(match.group(4) or 1)
 
         if i + 1 < len(matches):
-            hunk_content = raw_diff[match.start():matches[i + 1].start()]
+            hunk_content = raw_diff[match.start() : matches[i + 1].start()]
         else:
-            hunk_content = raw_diff[match.start():]
+            hunk_content = raw_diff[match.start() :]
 
         lines = hunk_content.splitlines()
         content_current_lines: list[str] = []
@@ -33,7 +35,11 @@ def parse_unified_diff(raw_diff: str, file_path: str) -> list[DiffHunk]:
             elif line.startswith(" "):
                 content_current_lines.append(line[1:])
                 content_target_lines.append(line[1:])
-            if line.startswith("<<<<<<<") or line.startswith("=======") or line.startswith(">>>>>>>"):
+            if (
+                line.startswith("<<<<<<<")
+                or line.startswith("=======")
+                or line.startswith(">>>>>>>")
+            ):
                 has_conflict = True
                 conflict_marker_lines.append(line_num)
 
@@ -130,8 +136,16 @@ def build_file_diff(
 ) -> FileDiff:
     hunks = parse_unified_diff(raw_diff, file_path)
 
-    lines_added = sum(1 for line in raw_diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
-    lines_deleted = sum(1 for line in raw_diff.splitlines() if line.startswith("-") and not line.startswith("---"))
+    lines_added = sum(
+        1
+        for line in raw_diff.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
+    lines_deleted = sum(
+        1
+        for line in raw_diff.splitlines()
+        if line.startswith("-") and not line.startswith("---")
+    )
     lines_changed = max(lines_added, lines_deleted)
     conflict_count = sum(1 for h in hunks if h.has_conflict)
 
@@ -183,5 +197,6 @@ def detect_language(file_path: str) -> str | None:
         ".md": "markdown",
     }
     from pathlib import Path
+
     ext = Path(file_path).suffix.lower()
     return language_map.get(ext)

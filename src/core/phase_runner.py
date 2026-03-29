@@ -44,7 +44,7 @@ class PhaseRunner:
         all_results = []
 
         for i in range(0, len(items), self.batch_size):
-            batch = items[i:i + self.batch_size]
+            batch = items[i : i + self.batch_size]
 
             if parallel:
                 batch_results = await self.run_parallel(batch, handler)

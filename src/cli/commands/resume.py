@@ -30,11 +30,15 @@ def resume_command_impl(run_id: str | None, checkpoint_path: str | None) -> None
         sys.exit(1)
 
     console.print(f"[blue]Resuming run {state.run_id}[/blue]")
-    status_val = state.status.value if hasattr(state.status, "value") else str(state.status)
+    status_val = (
+        state.status.value if hasattr(state.status, "value") else str(state.status)
+    )
     console.print(f"  Current status: {status_val}")
 
     if state.status in (SystemStatus.COMPLETED, SystemStatus.FAILED):
-        console.print(f"[yellow]Run is already in terminal state: {status_val}[/yellow]")
+        console.print(
+            f"[yellow]Run is already in terminal state: {status_val}[/yellow]"
+        )
         return
 
     orchestrator = Orchestrator(state.config)
@@ -44,13 +48,18 @@ def resume_command_impl(run_id: str | None, checkpoint_path: str | None) -> None
 
     final_state = asyncio.run(execute())
 
-    final_status = final_state.status.value if hasattr(final_state.status, "value") else str(final_state.status)
+    final_status = (
+        final_state.status.value
+        if hasattr(final_state.status, "value")
+        else str(final_state.status)
+    )
     if final_state.status == SystemStatus.COMPLETED:
         console.print("[green]Merge completed successfully![/green]")
     elif final_state.status == SystemStatus.AWAITING_HUMAN:
         console.print("[yellow]Still awaiting human decisions[/yellow]")
         pending = [
-            fp for fp, req in final_state.human_decision_requests.items()
+            fp
+            for fp, req in final_state.human_decision_requests.items()
             if req.human_decision is None
         ]
         console.print(f"  Pending: {len(pending)} files")

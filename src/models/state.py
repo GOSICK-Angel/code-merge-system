@@ -57,7 +57,9 @@ class MergeState(BaseModel):
 
     conflict_analyses: dict[str, ConflictAnalysis] = Field(default_factory=dict)
 
-    human_decision_requests: dict[str, HumanDecisionRequest] = Field(default_factory=dict)
+    human_decision_requests: dict[str, HumanDecisionRequest] = Field(
+        default_factory=dict
+    )
     human_decisions: dict[str, MergeDecision] = Field(default_factory=dict)
 
     judge_verdict: JudgeVerdict | None = None

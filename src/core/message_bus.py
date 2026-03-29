@@ -38,7 +38,11 @@ class MessageBus:
     ) -> list[AgentMessage]:
         results = self._messages
         if receiver is not None:
-            results = [m for m in results if m.receiver == receiver or m.receiver == AgentType.BROADCAST]
+            results = [
+                m
+                for m in results
+                if m.receiver == receiver or m.receiver == AgentType.BROADCAST
+            ]
         if unprocessed_only:
             results = [m for m in results if not m.is_processed]
         return results
@@ -57,7 +61,9 @@ class MessageBus:
             except asyncio.QueueEmpty:
                 break
 
-    async def wait_for_message(self, timeout: float | None = None) -> AgentMessage | None:
+    async def wait_for_message(
+        self, timeout: float | None = None
+    ) -> AgentMessage | None:
         try:
             if timeout is not None:
                 return await asyncio.wait_for(self._queue.get(), timeout=timeout)

@@ -39,7 +39,11 @@ def run_command_impl(config_path: str, dry_run: bool) -> None:
 
     final_state = asyncio.run(execute())
 
-    status_val = final_state.status.value if hasattr(final_state.status, "value") else str(final_state.status)
+    status_val = (
+        final_state.status.value
+        if hasattr(final_state.status, "value")
+        else str(final_state.status)
+    )
     if final_state.status == SystemStatus.COMPLETED:
         console.print("[green]Merge completed successfully![/green]")
     elif final_state.status == SystemStatus.AWAITING_HUMAN:

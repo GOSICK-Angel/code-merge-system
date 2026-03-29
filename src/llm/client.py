@@ -12,7 +12,9 @@ class ParseError(Exception):
 
 class LLMClient(ABC):
     @abstractmethod
-    async def complete(self, messages: list[dict], system: str | None = None, **kwargs) -> str:
+    async def complete(
+        self, messages: list[dict], system: str | None = None, **kwargs
+    ) -> str:
         pass
 
     @abstractmethod
@@ -37,7 +39,9 @@ class AnthropicClient(LLMClient):
         self.max_retries = max_retries
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
 
-    async def complete(self, messages: list[dict], system: str | None = None, **kwargs) -> str:
+    async def complete(
+        self, messages: list[dict], system: str | None = None, **kwargs
+    ) -> str:
         kwargs_merged = {
             "model": self.model,
             "max_tokens": self.max_tokens,
@@ -78,7 +82,9 @@ class AnthropicClient(LLMClient):
             data = json.loads(cleaned)
             return schema.model_validate(data)
         except Exception as e:
-            raise ParseError(f"Failed to parse structured response: {e}\nRaw: {raw[:500]}") from e
+            raise ParseError(
+                f"Failed to parse structured response: {e}\nRaw: {raw[:500]}"
+            ) from e
 
 
 class OpenAIClient(LLMClient):
@@ -96,7 +102,9 @@ class OpenAIClient(LLMClient):
         self.max_retries = max_retries
         self._client = openai.AsyncOpenAI(api_key=api_key)
 
-    async def complete(self, messages: list[dict], system: str | None = None, **kwargs) -> str:
+    async def complete(
+        self, messages: list[dict], system: str | None = None, **kwargs
+    ) -> str:
         all_messages: list[dict] = []
         if system:
             all_messages.append({"role": "system", "content": system})
@@ -138,7 +146,9 @@ class OpenAIClient(LLMClient):
             data = json.loads(cleaned)
             return schema.model_validate(data)
         except Exception as e:
-            raise ParseError(f"Failed to parse structured response: {e}\nRaw: {raw[:500]}") from e
+            raise ParseError(
+                f"Failed to parse structured response: {e}\nRaw: {raw[:500]}"
+            ) from e
 
 
 class LLMClientFactory:

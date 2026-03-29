@@ -31,24 +31,34 @@ class BaseAgent(ABC):
         schema: type[BaseModel] | None = None,
         max_retries: int | None = None,
     ) -> str | BaseModel:
-        retries = max_retries if max_retries is not None else self.llm_config.max_retries
+        retries = (
+            max_retries if max_retries is not None else self.llm_config.max_retries
+        )
         last_error: Exception | None = None
 
         for attempt in range(retries):
             try:
                 if schema is not None:
-                    return await self.llm.complete_structured(messages, schema, system=system)
+                    return await self.llm.complete_structured(
+                        messages, schema, system=system
+                    )
                 else:
                     return await self.llm.complete(messages, system=system)
             except ParseError as e:
                 last_error = e
-                self.logger.warning(f"Parse error on attempt {attempt + 1}/{retries}: {e}")
+                self.logger.warning(
+                    f"Parse error on attempt {attempt + 1}/{retries}: {e}"
+                )
                 if attempt + 1 < retries:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
             except Exception as e:
                 last_error = e
-                self.logger.warning(f"LLM error on attempt {attempt + 1}/{retries}: {e}")
+                self.logger.warning(
+                    f"LLM error on attempt {attempt + 1}/{retries}: {e}"
+                )
                 if attempt + 1 < retries:
-                    await asyncio.sleep(2 ** attempt)
+                    await asyncio.sleep(2**attempt)
 
-        raise RuntimeError(f"LLM call failed after {retries} attempts: {last_error}") from last_error
+        raise RuntimeError(
+            f"LLM call failed after {retries} attempts: {last_error}"
+        ) from last_error

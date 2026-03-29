@@ -71,13 +71,15 @@ class StateMachine:
         state.status = target
         state.updated_at = datetime.now()
 
-        state.messages.append({
-            "timestamp": datetime.now().isoformat(),
-            "type": "state_transition",
-            "from": current.value if hasattr(current, "value") else str(current),
-            "to": target.value if hasattr(target, "value") else str(target),
-            "reason": reason,
-        })
+        state.messages.append(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "type": "state_transition",
+                "from": current.value if hasattr(current, "value") else str(current),
+                "to": target.value if hasattr(target, "value") else str(target),
+                "reason": reason,
+            }
+        )
 
     def can_transition(self, current: SystemStatus, target: SystemStatus) -> bool:
         allowed = VALID_TRANSITIONS.get(current, [])

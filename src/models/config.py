@@ -2,7 +2,6 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Literal
 
 
-
 class AgentLLMConfig(BaseModel):
     provider: Literal["anthropic", "openai"] = "anthropic"
     model: str = "claude-opus-4-6"

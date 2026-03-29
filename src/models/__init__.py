@@ -13,8 +13,19 @@ from src.models.plan import MergePhase, PhaseFileBatch, RiskSummary, MergePlan
 from src.models.plan_judge import PlanJudgeResult, PlanIssue, PlanJudgeVerdict
 from src.models.dispute import PlanDisputeRequest
 from src.models.decision import MergeDecision, DecisionSource, FileDecisionRecord
-from src.models.conflict import ConflictType, ChangeIntent, ConflictPoint, ConflictAnalysis
-from src.models.judge import VerdictType, IssueSeverity, IssueLevel, JudgeIssue, JudgeVerdict
+from src.models.conflict import (
+    ConflictType,
+    ChangeIntent,
+    ConflictPoint,
+    ConflictAnalysis,
+)
+from src.models.judge import (
+    VerdictType,
+    IssueSeverity,
+    IssueLevel,
+    JudgeIssue,
+    JudgeVerdict,
+)
 from src.models.human import DecisionOption, HumanDecisionRequest
 from src.models.state import SystemStatus, PhaseResult, MergeState
 from src.models.message import AgentType, MessageType, AgentMessage

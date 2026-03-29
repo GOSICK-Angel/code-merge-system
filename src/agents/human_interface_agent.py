@@ -17,7 +17,8 @@ class HumanInterfaceAgent(BaseAgent):
 
     async def run(self, state: MergeState) -> AgentMessage:
         pending = [
-            req for req in state.human_decision_requests.values()
+            req
+            for req in state.human_decision_requests.values()
             if req.human_decision is None
         ]
 
@@ -42,7 +43,11 @@ class HumanInterfaceAgent(BaseAgent):
         ]
 
         for req in requests:
-            rec_val = req.analyst_recommendation.value if hasattr(req.analyst_recommendation, "value") else req.analyst_recommendation
+            rec_val = (
+                req.analyst_recommendation.value
+                if hasattr(req.analyst_recommendation, "value")
+                else req.analyst_recommendation
+            )
             report_lines += [
                 f"## {req.file_path} (priority={req.priority})",
                 "",
@@ -55,8 +60,14 @@ class HumanInterfaceAgent(BaseAgent):
                 "### Options",
             ]
             for opt in req.options:
-                opt_dec = opt.decision.value if hasattr(opt.decision, "value") else opt.decision
-                report_lines.append(f"- **{opt.option_key}** (`{opt_dec}`): {opt.description}")
+                opt_dec = (
+                    opt.decision.value
+                    if hasattr(opt.decision, "value")
+                    else opt.decision
+                )
+                report_lines.append(
+                    f"- **{opt.option_key}** (`{opt_dec}`): {opt.description}"
+                )
             report_lines.append("")
 
         output_file = Path(output_path)
@@ -69,18 +80,23 @@ class HumanInterfaceAgent(BaseAgent):
         requests: list[HumanDecisionRequest],
     ) -> list[HumanDecisionRequest]:
         from datetime import datetime
+
         results = list(requests)
 
         for req in results:
             if req.human_decision is not None:
                 continue
 
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"File: {req.file_path}")
             print(f"Context: {req.context_summary}")
             print("\nOptions:")
             for opt in req.options:
-                opt_dec = opt.decision.value if hasattr(opt.decision, "value") else opt.decision
+                opt_dec = (
+                    opt.decision.value
+                    if hasattr(opt.decision, "value")
+                    else opt.decision
+                )
                 print(f"  {opt.option_key}: {opt_dec} - {opt.description}")
 
             print("\nEnter option key (or press Enter to skip):", end=" ")
@@ -94,7 +110,11 @@ class HumanInterfaceAgent(BaseAgent):
                 continue
 
             selected_option = next(
-                (opt for opt in req.options if opt.option_key.lower() == user_input.lower()),
+                (
+                    opt
+                    for opt in req.options
+                    if opt.option_key.lower() == user_input.lower()
+                ),
                 None,
             )
 
@@ -151,6 +171,7 @@ class HumanInterfaceAgent(BaseAgent):
         requests: list[HumanDecisionRequest],
     ) -> list[HumanDecisionRequest]:
         from datetime import datetime
+
         decisions_file = Path(yaml_path)
         if not decisions_file.exists():
             raise FileNotFoundError(f"Decisions file not found: {yaml_path}")
@@ -174,7 +195,9 @@ class HumanInterfaceAgent(BaseAgent):
             try:
                 decision = MergeDecision(decision_raw)
             except ValueError:
-                self.logger.warning(f"Invalid decision value '{decision_raw}' for {req.file_path}")
+                self.logger.warning(
+                    f"Invalid decision value '{decision_raw}' for {req.file_path}"
+                )
                 continue
 
             if not self._validate_decision_value(decision):
@@ -182,7 +205,9 @@ class HumanInterfaceAgent(BaseAgent):
 
             custom_content = decision_data.get("custom_content")
             if decision == MergeDecision.MANUAL_PATCH and not custom_content:
-                self.logger.warning(f"MANUAL_PATCH for {req.file_path} has no custom_content, skipping")
+                self.logger.warning(
+                    f"MANUAL_PATCH for {req.file_path} has no custom_content, skipping"
+                )
                 continue
 
             results[i] = req.model_copy(
@@ -202,12 +227,19 @@ class HumanInterfaceAgent(BaseAgent):
             return False
         if not self._validate_decision_value(request.human_decision):
             return False
-        if request.human_decision == MergeDecision.MANUAL_PATCH and not request.custom_content:
+        if (
+            request.human_decision == MergeDecision.MANUAL_PATCH
+            and not request.custom_content
+        ):
             return False
         return True
 
-    def validate_decision_option(self, request: HumanDecisionRequest, option_key: str) -> bool:
-        option = next((opt for opt in request.options if opt.option_key == option_key), None)
+    def validate_decision_option(
+        self, request: HumanDecisionRequest, option_key: str
+    ) -> bool:
+        option = next(
+            (opt for opt in request.options if opt.option_key == option_key), None
+        )
         if option is None:
             return False
         return self._validate_decision_value(option.decision)
@@ -222,4 +254,5 @@ class HumanInterfaceAgent(BaseAgent):
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus
+
         return state.status == SystemStatus.AWAITING_HUMAN

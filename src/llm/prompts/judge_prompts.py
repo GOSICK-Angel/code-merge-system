@@ -16,8 +16,16 @@ def build_file_review_prompt(
     project_context: str = "",
 ) -> str:
     language = original_diff.language or "unknown"
-    decision_val = decision_record.decision.value if hasattr(decision_record.decision, "value") else decision_record.decision
-    source_val = decision_record.decision_source.value if hasattr(decision_record.decision_source, "value") else decision_record.decision_source
+    decision_val = (
+        decision_record.decision.value
+        if hasattr(decision_record.decision, "value")
+        else decision_record.decision
+    )
+    source_val = (
+        decision_record.decision_source.value
+        if hasattr(decision_record.decision_source, "value")
+        else decision_record.decision_source
+    )
 
     return f"""Review the following merged file for correctness and completeness.
 

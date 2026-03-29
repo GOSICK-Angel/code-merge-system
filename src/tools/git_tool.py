@@ -63,7 +63,9 @@ class GitTool:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
-    def get_commit_messages(self, file_path: str, ref: str, limit: int = 10) -> list[str]:
+    def get_commit_messages(
+        self, file_path: str, ref: str, limit: int = 10
+    ) -> list[str]:
         try:
             log_output = self.repo.git.log(
                 "--oneline", f"-{limit}", ref, "--", file_path
