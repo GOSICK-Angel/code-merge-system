@@ -244,12 +244,45 @@ class ExecutorAgent(BaseAgent):
                 "Could not fetch file contents for semantic merge",
             )
 
+        enriched_context = state.config.project_context
+        builder = None
+        if self._memory_store:
+            from src.llm.prompt_builders import AgentPromptBuilder
+
+            builder = AgentPromptBuilder(self.llm_config, self._memory_store)
+            memory_text = builder.build_memory_context_text([file_diff.file_path])
+            if memory_text:
+                enriched_context = (
+                    f"{enriched_context}\n\n{memory_text}"
+                    if enriched_context
+                    else memory_text
+                )
+
+        if builder is not None:
+            diff_ranges = _extract_diff_ranges(file_diff)
+            content_budget = builder.compute_content_budget(
+                EXECUTOR_SYSTEM + enriched_context
+            )
+            budget_tokens = content_budget // 4
+            current_content = builder.build_staged_content(
+                current_content,
+                file_diff.file_path,
+                diff_ranges,
+                budget_tokens // 2,
+            )
+            target_content = builder.build_staged_content(
+                target_content,
+                file_diff.file_path,
+                diff_ranges,
+                budget_tokens // 2,
+            )
+
         prompt = build_semantic_merge_prompt(
             file_diff,
             conflict_analysis,
             current_content,
             target_content,
-            state.config.project_context,
+            enriched_context,
         )
         messages = [{"role": "user", "content": prompt}]
 
@@ -439,3 +472,13 @@ class ExecutorAgent(BaseAgent):
             SystemStatus.AUTO_MERGING,
             SystemStatus.ANALYZING_CONFLICTS,
         )
+
+
+def _extract_diff_ranges(file_diff: FileDiff) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    if file_diff.hunks:
+        for hunk in file_diff.hunks:
+            ranges.append((hunk.start_line_current, hunk.end_line_current))
+    elif file_diff.lines_added > 0 or file_diff.lines_deleted > 0:
+        ranges.append((1, file_diff.lines_added + file_diff.lines_deleted + 100))
+    return ranges

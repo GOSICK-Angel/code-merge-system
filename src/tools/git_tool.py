@@ -141,7 +141,6 @@ class GitTool:
         self, pattern: str, file_patterns: list[str]
     ) -> dict[str, list[str]]:
         import fnmatch
-        import re
 
         all_files = [
             str(p.relative_to(self.repo_path))

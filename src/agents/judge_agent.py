@@ -18,6 +18,7 @@ from src.models.judge import (
 from src.models.config import CustomizationEntry, CustomizationVerification
 from src.models.diff import FileChangeCategory
 from src.models.state import MergeState
+from src.llm.prompt_builders import AgentPromptBuilder
 from src.core.read_only_state_view import ReadOnlyStateView
 from src.llm.prompts.judge_prompts import (
     JUDGE_SYSTEM,
@@ -123,12 +124,33 @@ class JudgeAgent(BaseAgent):
                     )
                 )
 
+        memory_context = ""
+        max_content_chars: int | None = None
+        if self._memory_store:
+            builder = AgentPromptBuilder(self.llm_config, self._memory_store)
+            memory_context = builder.build_memory_context_text([file_path])
+            max_content_chars = builder.compute_content_budget(
+                JUDGE_SYSTEM + memory_context
+            )
+
+            diff_ranges = _extract_diff_ranges(original_diff)
+            budget_tokens = max_content_chars // 4 if max_content_chars else 2000
+            if merged_content:
+                merged_content = builder.build_staged_content(
+                    merged_content,
+                    file_path,
+                    diff_ranges,
+                    budget_tokens,
+                )
+
         prompt = build_file_review_prompt(
             file_path,
             merged_content,
             decision_record,
             original_diff,
             project_context,
+            max_content_chars=max_content_chars,
+            memory_context=memory_context,
         )
         messages = [{"role": "user", "content": prompt}]
 
@@ -498,3 +520,15 @@ class JudgeAgent(BaseAgent):
         from src.models.state import SystemStatus
 
         return state.status == SystemStatus.JUDGE_REVIEWING
+
+
+def _extract_diff_ranges(original_diff: FileDiff) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    if original_diff.hunks:
+        for hunk in original_diff.hunks:
+            ranges.append((hunk.start_line_current, hunk.end_line_current))
+    elif original_diff.lines_added > 0 or original_diff.lines_deleted > 0:
+        ranges.append(
+            (1, original_diff.lines_added + original_diff.lines_deleted + 100)
+        )
+    return ranges

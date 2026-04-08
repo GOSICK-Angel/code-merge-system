@@ -1,5 +1,12 @@
+from __future__ import annotations
+
+from collections.abc import Callable
 from datetime import datetime
+from typing import Any
+
 from src.models.state import MergeState, SystemStatus
+
+StateObserver = Callable[[MergeState, SystemStatus, str], Any]
 
 
 VALID_TRANSITIONS: dict[SystemStatus, list[SystemStatus]] = {
@@ -63,6 +70,16 @@ VALID_TRANSITIONS: dict[SystemStatus, list[SystemStatus]] = {
 
 
 class StateMachine:
+    def __init__(self) -> None:
+        self._observers: list[StateObserver] = []
+
+    def add_observer(self, observer: StateObserver) -> None:
+        """Register a callback invoked after every state transition."""
+        self._observers.append(observer)
+
+    def remove_observer(self, observer: StateObserver) -> None:
+        self._observers = [o for o in self._observers if o is not observer]
+
     def transition(self, state: MergeState, target: SystemStatus, reason: str) -> None:
         current = state.status
         if not self.can_transition(current, target):
@@ -82,6 +99,12 @@ class StateMachine:
                 "reason": reason,
             }
         )
+
+        for observer in self._observers:
+            try:
+                observer(state, target, reason)
+            except Exception:
+                pass
 
     def can_transition(self, current: SystemStatus, target: SystemStatus) -> bool:
         allowed = VALID_TRANSITIONS.get(current, [])

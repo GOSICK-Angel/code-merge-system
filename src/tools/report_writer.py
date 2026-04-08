@@ -2,7 +2,6 @@ import json
 from functools import partial
 from pathlib import Path
 from src.models.state import MergeState
-from src.models.plan_review import PlanReviewRound, PlanHumanReview
 
 
 _I18N: dict[str, dict[str, str]] = {

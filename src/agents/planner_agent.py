@@ -12,6 +12,7 @@ from src.models.plan import (
     CategorySummary,
     MergeLayer,
     DEFAULT_LAYERS,
+    topological_sort_layers,
 )
 from src.models.diff import FileDiff, FileChangeCategory, RiskLevel
 from src.models.plan_judge import PlanIssue
@@ -119,7 +120,7 @@ class PlannerAgent(BaseAgent):
 
         phases: list[PhaseFileBatch] = []
 
-        for layer in sorted(layers, key=lambda ly: ly.layer_id):
+        for layer in layers:
             layer_files = file_layer_map.get(layer.layer_id, [])
             if not layer_files:
                 continue
@@ -262,7 +263,8 @@ class PlannerAgent(BaseAgent):
 
     def _resolve_layers(self, config: MergeConfig) -> list[MergeLayer]:
         raw_layers = config.layer_config.custom_layers or DEFAULT_LAYERS
-        return [MergeLayer(**layer_data) for layer_data in raw_layers]
+        layers = [MergeLayer(**layer_data) for layer_data in raw_layers]
+        return topological_sort_layers(layers)
 
     def _assign_files_to_layers(
         self, file_paths: list[str], layers: list[MergeLayer]
@@ -270,9 +272,7 @@ class PlannerAgent(BaseAgent):
         result: dict[int, list[str]] = {}
         assigned: set[str] = set()
 
-        sorted_layers = sorted(layers, key=lambda ly: ly.layer_id)
-
-        for layer in sorted_layers:
+        for layer in layers:
             for fp in file_paths:
                 if fp in assigned:
                     continue
@@ -282,7 +282,7 @@ class PlannerAgent(BaseAgent):
 
         unassigned = [fp for fp in file_paths if fp not in assigned]
         if unassigned:
-            max_layer = max(ly.layer_id for ly in sorted_layers) if sorted_layers else 0
+            max_layer = max(ly.layer_id for ly in layers) if layers else 0
             fallback_id = max_layer + 1
             result[fallback_id] = unassigned
 

@@ -1,0 +1,19 @@
+This is a plain text file used for testing the fallback chunker.
+
+It has no recognizable code structure, so the indent-based chunker
+should handle it gracefully.
+
+Section One:
+    Some indented content here.
+    More indented content.
+
+Section Two:
+    Different indented content.
+    Also some data.
+
+def fake_function():
+    This looks like a function but is actually in a .txt file.
+    The language detector should return None.
+
+class FakeClass:
+    Not really a class, just text.

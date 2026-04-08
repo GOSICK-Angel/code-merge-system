@@ -45,6 +45,8 @@ from src.models.judge import VerdictType
 from src.tools.gate_runner import GateRunner
 from src.tools.pollution_auditor import PollutionAuditor
 from src.tools.config_drift_detector import ConfigDriftDetector
+from src.memory.store import MemoryStore
+from src.memory.summarizer import PhaseSummarizer
 
 
 logger = logging.getLogger(__name__)
@@ -81,6 +83,8 @@ class Orchestrator:
             self.judge,
             self.human_interface,
         ]
+        self._memory_store = MemoryStore()
+        self._summarizer = PhaseSummarizer()
 
     def _setup_run_logger(self, run_id: str) -> Path:
         debug_dir = Path(self.config.output.debug_directory)
@@ -118,7 +122,7 @@ class Orchestrator:
             self._log_handler = None
 
     async def run(self, state: MergeState) -> MergeState:
-        log_path = self._setup_run_logger(state.run_id)
+        self._setup_run_logger(state.run_id)
         logger.info("=== Merge run %s started ===", state.run_id)
         logger.info(
             "Config: upstream=%s, fork=%s, max_files_per_run=%d, language=%s",
@@ -129,6 +133,9 @@ class Orchestrator:
         )
         run_start = time.monotonic()
         self.checkpoint.register_signal_handler(state)
+
+        self._memory_store = MemoryStore.from_memory(state.memory)
+        self._inject_memory()
 
         try:
             if state.status == SystemStatus.INITIALIZED:
@@ -143,6 +150,8 @@ class Orchestrator:
             if state.status == SystemStatus.PLANNING:
                 t0 = time.monotonic()
                 await self._run_phase1(state)
+                self._update_memory("planning", state)
+                self._inject_memory()
                 self.checkpoint.save(state, "after_phase1")
                 logger.info("Phase PLANNING completed in %.1fs", time.monotonic() - t0)
 
@@ -157,6 +166,8 @@ class Orchestrator:
             if state.status == SystemStatus.AUTO_MERGING:
                 t0 = time.monotonic()
                 await self._run_phase2(state)
+                self._update_memory("auto_merge", state)
+                self._inject_memory()
                 self.checkpoint.save(state, "after_phase2")
                 logger.info(
                     "Phase AUTO_MERGE completed in %.1fs", time.monotonic() - t0
@@ -165,6 +176,8 @@ class Orchestrator:
             if state.status == SystemStatus.ANALYZING_CONFLICTS:
                 t0 = time.monotonic()
                 await self._run_phase3(state)
+                self._update_memory("conflict_analysis", state)
+                self._inject_memory()
                 self.checkpoint.save(state, "after_phase3")
                 logger.info(
                     "Phase CONFLICT_ANALYSIS completed in %.1fs",
@@ -199,6 +212,7 @@ class Orchestrator:
             if state.status == SystemStatus.JUDGE_REVIEWING:
                 t0 = time.monotonic()
                 await self._run_phase5(state)
+                self._update_memory("judge_review", state)
                 self.checkpoint.save(state, "after_phase5")
                 logger.info(
                     "Phase JUDGE_REVIEW completed in %.1fs", time.monotonic() - t0
@@ -238,6 +252,10 @@ class Orchestrator:
             state.status.value if hasattr(state.status, "value") else state.status,
             elapsed,
         )
+        if self._trace_logger:
+            utilization_summary = self._trace_logger.get_utilization_summary()
+            if utilization_summary:
+                logger.info("Context utilization summary: %s", utilization_summary)
         self._teardown_run_logger()
 
     async def _initialize(self, state: MergeState) -> None:
@@ -506,7 +524,16 @@ class Orchestrator:
                 continue
 
             if batch.layer_id is not None:
-                self._verify_layer_deps(batch.layer_id, completed_layers, state)
+                deps_ok = self._verify_layer_deps(
+                    batch.layer_id, completed_layers, state
+                )
+                if not deps_ok:
+                    logger.warning(
+                        "Skipping batch %s (layer %d): dependencies not met",
+                        batch.batch_id,
+                        batch.layer_id,
+                    )
+                    continue
 
             for file_path in batch.file_paths:
                 category = batch.change_category
@@ -840,9 +867,9 @@ class Orchestrator:
         layer_id: int,
         completed_layers: set[int],
         state: MergeState,
-    ) -> None:
+    ) -> bool:
         if state.merge_plan is None or not state.merge_plan.layers:
-            return
+            return True
         for layer in state.merge_plan.layers:
             if layer.layer_id == layer_id:
                 missing = [
@@ -850,12 +877,14 @@ class Orchestrator:
                 ]
                 if missing:
                     logger.warning(
-                        "Layer %d (%s) depends on incomplete layers: %s",
+                        "Layer %d (%s) blocked by incomplete dependencies: %s",
                         layer_id,
                         layer.name,
                         missing,
                     )
-                return
+                    return False
+                return True
+        return True
 
     def _build_layer_index(self, state: MergeState) -> dict[int, MergeLayer]:
         if state.merge_plan is None or not state.merge_plan.layers:
@@ -939,6 +968,34 @@ class Orchestrator:
                 all_passed=bool(gate_history_entry.get("all_passed", False)),
             )
         )
+
+    def _update_memory(self, phase: str, state: MergeState) -> None:
+        method = getattr(self._summarizer, f"summarize_{phase}", None)
+        if method is None:
+            return
+        try:
+            phase_summary, entries = method(state)
+            store = self._memory_store.record_phase_summary(phase_summary)
+            for entry in entries:
+                store = store.add_entry(entry)
+            count_before = store.entry_count
+            store = store.remove_superseded(phase)
+            removed = count_before - store.entry_count
+            self._memory_store = store
+            state.memory = store.to_memory()
+            logger.info(
+                "Memory updated after %s: %d entries total, %d new, %d superseded removed",
+                phase,
+                store.entry_count,
+                len(entries),
+                removed,
+            )
+        except Exception as e:
+            logger.warning("Memory summarization failed for %s: %s", phase, e)
+
+    def _inject_memory(self) -> None:
+        for agent in self._all_agents:
+            agent.set_memory_store(self._memory_store)
 
     async def _run_phase6(self, state: MergeState) -> None:
         state.current_phase = MergePhase.REPORT

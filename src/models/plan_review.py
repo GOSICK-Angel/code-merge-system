@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 from pydantic import BaseModel, Field
-from src.models.plan_judge import PlanJudgeResult, PlanJudgeVerdict
+from src.models.plan_judge import PlanJudgeResult
 
 
 class PlanHumanDecision(str, Enum):

@@ -188,6 +188,42 @@ DEFAULT_LAYERS: list[dict[str, Any]] = [
 ]
 
 
+class LayerCycleError(ValueError):
+    """Raised when layer dependencies contain a cycle."""
+
+
+def topological_sort_layers(layers: list[MergeLayer]) -> list[MergeLayer]:
+    layer_map = {ly.layer_id: ly for ly in layers}
+    in_degree: dict[int, int] = {ly.layer_id: 0 for ly in layers}
+    dependents: dict[int, list[int]] = {ly.layer_id: [] for ly in layers}
+
+    for ly in layers:
+        for dep in ly.depends_on:
+            if dep in layer_map:
+                in_degree[ly.layer_id] += 1
+                dependents[dep].append(ly.layer_id)
+
+    queue = sorted(lid for lid, deg in in_degree.items() if deg == 0)
+    result: list[MergeLayer] = []
+
+    while queue:
+        lid = queue.pop(0)
+        result.append(layer_map[lid])
+        for child in sorted(dependents[lid]):
+            in_degree[child] -= 1
+            if in_degree[child] == 0:
+                queue.append(child)
+
+    if len(result) != len(layers):
+        sorted_ids = {ly.layer_id for ly in result}
+        cycle_ids = [ly.layer_id for ly in layers if ly.layer_id not in sorted_ids]
+        raise LayerCycleError(
+            f"Cycle detected in layer dependencies involving layers: {cycle_ids}"
+        )
+
+    return result
+
+
 class PhaseFileBatch(BaseModel):
     batch_id: str
     phase: MergePhase

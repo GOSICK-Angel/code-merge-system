@@ -1,6 +1,21 @@
 from src.models.diff import FileDiff
 from src.models.decision import FileDecisionRecord
 
+_DEFAULT_MAX_CONTENT_CHARS = 5000
+
+
+def _truncate_content(content: str, max_chars: int | None) -> str:
+    limit = max_chars if max_chars is not None else _DEFAULT_MAX_CONTENT_CHARS
+    if len(content) <= limit:
+        return content
+    return content[:limit] + "\n... [truncated]"
+
+
+def _memory_section(memory_context: str) -> str:
+    if not memory_context:
+        return ""
+    return f"\n{memory_context}\n\n"
+
 
 JUDGE_SYSTEM = """You are an independent reviewer of code merge results. Your task is to verify whether
 the merge result preserves all private logic of the fork branch and correctly introduces all changes from the upstream branch.
@@ -14,6 +29,8 @@ def build_file_review_prompt(
     decision_record: FileDecisionRecord,
     original_diff: FileDiff,
     project_context: str = "",
+    max_content_chars: int | None = None,
+    memory_context: str = "",
 ) -> str:
     language = original_diff.language or "unknown"
     decision_val = (
@@ -48,9 +65,9 @@ Language: {language}
 
 # Merged Content
 ```{language}
-{merged_content[:5000]}{"..." if len(merged_content) > 5000 else ""}
+{_truncate_content(merged_content, max_content_chars)}
 ```
-
+{_memory_section(memory_context)}
 # Review Tasks
 1. Check for remaining conflict markers (<<<<<<, =======, >>>>>>>)
 2. Check if fork's private logic is preserved

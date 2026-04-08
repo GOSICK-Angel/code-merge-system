@@ -13,6 +13,7 @@ from src.models.judge import JudgeVerdict
 from src.models.human import HumanDecisionRequest
 from src.models.plan_judge import PlanJudgeVerdict
 from src.models.plan_review import PlanReviewRound, PlanHumanReview
+from src.memory.models import MergeMemory
 from src.models.dispute import PlanDisputeRequest
 from src.models.conflict import ConflictAnalysis
 
@@ -92,6 +93,8 @@ class MergeState(BaseModel):
         default=None,
         description="ConfigDriftReport from drift detection",
     )
+
+    memory: MergeMemory = Field(default_factory=MergeMemory)
 
     errors: list[dict[str, Any]] = Field(default_factory=list)
     messages: list[dict[str, Any]] = Field(default_factory=list)

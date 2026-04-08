@@ -36,6 +36,9 @@ CLAUDE.local.md
 *.swp
 *.swo
 
+# TUI (npm install in tui/)
+tui/node_modules/
+
 # macOS
 .DS_Store
 

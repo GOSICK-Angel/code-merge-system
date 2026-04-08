@@ -190,5 +190,16 @@ def ui_command(
     start_server(state, host, port)
 
 
+@cli.command("tui")
+@click.option("--config", "-c", required=True, type=click.Path(exists=True))
+@click.option("--ws-port", default=8765, type=int, help="WebSocket port for TUI bridge")
+@click.option("--dry-run", is_flag=True, help="Analyze only, do not merge")
+def tui_command(config: str, ws_port: int, dry_run: bool) -> None:
+    """Launch interactive terminal UI for merge workflow"""
+    from src.cli.commands.tui import tui_command_impl
+
+    tui_command_impl(config, ws_port, dry_run)
+
+
 if __name__ == "__main__":
     cli()

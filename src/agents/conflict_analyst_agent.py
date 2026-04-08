@@ -90,12 +90,54 @@ class ConflictAnalystAgent(BaseAgent):
         target_content: str | None,
         project_context: str = "",
     ) -> ConflictAnalysis:
+        enriched_context = project_context
+        builder = None
+        if self._memory_store:
+            from src.llm.prompt_builders import AgentPromptBuilder
+
+            builder = AgentPromptBuilder(self.llm_config, self._memory_store)
+            memory_text = builder.build_memory_context_text([file_diff.file_path])
+            if memory_text:
+                enriched_context = (
+                    f"{project_context}\n\n{memory_text}"
+                    if project_context
+                    else memory_text
+                )
+
+        if builder is not None:
+            diff_ranges = _extract_diff_ranges(file_diff)
+            content_budget = builder.compute_content_budget(
+                ANALYST_SYSTEM + enriched_context
+            )
+            content_budget_tokens = content_budget // 4  # chars -> rough tokens
+            if current_content:
+                current_content = builder.build_staged_content(
+                    current_content,
+                    file_diff.file_path,
+                    diff_ranges,
+                    content_budget_tokens // 2,
+                )
+            if target_content:
+                target_content = builder.build_staged_content(
+                    target_content,
+                    file_diff.file_path,
+                    diff_ranges,
+                    content_budget_tokens // 2,
+                )
+            if base_content:
+                base_content = builder.build_staged_content(
+                    base_content,
+                    file_diff.file_path,
+                    diff_ranges,
+                    content_budget_tokens // 4,
+                )
+
         prompt = build_conflict_analysis_prompt(
             file_diff,
             base_content,
             current_content,
             target_content,
-            project_context,
+            enriched_context,
         )
         messages = [{"role": "user", "content": prompt}]
 
@@ -159,3 +201,13 @@ class ConflictAnalystAgent(BaseAgent):
         from src.models.state import SystemStatus
 
         return state.status == SystemStatus.ANALYZING_CONFLICTS
+
+
+def _extract_diff_ranges(file_diff: FileDiff) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+    if file_diff.hunks:
+        for hunk in file_diff.hunks:
+            ranges.append((hunk.start_line_current, hunk.end_line_current))
+    elif file_diff.lines_added > 0 or file_diff.lines_deleted > 0:
+        ranges.append((1, file_diff.lines_added + file_diff.lines_deleted + 100))
+    return ranges
