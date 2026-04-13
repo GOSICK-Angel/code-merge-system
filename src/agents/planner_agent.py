@@ -826,3 +826,8 @@ class PlannerAgent(BaseAgent):
         score = compute_risk_score(file_diff, config.file_classifier)
         updated = file_diff.model_copy(update={"risk_score": score})
         return classify_file(updated, config.file_classifier)
+
+
+from src.agents.registry import AgentRegistry  # noqa: E402
+
+AgentRegistry.register("planner", PlannerAgent)

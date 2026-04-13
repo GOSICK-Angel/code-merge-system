@@ -17,12 +17,17 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from src.agents.conflict_analyst_agent import ConflictAnalystAgent
-from src.agents.executor_agent import ExecutorAgent
-from src.agents.human_interface_agent import HumanInterfaceAgent
-from src.agents.judge_agent import JudgeAgent
-from src.agents.planner_agent import PlannerAgent
-from src.agents.planner_judge_agent import PlannerJudgeAgent
+from src.agents.base_agent import BaseAgent
+from src.agents.registry import AgentRegistry
+
+# Import agent modules to trigger self-registration
+import src.agents.planner_agent  # noqa: F401
+import src.agents.planner_judge_agent  # noqa: F401
+import src.agents.conflict_analyst_agent  # noqa: F401
+import src.agents.executor_agent  # noqa: F401
+import src.agents.judge_agent  # noqa: F401
+import src.agents.human_interface_agent  # noqa: F401
+
 from src.core.checkpoint import Checkpoint
 from src.core.message_bus import MessageBus
 from src.core.phase_runner import PhaseRunner
@@ -106,7 +111,11 @@ class Orchestrator:
 
     OnActivityCallback = Callable[[str, str], None]
 
-    def __init__(self, config: MergeConfig) -> None:
+    def __init__(
+        self,
+        config: MergeConfig,
+        agents: dict[str, BaseAgent] | None = None,
+    ) -> None:
         self.config = config
 
         # --- tools ---
@@ -117,24 +126,16 @@ class Orchestrator:
         self.checkpoint = Checkpoint(config.output.debug_directory)
         self.phase_runner = PhaseRunner(batch_size=10, max_concurrency=5)
 
-        # --- agents ---
-        self.planner = PlannerAgent(config.agents.planner)
-        self.planner_judge = PlannerJudgeAgent(config.agents.planner_judge)
-        self.conflict_analyst = ConflictAnalystAgent(
-            config.agents.conflict_analyst, git_tool=self.git_tool
-        )
-        self.executor = ExecutorAgent(config.agents.executor, git_tool=self.git_tool)
-        self.judge = JudgeAgent(config.agents.judge, git_tool=self.git_tool)
-        self.human_interface = HumanInterfaceAgent(config.agents.human_interface)
+        # --- agents (B3: registry-based creation with DI override) ---
+        agent_map = agents or AgentRegistry.create_all(config, git_tool=self.git_tool)
+        self.planner = agent_map["planner"]
+        self.planner_judge = agent_map["planner_judge"]
+        self.conflict_analyst = agent_map["conflict_analyst"]
+        self.executor = agent_map["executor"]
+        self.judge = agent_map["judge"]
+        self.human_interface = agent_map["human_interface"]
 
-        self._all_agents = [
-            self.planner,
-            self.planner_judge,
-            self.conflict_analyst,
-            self.executor,
-            self.judge,
-            self.human_interface,
-        ]
+        self._all_agents = list(agent_map.values())
 
         # --- memory ---
         self._memory_store = MemoryStore()

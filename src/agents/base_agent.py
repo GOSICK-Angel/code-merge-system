@@ -1,6 +1,7 @@
 import logging
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any
 import asyncio
 from pydantic import BaseModel
@@ -10,17 +11,26 @@ from src.models.state import MergeState
 from src.llm.client import LLMClient, LLMClientFactory
 from src.llm.context import (
     TokenBudget,
-    _CHARS_PER_TOKEN,
     estimate_tokens,
     get_context_window,
 )
-from src.llm.error_classifier import ClassifiedError, classify_error
+from src.llm.context_compressor import ContextCompressor
+from src.llm.error_classifier import ClassifiedError, ErrorCategory, classify_error
 from src.llm.retry_utils import jittered_backoff
 from src.memory.layered_loader import LayeredMemoryLoader
 from src.memory.store import MemoryStore
 from src.tools.trace_logger import TraceLogger
 
 CIRCUIT_BREAKER_THRESHOLD = 3
+
+_CIRCUIT_BREAKER_CATEGORIES: frozenset[ErrorCategory] = frozenset(
+    {
+        ErrorCategory.AUTH_PERMANENT,
+        ErrorCategory.FORMAT,
+    }
+)
+
+MAX_RATE_LIMIT_WAITS = 5
 
 
 class CircuitBreakerOpen(RuntimeError):
@@ -43,6 +53,35 @@ class AgentExhaustedError(RuntimeError):
     ) -> None:
         super().__init__(message)
         self.last_classification = last_classification
+
+
+@dataclass
+class RetryBudget:
+    """Tracks retry state across error categories within a single LLM call."""
+
+    max_retries: int
+    max_rate_limit_waits: int = MAX_RATE_LIMIT_WAITS
+    attempt: int = 0
+    rate_limit_waits: int = 0
+    category_counts: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def retries_exhausted(self) -> bool:
+        return self.attempt >= self.max_retries
+
+    @property
+    def rate_limit_exhausted(self) -> bool:
+        return self.rate_limit_waits >= self.max_rate_limit_waits
+
+    def record(self, category: ErrorCategory) -> None:
+        key = category.value
+        self.category_counts[key] = self.category_counts.get(key, 0) + 1
+
+    def consume_attempt(self) -> None:
+        self.attempt += 1
+
+    def consume_rate_limit_wait(self) -> None:
+        self.rate_limit_waits += 1
 
 
 class BaseAgent(ABC):
@@ -94,50 +133,64 @@ class BaseAgent(ABC):
     def can_handle(self, state: MergeState) -> bool:
         pass
 
+    def _on_credential_rotation_needed(self, classified: ClassifiedError) -> bool:
+        """Hook for credential rotation (extension point for C2 credential pool).
+
+        Subclasses or future credential-pool integration can override this to
+        swap API keys on transient auth errors.  Returns True if rotation
+        succeeded and the call should be retried.
+        """
+        self.logger.warning(
+            "Credential rotation requested but no credential pool configured "
+            "(category=%s)",
+            classified.category.value,
+        )
+        return False
+
+    def _on_fallback_needed(self, classified: ClassifiedError) -> bool:
+        """Hook for provider fallback (extension point for C2 credential pool).
+
+        Subclasses or future multi-provider support can override this to
+        switch to a different LLM provider on permanent auth failures.
+        Returns True if fallback succeeded.
+        """
+        self.logger.warning(
+            "Provider fallback requested but no fallback provider configured "
+            "(category=%s)",
+            classified.category.value,
+        )
+        return False
+
     def _mitigate_context_pressure(
         self,
         messages: list[dict[str, Any]],
         budget: TokenBudget,
     ) -> list[dict[str, Any]]:
-        """Truncate the longest message content to fit within budget."""
-        estimated = estimate_tokens("".join(m.get("content", "") for m in messages))
-        if budget.can_fit(estimated):
-            return messages
+        """Three-stage context compression (B2).
 
-        excess_tokens = estimated - budget.available
-        excess_chars = int(excess_tokens * _CHARS_PER_TOKEN)
-        self.logger.info(
-            "Mitigating context pressure: %d excess tokens, truncating messages",
-            excess_tokens,
+        Delegates to :class:`ContextCompressor` which applies:
+        1. Zero-cost stale output pruning
+        2. Boundary-aware middle truncation
+        3. Middle message dropping (last resort)
+        """
+        comp_cfg = self.llm_config.compression
+        compressor = ContextCompressor(
+            budget,
+            protect_head=1,
+            protect_tail=max(1, int(comp_cfg.protect_tail_tokens / 500)),
+            stale_char_threshold=comp_cfg.stale_output_threshold,
         )
-
-        mitigated = list(messages)
-        content_sizes = [
-            (i, len(m.get("content", ""))) for i, m in enumerate(mitigated)
-        ]
-        content_sizes.sort(key=lambda x: x[1], reverse=True)
-
-        chars_to_cut = excess_chars + int(500 * _CHARS_PER_TOKEN)
-        for idx, size in content_sizes:
-            if chars_to_cut <= 0:
-                break
-            content = mitigated[idx].get("content", "")
-            if not content:
-                continue
-            cut = min(chars_to_cut, size // 2)
-            if cut < 100:
-                continue
-            truncated = (
-                content[: size - cut]
-                + "\n\n... [auto-truncated to fit context window] ...\n"
+        result, stats = compressor.compress(messages)
+        if stats.total_saved > 0:
+            self.logger.info(
+                "Context compressed: %d→%d tokens (P1=%d, P2=%d, P3=%d saved)",
+                stats.tokens_before,
+                stats.tokens_after,
+                stats.phase1_saved,
+                stats.phase2_saved,
+                stats.phase3_saved,
             )
-            mitigated[idx] = {**mitigated[idx], "content": truncated}
-            chars_to_cut -= cut
-            self.logger.debug(
-                "Truncated message[%d]: %d -> %d chars", idx, size, len(truncated)
-            )
-
-        return mitigated
+        return result
 
     async def _call_llm_with_retry(
         self,
@@ -160,8 +213,6 @@ class BaseAgent(ABC):
         retries = (
             max_retries if max_retries is not None else self.llm_config.max_retries
         )
-        last_error: Exception | None = None
-
         budget = self._get_token_budget()
         estimated_tokens = estimate_tokens(
             "".join(m.get("content", "") for m in messages)
@@ -196,9 +247,14 @@ class BaseAgent(ABC):
             utilization * 100,
         )
 
+        retry_budget = RetryBudget(max_retries=retries)
+        last_error: Exception | None = None
         last_classified: ClassifiedError | None = None
 
-        for attempt in range(retries):
+        while True:
+            if retry_budget.retries_exhausted:
+                break
+
             t0 = time.monotonic()
             try:
                 llm_result: str | BaseModel
@@ -213,7 +269,7 @@ class BaseAgent(ABC):
                 resp_len = len(resp_str)
                 self.logger.info(
                     "LLM response: attempt=%d/%d, elapsed=%.1fs, response_chars=%d",
-                    attempt + 1,
+                    retry_budget.attempt + 1,
                     retries,
                     elapsed,
                     resp_len,
@@ -227,7 +283,7 @@ class BaseAgent(ABC):
                         prompt_chars=prompt_chars,
                         response_chars=resp_len,
                         elapsed_seconds=elapsed,
-                        attempt=attempt + 1,
+                        attempt=retry_budget.attempt + 1,
                         max_attempts=retries,
                         success=True,
                         prompt_preview=prompt_preview,
@@ -242,11 +298,10 @@ class BaseAgent(ABC):
                 elapsed = time.monotonic() - t0
                 classified = classify_error(e, self.llm_config.provider)
                 last_classified = classified
+                retry_budget.record(classified.category)
 
                 self.logger.warning(
-                    "LLM error on attempt %d/%d (%.1fs) [%s]: %s",
-                    attempt + 1,
-                    retries,
+                    "LLM error (%.1fs) [%s]: %s",
                     elapsed,
                     classified.category.value,
                     classified.message,
@@ -259,7 +314,7 @@ class BaseAgent(ABC):
                         prompt_chars=prompt_chars,
                         response_chars=0,
                         elapsed_seconds=elapsed,
-                        attempt=attempt + 1,
+                        attempt=retry_budget.attempt + 1,
                         max_attempts=retries,
                         success=False,
                         error=f"[{classified.category.value}] {str(e)[:180]}",
@@ -270,8 +325,16 @@ class BaseAgent(ABC):
                     )
 
                 if not classified.retryable:
-                    self._consecutive_failures += 1
+                    if classified.should_fallback:
+                        if self._on_fallback_needed(classified):
+                            retry_budget.consume_attempt()
+                            continue
+                    if classified.category in _CIRCUIT_BREAKER_CATEGORIES:
+                        self._consecutive_failures += 1
                     raise AgentError(classified.message, classified) from e
+
+                if classified.should_rotate:
+                    self._on_credential_rotation_needed(classified)
 
                 if classified.should_compress:
                     self.logger.info(
@@ -283,19 +346,45 @@ class BaseAgent(ABC):
                     )
                     prompt_chars = sum(len(m.get("content", "")) for m in messages)
 
-                if attempt + 1 < retries:
+                is_rate_limit = classified.category == ErrorCategory.RATE_LIMIT
+                if is_rate_limit:
+                    retry_budget.consume_rate_limit_wait()
+                    if retry_budget.rate_limit_exhausted:
+                        self.logger.error(
+                            "Rate limit wait budget exhausted (%d waits) for %s",
+                            retry_budget.rate_limit_waits,
+                            self.agent_type.value,
+                        )
+                        break
+                else:
+                    retry_budget.consume_attempt()
+
+                if not retry_budget.retries_exhausted:
                     delay = jittered_backoff(
-                        attempt, base=max(1.0, classified.cooldown_seconds)
+                        retry_budget.attempt
+                        if not is_rate_limit
+                        else retry_budget.rate_limit_waits,
+                        base=max(1.0, classified.cooldown_seconds),
                     )
                     self.logger.debug(
-                        "Backing off %.1fs before retry (category=%s)",
+                        "Backing off %.1fs before retry (category=%s, attempt=%d, rl_waits=%d)",
                         delay,
                         classified.category.value,
+                        retry_budget.attempt,
+                        retry_budget.rate_limit_waits,
                     )
                     await asyncio.sleep(delay)
 
-        self._consecutive_failures += 1
+        if last_classified and last_classified.category in _CIRCUIT_BREAKER_CATEGORIES:
+            self._consecutive_failures += 1
+        elif last_classified and last_classified.category not in (
+            ErrorCategory.RATE_LIMIT,
+            ErrorCategory.TRANSPORT,
+        ):
+            self._consecutive_failures += 1
         raise AgentExhaustedError(
-            f"Agent {self.agent_type.value}: LLM call failed after {retries} attempts: {last_error}",
+            f"Agent {self.agent_type.value}: LLM call failed after "
+            f"{retry_budget.attempt} attempts "
+            f"(+{retry_budget.rate_limit_waits} rate-limit waits): {last_error}",
             last_classified,
         ) from last_error

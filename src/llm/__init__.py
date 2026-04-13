@@ -10,6 +10,7 @@ from src.llm.error_classifier import (
     ErrorCategory,
     classify_error,
 )
+from src.llm.prompt_caching import CacheStrategy, apply_cache_markers
 from src.llm.response_parser import (
     parse_plan_judge_verdict,
     parse_conflict_analysis,
@@ -28,6 +29,8 @@ __all__ = [
     "ClassifiedError",
     "ErrorCategory",
     "classify_error",
+    "CacheStrategy",
+    "apply_cache_markers",
     "jittered_backoff",
     "parse_plan_judge_verdict",
     "parse_conflict_analysis",

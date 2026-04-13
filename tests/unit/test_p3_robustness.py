@@ -514,17 +514,25 @@ class TestOrchestratorP3Integration:
         from src.models.config import MergeConfig
 
         config = MergeConfig(upstream_ref="upstream/main", fork_ref="fork/main")
+        mock_agents = {
+            name: MagicMock()
+            for name in [
+                "planner",
+                "planner_judge",
+                "conflict_analyst",
+                "executor",
+                "judge",
+                "human_interface",
+            ]
+        }
+        for a in mock_agents.values():
+            a.set_trace_logger = MagicMock()
+            a.set_memory_store = MagicMock()
         with (
             patch("src.core.orchestrator.GitTool"),
             patch("src.core.orchestrator.GateRunner"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
         ):
-            return Orchestrator(config)
+            return Orchestrator(config, agents=mock_agents)
 
     def test_orchestrator_imports_p3_tools(self):
         from src.tools.pollution_auditor import PollutionAuditor

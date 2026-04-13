@@ -78,3 +78,8 @@ class PlannerJudgeAgent(BaseAgent):
         from src.models.state import SystemStatus
 
         return state.status == SystemStatus.PLAN_REVIEWING
+
+
+from src.agents.registry import AgentRegistry  # noqa: E402
+
+AgentRegistry.register("planner_judge", PlannerJudgeAgent)

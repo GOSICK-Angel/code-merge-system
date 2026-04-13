@@ -6,6 +6,7 @@ import openai
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
 from src.models.config import AgentLLMConfig
+from src.llm.prompt_caching import CacheStrategy, apply_cache_markers
 
 
 class ParseError(Exception):
@@ -38,11 +39,13 @@ class AnthropicClient(LLMClient):
         max_tokens: int,
         max_retries: int,
         base_url: str | None = None,
+        cache_strategy: CacheStrategy = CacheStrategy.SYSTEM_AND_RECENT,
     ):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_retries = max_retries
+        self.cache_strategy = cache_strategy
         kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
@@ -51,14 +54,17 @@ class AnthropicClient(LLMClient):
     async def complete(
         self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
     ) -> str:
+        cached_messages, cached_system = apply_cache_markers(
+            messages, system=system, strategy=self.cache_strategy
+        )
         kwargs_merged: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
-            "messages": messages,
+            "messages": cached_messages,
         }
-        if system:
-            kwargs_merged["system"] = system
+        if cached_system:
+            kwargs_merged["system"] = cached_system
         kwargs_merged.update(kwargs)
 
         response = await self._client.messages.create(**kwargs_merged)
@@ -198,6 +204,7 @@ class LLMClientFactory:
                 max_tokens=config.max_tokens,
                 max_retries=config.max_retries,
                 base_url=base_url,
+                cache_strategy=CacheStrategy(config.cache_strategy),
             )
         elif config.provider == "openai":
             if base_url and not base_url.rstrip("/").endswith("/v1"):

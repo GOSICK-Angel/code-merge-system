@@ -3,6 +3,15 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Any, Literal
 
 
+class CompressionConfig(BaseModel):
+    """B2: Per-agent context compression tunables."""
+
+    protect_head_tokens: int = Field(default=4000, ge=0)
+    protect_tail_tokens: int = Field(default=20000, ge=0)
+    stale_output_threshold: int = Field(default=200, ge=0)
+    summary_budget_ratio: float = Field(default=0.05, ge=0.0, le=1.0)
+
+
 class AgentLLMConfig(BaseModel):
     provider: Literal["anthropic", "openai"] = "anthropic"
     model: str = "claude-opus-4-6"
@@ -11,6 +20,12 @@ class AgentLLMConfig(BaseModel):
     max_retries: int = Field(default=3, ge=1)
     api_key_env: str = "ANTHROPIC_API_KEY"
     api_base_url_env: str = ""
+    cache_strategy: Literal["none", "system_only", "system_and_recent"] = Field(
+        default="system_and_recent",
+        description="Prompt caching strategy (Anthropic only). "
+        "Ignored for OpenAI providers.",
+    )
+    compression: CompressionConfig = Field(default_factory=CompressionConfig)
 
 
 class AgentsLLMConfig(BaseModel):

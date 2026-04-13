@@ -532,3 +532,8 @@ def _extract_diff_ranges(original_diff: FileDiff) -> list[tuple[int, int]]:
             (1, original_diff.lines_added + original_diff.lines_deleted + 100)
         )
     return ranges
+
+
+from src.agents.registry import AgentRegistry  # noqa: E402
+
+AgentRegistry.register("judge", JudgeAgent, extra_kwargs=["git_tool"])

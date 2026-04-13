@@ -856,35 +856,35 @@ class TestPhaseClasses:
         from src.core.orchestrator import Orchestrator
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool") as MockGit,
-            patch("src.core.orchestrator.PlannerAgent") as MockPlanner,
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
+        mock_agents = {
+            name: MagicMock()
+            for name in [
+                "planner",
+                "planner_judge",
+                "conflict_analyst",
+                "executor",
+                "judge",
+                "human_interface",
+            ]
+        }
+        for a in mock_agents.values():
+            a.set_trace_logger = MagicMock()
+            a.set_memory_store = MagicMock()
+        mock_agents["planner"].run = AsyncMock()
+        mock_agents["planner_judge"].review_plan = AsyncMock(
+            return_value=_make_plan_judge_verdict(PlanJudgeResult.APPROVED)
+        )
+        mock_agents["conflict_analyst"].run = AsyncMock()
+        judge_msg = MagicMock()
+        judge_msg.payload = {}
+        mock_agents["judge"].run = AsyncMock(return_value=judge_msg)
+
+        with patch("src.core.orchestrator.GitTool") as MockGit:
             mock_git = MockGit.return_value
             mock_git.get_merge_base.return_value = "abc123"
             mock_git.get_changed_files.return_value = []
 
-            mock_planner = MockPlanner.return_value
-            mock_planner.run = AsyncMock()
-
-            orch = Orchestrator(config)
-            orch.planner_judge = MagicMock()
-            orch.planner_judge.review_plan = AsyncMock(
-                return_value=_make_plan_judge_verdict(PlanJudgeResult.APPROVED)
-            )
-            orch.executor = MagicMock()
-            orch.judge = MagicMock()
-            orch.conflict_analyst = MagicMock()
-            orch.conflict_analyst.run = AsyncMock()
-
-            judge_msg = MagicMock()
-            judge_msg.payload = {}
-            orch.judge.run = AsyncMock(return_value=judge_msg)
+            orch = Orchestrator(config, agents=mock_agents)
 
             with (
                 patch("src.core.phases.report_generation.write_json_report"),
@@ -1288,19 +1288,26 @@ class TestPhaseClasses:
         from src.core.orchestrator import Orchestrator
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool") as MockGit,
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
+        mock_agents = {
+            name: MagicMock()
+            for name in [
+                "planner",
+                "planner_judge",
+                "conflict_analyst",
+                "executor",
+                "judge",
+                "human_interface",
+            ]
+        }
+        for a in mock_agents.values():
+            a.set_trace_logger = MagicMock()
+            a.set_memory_store = MagicMock()
+
+        with patch("src.core.orchestrator.GitTool") as MockGit:
             mock_git = MockGit.return_value
             mock_git.get_merge_base.side_effect = RuntimeError("git error")
 
-            orch = Orchestrator(config)
+            orch = Orchestrator(config, agents=mock_agents)
             state = _make_state(config)
             result = await orch.run(state)
 
@@ -1311,16 +1318,23 @@ class TestPhaseClasses:
         from src.core.orchestrator import Orchestrator
 
         config = _make_config(str(tmp_path))
-        with (
-            patch("src.core.orchestrator.GitTool"),
-            patch("src.core.orchestrator.PlannerAgent"),
-            patch("src.core.orchestrator.PlannerJudgeAgent"),
-            patch("src.core.orchestrator.ConflictAnalystAgent"),
-            patch("src.core.orchestrator.ExecutorAgent"),
-            patch("src.core.orchestrator.JudgeAgent"),
-            patch("src.core.orchestrator.HumanInterfaceAgent"),
-        ):
-            orch = Orchestrator(config)
+        mock_agents = {
+            name: MagicMock()
+            for name in [
+                "planner",
+                "planner_judge",
+                "conflict_analyst",
+                "executor",
+                "judge",
+                "human_interface",
+            ]
+        }
+        for a in mock_agents.values():
+            a.set_trace_logger = MagicMock()
+            a.set_memory_store = MagicMock()
+
+        with patch("src.core.orchestrator.GitTool"):
+            orch = Orchestrator(config, agents=mock_agents)
             state = _make_state(config)
             state.status = SystemStatus.AWAITING_HUMAN
             result = await orch.run(state)

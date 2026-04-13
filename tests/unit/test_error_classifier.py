@@ -1,4 +1,4 @@
-"""Tests for A4: error classifier, jittered backoff, and classified retry logic."""
+"""Tests for A4/A5: error classifier, jittered backoff, RetryBudget, and classified retry logic."""
 
 from __future__ import annotations
 
@@ -266,6 +266,63 @@ class TestJitteredBackoff:
 
 
 # ============================================================================
+# 5b. RetryBudget
+# ============================================================================
+
+
+class TestRetryBudget:
+    def test_initial_state(self):
+        from src.agents.base_agent import RetryBudget
+
+        rb = RetryBudget(max_retries=3)
+        assert rb.attempt == 0
+        assert rb.rate_limit_waits == 0
+        assert not rb.retries_exhausted
+        assert not rb.rate_limit_exhausted
+        assert rb.category_counts == {}
+
+    def test_consume_attempt(self):
+        from src.agents.base_agent import RetryBudget
+
+        rb = RetryBudget(max_retries=2)
+        rb.consume_attempt()
+        assert rb.attempt == 1
+        assert not rb.retries_exhausted
+        rb.consume_attempt()
+        assert rb.attempt == 2
+        assert rb.retries_exhausted
+
+    def test_consume_rate_limit_wait(self):
+        from src.agents.base_agent import RetryBudget
+
+        rb = RetryBudget(max_retries=3, max_rate_limit_waits=2)
+        rb.consume_rate_limit_wait()
+        assert rb.rate_limit_waits == 1
+        assert not rb.rate_limit_exhausted
+        rb.consume_rate_limit_wait()
+        assert rb.rate_limit_waits == 2
+        assert rb.rate_limit_exhausted
+
+    def test_record_category_counts(self):
+        from src.agents.base_agent import RetryBudget
+
+        rb = RetryBudget(max_retries=5)
+        rb.record(ErrorCategory.OVERLOAD)
+        rb.record(ErrorCategory.OVERLOAD)
+        rb.record(ErrorCategory.RATE_LIMIT)
+        assert rb.category_counts == {"overload": 2, "rate_limit": 1}
+
+    def test_rate_limit_does_not_affect_attempts(self):
+        from src.agents.base_agent import RetryBudget
+
+        rb = RetryBudget(max_retries=2, max_rate_limit_waits=10)
+        for _ in range(10):
+            rb.consume_rate_limit_wait()
+        assert rb.attempt == 0
+        assert not rb.retries_exhausted
+
+
+# ============================================================================
 # 6. BaseAgent retry integration
 # ============================================================================
 
@@ -346,7 +403,6 @@ class TestBaseAgentRetryIntegration:
         agent.llm.complete = AsyncMock(side_effect=[rate_err, "ok"])
 
         backoff_calls: list[tuple[int, float]] = []
-        original_backoff = jittered_backoff
 
         def tracking_backoff(
             attempt: int, base: float = 1.0, max_delay: float = 60.0
@@ -391,6 +447,236 @@ class TestBaseAgentRetryIntegration:
         for call in calls:
             error_str = call.kwargs.get("error", "")
             assert "[overload]" in error_str
+
+
+# ============================================================================
+# 6b. A5: Rate-limit does not consume retry budget
+# ============================================================================
+
+
+class TestRateLimitDoesNotConsumeRetryBudget:
+    """Rate-limit (429) errors should use a separate wait counter so
+    they don't burn normal retry attempts (spec §4.4)."""
+
+    @pytest.mark.asyncio
+    async def test_rate_limits_preserve_retry_budget(self):
+        """3 consecutive 429s + 1 success should succeed with max_retries=1,
+        because rate-limit waits don't count against the retry counter."""
+        agent = _make_test_agent(max_retries=1)
+        rate_err = _make_api_error(429, "rate limited")
+        agent.llm.complete = AsyncMock(side_effect=[rate_err, rate_err, rate_err, "ok"])
+
+        with patch("src.agents.base_agent.jittered_backoff", return_value=0.0):
+            result = await agent._call_llm_with_retry(
+                [{"role": "user", "content": "hi"}]
+            )
+        assert result == "ok"
+        assert agent.consecutive_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_exhaustion_raises(self):
+        """When MAX_RATE_LIMIT_WAITS is exceeded, the call should fail."""
+        from src.agents.base_agent import AgentExhaustedError, MAX_RATE_LIMIT_WAITS
+
+        agent = _make_test_agent(max_retries=3)
+        rate_err = _make_api_error(429, "rate limited")
+        agent.llm.complete = AsyncMock(
+            side_effect=[rate_err] * (MAX_RATE_LIMIT_WAITS + 1)
+        )
+
+        with patch("src.agents.base_agent.jittered_backoff", return_value=0.0):
+            with pytest.raises(AgentExhaustedError) as exc_info:
+                await agent._call_llm_with_retry([{"role": "user", "content": "hi"}])
+        assert exc_info.value.last_classification is not None
+        assert exc_info.value.last_classification.category == ErrorCategory.RATE_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_mixed_rate_limit_and_overload(self):
+        """Rate-limit waits and normal retries are tracked independently."""
+        agent = _make_test_agent(max_retries=2)
+        rate_err = _make_api_error(429, "rate limited")
+        overload_err = _make_api_error(500, "server error")
+        agent.llm.complete = AsyncMock(
+            side_effect=[rate_err, rate_err, overload_err, "ok"]
+        )
+
+        with patch("src.agents.base_agent.jittered_backoff", return_value=0.0):
+            result = await agent._call_llm_with_retry(
+                [{"role": "user", "content": "hi"}]
+            )
+        assert result == "ok"
+
+
+# ============================================================================
+# 6c. A5: Category-aware circuit breaker
+# ============================================================================
+
+
+class TestCategoryAwareCircuitBreaker:
+    """Circuit breaker should only trip on permanent/systemic failures,
+    not on transient transport or rate-limit errors."""
+
+    @pytest.mark.asyncio
+    async def test_auth_permanent_increments_circuit_breaker(self):
+        from src.agents.base_agent import AgentError
+
+        agent = _make_test_agent(max_retries=3)
+        err = _make_api_error(401, "invalid key")
+        agent.llm.complete = AsyncMock(side_effect=err)
+
+        with pytest.raises(AgentError):
+            await agent._call_llm_with_retry([{"role": "user", "content": "hi"}])
+        assert agent.consecutive_failures == 1
+
+    @pytest.mark.asyncio
+    async def test_format_error_increments_circuit_breaker(self):
+        from src.agents.base_agent import AgentError
+
+        agent = _make_test_agent(max_retries=3)
+        err = _make_api_error(400, "invalid json body")
+        agent.llm.complete = AsyncMock(side_effect=err)
+
+        with pytest.raises(AgentError):
+            await agent._call_llm_with_retry([{"role": "user", "content": "hi"}])
+        assert agent.consecutive_failures == 1
+
+    @pytest.mark.asyncio
+    async def test_transport_exhaustion_does_not_trip_circuit_breaker(self):
+        from src.agents.base_agent import AgentExhaustedError
+
+        agent = _make_test_agent(max_retries=2)
+        agent.llm.complete = AsyncMock(side_effect=ConnectionError("refused"))
+
+        with patch("src.agents.base_agent.jittered_backoff", return_value=0.0):
+            with pytest.raises(AgentExhaustedError):
+                await agent._call_llm_with_retry([{"role": "user", "content": "hi"}])
+        assert agent.consecutive_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_exhaustion_does_not_trip_circuit_breaker(self):
+        from src.agents.base_agent import AgentExhaustedError, MAX_RATE_LIMIT_WAITS
+
+        agent = _make_test_agent(max_retries=3)
+        rate_err = _make_api_error(429, "rate limited")
+        agent.llm.complete = AsyncMock(
+            side_effect=[rate_err] * (MAX_RATE_LIMIT_WAITS + 1)
+        )
+
+        with patch("src.agents.base_agent.jittered_backoff", return_value=0.0):
+            with pytest.raises(AgentExhaustedError):
+                await agent._call_llm_with_retry([{"role": "user", "content": "hi"}])
+        assert agent.consecutive_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_overload_exhaustion_trips_circuit_breaker(self):
+        from src.agents.base_agent import AgentExhaustedError
+
+        agent = _make_test_agent(max_retries=2)
+        err = _make_api_error(500, "internal server error")
+        agent.llm.complete = AsyncMock(side_effect=err)
+
+        with patch("src.agents.base_agent.jittered_backoff", return_value=0.0):
+            with pytest.raises(AgentExhaustedError):
+                await agent._call_llm_with_retry([{"role": "user", "content": "hi"}])
+        assert agent.consecutive_failures == 1
+
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_blocks_after_threshold(self):
+        from src.agents.base_agent import (
+            AgentError,
+            CircuitBreakerOpen,
+            CIRCUIT_BREAKER_THRESHOLD,
+        )
+
+        agent = _make_test_agent(max_retries=3)
+        agent._consecutive_failures = CIRCUIT_BREAKER_THRESHOLD
+
+        with pytest.raises(CircuitBreakerOpen):
+            await agent._call_llm_with_retry([{"role": "user", "content": "hi"}])
+
+
+# ============================================================================
+# 6d. A5: Credential rotation / provider fallback hooks
+# ============================================================================
+
+
+class TestCredentialRotationAndFallbackHooks:
+    @pytest.mark.asyncio
+    async def test_rotation_hook_called_on_transient_auth(self):
+        agent = _make_test_agent(max_retries=2)
+        auth_err = _make_api_error(403, "quota exceeded temporarily")
+        agent.llm.complete = AsyncMock(side_effect=[auth_err, "ok"])
+        agent._on_credential_rotation_needed = MagicMock(return_value=False)
+
+        with patch("src.agents.base_agent.jittered_backoff", return_value=0.0):
+            result = await agent._call_llm_with_retry(
+                [{"role": "user", "content": "hi"}]
+            )
+        assert result == "ok"
+        agent._on_credential_rotation_needed.assert_called_once()
+        classified_arg = agent._on_credential_rotation_needed.call_args[0][0]
+        assert classified_arg.should_rotate is True
+
+    @pytest.mark.asyncio
+    async def test_fallback_hook_called_on_permanent_auth(self):
+        from src.agents.base_agent import AgentError
+
+        agent = _make_test_agent(max_retries=3)
+        err = _make_api_error(401, "invalid key")
+        agent.llm.complete = AsyncMock(side_effect=err)
+        agent._on_fallback_needed = MagicMock(return_value=False)
+
+        with pytest.raises(AgentError):
+            await agent._call_llm_with_retry([{"role": "user", "content": "hi"}])
+        agent._on_fallback_needed.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_fallback_hook_success_allows_retry(self):
+        agent = _make_test_agent(max_retries=3)
+        err = _make_api_error(401, "invalid key")
+        agent.llm.complete = AsyncMock(side_effect=[err, "recovered"])
+        agent._on_fallback_needed = MagicMock(return_value=True)
+
+        result = await agent._call_llm_with_retry([{"role": "user", "content": "hi"}])
+        assert result == "recovered"
+        agent._on_fallback_needed.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_rotation_not_called_when_should_rotate_false(self):
+        from src.agents.base_agent import AgentExhaustedError
+
+        agent = _make_test_agent(max_retries=2)
+        err = _make_api_error(500, "server error")
+        agent.llm.complete = AsyncMock(side_effect=err)
+        agent._on_credential_rotation_needed = MagicMock(return_value=False)
+
+        with patch("src.agents.base_agent.jittered_backoff", return_value=0.0):
+            with pytest.raises(AgentExhaustedError):
+                await agent._call_llm_with_retry([{"role": "user", "content": "hi"}])
+        agent._on_credential_rotation_needed.assert_not_called()
+
+
+# ============================================================================
+# 6e. A5: Exhausted error message includes retry budget details
+# ============================================================================
+
+
+class TestExhaustedErrorDetails:
+    @pytest.mark.asyncio
+    async def test_error_message_includes_rate_limit_waits(self):
+        from src.agents.base_agent import AgentExhaustedError, MAX_RATE_LIMIT_WAITS
+
+        agent = _make_test_agent(max_retries=1)
+        rate_err = _make_api_error(429, "rate limited")
+        overload_err = _make_api_error(500, "server error")
+        agent.llm.complete = AsyncMock(side_effect=[rate_err, rate_err, overload_err])
+
+        with patch("src.agents.base_agent.jittered_backoff", return_value=0.0):
+            with pytest.raises(AgentExhaustedError) as exc_info:
+                await agent._call_llm_with_retry([{"role": "user", "content": "hi"}])
+        msg = str(exc_info.value)
+        assert "1 attempts" in msg
+        assert "2 rate-limit waits" in msg
 
 
 # ============================================================================

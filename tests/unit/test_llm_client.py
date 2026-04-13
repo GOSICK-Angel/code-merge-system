@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from pydantic import BaseModel
 
 from src.llm.client import AnthropicClient, OpenAIClient, LLMClientFactory, ParseError
+from src.llm.prompt_caching import CacheStrategy
 from src.models.config import AgentLLMConfig
 
 
@@ -11,7 +12,9 @@ class SimpleSchema(BaseModel):
     value: int
 
 
-def _make_anthropic_client() -> AnthropicClient:
+def _make_anthropic_client(
+    cache_strategy: CacheStrategy = CacheStrategy.SYSTEM_AND_RECENT,
+) -> AnthropicClient:
     with patch("anthropic.AsyncAnthropic"):
         return AnthropicClient(
             model="claude-opus-4-6",
@@ -19,6 +22,7 @@ def _make_anthropic_client() -> AnthropicClient:
             temperature=0.2,
             max_tokens=1024,
             max_retries=3,
+            cache_strategy=cache_strategy,
         )
 
 
@@ -64,7 +68,7 @@ class TestAnthropicClientComplete:
         assert result == "Hello world"
 
     async def test_passes_messages_to_api(self):
-        client = _make_anthropic_client()
+        client = _make_anthropic_client(cache_strategy=CacheStrategy.NONE)
         mock_content = MagicMock()
         mock_content.text = "response"
         mock_response = MagicMock()
@@ -91,7 +95,7 @@ class TestAnthropicClientComplete:
         assert call_kwargs["model"] == "claude-opus-4-6"
 
     async def test_includes_system_when_provided(self):
-        client = _make_anthropic_client()
+        client = _make_anthropic_client(cache_strategy=CacheStrategy.NONE)
         mock_content = MagicMock()
         mock_content.text = "response"
         mock_response = MagicMock()
@@ -104,6 +108,24 @@ class TestAnthropicClientComplete:
 
         call_kwargs = client._client.messages.create.call_args.kwargs
         assert call_kwargs["system"] == "Be helpful"
+
+    async def test_system_cached_when_strategy_enabled(self):
+        client = _make_anthropic_client(cache_strategy=CacheStrategy.SYSTEM_AND_RECENT)
+        mock_content = MagicMock()
+        mock_content.text = "response"
+        mock_response = MagicMock()
+        mock_response.content = [mock_content]
+        client._client.messages.create = AsyncMock(return_value=mock_response)
+
+        await client.complete(
+            [{"role": "user", "content": "test"}], system="Be helpful"
+        )
+
+        call_kwargs = client._client.messages.create.call_args.kwargs
+        system_val = call_kwargs["system"]
+        assert isinstance(system_val, list)
+        assert system_val[0]["text"] == "Be helpful"
+        assert system_val[0]["cache_control"] == {"type": "ephemeral"}
 
     async def test_excludes_system_when_none(self):
         client = _make_anthropic_client()
@@ -202,7 +224,7 @@ class TestAnthropicClientCompleteStructured:
             )
 
     async def test_appends_instruction_to_last_user_message(self):
-        client = _make_anthropic_client()
+        client = _make_anthropic_client(cache_strategy=CacheStrategy.NONE)
         mock_content = MagicMock()
         mock_content.text = '{"name": "test", "value": 1}'
         mock_response = MagicMock()
@@ -219,7 +241,7 @@ class TestAnthropicClientCompleteStructured:
         assert "JSON" in last_msg["content"]
 
     async def test_adds_user_message_when_no_user_last(self):
-        client = _make_anthropic_client()
+        client = _make_anthropic_client(cache_strategy=CacheStrategy.NONE)
         mock_content = MagicMock()
         mock_content.text = '{"name": "test", "value": 1}'
         mock_response = MagicMock()
