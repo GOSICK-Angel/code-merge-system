@@ -1,7 +1,10 @@
 import asyncio
+import logging
 from collections import defaultdict
 from typing import Callable
 from src.models.message import AgentMessage, AgentType
+
+logger = logging.getLogger(__name__)
 
 
 class MessageBus:
@@ -20,7 +23,12 @@ class MessageBus:
             try:
                 callback(message)
             except Exception:
-                pass
+                logger.warning(
+                    "Subscriber callback error for %s: %s",
+                    message.receiver.value,
+                    callback,
+                    exc_info=True,
+                )
 
         if message.receiver == AgentType.BROADCAST:
             for agent_type, callbacks in self._subscribers.items():
@@ -29,7 +37,12 @@ class MessageBus:
                         try:
                             callback(message)
                         except Exception:
-                            pass
+                            logger.warning(
+                                "Broadcast subscriber error for %s: %s",
+                                agent_type.value,
+                                callback,
+                                exc_info=True,
+                            )
 
     def subscribe(
         self, agent_type: AgentType, callback: Callable[[AgentMessage], None]

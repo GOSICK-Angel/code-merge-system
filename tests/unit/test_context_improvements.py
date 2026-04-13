@@ -13,6 +13,7 @@ import pytest
 
 from src.agents.base_agent import (
     CIRCUIT_BREAKER_THRESHOLD,
+    AgentExhaustedError,
     BaseAgent,
     CircuitBreakerOpen,
 )
@@ -256,7 +257,7 @@ class TestCircuitBreaker:
         agent = _make_agent(max_retries=1)
         agent.llm.complete = AsyncMock(side_effect=RuntimeError("fail"))
 
-        with pytest.raises(RuntimeError, match="failed after 1 attempts"):
+        with pytest.raises(AgentExhaustedError, match="failed after 1 attempts"):
             await agent._call_llm_with_retry([{"role": "user", "content": "test"}])
         assert agent.consecutive_failures == 1
 

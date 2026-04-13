@@ -7,13 +7,15 @@ from pydantic import BaseModel
 from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage
 from src.models.state import MergeState
-from src.llm.client import LLMClient, LLMClientFactory, ParseError
+from src.llm.client import LLMClient, LLMClientFactory
 from src.llm.context import (
     TokenBudget,
     _CHARS_PER_TOKEN,
     estimate_tokens,
     get_context_window,
 )
+from src.llm.error_classifier import ClassifiedError, classify_error
+from src.llm.retry_utils import jittered_backoff
 from src.memory.layered_loader import LayeredMemoryLoader
 from src.memory.store import MemoryStore
 from src.tools.trace_logger import TraceLogger
@@ -23,6 +25,24 @@ CIRCUIT_BREAKER_THRESHOLD = 3
 
 class CircuitBreakerOpen(RuntimeError):
     """Raised when the circuit breaker trips after too many consecutive failures."""
+
+
+class AgentError(RuntimeError):
+    """Non-retryable LLM error with classification details."""
+
+    def __init__(self, message: str, classification: ClassifiedError) -> None:
+        super().__init__(message)
+        self.classification = classification
+
+
+class AgentExhaustedError(RuntimeError):
+    """Raised when all retry attempts are exhausted."""
+
+    def __init__(
+        self, message: str, last_classification: ClassifiedError | None = None
+    ) -> None:
+        super().__init__(message)
+        self.last_classification = last_classification
 
 
 class BaseAgent(ABC):
@@ -176,6 +196,8 @@ class BaseAgent(ABC):
             utilization * 100,
         )
 
+        last_classified: ClassifiedError | None = None
+
         for attempt in range(retries):
             t0 = time.monotonic()
             try:
@@ -215,44 +237,19 @@ class BaseAgent(ABC):
                         utilization=round(utilization, 4),
                     )
                 return llm_result
-            except ParseError as e:
-                last_error = e
-                elapsed = time.monotonic() - t0
-                self.logger.warning(
-                    "Parse error on attempt %d/%d (%.1fs): %s",
-                    attempt + 1,
-                    retries,
-                    elapsed,
-                    e,
-                )
-                if self._trace_logger:
-                    self._trace_logger.record(
-                        agent=self.agent_type.value,
-                        model=self.llm_config.model,
-                        provider=self.llm_config.provider,
-                        prompt_chars=prompt_chars,
-                        response_chars=0,
-                        elapsed_seconds=elapsed,
-                        attempt=attempt + 1,
-                        max_attempts=retries,
-                        success=False,
-                        error=str(e)[:200],
-                        prompt_preview=prompt_preview,
-                        estimated_tokens=estimated_tokens,
-                        budget_available=budget.available,
-                        utilization=round(utilization, 4),
-                    )
-                if attempt + 1 < retries:
-                    await asyncio.sleep(2**attempt)
             except Exception as e:
                 last_error = e
                 elapsed = time.monotonic() - t0
+                classified = classify_error(e, self.llm_config.provider)
+                last_classified = classified
+
                 self.logger.warning(
-                    "LLM error on attempt %d/%d (%.1fs): %s",
+                    "LLM error on attempt %d/%d (%.1fs) [%s]: %s",
                     attempt + 1,
                     retries,
                     elapsed,
-                    e,
+                    classified.category.value,
+                    classified.message,
                 )
                 if self._trace_logger:
                     self._trace_logger.record(
@@ -265,16 +262,40 @@ class BaseAgent(ABC):
                         attempt=attempt + 1,
                         max_attempts=retries,
                         success=False,
-                        error=str(e)[:200],
+                        error=f"[{classified.category.value}] {str(e)[:180]}",
                         prompt_preview=prompt_preview,
                         estimated_tokens=estimated_tokens,
                         budget_available=budget.available,
                         utilization=round(utilization, 4),
                     )
+
+                if not classified.retryable:
+                    self._consecutive_failures += 1
+                    raise AgentError(classified.message, classified) from e
+
+                if classified.should_compress:
+                    self.logger.info(
+                        "Context overflow detected — compressing messages before retry"
+                    )
+                    messages = self._mitigate_context_pressure(messages, budget)
+                    estimated_tokens = estimate_tokens(
+                        "".join(m.get("content", "") for m in messages)
+                    )
+                    prompt_chars = sum(len(m.get("content", "")) for m in messages)
+
                 if attempt + 1 < retries:
-                    await asyncio.sleep(2**attempt)
+                    delay = jittered_backoff(
+                        attempt, base=max(1.0, classified.cooldown_seconds)
+                    )
+                    self.logger.debug(
+                        "Backing off %.1fs before retry (category=%s)",
+                        delay,
+                        classified.category.value,
+                    )
+                    await asyncio.sleep(delay)
 
         self._consecutive_failures += 1
-        raise RuntimeError(
-            f"LLM call failed after {retries} attempts: {last_error}"
+        raise AgentExhaustedError(
+            f"Agent {self.agent_type.value}: LLM call failed after {retries} attempts: {last_error}",
+            last_classified,
         ) from last_error
