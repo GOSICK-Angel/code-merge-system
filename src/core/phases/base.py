@@ -17,6 +17,8 @@ from src.tools.gate_runner import GateRunner
 from src.tools.trace_logger import TraceLogger
 from src.memory.store import MemoryStore
 from src.memory.summarizer import PhaseSummarizer
+from src.core.hooks import HookManager
+from src.tools.cost_tracker import CostTracker
 
 OnActivityCallback = Callable[[str, str], None]
 
@@ -41,6 +43,8 @@ class PhaseContext:
     summarizer: PhaseSummarizer
     trace_logger: TraceLogger | None = None
     emit: OnActivityCallback | None = None
+    hooks: HookManager = field(default_factory=HookManager)
+    cost_tracker: CostTracker = field(default_factory=CostTracker)
     agents: dict[str, Any] = field(default_factory=dict)
 
     def notify(self, agent: str, action: str) -> None:

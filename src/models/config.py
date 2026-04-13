@@ -18,7 +18,7 @@ class AgentLLMConfig(BaseModel):
     temperature: float = Field(default=0.2, ge=0.0, le=1.0)
     max_tokens: int = Field(default=8192, ge=512, le=200000)
     max_retries: int = Field(default=3, ge=1)
-    api_key_env: str = "ANTHROPIC_API_KEY"
+    api_key_env: str | list[str] = "ANTHROPIC_API_KEY"
     api_base_url_env: str = ""
     cache_strategy: Literal["none", "system_only", "system_and_recent"] = Field(
         default="system_and_recent",
@@ -26,6 +26,13 @@ class AgentLLMConfig(BaseModel):
         "Ignored for OpenAI providers.",
     )
     compression: CompressionConfig = Field(default_factory=CompressionConfig)
+
+    @property
+    def api_key_env_list(self) -> list[str]:
+        """Normalize api_key_env to a list for credential pool support."""
+        if isinstance(self.api_key_env, list):
+            return self.api_key_env
+        return [self.api_key_env]
 
 
 class AgentsLLMConfig(BaseModel):
@@ -124,6 +131,7 @@ class OutputConfig(BaseModel):
     formats: list[Literal["json", "markdown"]] = ["json", "markdown"]
     include_raw_diffs: bool = False
     include_llm_traces: bool = True
+    structured_logs: bool = False
     language: str = "en"
 
 

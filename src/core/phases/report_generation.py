@@ -30,10 +30,12 @@ class ReportGenerationPhase(Phase):
         output_dir = state.config.output.directory
 
         try:
+            cost_summary = ctx.cost_tracker.summary() if ctx.cost_tracker else None
+
             if "json" in state.config.output.formats:
                 write_json_report(state, output_dir)
             if "markdown" in state.config.output.formats:
-                write_markdown_report(state, output_dir)
+                write_markdown_report(state, output_dir, cost_summary=cost_summary)
 
             write_living_plan_report(state, output_dir)
 

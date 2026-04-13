@@ -50,6 +50,9 @@ from src.models.config import MergeConfig
 from src.models.state import MergeState, SystemStatus
 from src.tools.gate_runner import GateRunner
 from src.tools.git_tool import GitTool
+from src.core.hooks import HookManager
+from src.tools.cost_tracker import CostTracker
+from src.tools.structured_logger import create_structured_handler
 from src.tools.trace_logger import TraceLogger
 
 logger = logging.getLogger(__name__)
@@ -141,14 +144,26 @@ class Orchestrator:
         self._memory_store = MemoryStore()
         self._summarizer = PhaseSummarizer()
 
+        # --- hooks (C1) ---
+        self._hooks = HookManager()
+
+        # --- cost tracking (C3) ---
+        self._cost_tracker = CostTracker()
+
         # --- logging/activity ---
         self._log_handler: logging.FileHandler | None = None
+        self._structured_handler: logging.FileHandler | None = None
         self._trace_logger: TraceLogger | None = None
         self._on_activity: Orchestrator.OnActivityCallback | None = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    @property
+    def hooks(self) -> HookManager:
+        """Expose hook manager for external registration."""
+        return self._hooks
 
     def set_activity_callback(self, cb: OnActivityCallback) -> None:
         self._on_activity = cb
@@ -178,13 +193,28 @@ class Orchestrator:
                 agent, before_msg, after_msg = _PHASE_ACTIVITY.get(
                     state.status, (phase.name, "running", "done")
                 )
+                self._inject_cost_tracker(phase=phase.name)
                 self._emit(agent, before_msg)
+                await self._hooks.emit(
+                    "phase:before",
+                    phase=phase.name,
+                    status=state.status,
+                    state=state,
+                )
 
                 t0 = time.monotonic()
                 outcome = await phase.run(state, ctx)
                 elapsed = time.monotonic() - t0
 
                 self._emit(agent, after_msg)
+                await self._hooks.emit(
+                    "phase:after",
+                    phase=phase.name,
+                    status=state.status,
+                    outcome=outcome,
+                    elapsed=elapsed,
+                    state=state,
+                )
                 logger.info("Phase %s completed in %.1fs", phase.name, elapsed)
 
                 if outcome.should_update_memory:
@@ -215,6 +245,11 @@ class Orchestrator:
                 pass
             self.checkpoint.save(state, "failed")
 
+        await self._hooks.emit(
+            "merge:complete",
+            state=state,
+            elapsed=time.monotonic() - run_start,
+        )
         self._finalize_log(state, run_start)
         return state
 
@@ -235,6 +270,8 @@ class Orchestrator:
             summarizer=self._summarizer,
             trace_logger=self._trace_logger,
             emit=self._on_activity,
+            hooks=self._hooks,
+            cost_tracker=self._cost_tracker,
             agents={
                 "planner": self.planner,
                 "planner_judge": self.planner_judge,
@@ -277,6 +314,10 @@ class Orchestrator:
         for agent in self._all_agents:
             agent.set_memory_store(self._memory_store)
 
+    def _inject_cost_tracker(self, phase: str = "") -> None:
+        for agent in self._all_agents:
+            agent.set_cost_tracker(self._cost_tracker, phase=phase)
+
     # ------------------------------------------------------------------
     # Run-level logging
     # ------------------------------------------------------------------
@@ -303,6 +344,11 @@ class Orchestrator:
 
         self._log_handler = handler
 
+        if self.config.output.structured_logs:
+            structured_path = str(debug_dir / f"run_{run_id}.jsonl")
+            self._structured_handler = create_structured_handler(structured_path)
+            root.addHandler(self._structured_handler)
+
         if self.config.output.include_llm_traces:
             self._trace_logger = TraceLogger(str(debug_dir), run_id)
             for agent in self._all_agents:
@@ -311,10 +357,15 @@ class Orchestrator:
         return log_path
 
     def _teardown_run_logger(self) -> None:
+        root = logging.getLogger()
         if self._log_handler:
-            logging.getLogger().removeHandler(self._log_handler)
+            root.removeHandler(self._log_handler)
             self._log_handler.close()
             self._log_handler = None
+        if self._structured_handler:
+            root.removeHandler(self._structured_handler)
+            self._structured_handler.close()
+            self._structured_handler = None
 
     def _finalize_log(self, state: MergeState, run_start: float) -> None:
         elapsed = time.monotonic() - run_start
@@ -328,6 +379,8 @@ class Orchestrator:
             utilization_summary = self._trace_logger.get_utilization_summary()
             if utilization_summary:
                 logger.info("Context utilization summary: %s", utilization_summary)
+        if self._cost_tracker.total_calls > 0:
+            logger.info("Cost summary: %s", self._cost_tracker.summary())
         self._teardown_run_logger()
 
 

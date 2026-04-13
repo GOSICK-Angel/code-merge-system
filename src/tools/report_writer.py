@@ -1,7 +1,10 @@
 import json
 from functools import partial
 from pathlib import Path
+from typing import Any
+
 from src.models.state import MergeState
+from src.tools.cost_tracker import CostTracker
 
 
 _I18N: dict[str, dict[str, str]] = {
@@ -82,6 +85,20 @@ _I18N: dict[str, dict[str, str]] = {
         "category_summary": "Category Summary",
         "layer_summary": "Layer Summary",
         "todo_merge_count": "TODO [merge] count",
+        "run_insights": "Run Insights",
+        "metric": "Metric",
+        "value": "Value",
+        "total_llm_calls": "Total LLM calls",
+        "total_cost": "Total cost",
+        "most_expensive_agent": "Most expensive agent",
+        "avg_latency": "Average latency",
+        "total_input_tokens": "Total input tokens",
+        "total_output_tokens": "Total output tokens",
+        "cost_by_agent": "Cost by Agent",
+        "agent_name": "Agent",
+        "calls": "Calls",
+        "tokens": "Tokens",
+        "cost": "Cost (USD)",
     },
     "zh": {
         "merge_report": "合并报告",
@@ -160,6 +177,20 @@ _I18N: dict[str, dict[str, str]] = {
         "category_summary": "分类摘要",
         "layer_summary": "层次摘要",
         "todo_merge_count": "TODO [merge] 计数",
+        "run_insights": "运行洞察",
+        "metric": "指标",
+        "value": "值",
+        "total_llm_calls": "LLM 调用总数",
+        "total_cost": "总成本",
+        "most_expensive_agent": "最高成本 Agent",
+        "avg_latency": "平均延迟",
+        "total_input_tokens": "输入 Token 总数",
+        "total_output_tokens": "输出 Token 总数",
+        "cost_by_agent": "Agent 成本明细",
+        "agent_name": "Agent",
+        "calls": "调用次数",
+        "tokens": "Token 数",
+        "cost": "成本 (USD)",
     },
 }
 
@@ -168,7 +199,60 @@ def _t(language: str, key: str) -> str:
     return _I18N.get(language, _I18N["en"]).get(key, _I18N["en"].get(key, key))
 
 
-def write_markdown_report(state: MergeState, output_dir: str) -> Path:
+def _build_run_insights_lines(
+    t: partial[str],
+    cost_summary: dict[str, Any],
+) -> list[str]:
+    """Build the Run Insights markdown section from a CostTracker summary."""
+    if not cost_summary or cost_summary.get("total_calls", 0) == 0:
+        return []
+
+    by_agent: dict[str, Any] = cost_summary.get("by_agent", {})
+    most_expensive = ""
+    if by_agent:
+        top = max(by_agent.items(), key=lambda x: x[1].get("cost_usd", 0))
+        most_expensive = f"{top[0]} (${top[1]['cost_usd']:.4f})"
+
+    tokens = cost_summary.get("total_tokens", {})
+
+    lines: list[str] = [
+        f"## {t('run_insights')}",
+        "",
+        f"| {t('metric')} | {t('value')} |",
+        "|--------|-------|",
+        f"| {t('total_llm_calls')} | {cost_summary['total_calls']} |",
+        f"| {t('total_cost')} | ${cost_summary['total_cost_usd']:.4f} |",
+        f"| {t('most_expensive_agent')} | {most_expensive} |",
+        f"| {t('avg_latency')} | {cost_summary.get('avg_latency_s', 0):.1f}s |",
+        f"| {t('total_input_tokens')} | {tokens.get('input', 0):,} |",
+        f"| {t('total_output_tokens')} | {tokens.get('output', 0):,} |",
+        "",
+    ]
+
+    if by_agent:
+        lines += [
+            f"### {t('cost_by_agent')}",
+            "",
+            f"| {t('agent_name')} | {t('calls')} | {t('tokens')} | {t('cost')} |",
+            "|-------|-------|--------|------|",
+        ]
+        for agent_name, agg in sorted(
+            by_agent.items(), key=lambda x: x[1].get("cost_usd", 0), reverse=True
+        ):
+            lines.append(
+                f"| {agent_name} | {agg['calls']} "
+                f"| {agg.get('tokens', 0):,} | ${agg['cost_usd']:.4f} |"
+            )
+        lines.append("")
+
+    return lines
+
+
+def write_markdown_report(
+    state: MergeState,
+    output_dir: str,
+    cost_summary: dict[str, Any] | None = None,
+) -> Path:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -244,6 +328,9 @@ def write_markdown_report(state: MergeState, output_dir: str) -> Path:
         for err in state.errors:
             lines.append(f"- `{err.get('phase', '?')}`: {err.get('message', '')}")
         lines.append("")
+
+    if cost_summary:
+        lines.extend(_build_run_insights_lines(t, cost_summary))
 
     report_path.write_text("\n".join(lines), encoding="utf-8")
     return report_path

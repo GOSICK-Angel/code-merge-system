@@ -29,6 +29,9 @@ class LLMClient(ABC):
     ) -> BaseModel:
         pass
 
+    def update_api_key(self, new_key: str) -> None:
+        """Replace the API key used by this client (C2 credential rotation)."""
+
 
 class AnthropicClient(LLMClient):
     def __init__(
@@ -50,6 +53,9 @@ class AnthropicClient(LLMClient):
         if base_url:
             kwargs["base_url"] = base_url
         self._client = anthropic.AsyncAnthropic(**kwargs)
+
+    def update_api_key(self, new_key: str) -> None:
+        self._client = anthropic.AsyncAnthropic(api_key=new_key)
 
     async def complete(
         self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
@@ -124,6 +130,9 @@ class OpenAIClient(LLMClient):
             kwargs["base_url"] = base_url
         self._client = openai.AsyncOpenAI(**kwargs)
 
+    def update_api_key(self, new_key: str) -> None:
+        self._client = openai.AsyncOpenAI(api_key=new_key)
+
     async def complete(
         self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
     ) -> str:
@@ -180,10 +189,11 @@ class OpenAIClient(LLMClient):
 class LLMClientFactory:
     @staticmethod
     def create(config: AgentLLMConfig) -> LLMClient:
-        api_key = os.environ.get(config.api_key_env)
+        primary_env = config.api_key_env_list[0]
+        api_key = os.environ.get(primary_env)
         if not api_key:
             raise EnvironmentError(
-                f"Required env var '{config.api_key_env}' is not set. "
+                f"Required env var '{primary_env}' is not set. "
                 f"Needed for agent using {config.provider}/{config.model}."
             )
         base_url: str | None = None

@@ -16,9 +16,11 @@ from src.llm.context import (
 )
 from src.llm.context_compressor import ContextCompressor
 from src.llm.error_classifier import ClassifiedError, ErrorCategory, classify_error
+from src.llm.credential_pool import CredentialPool
 from src.llm.retry_utils import jittered_backoff
 from src.memory.layered_loader import LayeredMemoryLoader
 from src.memory.store import MemoryStore
+from src.tools.cost_tracker import CostTracker, TokenUsage
 from src.tools.trace_logger import TraceLogger
 
 CIRCUIT_BREAKER_THRESHOLD = 3
@@ -94,12 +96,19 @@ class BaseAgent(ABC):
         self._trace_logger: TraceLogger | None = None
         self._memory_store: MemoryStore | None = None
         self._consecutive_failures: int = 0
+        self._credential_pool: CredentialPool | None = self._init_credential_pool()
+        self._cost_tracker: CostTracker | None = None
+        self._current_phase: str = ""
 
     def set_trace_logger(self, trace_logger: TraceLogger) -> None:
         self._trace_logger = trace_logger
 
     def set_memory_store(self, store: MemoryStore) -> None:
         self._memory_store = store
+
+    def set_cost_tracker(self, tracker: CostTracker, phase: str = "") -> None:
+        self._cost_tracker = tracker
+        self._current_phase = phase
 
     @property
     def consecutive_failures(self) -> int:
@@ -133,19 +142,53 @@ class BaseAgent(ABC):
     def can_handle(self, state: MergeState) -> bool:
         pass
 
-    def _on_credential_rotation_needed(self, classified: ClassifiedError) -> bool:
-        """Hook for credential rotation (extension point for C2 credential pool).
+    def _init_credential_pool(self) -> CredentialPool | None:
+        """Build credential pool from config (C2).
 
-        Subclasses or future credential-pool integration can override this to
-        swap API keys on transient auth errors.  Returns True if rotation
-        succeeded and the call should be retried.
+        Only creates a pool when multiple keys are configured.
         """
-        self.logger.warning(
-            "Credential rotation requested but no credential pool configured "
-            "(category=%s)",
-            classified.category.value,
+        env_vars = self.llm_config.api_key_env_list
+        if len(env_vars) <= 1:
+            return None
+        pool = CredentialPool.from_env_vars(env_vars)
+        if pool.size <= 1:
+            return None
+        self.logger.info(
+            "Credential pool initialized with %d keys for %s",
+            pool.size,
+            self.agent_type.value,
         )
-        return False
+        return pool
+
+    def _on_credential_rotation_needed(self, classified: ClassifiedError) -> bool:
+        """Rotate to next available credential in the pool (C2).
+
+        Returns True if rotation succeeded and the call should be retried.
+        """
+        if self._credential_pool is None:
+            self.logger.warning(
+                "Credential rotation requested but no credential pool configured "
+                "(category=%s)",
+                classified.category.value,
+            )
+            return False
+
+        try:
+            cooldown_secs = max(30, int(classified.cooldown_seconds))
+            current = self._credential_pool.get_active()
+            self._credential_pool.cooldown(current, seconds=cooldown_secs)
+            next_cred = self._credential_pool.get_active()
+            self.llm.update_api_key(next_cred.key)
+            self.logger.info(
+                "Rotated credential to %s (pool: %d/%d available)",
+                next_cred.source,
+                self._credential_pool.available_count,
+                self._credential_pool.size,
+            )
+            return True
+        except Exception as exc:
+            self.logger.warning("Credential rotation failed: %s", exc)
+            return False
 
     def _on_fallback_needed(self, classified: ClassifiedError) -> bool:
         """Hook for provider fallback (extension point for C2 credential pool).
@@ -291,6 +334,19 @@ class BaseAgent(ABC):
                         estimated_tokens=estimated_tokens,
                         budget_available=budget.available,
                         utilization=round(utilization, 4),
+                    )
+                if self._cost_tracker:
+                    output_tokens = estimate_tokens(resp_str)
+                    self._cost_tracker.record(
+                        agent=self.agent_type.value,
+                        phase=self._current_phase,
+                        model=self.llm_config.model,
+                        provider=self.llm_config.provider,
+                        usage=TokenUsage(
+                            input_tokens=estimated_tokens,
+                            output_tokens=output_tokens,
+                        ),
+                        elapsed_seconds=elapsed,
                     )
                 return llm_result
             except Exception as e:
