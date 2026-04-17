@@ -1,0 +1,39 @@
+src/agents/judge_agent.py
+  b2d7d5cd8f098af0 312-313,392-455
+src/tools/scar_list_builder.py
+  b2d7d5cd8f098af0 1-212
+src/models/state.py
+  b2d7d5cd8f098af0 33-34,131-138,169-170,180-181
+src/agents/executor_agent.py
+  b2d7d5cd8f098af0 47-52,69-108
+src/tools/sentinel_scanner.py
+  b2d7d5cd8f098af0 1-103
+src/tools/config_line_retention_checker.py
+  b2d7d5cd8f098af0 1-99
+src/models/config.py
+  b2d7d5cd8f098af0 203-234,236-237,239-259,444-455
+tests/unit/test_p2_hardening.py
+  b2d7d5cd8f098af0 1-620
+src/models/judge.py
+  b2d7d5cd8f098af0 66-67,79-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.2",
+  "base_commit_sha": "50834f7515c837f4ea50ee48190c64b92a4ab06d",
+  "prompts": {
+    "b2d7d5cd8f098af0": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "c7b92c6e-290c-46c6-8733-119300962986",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Angel",
+      "messages": [],
+      "total_additions": 1237,
+      "total_deletions": 0,
+      "accepted_lines": 1237,
+      "overriden_lines": 0
+    }
+  }
+}
