@@ -1,0 +1,139 @@
+src/cli/main.py
+  1f28ef5679857e78 16-35,40-70,173-177
+tui/src/state/ws-client.ts
+  1f28ef5679857e78 16-18,28-33,86-89,106
+src/core/orchestrator.py
+  1f28ef5679857e78 31,130-133,176-183,338-340,360,365
+src/tools/git_committer.py
+  1f28ef5679857e78 1-55
+src/core/phases/_gate_helpers.py
+  1f28ef5679857e78 150,166
+src/models/plan_review.py
+  1f28ef5679857e78 13-56,64-85,93
+config/default.yaml
+  1f28ef5679857e78 98
+src/cli/commands/resume.py
+  1f28ef5679857e78 5,24,27-31,36-39,88-89
+src/tools/merge_plan_report.py
+  1f28ef5679857e78 10,22,45,50,98-152
+tests/unit/test_cli_flow.py
+  1f28ef5679857e78 1-267
+tests/unit/test_sync_point_detector.py
+  1f28ef5679857e78 1-569
+tui/src/state/store.ts
+  1f28ef5679857e78 18-19,37-38,101-102
+config/dify-plugins.yaml
+  1f28ef5679857e78 27,34
+tests/unit/test_phases.py
+  1f28ef5679857e78 141-142,158,166-199,208
+src/cli/commands/setup.py
+  1f28ef5679857e78 1-340
+tests/unit/test_checkpoint_resume.py
+  1f28ef5679857e78 1-177
+.claude/settings.local.json
+  1f28ef5679857e78 4-6
+src/agents/executor_agent.py
+  1f28ef5679857e78 44-45,351-352
+src/llm/client.py
+  1f28ef5679857e78 177-183
+tests/unit/test_llm_client.py
+  1f28ef5679857e78 287,293,298-299
+src/core/phases/initialize.py
+  1f28ef5679857e78 24-25,51,56,59-88,180-200
+src/tools/sync_point_detector.py
+  1f28ef5679857e78 1-282
+tui/src/screens/PlanReviewScreen.tsx
+  1f28ef5679857e78 1,8-9,12-17,19-286,292-293,296-301,303-335,343-353,355-419,423-453,458,460-461,465-487,489,491-556,558-605,607-609
+src/core/phases/conflict_analysis.py
+  1f28ef5679857e78 6,15-17,107,110-223,225,232,246-274
+tests/unit/test_core.py
+  1f28ef5679857e78 117-132,135,304-305,309,312,319,324-325,329-331,333-334,336-359,362,370-377,380,384-390,393,396,398-400,402,404-405,408,978,1012-1013,1027,1031,1035-1066,1083,1109,1145,1170,1424
+src/cli/paths.py
+  1f28ef5679857e78 1-118
+CLAUDE.md
+  1f28ef5679857e78 16-25,27-28,53,61-77
+src/llm/prompts/planner_judge_prompts.py
+  1f28ef5679857e78 1-2,4-12,14-18,20,22-34,69-150,152-202,204-211,220-234,250-257
+src/agents/conflict_analyst_agent.py
+  1f28ef5679857e78 45-46
+src/agents/base_agent.py
+  1f28ef5679857e78 245,316-321
+src/agents/planner_agent.py
+  1f28ef5679857e78 2,22,26,28-31,62,645-646,650-668,671-739,741-751,753-762,766,768-776,778-783,785-792,816-861,866-874,901-902
+src/cli/commands/run.py
+  1f28ef5679857e78 58,64-72,74-82,96,98-103,127-183,187
+src/models/config.py
+  1f28ef5679857e78 141,201-232,262-265
+src/tools/file_classifier.py
+  1f28ef5679857e78 102-105
+pyproject.toml
+  1f28ef5679857e78 22
+tui/src/state/types.ts
+  1f28ef5679857e78 210-237,243-288
+src/tools/git_tool.py
+  1f28ef5679857e78 125-209
+src/web/ws_bridge.py
+  1f28ef5679857e78 6,36,39,69-73,157-160,162-184,186,209,287-294,349-369,371-409,424-428,451-459,461-468,474,481-482,486-507,510,520-523
+src/core/phases/human_review.py
+  1f28ef5679857e78 5,11-12,30-107,122-131,141,152
+src/cli/commands/tui.py
+  1f28ef5679857e78 25-39,41,59-64,81-88
+src/core/phases/plan_review.py
+  1f28ef5679857e78 5-6,8,10,12-23,25,45,47,49-50,56-68,73-76,78-81,84-88,90-102,111,113-118,120,138-145,147-156,158-177,181,185,190,192-198,219-221,223-277,282-356,362,364-373,375-376,399-450,452-618
+src/models/state.py
+  1f28ef5679857e78 10,15-20,29,72-73,97-100,113-120,135,141
+tui/src/hooks/use-elapsed.ts
+  1f28ef5679857e78 3,12,14
+doc/migration-aware-merge.md
+  1f28ef5679857e78 1-464
+src/tools/commit_replayer.py
+  1f28ef5679857e78 1-97
+src/agents/judge_agent.py
+  1f28ef5679857e78 46-47
+src/core/phases/report_generation.py
+  1f28ef5679857e78 6,31-35
+doc/opensource-comparison.md
+  1f28ef5679857e78 1-141
+src/llm/prompts/planner_prompts.py
+  1f28ef5679857e78 52-76,78,156-227
+tests/unit/test_rule_resolver.py
+  1f28ef5679857e78 1-174
+src/core/phases/auto_merge.py
+  1f28ef5679857e78 19-20,42,45-62,64,83-85,94,107,141-153,165-167,228
+src/tools/rule_resolver.py
+  1f28ef5679857e78 1-246
+src/agents/planner_judge_agent.py
+  1f28ef5679857e78 1-2,8,14,28,48-51,53-61,67-69,78,85
+doc/plan-cli-checkpoint-resume-overhaul.md
+  1f28ef5679857e78 1-673
+src/core/checkpoint.py
+  1f28ef5679857e78 2,7,9-14,18,20-23,25-35,37-38,40-42,46-68
+src/tools/report_writer.py
+  1f28ef5679857e78 102-108,201-207,287-301,513-525,527-542
+tests/unit/test_plan_revision.py
+  1f28ef5679857e78 1-615
+tests/unit/test_p0_classification.py
+  1f28ef5679857e78 406
+tests/unit/test_agents_extended.py
+  1f28ef5679857e78 147,171,190,210,363,394,413,734,1032,1073,1106,1121,1298,1302,1435,1476,1676
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.2",
+  "base_commit_sha": "c522395c33549576d54d5f5c57f24bc3def57b80",
+  "prompts": {
+    "1f28ef5679857e78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "52edb0f8-ca0c-4821-8e60-f0a942028fb6",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Angel",
+      "messages": [],
+      "total_additions": 7260,
+      "total_deletions": 475,
+      "accepted_lines": 7260,
+      "overriden_lines": 0
+    }
+  }
+}
