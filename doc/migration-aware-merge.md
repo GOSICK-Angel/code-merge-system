@@ -87,10 +87,15 @@ class SyncPointResult(BaseModel):
     first_unsynced_commit: str | None  # SHA of first upstream commit NOT in fork
     confidence: float                  # Detection confidence (0.0 ~ 1.0)
     skipped_commit_count: int = 0      # Number of commits skipped (already synced)
+    patch_id_promoted_count: int = 0   # Files promoted to synced via Patch-ID (Phase 1b)
 
 class SyncPointDetector:
-    SYNC_RATIO_THRESHOLD = 0.3   # If >30% of upstream-changed files are synced
-    MIN_SYNCED_FILES = 5         # Minimum synced files to trigger detection
+    def __init__(
+        self,
+        sync_ratio_threshold: float = 0.3,   # min sync_ratio to trigger detection
+        min_synced_files: int = 5,            # min synced files to trigger detection
+        enable_patch_id: bool = True,         # enable Phase 1b Patch-ID verification
+    ) -> None: ...
 
     def detect(
         self,
@@ -100,18 +105,24 @@ class SyncPointDetector:
         upstream_ref: str,
     ) -> SyncPointResult:
         """
-        Two-phase algorithm:
-        Phase 1 — File-level sync detection (O(3) git ls-tree calls):
-          Compare hashes at merge_base, fork HEAD, upstream HEAD.
-          A file is "synced" when base_hash != up_hash AND fork_hash == up_hash
-          (upstream changed it, fork also has the upstream version → migration).
+        Three-phase algorithm:
+        Phase 1  — File-level sync detection (O(3) git ls-tree calls):
+          Compare blob hashes at merge_base / fork / upstream.
+          A file is "synced" when upstream changed it AND fork_hash == up_hash.
+          A file is "ambiguous" when all three hashes differ (both sides changed).
 
-        Phase 2 — Commit-level boundary detection (only if Phase 1 detects migration):
+        Phase 1b — Patch-ID verification (only for ambiguous files, optional):
+          For each ambiguous file, compare the patch-ID of upstream's diff vs fork's
+          diff relative to merge_base. If patch-IDs match, the fork applied the same
+          logical change (e.g., a copy with minor tweaks) → promote to synced.
+
+        Phase 2  — Commit-level boundary detection (only if Phase 1/1b detects migration):
           Walk upstream commits oldest→newest. For each commit, check if ALL
-          its modified files belong to the "synced" file set.
+          its modified files belong to the synced set.
+          Uses binary search when commit count > 50; linear scan otherwise.
           The last commit where this is true = effective merge-base.
 
-        Confidence = min(sync_ratio, synced_files / MIN_SYNCED_FILES) capped at 1.0.
+        Confidence = file_factor × ratio_factor, capped at 1.0.
         """
 ```
 
@@ -130,66 +141,93 @@ Phase 1 — File-level detection (3 bulk ls-tree calls):
 
   synced_files: set[str] = set()
   upstream_changed_files: set[str] = set()
+  ambiguous_files: set[str] = set()
 
-  for fp in up_hashes:
+  for fp in (up_hashes.keys() | base_hashes.keys()):
+    up_hash   = up_hashes.get(fp)
     base_hash = base_hashes.get(fp)
-    up_hash = up_hashes[fp]
     fork_hash = fork_hashes.get(fp)
 
-    if up_hash == base_hash:
+    if up_hash is None or up_hash == base_hash:
       continue  # upstream didn't change this file
     upstream_changed_files.add(fp)
 
     if fork_hash == up_hash:
-      synced_files.add(fp)  # fork has upstream's version → migrated
+      synced_files.add(fp)                       # exact blob match → migrated
+    elif fork_hash is not None and fork_hash != base_hash and fork_hash != up_hash:
+      ambiguous_files.add(fp)                    # all three differ → may be tweaked copy
 
   sync_ratio = len(synced_files) / len(upstream_changed_files) if upstream_changed_files else 0.0
-  detected = (sync_ratio >= SYNC_RATIO_THRESHOLD and len(synced_files) >= MIN_SYNCED_FILES)
+
+Phase 1b — Patch-ID verification (only when enable_patch_id=True and ambiguous_files non-empty):
+  for fp in ambiguous_files:
+    up_pid   = git_tool.get_diff_patch_id(merge_base, upstream_ref, fp)
+    fork_pid = git_tool.get_diff_patch_id(merge_base, fork_ref, fp)
+    if up_pid and fork_pid and up_pid == fork_pid:
+      synced_files.add(fp)   # same logical change, just tweaked → promote to synced
+
+  # Re-compute sync_ratio after promotion
+  sync_ratio = len(synced_files) / len(upstream_changed_files) if upstream_changed_files else 0.0
+  detected = (sync_ratio >= sync_ratio_threshold and len(synced_files) >= min_synced_files)
 
 Phase 2 — Commit boundary detection (only when detected=True):
   commits = git_tool.list_commits(merge_base, upstream_ref)  # oldest first
 
-  effective_base = merge_base
-  for commit in commits:
-    commit_files = set(commit["files"])
-    # A commit is "synced" if ALL its modified files are in the synced set
-    if commit_files and commit_files.issubset(synced_files):
-      effective_base = commit["sha"]
-    else:
-      # First commit with unsynced files → boundary found
-      break
-
-  # Note: This approach correctly handles the case where later upstream
-  # commits modify the same files as earlier ones, because the synced_files
-  # set is built from file-level hash comparison, not commit-level.
-```
-
-#### 3.1.1 File-Level Sync Detection (for partial migrations)
-
-When migration only copied some files (not all upstream changes), commit-level detection is imprecise. File-level detection is more accurate:
-
-```
-For each file that exists in both fork and upstream:
-  fork_hash = fork_hashes[fp]
-  up_hash = up_hashes[fp]
-  base_hash = base_hashes[fp]
-  
-  if fork_hash == up_hash:
-    → File is fully synced (Category A)
-  elif fork_hash == base_hash:
-    → File was NOT migrated, upstream has new changes (Category B)
-  elif up_hash == base_hash:
-    → File was only changed in fork (Category E)  
+  if len(commits) > 50:
+    # Binary search: assume synced commits form a contiguous prefix
+    lo, hi, boundary = 0, len(commits) - 1, -1
+    while lo <= hi:
+      mid = (lo + hi) // 2
+      files = set(commits[mid]["files"])
+      if not files or files.issubset(synced_files):
+        boundary = mid; lo = mid + 1
+      else:
+        hi = mid - 1
+    effective_base = commits[boundary]["sha"] if boundary >= 0 else merge_base
   else:
-    → Check: does fork contain the upstream version from some intermediate commit?
-      For each upstream commit that modified this file:
-        up_hash_at_commit = git show <commit>:<file> | hash
-        if fork_hash == up_hash_at_commit:
-          → File was synced up to this commit, but upstream continued changing it
-          → This file's effective merge-base is this commit
+    # Linear scan: more robust for non-contiguous synced commits
+    effective_base = merge_base
+    for commit in commits:
+      commit_files = set(commit.get("files", []))
+      if not commit_files or commit_files.issubset(synced_files):
+        effective_base = commit["sha"]   # advance boundary
+      else:
+        break                            # first unsynced commit → stop
+
+  # Note: synced_files is built from file-level hash/patch-ID comparison,
+  # so it correctly handles cases where later upstream commits revisit the
+  # same files — the set membership check always reflects HEAD-level state.
 ```
 
-The file-level detection produces a **per-file effective merge-base**, which is more granular than the commit-level approach. However, for the initial implementation, commit-level detection is sufficient and significantly simpler.
+#### 3.1.1 Phase 1b: Patch-ID Verification (for tweaked copies)
+
+> **Implementation note**: The original design proposed checking intermediate commit blob hashes for "ambiguous" files (all three hashes differ). This approach requires O(commits × ambiguous_files) `git show` calls and was not implemented. Instead, the actual implementation uses **git patch-ID**, which compares the semantic diff rather than the blob, and requires only O(ambiguous_files) calls.
+
+When a file was copied with minor tweaks (whitespace, comment changes, local adaptations), blob hashes will differ between fork and upstream even though the logical change is the same. Patch-ID catches this case:
+
+```
+Ambiguous file: base_hash != up_hash AND fork_hash != up_hash AND fork_hash != base_hash
+  → Both sides changed the file differently by blob; exact-match fails
+
+Patch-ID check:
+  up_pid   = git diff <merge_base>..<upstream_ref> -- <fp> | git patch-id
+  fork_pid = git diff <merge_base>..<fork_ref>     -- <fp> | git patch-id
+
+  if up_pid == fork_pid:
+    → The diff applied to the file is semantically identical → promote to synced
+    → patch_id_promoted_count += 1
+```
+
+**Trade-off vs. per-commit blob check (original design)**:
+
+| | Patch-ID (implemented) | Per-commit blob check (original design) |
+|---|---|---|
+| API calls | O(ambiguous_files) | O(commits × ambiguous_files) |
+| Detects | Tweaked copies at HEAD | Partial sync at any intermediate commit |
+| Per-file merge-base | No (commit-level only) | Yes (most granular) |
+| Complexity | Low | High |
+
+Per-file effective merge-base (the most granular approach from the original design) remains a future enhancement.
 
 ### 3.2 Config Changes (`src/models/config.py`)
 
@@ -315,36 +353,46 @@ When migration is detected, the system should:
 
 ## 4. Implementation Plan
 
-### Phase 1: Core Detection (~150 lines new)
+> **状态**: 已全部实现，并在以下方面超出原设计。
 
-| File | Action | Lines |
-|------|--------|-------|
-| `src/tools/sync_point_detector.py` | **New** — `SyncPointDetector` + `SyncPointResult` | ~120 |
-| `src/models/config.py` | Modify — add `MigrationConfig` + field on `MergeConfig` | ~15 |
-| `src/models/state.py` | Modify — add `migration_info` field | ~3 |
+### Phase 1: Core Detection
 
-### Phase 2: Integration (~40 lines changed)
+| File | Action | 说明 |
+|------|--------|------|
+| `src/tools/sync_point_detector.py` | **New** | `SyncPointDetector` + `SyncPointResult`，含三阶段算法 |
+| `src/models/config.py` | Modify | 新增 `MigrationConfig` + `MergeConfig.migration` 字段 |
+| `src/models/state.py` | Modify | 新增 `migration_info: SyncPointResult \| None` 字段 |
 
-| File | Action | Lines |
-|------|--------|-------|
-| `src/core/phases/initialize.py` | Modify — add detection logic before classification | ~25 |
-| `src/tools/pollution_auditor.py` | Modify — skip files already handled by sync-point detection | ~10 |
+### Phase 2: Integration
 
-### Phase 3: Reporting (~30 lines changed)
+| File | Action | 说明 |
+|------|--------|------|
+| `src/core/phases/initialize.py` | Modify | merge-base 获取后立即运行检测，覆写 `state.merge_base_commit` |
+| `src/tools/pollution_auditor.py` | — | 未单独修改；迁移检测后运行，自然覆盖边缘情况 |
 
-| File | Action | Lines |
-|------|--------|-------|
-| `src/tools/merge_plan_report.py` | Modify — add migration section | ~20 |
-| `src/cli/commands/tui.py` | Modify — display migration notification | ~10 |
+### Phase 3: Reporting
 
-### Phase 4: Tests (~150 lines new)
+| File | Action | 说明 |
+|------|--------|------|
+| `src/tools/merge_plan_report.py` | Modify | 新增 `_migration_section()` |
+| `src/cli/commands/tui.py` | — | TUI 通知未单独实现；通过 `ctx.notify()` 日志可见 |
 
-| File | Action | Lines |
-|------|--------|-------|
-| `tests/unit/test_sync_point_detector.py` | **New** — unit tests for detection algorithm | ~100 |
-| `tests/unit/test_migration_config.py` | **New** — config validation tests | ~50 |
+### Phase 4: Tests
 
-**Total: ~220 lines new, ~80 lines changed.**
+| File | Action | 说明 |
+|------|--------|------|
+| `tests/unit/test_sync_point_detector.py` | **New** | 三阶段算法单元测试 |
+| `tests/unit/test_migration_config.py` | **New** | 配置验证测试 |
+
+### 超出原设计的实现项
+
+| 项目 | 原设计 | 实际实现 |
+|------|--------|---------|
+| 模糊文件处理 | 无（未提及） | **Phase 1b Patch-ID 验证**：对所有三 hash 均不同的文件比对 patch-ID，检测带微调的 copy |
+| commit 边界搜索 | 线性扫描 | **>50 commits 时自动切换二分搜索**，复杂度从 O(n) 降至 O(log n) |
+| `SyncPointResult` 字段 | 9 个字段 | 新增 `patch_id_promoted_count`（Phase 1b 升级的文件数） |
+| `SyncPointDetector` 参数 | 类常量 | 改为 `__init__` 参数（`sync_ratio_threshold`, `min_synced_files`, `enable_patch_id`），可按调用方配置 |
+| 对 ambiguous 文件的追踪 | 无 | `_file_level_detection` 返回三元组，额外输出 `ambiguous_files` 集合供 Phase 1b 消费 |
 
 ---
 

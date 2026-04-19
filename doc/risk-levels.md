@@ -50,25 +50,29 @@ score >= 0.6 -> HUMAN_REQUIRED
 
 ### Executor (`executor_agent.py`)
 
-Only processes **AUTO_SAFE** and **DELETED_ONLY**:
+Only processes **AUTO_SAFE** and **AUTO_RISKY**:
 
 | Category | AUTO_SAFE | AUTO_RISKY | HUMAN_REQUIRED | DELETED_ONLY |
 |----------|-----------|------------|----------------|--------------|
-| A (unchanged) | SKIP | - | - | SKIP |
-| B (upstream only) | TAKE_TARGET | - | - | TAKE_TARGET |
-| C (both changed) | TAKE_TARGET | SEMANTIC_MERGE | ESCALATE_HUMAN | TAKE_TARGET |
-| D_MISSING (new) | TAKE_TARGET | - | - | TAKE_TARGET |
-| D_EXTRA (current) | SKIP | - | - | SKIP |
-| E (current only) | SKIP | - | - | SKIP |
+| A (unchanged) | SKIP | - | pre-pass → human | pre-pass → human |
+| B (upstream only) | TAKE_TARGET | - | pre-pass → human | pre-pass → human |
+| C (both changed) | TAKE_TARGET | SEMANTIC_MERGE | pre-pass → human | pre-pass → human |
+| D_MISSING (new) | TAKE_TARGET | - | pre-pass → human | pre-pass → human |
+| D_EXTRA (current) | SKIP | - | pre-pass → human | pre-pass → human |
+| E (current only) | SKIP | - | pre-pass → human | pre-pass → human |
+
+`DELETED_ONLY` is handled in the AutoMerge **pre-pass**: `executor.analyze_deletion()` generates a
+`UserDecisionItem` (with LLM-backed rationale) that is queued for human decision before any merge
+execution begins. The human then chooses: approve deletion / keep file / take upstream version.
 
 ### Orchestrator Phase Routing
 
 | Risk Level | Auto-merge? | Conflict Analyst? | Human Escalation? | Judge Review? |
 |------------|-------------|--------------------|--------------------|---------------|
 | AUTO_SAFE | YES | NO | NO | YES |
-| AUTO_RISKY | NO | YES | Conditional | YES |
-| HUMAN_REQUIRED | NO | YES | YES | YES |
-| DELETED_ONLY | YES (SKIP) | NO | NO | YES |
+| AUTO_RISKY | YES (parallel) | YES | Conditional | YES |
+| HUMAN_REQUIRED | NO | NO | YES (pre-pass) | YES |
+| DELETED_ONLY | NO | NO | YES (pre-pass) | YES |
 | BINARY | NO | NO | Escalated | YES |
 | EXCLUDED | NO | NO | NO | NO |
 
@@ -87,16 +91,19 @@ PlannerJudge reviews (may reclassify)
 Human approves plan
     |
     v
-Executor: AUTO_SAFE + DELETED_ONLY -> auto-merge
+AutoMerge pre-pass:
+  HUMAN_REQUIRED -> generate UserDecisionItem -> AWAITING_HUMAN
+  DELETED_ONLY   -> analyze_deletion() -> UserDecisionItem -> AWAITING_HUMAN
+    |
+    v (if no pre-pass decisions pending)
+Executor: AUTO_SAFE + AUTO_RISKY -> auto-merge (parallel within each layer)
+  after each layer: Judge batch sub-review + Executor↔Judge dispute loop
     |
     v
-ConflictAnalyst: AUTO_RISKY + HUMAN_REQUIRED -> analyze
+ConflictAnalyst: AUTO_RISKY -> deeper conflict analysis
     |
     v
-HumanInterface: HUMAN_REQUIRED -> escalate to user
-    |
-    v
-Judge: final review of all decisions
+Judge: final review of all decisions (Executor↔Judge negotiation, no hard veto)
 ```
 
 ## PlannerJudge Reclassification

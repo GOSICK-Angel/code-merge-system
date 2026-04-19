@@ -1,198 +1,186 @@
 # CodeMergeSystem
 
-A multi-agent system for automating code merges between upstream and fork branches, with semantic conflict resolution, risk-based routing, and human-in-the-loop escalation.
+一个面向"长期分叉 fork ↔ upstream"场景的多 Agent 代码合并系统。通过 LLM 做语义理解、通过确定性工具做**可证伪**的加固扫描，把原本需要人工逐文件处理的大规模合并变成一条 **可审计、可暂停、可恢复** 的流水线。
 
-## Overview
+> 中文文档为权威版本。英文文档将在后续补充。
 
-The system orchestrates six specialized agents in a pipeline:
+---
 
-| Agent | Role | LLM |
-|-------|------|-----|
-| **Planner** | Analyzes diffs, generates phased merge plan | Claude Opus |
-| **PlannerJudge** | Independently reviews merge plan quality | GPT-4o |
-| **ConflictAnalyst** | Analyzes high-risk conflict semantics | Claude Sonnet |
-| **Executor** | Applies file-level merge decisions | GPT-4o |
-| **Judge** | Reviews merged results for correctness | Claude Opus |
-| **HumanInterface** | Generates reports, collects human decisions | Claude Haiku |
+## 这是为了解决什么问题
 
-Key design principles:
-- Reviewer agents (Judge, PlannerJudge) use a different LLM provider than executor agents
-- Human decisions are always explicit — no timeout-based auto-defaults
-- All file writes are snapshotted before execution; failures auto-rollback
-- Full checkpoint/resume support at every phase boundary
+在长期维护的软件项目中，下游团队常常基于某个历史版本做了大量私有改动，同时 upstream 持续迭代新功能、重构接口、升级依赖。分叉时间一长，直接 `git merge` 会出现：
 
-## Requirements
+- 数百到数千个文件级冲突，人工无法逐一处理；
+- 行级 diff 无法表达语义，LLM/人都容易判错；
+- fork 独有的定制（API、路由、哨兵、CI job）被整文件覆盖而不被察觉；
+- 合并错一处可能导致运行时漏洞或功能失踪，且难以回滚。
+
+CodeMergeSystem 用 **七个专门化 Agent + 五十余个确定性工具 + 三层记忆 + 完整 Checkpoint** 提供一条通用合并流水线。
+
+## 核心能力
+
+- **六大丢失模式识别**：shadow 冲突 / 接口反向影响 / 顶层调用丢失 / 配置行保留 / Scar 自学习 / 业务哨兵扫描
+- **Planner ↔ Judge 协商**：审查 Agent 与 Executor 使用不同 LLM 提供商，避免共谋偏差
+- **写入即快照**：任何文件写入前自动保存原内容，失败即回滚
+- **全阶段 Checkpoint**：任意时刻 SIGINT 可安全中断，`merge resume` 从上次停下处继续
+- **门禁 baseline-diff**：只看"新引入的失败"，而非简单 exit 0，避免合入隐性 regression
+- **显式人工决策**：决策无默认回退，避免"超时即接受"的隐患
+- **多语言 AST 分块**：Python/TS/JS/Go/Rust/Java/C 均走 tree-sitter
+
+## 环境要求
 
 - Python 3.11+
-- `ANTHROPIC_API_KEY` — for Planner, ConflictAnalyst, Judge, HumanInterface
-- `OPENAI_API_KEY` — for PlannerJudge, Executor
+- `ANTHROPIC_API_KEY`（用于 Planner / ConflictAnalyst / Judge / HumanInterface）
+- `OPENAI_API_KEY`（用于 PlannerJudge / Executor）
+- Node.js（仅在使用 TUI 时需要）
 
-## Installation
+## 快速开始
 
 ```bash
-# 1. Clone the repo (skip if already cloned)
+# 1. 安装
 git clone <repo-url> && cd CodeMergeSystem
-
-# 2. Create a virtual environment (recommended)
-python3.11 -m venv .venv
-source .venv/bin/activate        # macOS / Linux
-# .venv\Scripts\activate         # Windows
-
-# 3. Install in editable mode with dev dependencies
+python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# 4. Verify installation
-merge --help                     # CLI should print usage
-mypy src                         # type check
-pytest tests/unit/ -q            # run tests
+# 2. 配置 API Key
+export ANTHROPIC_API_KEY=sk-ant-...
+export OPENAI_API_KEY=sk-...
+
+# 3. 在目标仓库内一键合并（首次运行自动进入配置向导）
+cd /path/to/your-fork-repo
+merge upstream/main
 ```
 
-### Rebuild after code changes
+首次运行会自动生成 `<repo>/.merge/config.yaml` 与 `.env`（后者自动写入 `.gitignore`）。
 
-Any changes to source files under `src/` take effect immediately because editable mode (`-e`) links directly to the source tree. You only need to re-run `pip install` when dependencies in `pyproject.toml` change:
+## 常用命令
 
 ```bash
-# After modifying pyproject.toml dependencies
-pip install -e ".[dev]"
+merge <target-branch>              # 一站式入口（默认进入 TUI）
+merge <target-branch> --no-tui     # 纯文本输出
+merge <target-branch> --ci         # CI 模式：无交互，JSON 摘要到 stdout
+merge <target-branch> --dry-run    # 只分析不写文件
+merge <target-branch> -r           # 强制重新配置
 
-# Force full rebuild (clears cached artifacts)
-pip install -e ".[dev]" --no-build-isolation --force-reinstall
+merge run --config <path>          # 显式指定配置文件
+merge resume --run-id <id>         # 从 checkpoint 恢复
+merge resume --run-id <id> --decisions decisions.yaml   # 带人工决策续跑
+merge report --run-id <id>         # 仅重新生成报告
+merge validate --config <path>     # 校验配置 + 所有 api_key_env
+merge ui --run-id <id>             # 启动 Web UI 回看历史 run
 ```
 
-### Build a distributable wheel
+## 架构一览
+
+```
+CLI / TUI / Web UI
+       │
+  Orchestrator ── 状态机驱动 8 个 Phase
+       │
+  ┌────┴─────┐
+  │          │
+Agents     Tools            Memory
+(7 角色)  (50+ 工具 +         (L0/L1/L2
+         baseline parsers)   三层记忆)
+  │
+LLM 层（anthropic / openai，凭据池、智能路由、压缩）
+```
+
+| Agent | 角色 | 默认模型 |
+|-------|------|----------|
+| Planner | 生成合并计划 | Claude Opus |
+| PlannerJudge | 审查计划 | GPT-4o |
+| ConflictAnalyst | 高风险冲突语义分析 | Claude Sonnet |
+| Executor | **唯一写权限**，应用合并 | GPT-4o |
+| Judge | 审查合并结果 + 确定性复检 | Claude Opus |
+| HumanInterface | 决策模板生成 | Claude Haiku |
+| SmokeTest | 合并后冒烟测试 | — |
+
+每个 Agent 的模型、API Key、降档策略均可在 `config.yaml` 中独立配置。
+
+## `.merge/` 生产目录布局
+
+pip 安装后在目标仓库运行时，所有产物写入 `<repo>/.merge/`：
+
+```
+.merge/
+  config.yaml        # 首次运行自动生成
+  .env               # API Keys，自动 gitignore
+  .gitignore         # 自动生成
+  plans/             # MERGE_PLAN_<id>.md 报告
+  runs/<run_id>/
+    checkpoint.json
+    merge_report.md
+    plan_review.md
+    logs/run_<id>.log
+```
+
+API Key 解析顺序：**Shell env → `.merge/.env` → `~/.config/code-merge-system/.env`**
+
+## 文档
+
+完整中文文档索引见 [`doc/README.md`](doc/README.md)。关键入口：
+
+- [**新人上手指南**](doc/modules/onboarding.md) — 第一次接触本项目必读
+- [系统架构](doc/architecture.md) — 分层 / 数据流 / 持久化 / 扩展点
+- [执行流程与状态机](doc/flow.md) — 13 个状态、8 个 Phase
+- [六大丢失模式 + P0/P1/P2 加固项](doc/multi-agent-optimization-from-merge-experience.md)
+- [迁移感知合并](doc/migration-aware-merge.md) — bulk-copy 场景
+- [风险等级](doc/risk-levels.md)
+
+模块技术文档（`doc/modules/`）：
+
+| 模块 | 文档 |
+|---|---|
+| 数据模型（Pydantic v2） | [data-models.md](doc/modules/data-models.md) |
+| Agents | [agents.md](doc/modules/agents.md) |
+| Core（Orchestrator / Phases / Checkpoint） | [core.md](doc/modules/core.md) |
+| Tools（扫描器 / 门禁 / Git） | [tools.md](doc/modules/tools.md) |
+| LLM 层（路由 / 压缩 / 凭据池） | [llm.md](doc/modules/llm.md) |
+| 记忆系统（L0/L1/L2） | [memory.md](doc/modules/memory.md) |
+| CLI / TUI / Web UI | [cli.md](doc/modules/cli.md) |
+
+## 参考开源项目
+
+本项目在设计过程中参考了多个开源实现，相关分析文档位于 [`doc/references/`](doc/references/)：
+
+| 项目 | 类型 | 借鉴点 |
+|---|---|---|
+| [Weave](https://github.com/ataraxy-labs/weave) | 语义合并引擎 | tree-sitter entity-level merge；函数/类粒度三方合并 |
+| [merge-engine](https://docs.rs/merge-engine/) | Rust 合并库 | 4 层合并策略（Pattern DSL → CST → VSA → Genetic） |
+| [Mergiraf](https://mergiraf.org/) | AST 结构化合并 | AST 级语法感知合并 |
+| [git-machete](https://github.com/VirtusLab/git-machete) | 分支工作流 | Fork-point 推断 + `--override-to` 手动校正 |
+| [mergefix](https://pypi.org/project/mergefix/) | AI 冲突修复 | LLM 后处理冲突标记 |
+| [reconcile-ai](https://github.com/kailashchanel/reconcile-ai) | 批量冲突修复 | 批量提示节省成本 |
+| [clash](https://github.com/clash-sh/clash) | 并行 Agent | Worktree 级冲突检测 |
+| [NousResearch/hermes-agent](https://github.com/nousresearch/hermes-agent) | Agent 架构 | 工具抽象与 Agent 协作模式 |
+| Graphify | 代码知识图谱 | 用图谱压缩代码上下文 |
+| MemPalace | 记忆系统 | 语义索引 + 分层记忆 |
+
+详细对照见 [`doc/references/opensource-comparison.md`](doc/references/opensource-comparison.md) 与各 `*-analysis.md`。
+
+## 开发
 
 ```bash
-pip install build                # install build tool (one-time)
-python -m build                  # outputs dist/*.whl and dist/*.tar.gz
+pytest tests/unit/ -q              # 单元测试（不打 LLM API）
+pytest tests/integration/ -v       # 集成测试（打真 API，本地跑，不进 CI）
+mypy src                           # 类型检查（strict 模式）
+ruff check src/                    # Lint
+ruff format src/                   # 格式化
 
-# Install the wheel on another machine
-pip install dist/code_merge_system-0.1.0-py3-none-any.whl
+# TUI 前端
+cd tui && npm run start            # 启动
+cd tui && npm run build            # tsc --noEmit 类型检查
 ```
 
-## Quick Start
+关键约束（PR review 会检查）：
 
-```bash
-# 1. Copy the default config template and edit it
-cp config/default.yaml config/my-merge.yaml
+- 不要给 `DecisionSource` 加 `TIMEOUT_DEFAULT`
+- Judge / PlannerJudge 只接收 `ReadOnlyStateView`
+- Executor 写文件必须走 `apply_with_snapshot()`
+- `plan_revision_rounds >= max` 时转 `AWAITING_HUMAN`，不是 `FAILED`
+- HumanInterface 不填默认值
 
-# 2. Edit upstream_ref / fork_ref / repo_path to match your repository
-#    Set API keys in your shell:
-export ANTHROPIC_API_KEY="sk-ant-..."
-export OPENAI_API_KEY="sk-..."
+## 许可证
 
-# 3. Validate config and environment
-merge validate --config config/my-merge.yaml
-
-# 4. Dry run (analysis only, no file writes)
-merge run --config config/my-merge.yaml --dry-run
-
-# 5. Run full merge
-merge run --config config/my-merge.yaml
-```
-
-## Usage
-
-```bash
-# Validate config and check all required env vars
-merge validate --config config/my-merge.yaml
-
-# Full merge execution
-merge run --config config/my-merge.yaml
-
-# Dry run — only analyze, do not write files
-merge run --config config/my-merge.yaml --dry-run
-
-# CI mode — no interaction, exit codes, JSON summary to stdout
-merge run --config config/my-merge.yaml --ci
-
-# Export human decision template when the run pauses at AWAITING_HUMAN
-merge run --config config/my-merge.yaml --export-decisions decisions.yaml
-
-# Resume from checkpoint after interruption or human review
-merge resume --run-id <run-id>
-
-# Resume with human decisions file
-merge resume --run-id <run-id> --decisions decisions.yaml
-
-# Generate reports from a completed run
-merge report --run-id <run-id> --output ./outputs
-
-# Interactive setup wizard (creates config + checks keys)
-merge init
-
-# Web UI for reviewing merge decisions
-merge ui --run-id <run-id> --port 8080
-```
-
-## Configuration
-
-Copy `config/default.yaml` as your starting point, then edit the fields below:
-
-```bash
-cp config/default.yaml config/my-merge.yaml
-```
-
-The only fields you **must** change:
-
-```yaml
-upstream_ref: "upstream/main"       # the branch you want to merge FROM
-fork_ref: "feature/my-fork"         # your current branch
-repo_path: "."                      # path to the git repo (default: cwd)
-project_context: "Describe your project so LLMs understand the codebase."
-```
-
-Key tunable parameters (with defaults):
-
-```yaml
-max_plan_revision_rounds: 2         # Planner↔Judge max negotiation rounds
-
-thresholds:
-  auto_merge_confidence: 0.85       # above this → auto merge
-  human_escalation: 0.60            # below this → escalate to human
-  risk_score_low: 0.30              # below → AUTO_SAFE
-  risk_score_high: 0.60             # above → HUMAN_REQUIRED
-
-output:
-  directory: ./outputs              # reports and checkpoints go here
-  formats: [json, markdown]
-```
-
-See `config/default.yaml` for the full configuration reference including per-agent LLM settings.
-
-## Development
-
-```bash
-# Run unit tests
-pytest tests/unit/ -v
-
-# Run all tests with coverage
-pytest --cov=src tests/
-
-# Type check
-mypy src
-
-# Lint
-ruff check src/
-
-# Format
-ruff format src/
-```
-
-## Architecture
-
-```
-src/
-├── models/     # Pydantic data models (config, state, plan, decision, etc.)
-├── tools/      # Git operations, diff parsing, file classification, patch application
-├── llm/        # LLM client abstraction, prompt templates, response parsers
-├── agents/     # Six specialized agents
-├── core/       # Orchestrator, state machine, checkpointing, message bus
-└── cli/        # Click CLI (run, resume, report, validate)
-```
-
-See `doc/` for detailed design documentation:
-- `doc/architecture.md` — directory structure and tech stack
-- `doc/agents.md` — agent responsibilities and LLM configuration
-- `doc/flow.md` — state machine and 6-phase execution flow
-- `doc/data-models.md` — all Pydantic model definitions
-- `doc/implementation-plan.md` — algorithm design and prompt frameworks
+TBD

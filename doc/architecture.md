@@ -1,302 +1,444 @@
 # 系统架构设计文档
 
+> **版本**：2026-04-17
+> **对应代码**：`main` 分支 commit `50834f7` 及之后
+> **本文档定位**：CodeMergeSystem 的权威架构总览。单模块细节请查 `doc/modules/`。
+
+---
+
 ## 目录
 
-1. [问题背景与设计目标](#1-问题背景与设计目标)
-2. [核心设计原则](#2-核心设计原则)
-3. [项目目录结构](#3-项目目录结构)
-4. [技术栈选型](#4-技术栈选型)
-5. [模块职责说明](#5-模块职责说明)
-6. [系统扩展点设计](#6-系统扩展点设计)
+1. [项目定位与问题背景](#1-项目定位与问题背景)
+2. [总体架构](#2-总体架构)
+3. [核心设计原则](#3-核心设计原则)
+4. [运行时视图：Phase 驱动循环](#4-运行时视图phase-驱动循环)
+5. [分层与模块划分](#5-分层与模块划分)
+6. [关键数据流](#6-关键数据流)
+7. [状态与持久化](#7-状态与持久化)
+8. [LLM 路由、凭据池与成本](#8-llm-路由凭据池与成本)
+9. [工具层与加固管线](#9-工具层与加固管线)
+10. [配置模型与 `.merge/` 目录](#10-配置模型与-merge-目录)
+11. [CLI 与 TUI 前端](#11-cli-与-tui-前端)
+12. [可观测性](#12-可观测性)
+13. [扩展点](#13-扩展点)
+14. [术语表](#14-术语表)
 
 ---
 
-## 1. 问题背景与设计目标
+## 1. 项目定位与问题背景
 
-### 1.1 问题背景
+CodeMergeSystem 是一个**通用**的多 Agent 合代码系统，目标是为任意"长期分叉 fork ↔ upstream"场景提供可复用的合并流水线：
 
-在长期维护的软件项目中，常见一种高风险场景：**下游团队基于某一上游版本创建了长期分叉分支**（fork branch），在此基础上累积了大量私有改动；与此同时，上游主干持续演进，引入了架构升级、接口变更、依赖更新等大量变更。
+- fork 基于旧版 upstream 做了大量私有改动；
+- upstream 长期迭代后产生跨越若干大版本的变更；
+- 直接 `git merge` 会出现成百上千的冲突，行级 diff 无法表达语义差异，也无法看出哪些 fork 独有功能已被悄悄覆盖。
 
-当两个分支的历史分叉点已经非常久远时，直接执行 `git merge` 会产生以下问题：
+系统通过 LLM + 确定性工具混合的流水线解决四个问题：
 
-- **冲突数量庞大**：数百乃至数千个文件同时报冲突，人工无法逐一处理。
-- **语义信息丢失**：`git` 的行级别 diff 无法理解代码的语义，频繁误判。
-- **上下文缺失**：开发者不清楚每个冲突的"修改意图"，无法做出正确选择。
-- **不可逆风险**：错误的合并决策可能导致功能缺失或安全漏洞，且难以追溯。
-- **人工审查瓶颈**：依赖单一人工审查效率低下，难以在合理时间内完成。
-
-### 1.2 设计目标
-
-本系统（Multi-agent Code Merge System）旨在解决上述问题，具体目标如下：
-
-| 目标 | 描述 |
-|------|------|
-| **自动化分类** | 将所有变更文件按风险等级分类，优先自动处理低风险文件 |
-| **语义级合并** | 对高冲突文件使用 LLM 进行语义理解，生成合并建议 |
-| **人工决策支持** | 将无法自动解决的冲突结构化呈现给人工，降低决策成本 |
-| **完整审计链** | 每个合并决策均有完整的推理记录，可追溯、可解释 |
-| **门禁控制** | Judge Agent 独立审查，确保合并质量满足预设标准才能推进 |
-| **安全可回滚** | 全流程支持断点续传，任何阶段均可安全中断和恢复 |
+| 问题 | 本系统给出的答案 |
+|---|---|
+| 冲突数量大 | 按 ABCDE 五类文件分流，低风险自动合并、高风险送审 |
+| 语义丢失 | 六类丢失模式 (M1–M6) 专项工具扫描 + LLM 语义合并 |
+| 上下文不足 | 三层 Memory + Layered Memory Loader 注入每个 Agent |
+| 不可逆 | 每次写入前快照，失败自动回滚；全阶段 Checkpoint |
 
 ---
 
-## 2. 核心设计原则
-
-### P1：不丢失原则（No-Loss Guarantee）
-任何合并决策都不得在无记录的情况下丢弃代码。若某段代码被决定舍弃，必须在 `FileDecisionRecord` 中明确记录"被丢弃的内容"及"丢弃原因"。
-
-### P2：语义优先（Semantic-First）
-优先基于代码语义而非文本行差异做决策。对于逻辑功能等价的变更（如变量重命名、函数提取），应识别为"无冲突"或"低风险"。
-
-### P3：可解释性（Explainability）
-每一个 `MergeDecision` 必须附带推理说明（`rationale` 字段）。系统输出的所有报告必须对人类可读、逻辑清晰。
-
-### P4：不确定即升级（Uncertainty Escalation）
-当 Agent 对某个决策的置信度低于阈值时，必须升级为 `ESCALATE_HUMAN`，绝不允许以"低置信度"决策直接写入代码。
-
-### P5：审查隔离（Review Isolation）
-Judge/Reviewer Agent 只读访问合并结果，不直接执行任何写操作。写操作只由 Executor Agent 执行，且必须在 Judge 审查通过后进行。
-
----
-
-## 3. 项目目录结构
+## 2. 总体架构
 
 ```
-CodeMergeSystem/
-├── src/
-│   ├── agents/                      # 六大核心 Agent 实现
-│   │   ├── __init__.py
-│   │   ├── base_agent.py            # Agent 抽象基类
-│   │   ├── planner_agent.py         # Planner：分析 diff，制定合并计划
-│   │   ├── planner_judge_agent.py   # PlannerJudge：独立审查合并计划质量
-│   │   ├── executor_agent.py        # Executor：执行自动合并操作（含计划质疑）
-│   │   ├── conflict_analyst_agent.py # ConflictAnalyst：深度冲突分析
-│   │   ├── judge_agent.py           # Judge/Reviewer：只读审查合并结果
-│   │   └── human_interface_agent.py  # HumanInterface：人工决策收集
-│   │
-│   ├── core/                        # 核心调度与状态管理
-│   │   ├── __init__.py
-│   │   ├── orchestrator.py          # 主编排器，Phase 顺序调度
-│   │   ├── state_machine.py         # 全局状态机
-│   │   ├── message_bus.py           # Agent 间消息传递
-│   │   ├── checkpoint.py            # 断点保存与恢复
-│   │   └── phase_runner.py          # 单 Phase 执行器，支持并发
-│   │
-│   ├── tools/                       # 工具层（Git 操作、文件 I/O）
-│   │   ├── __init__.py
-│   │   ├── git_tool.py              # GitPython 封装：diff、checkout、apply
-│   │   ├── file_classifier.py       # 文件风险分类器
-│   │   ├── diff_parser.py           # Diff 解析与结构化
-│   │   ├── patch_applier.py         # Patch 生成与应用
-│   │   └── report_writer.py         # 报告序列化输出（JSON/Markdown）
-│   │
-│   ├── models/                      # 数据模型（Pydantic v2）
-│   │   ├── __init__.py
-│   │   ├── config.py                # MergeConfig 输入配置模型
-│   │   ├── diff.py                  # FileDiff、ConflictPoint 模型
-│   │   ├── decision.py              # MergeDecision、FileDecisionRecord
-│   │   ├── plan.py                  # MergePlan、Phase 模型
-│   │   ├── judge.py                 # JudgeVerdict 模型
-│   │   ├── human.py                 # HumanDecisionRequest 模型
-│   │   ├── state.py                 # MergeState 全局状态
-│   │   ├── plan_review.py           # PlanReviewRound / PlanHumanReview 计划审查记录
-│   │   └── message.py               # AgentMessage 消息协议
-│   │
-│   ├── llm/                         # LLM 调用封装
-│   │   ├── __init__.py
-│   │   ├── client.py                # LLMClientFactory：按 Agent 配置创建 client
-│   │   ├── prompts/                 # Prompt 模板目录
-│   │   │   ├── planner_prompts.py
-│   │   │   ├── planner_judge_prompts.py  # PlannerJudge 专用 Prompt
-│   │   │   ├── analyst_prompts.py
-│   │   │   ├── judge_prompts.py
-│   │   │   └── executor_prompts.py
-│   │   └── response_parser.py       # LLM 响应结构化解析
-│   │
-│   └── cli/                         # CLI 入口
-│       ├── __init__.py
-│       ├── main.py                  # Click 主命令组
-│       ├── commands/
-│       │   ├── run.py               # merge run 命令
-│       │   ├── resume.py            # merge resume 命令
-│       │   ├── report.py            # merge report 命令
-│       │   └── validate.py          # merge validate 命令
-│       └── display.py               # Rich 终端输出格式化
-│
-├── tests/
-│   ├── unit/
-│   │   ├── test_file_classifier.py
-│   │   ├── test_diff_parser.py
-│   │   ├── test_state_machine.py
-│   │   └── test_models.py
-│   ├── integration/
-│   │   ├── test_planner_agent.py
-│   │   ├── test_executor_agent.py
-│   │   └── test_orchestrator.py
-│   ├── fixtures/
-│   │   ├── sample_diffs/
-│   │   └── sample_configs/
-│   └── conftest.py
-│
-├── config/
-│   ├── merge_config.example.yaml    # 配置文件示例
-│   └── default_thresholds.yaml     # 默认评分阈值配置
-│
-├── outputs/                         # 运行输出目录（gitignored）
-│   ├── merge_plan.json
-│   ├── file_decisions/
-│   ├── human_report.md
-│   ├── judge_report.json
-│   └── final_summary.md
-│
-├── pyproject.toml                   # 项目依赖与构建配置
-├── Makefile                         # 常用开发命令
-└── README.md
+┌──────────────────────────────────────────────────────────────────────────┐
+│                          CLI / TUI 前端（面向用户）                       │
+│  merge <branch>  merge run/resume/report/validate/init/ui/tui            │
+└──────────────────────────────────────────────────────────────────────────┘
+                                    │
+┌──────────────────────────────────────────────────────────────────────────┐
+│                             Orchestrator                                  │
+│         状态机驱动 Phase 循环 · 注入依赖 · 持久化 · Hook 事件             │
+└──────────────────────────────────────────────────────────────────────────┘
+           │                │                │                 │
+           ▼                ▼                ▼                 ▼
+     ┌──────────┐     ┌──────────┐     ┌──────────┐      ┌──────────┐
+     │  Phases  │ ◀── │  Agents  │ ◀── │   LLM    │ ◀──  │  Memory  │
+     │ 8 阶段   │     │ 7 类角色 │     │ 多提供商 │      │ 三层记忆 │
+     └──────────┘     └──────────┘     └──────────┘      └──────────┘
+           │                │                │
+           ▼                ▼                ▼
+     ┌──────────────────────────────────────────────┐
+     │                   Tools                      │
+     │  Git · Diff · 分类器 · Gate · 六大加固扫描器 │
+     └──────────────────────────────────────────────┘
+                            │
+                            ▼
+                      ┌──────────┐
+                      │ File I/O │  带快照的原子写入、Checkpoint JSON
+                      └──────────┘
 ```
 
 ---
 
-## 4. 技术栈选型
+## 3. 核心设计原则
 
-### 4.1 核心语言与运行时
+这些原则是**加载到代码的不变量**，由 `CLAUDE.md` 与 mypy/unit test 共同守护：
 
-| 组件 | 选型 | 版本 | 理由 |
-|------|------|------|------|
-| 主语言 | Python | 3.11+ | asyncio 成熟、LLM SDK 生态最佳 |
-| 类型系统 | Pydantic v2 | ≥2.5 | 高性能数据验证，内置 JSON 序列化 |
-| 异步运行时 | asyncio + anyio | 内置 | 并发执行多个文件分析任务 |
-
-### 4.2 Git 操作
-
-| 组件 | 选型 | 说明 |
-|------|------|------|
-| Git 库 | GitPython | 封装 `git diff`、`git show`、`git apply` |
-| Diff 解析 | unidiff | 结构化解析 unified diff 格式 |
-| Patch 应用 | subprocess + git apply | 原子性应用合并结果 |
-
-### 4.3 LLM 集成
-
-| 组件 | 选型 | 说明 |
-|------|------|------|
-| Anthropic SDK | anthropic-sdk-python | 调用 Claude 模型进行语义分析 |
-| OpenAI SDK | openai | 备用模型支持 |
-| 重试机制 | tenacity | 指数退避重试，避免 API 限流 |
-| 结构化输出 | Instructor / 原生 tool_use | 确保 LLM 输出符合 Pydantic 模型 |
-
-### 4.4 CLI 与输出
-
-| 组件 | 选型 | 说明 |
-|------|------|------|
-| CLI 框架 | Click | 子命令、参数解析、帮助文档 |
-| 终端 UI | Rich | 进度条、彩色输出、表格展示 |
-| 报告格式 | Markdown + JSON | 人类可读 + 机器可处理双格式输出 |
-
-### 4.5 测试与质量
-
-| 组件 | 选型 | 说明 |
-|------|------|------|
-| 测试框架 | pytest + pytest-asyncio | 支持异步测试用例 |
-| Mock | pytest-mock + respx | 隔离 LLM API 调用 |
-| 覆盖率 | pytest-cov | 确保 80%+ 测试覆盖率 |
-| 类型检查 | mypy | 静态类型验证 |
-| 代码格式 | ruff + black | 统一代码风格 |
+| # | 原则 | 代码执行位 |
+|---|------|-----------|
+| **P1** | 不丢失（No-Loss） | `FileDecisionRecord.discarded_content` + `rationale` 必填 |
+| **P2** | 语义优先 | ConflictAnalyst + ThreeWayDiff AST 抽取 |
+| **P3** | 可解释 | 每个 MergeDecision 附 rationale，Plan Review 报告全量保留 |
+| **P4** | 不确定即升级 | 置信度 < threshold → `ESCALATE_HUMAN` |
+| **P5** | 审查隔离 | Judge / PlannerJudge 接收 `ReadOnlyStateView`；写操作仅 Executor |
+| **P6** | 显式人工 | 人工决策无超时回退；`DecisionSource` 无 `TIMEOUT_DEFAULT` |
+| **P7** | 快照先于写入 | `patch_applier.apply_with_snapshot()` 唯一写入通道 |
+| **P8** | 零仓库知识 | `src/` 不出现项目专属字符串；规则走 YAML |
 
 ---
 
-## 5. 模块职责说明
+## 4. 运行时视图：Phase 驱动循环
 
-### 5.1 `src/agents/` — Agent 层
-
-本层包含所有 AI Agent 的实现，每个 Agent 继承自 `BaseAgent`，具备以下标准接口：
-
-```python
-class BaseAgent(ABC):
-    def __init__(self, llm_config: AgentLLMConfig):
-        self.llm = LLMClientFactory.create(llm_config)
-
-    async def run(self, state: MergeState) -> AgentMessage:
-        """主执行入口，接收全局状态，返回消息"""
-        ...
-
-    async def can_handle(self, state: MergeState) -> bool:
-        """判断当前状态是否满足该 Agent 的执行前置条件"""
-        ...
-```
-
-六个 Agent 及职责：
-
-| Agent | 文件 | 核心职责 |
-|-------|------|---------|
-| Planner | `planner_agent.py` | 分析 diff，生成 MergePlan |
-| **PlannerJudge** | `planner_judge_agent.py` | 独立审查 MergePlan 质量，可要求 Planner 修订（最多 2 轮） |
-| ConflictAnalyst | `conflict_analyst_agent.py` | 高风险冲突语义分析 |
-| Executor | `executor_agent.py` | 唯一写权限 Agent，执行合并；可发起 PlanDisputeRequest |
-| Judge | `judge_agent.py` | 只读审查合并结果，输出 JudgeVerdict |
-| HumanInterface | `human_interface_agent.py` | 人工决策收集与呈现 |
-
-各 Agent 详细职责见 `agents-design.md`。
-
-### 5.2 `src/core/` — 编排层
-
-- **`orchestrator.py`**：系统主入口，按 Phase 顺序调度 Agent，管理整体执行流程。
-- **`state_machine.py`**：维护 `MergeState`，处理状态转换，记录每次状态变更的时间戳和触发原因。
-- **`message_bus.py`**：基于内存的简单消息队列，Agent 通过此总线发布和订阅消息。
-- **`checkpoint.py`**：将 `MergeState` 序列化至磁盘（JSON），支持从任意检查点恢复。
-- **`phase_runner.py`**：单 Phase 内的任务执行器，使用 `asyncio.gather` 支持并发文件处理。
-
-### 5.3 `src/tools/` — 工具层
-
-工具层不包含业务逻辑，只提供纯函数式的工具调用接口：
-
-- **`git_tool.py`**：封装所有 `git` 命令，对外暴露高级 API（如 `get_file_diff(file_path)`）。
-- **`file_classifier.py`**：基于文件路径、扩展名、diff 大小、冲突密度计算风险分数。
-- **`diff_parser.py`**：将 unified diff 文本解析为结构化的 `FileDiff` 和 `ConflictPoint` 列表。
-- **`patch_applier.py`**：将 LLM 生成的合并结果转换为 git patch 并原子性应用。
-- **`report_writer.py`**：将各类数据模型序列化为 Markdown 报告或 JSON 文件。包括 `write_plan_review_report()` 用于输出 Planner↔Judge 全部交互记录和人类审查记录（`plan_review_<run_id>.md`）。
-
-### 5.4 `src/models/` — 数据层
-
-所有数据模型使用 Pydantic v2 定义，具备完整类型注解和验证规则。模型详细定义见 `data-models.md`。
-
-### 5.5 `src/llm/` — LLM 层
-
-- **`client.py`**：`LLMClientFactory` 工厂类，按每个 Agent 的 `AgentLLMConfig` 创建独立客户端，支持 Anthropic / OpenAI，各 Agent 可使用不同提供商与模型。
-- **`prompts/`**：每个 Agent 对应独立的 Prompt 模板文件，模板使用 Jinja2 渲染。
-- **`response_parser.py`**：解析 LLM 响应，使用 Instructor 库将非结构化文本转换为 Pydantic 模型。
-
-### 5.6 `src/cli/` — CLI 层
-
-基于 Click 构建，提供以下子命令：
+Orchestrator 是纯 Phase 分派器（~400 LOC），不含业务逻辑。它按状态机 `status → Phase 类` 的映射循环调度：
 
 ```
-merge run      --config <yaml>      执行完整合并流程
-merge resume   --checkpoint <path>  从检查点恢复执行
-merge report   --output <dir>       仅生成报告（不执行合并）
-merge validate --config <yaml>      验证配置文件合法性
+INITIALIZED        → InitializePhase
+PLANNING           → PlanningPhase
+PLAN_REVIEWING     → PlanReviewPhase   （可回环 PLAN_REVISING）
+AUTO_MERGING       → AutoMergePhase    （可进入 PLAN_DISPUTE_PENDING）
+ANALYZING_CONFLICTS→ ConflictAnalysisPhase
+AWAITING_HUMAN     → HumanReviewPhase  （人工决策后 resume）
+JUDGE_REVIEWING    → JudgeReviewPhase  （可回环 AUTO_MERGING / ANALYZING_CONFLICTS）
+GENERATING_REPORT  → ReportGenerationPhase → COMPLETED
+```
+
+完整状态转换表与每阶段前置/后置条件详见 [`flow.md`](flow.md)。
+
+每个 Phase 实现 `Phase.execute(state, ctx) -> PhaseOutcome` 接口。Outcome 告诉 Orchestrator：
+
+- 下一个 `target_status` 与 reason
+- 是否需要 `checkpoint_tag`
+- 是否需要触发 memory 汇总
+- `extra.paused=True` 可让流程在此阶段挂起（等待人工）
+
+---
+
+## 5. 分层与模块划分
+
+实际目录（以 `src/` 为根）：
+
+```
+src/
+├── cli/              # Click CLI + commands/（run / resume / init / setup / tui）
+├── core/             # Orchestrator · StateMachine · Checkpoint · MessageBus · Hooks
+│   └── phases/       # 8 个 Phase 类 + PhaseContext · PhaseOutcome
+├── agents/           # 7 类 Agent + BaseAgent + Registry
+├── llm/              # 客户端 · 路由 · 凭据池 · 上下文 · 压缩 · 分块 · prompts/
+├── memory/           # 三层记忆 · Store · Summarizer · LayeredLoader
+├── models/           # 全部 Pydantic v2 数据模型
+├── tools/            # Git · 分类 · 门禁 · 加固扫描 · 报告输出
+│   └── baseline_parsers/  # 可插拔的多语言测试/Lint 输出解析器
+├── integrations/     # 外部系统对接（GitHub）
+└── web/              # Web UI + WebSocket Bridge（供 TUI 使用）
+
+tui/                  # React Ink 终端 UI（Node.js）
+tests/unit/           # 单元测试
+tests/integration/    # 集成测试（需真实 API Key，CI 不跑）
+config/               # 默认 YAML 模板
+```
+
+各模块详细文档位于 `doc/modules/` 下，建议按以下顺序阅读：
+
+1. [`modules/data-models.md`](modules/data-models.md) — 数据模型是所有模块的契约
+2. [`flow.md`](flow.md) — 状态机与 Phase 流程
+3. [`modules/agents.md`](modules/agents.md) — 七类 Agent 的职责
+4. [`modules/core.md`](modules/core.md) — Phase 调度与 Checkpoint
+5. [`modules/tools.md`](modules/tools.md) — 确定性加固扫描器
+6. [`modules/llm.md`](modules/llm.md) — LLM 路由与成本
+7. [`modules/memory.md`](modules/memory.md) — 三层记忆系统
+8. [`modules/cli.md`](modules/cli.md) — 一站式 CLI + TUI
+
+---
+
+## 6. 关键数据流
+
+```
+┌────────────┐  git diff       ┌────────────┐   FileDiff[]   ┌────────────┐
+│  GitTool   │ ──────────────▶ │ DiffParser │ ─────────────▶ │ Classifier │
+└────────────┘                 └────────────┘                └─────┬──────┘
+                                                                   │ RiskLevel × 文件
+                                                                   ▼
+                                 ┌──────────────────────────────────────────┐
+                                 │ PollutionAuditor · SyncPointDetector     │
+                                 │ ShadowConflictDetector · ScarListBuilder │
+                                 │ InterfaceChangeExtractor · Sentinel...   │
+                                 └──────────────────┬───────────────────────┘
+                                                    │ state 字段
+                                                    ▼
+                                              ┌──────────┐
+                                              │ Planner  │ ──▶ MergePlan
+                                              └─────┬────┘
+                                                    │
+                                           ┌────────▼────────┐
+                                           │ PlannerJudge    │ ──▶ approve / revise
+                                           └────────┬────────┘
+                                                    │ 达成一致或 AWAITING_HUMAN
+                                                    ▼
+                         ┌──────────── Executor ──────────────┐
+                         │ apply_with_snapshot → 写文件        │
+                         │ 失败自动回滚；可 raise_plan_dispute │
+                         └────────────┬────────────────────────┘
+                                      │
+                   ┌──────────────────▼──────────────────┐
+                   │ ConflictAnalyst（仅高风险文件）      │
+                   └──────────────────┬──────────────────┘
+                                      │
+                                      ▼
+                                   Judge
+                        ┌───── verdict ─────┐
+                        │ approved → REPORT │
+                        │ repair   → 回环     │
+                        │ escalate → HUMAN   │
+                        └───────────────────┘
 ```
 
 ---
 
-## 6. 系统扩展点设计
+## 7. 状态与持久化
 
-### 6.1 新增 Agent
+### 7.1 `MergeState`
 
-继承 `BaseAgent`，实现 `run()` 和 `can_handle()` 方法，在 `orchestrator.py` 的 Phase 配置中注册即可。不需要修改任何现有 Agent 代码。
+全局状态对象（`src/models/state.py`）。贯穿所有 Phase 和 Agent，包含：
 
-### 6.2 新增合并策略
+- 原始输入：`config`、`upstream_ref/fork_ref`、`merge_base_commit`
+- 分析产物：`file_diffs`、`file_classifications`、`file_categories`
+- 六大扫描结果：`shadow_conflicts`、`interface_changes`、`reverse_impacts`、`scar_list`、`sentinel_hits`、`config_drifts`
+- 迁移感知：`migration_info: SyncPointResult | None`（InitializePhase 迁移检测结果，含 effective merge-base、跳过 commit 数、sync_ratio 等）
+- 迭代过程：`merge_plan`、`plan_review_log`、`file_decision_records`、`applied_patches`
+- 仲裁：`judge_verdict`、`judge_verdicts_log`、`plan_disputes`
+- 记忆：`memory: MergeMemory`
+- 轨迹：`messages`、`errors`、`phase_results`
 
-在 `src/tools/patch_applier.py` 中扩展 `MergeStrategy` 枚举，并在 `executor_agent.py` 的策略分发函数中添加对应处理分支。
+### 7.2 Checkpoint
 
-### 6.3 更换 LLM 提供商
+- 单文件滚动写入 `<run_dir>/checkpoint.json`（`_atomic_write`: 先写 tmp 再 rename，POSIX 原子）
+- 开启 `debug_checkpoints` 后，额外在 `checkpoints_debug/<tag>.json` 落盘每个 Phase 快照
+- 注册 SIGINT/SIGTERM 处理器，中断时打 `interrupt` 标记
+- Schema mismatch 时直接报错——永远不会静默恢复出半损坏状态
 
-修改 `src/llm/client.py` 中的 `LLMProvider` 枚举及对应的客户端初始化逻辑，或通过 `merge_config.yaml` 中的 `llm.provider` 字段动态切换。
+### 7.3 `.merge/` 生产目录
 
-### 6.4 接入外部系统
+生产模式（pip 安装后在目标仓库运行）下，所有产物都写入 `<repo>/.merge/`：
 
-- **GitHub PR**：在 `report_writer.py` 中添加 GitHub API 客户端，将 `HumanReport` 转换为 PR Review Comment。
-- **CI/CD**：提供 `merge validate` 命令的退出码标准，CI 可通过退出码判断是否允许合并。
-- **Web UI**：`HumanInterface` Agent 支持切换至 HTTP 模式，通过 REST API 接收人工决策（替换当前的 CLI stdin 模式）。
+```
+.merge/
+  config.yaml          # 首次运行由向导生成
+  .env                 # API Keys，自动 gitignore
+  .gitignore           # 自动生成
+  plans/               # MERGE_PLAN_<id>.md 报告
+  runs/<run_id>/
+    checkpoint.json
+    merge_report.md
+    plan_review.md
+    checkpoints_debug/   # 开启 debug 后才有
+    logs/run_<id>.log
+    logs/run_<id>.jsonl  # 开启 structured_logs 后才有
+```
 
-### 6.5 自定义文件分类规则
+---
 
-在 `config/merge_config.yaml` 中配置 `file_classifier.rules` 字段，支持基于 glob 模式、文件大小、历史修改频率等维度自定义风险评分规则，无需修改代码。
+## 8. LLM 路由、凭据池与成本
+
+| 组件 | 文件 | 要点 |
+|---|---|---|
+| 客户端工厂 | `src/llm/client.py` | 按 `AgentLLMConfig.provider` 实例化 anthropic/openai；支持 `update_api_key()` 热切换、`with_model()` 临时换模型 |
+| 凭据池 | `src/llm/credential_pool.py` | 同一 Agent 可声明 `api_key_env: [KEY_A, KEY_B, ...]`，限流后轮转 |
+| 模型路由 | `src/llm/model_router.py` | `cheap_model` 存在时，对"简单任务"降档（D1 smart routing） |
+| 错误分类 | `src/llm/error_classifier.py` | 8 类 ErrorCategory → 不同重试/熔断策略 |
+| 上下文预算 | `src/llm/context.py` | `TokenBudget` + 优先级分段组装 + 保底/截断 |
+| 压缩 | `src/llm/context_compressor.py` | 保头保尾 + 中段摘要（每 Agent 可调） |
+| 分块 | `src/llm/chunker.py` | 大文件 AST/行级分块，配合 `relevance.py` 评分 |
+| Prompt Caching | `src/llm/prompt_caching.py` | Anthropic 专属，`cache_strategy` 三档可配 |
+| 成本追踪 | `src/tools/cost_tracker.py` | 每次调用记 token/美金；run 结束汇总 |
+| 熔断与重试 | `src/agents/base_agent.py` | 3 类错误累计 ≥ 3 触发熔断；rate-limit 最多等 5 轮 |
+
+每个 Agent 的模型、provider、api_key_env 均在 `config.agents.<name>` 独立配置，详见 [`modules/llm.md`](modules/llm.md)。
+
+---
+
+## 9. 工具层与加固管线
+
+`src/tools/` 是整个系统的确定性脊柱。LLM 负责"理解"，Tools 负责"证伪"。
+
+按职责分为三组：
+
+### 9.1 基础工具
+- `git_tool.py`：GitPython 封装
+- `diff_parser.py`：unified diff → `FileDiff[]`
+- `file_classifier.py`：ABCDE 分类 + 风险打分
+- `patch_applier.py`：快照+原子写入（P7）
+- `commit_replayer.py`：**git 历史保留 — 第一阶段**。在 AutoMergePhase Executor 运行前，将所有文件均属 Category B / D_MISSING 的 upstream commits 通过 `git cherry-pick` 原样重放，保留原始作者、时间戳、commit message；cherry-picked 文件写入 `state.replayed_files`，Executor 遇到后自动跳过
+- `git_committer.py`：**git 历史保留 — 第二阶段**。AutoMergePhase 全部层完成后，将 Executor 写入的文件（排除已 cherry-pick 的文件）`git add` 并 `git commit`，生成一条 `merge(auto_merge): resolve N files` 记录；受 `history.commit_after_phase` 控制
+- `report_writer.py` / `merge_plan_report.py`：Markdown / JSON 报告
+- `gate_runner.py` + `baseline_parsers/`：门禁命令执行与 baseline-diff
+
+### 9.2 六大丢失模式扫描器（见 `multi-agent-optimization-from-merge-experience.md`）
+
+| 模式 | 工具 |
+|---|---|
+| M1 定制被整文件覆盖 | `scar_list_builder.py`（P2-1 自学习） |
+| M2 同名不同扩展的 shadow 冲突 | `shadow_conflict_detector.py` |
+| M3 接口变更未同步调用方 | `interface_change_extractor.py` + `reverse_impact_scanner.py` |
+| M4 顶层调用被替换 | `three_way_diff.py` |
+| M5 配置行被覆盖 | `config_line_retention_checker.py`、`config_drift_detector.py` |
+| M6 类型/API 契约回归 | `gate_runner.py` + `baseline_parsers/*_json.py` |
+
+另外：
+- `pollution_auditor.py`：历史合并污染再分类（**条件执行**：仅当 git log 在 fork 分支中检测到以往 upstream merge commit 时才进行分类修正；若无历史 merge 记录则直接跳过，不产生任何开销）
+- `sync_point_detector.py`：**迁移感知同步点检测**（Migration-Aware Merge）。fork 曾通过 bulk copy 手工同步 upstream 代码时，git merge-base 会指向远古 commit，导致大量误分类。该工具在 InitializePhase 最前端运行，三阶段算法自动识别并覆写 effective merge-base：
+  1. **文件级**：对比三处 blob hash，找出 upstream 修改而 fork 已同步的文件集合
+  2. **Patch-ID 验证**：对 hash 不同但 patch-ID 相同的模糊文件升级为 synced（检测带微调的 copy）
+  3. **Commit 边界**：oldest→newest 遍历 upstream commits（>50 条二分搜索），确定最后一个完全已同步的 commit
+  - 结果存入 `state.migration_info`；支持 `merge_base_override` 手动覆盖；受 `config.migration` 控制
+- `cross_layer_checker.py`：跨层键一致性断言
+- `sentinel_scanner.py`：业务哨兵 regex 扫描（P2-2）
+- `smoke_runner.py`：post-judge 冒烟测试（P1-3）
+
+### 9.3 可观测性工具
+- `cost_tracker.py`、`trace_logger.py`、`structured_logger.py`、`ci_reporter.py`
+
+---
+
+## 10. 配置模型与 `.merge/` 目录
+
+配置的权威模型在 `src/models/config.py`：
+
+```
+MergeConfig
+├── upstream_ref / fork_ref / working_branch / repo_path
+├── project_context              # 注入到每个 Agent 的 system prompt
+├── max_files_per_run
+├── max_plan_revision_rounds     # Planner ↔ Judge 最多协商轮数（默认 5）
+├── max_judge_repair_rounds      # Executor ↔ Judge 最多修复轮数
+├── llm                          # 旧版全局默认，保留向后兼容
+├── agents                       # 每个 Agent 独立 LLM 配置（权威）
+│   ├── planner / planner_judge / conflict_analyst
+│   └── executor / judge / human_interface
+├── thresholds                   # auto_merge_confidence / human_escalation /
+│                                #   risk_score_low / risk_score_high
+├── file_classifier              # 排除/二进制/安全敏感规则
+├── output                       # directory / debug_directory / formats /
+│                                #   include_llm_traces / structured_logs / language
+├── syntax_check / llm_risk_scoring / github
+├── layer_config                 # 层依赖拓扑（DEFAULT_LAYERS 9 层）
+├── customizations               # fork 定制项 + verification 规则
+├── shadow_rules_extra           # P0-2 额外 shadow 规则
+├── cross_layer_assertions       # P0-4 断言
+├── gate                         # 门禁命令清单 + baseline_parser
+├── reverse_impact               # P1-1 反向扫描范围
+├── smoke_tests                  # P1-3 冒烟测试套件
+├── sentinels_extra              # P2-2 业务哨兵
+├── config_retention             # P2-3 配置行保留规则
+├── scar_learning                # P2-1 scar 自学习
+├── migration                    # 迁移感知合并（MigrationConfig）
+│   ├── merge_base_override      #   手动指定 effective merge-base commit SHA
+│   ├── auto_detect_sync_point   #   是否自动检测（默认 true）
+│   ├── sync_detection_threshold #   触发检测的最小 sync_ratio（默认 0.3）
+│   └── min_synced_files         #   最少已同步文件数（默认 5，防假阳性）
+└── history                      # Commit 历史保留（HistoryPreservationConfig）
+    ├── enabled                  #   总开关（默认 true）
+    ├── cherry_pick_clean        #   对 replayable commits 执行 cherry-pick（默认 true）
+    └── commit_after_phase       #   每 Phase 结束后 commit Executor 产出（默认 true）
+```
+
+生产模式下 `.merge/` 目录由 `src/cli/paths.py` + `src/cli/commands/setup.py` 管理，首次运行通过向导生成。API Key 解析顺序：**shell env → `.merge/.env` → `~/.config/code-merge-system/.env`**。
+
+---
+
+## 11. CLI 与 TUI 前端
+
+### 11.1 CLI（`src/cli/main.py`）
+
+一站式入口（主命令）：
+
+```bash
+merge <target-branch>              # 默认进入 TUI；首次运行自动触发 setup 向导
+merge <target-branch> --no-tui     # 纯文本输出模式
+merge <target-branch> --ci         # CI 模式：无交互，JSON 摘要到 stdout
+merge <target-branch> --dry-run    # 仅分析，不写文件
+merge <target-branch> -r           # 强制重新触发配置向导
+```
+
+辅助子命令：
+
+| 子命令 | 用途 |
+|--------|------|
+| `merge resume --run-id <id>` | 从 checkpoint 恢复上次中断的 run |
+| `merge validate --config <path>` | 校验配置文件及所有 API Key 环境变量 |
+| `merge run --config <path>` | 以显式配置文件启动（高级 / CI 场景） |
+
+### 11.2 TUI（`tui/` + `src/web/ws_bridge.py`）
+
+- 前端：React Ink（Node.js），入口 `tui/src`
+- 后端：`src/web/ws_bridge.py` 启动 WebSocket 服务（默认 `ws://localhost:8765`）
+- 状态机 Observer 把 `state_transition / activity / phase_event` 推流到前端
+- 人工决策：前端提交 → Bridge → HumanReviewPhase 消费
+
+### 11.3 Web UI（`src/web/`）
+
+`merge ui --run-id <id>` 启动一个独立 HTTP 服务，用于回看历史 run 的合并决策（app.py + server.py）。
+
+---
+
+## 12. 可观测性
+
+### 12.1 用户可见（写入合并报告）
+
+| 输出 | 位置 | 说明 |
+|---|---|---|
+| 成本汇总 | `merge_report.md` → "Run Insights" 区块 | LLM 调用次数、总费用、各 Agent 明细 |
+| Context 利用率 | `merge_report.md` → "Run Insights" 区块 | 各 Agent 平均 / 峰值 token 占用率 |
+
+### 12.2 开发者内部（写入日志文件）
+
+| 输出 | 文件 | 用途 |
+|---|---|---|
+| 纯文本日志 | `.merge/runs/<id>/logs/run_<id>.log` | 调试、事后审阅 |
+| 结构化日志 | `run_<id>.jsonl`（`output.structured_logs=true`） | 日志聚合、指标 |
+| LLM trace | `llm_traces_<id>.jsonl`（`output.include_llm_traces=true`） | 回放完整 prompt/response |
+| Hook 事件 | `phase:before` / `phase:after` / `merge:complete` | 外部系统挂接 |
+
+---
+
+## 13. 扩展点
+
+1. **新增 Agent**：继承 `BaseAgent`，在类定义末尾 `AgentRegistry.register("my_agent", MyAgent)`，import 该模块后 Orchestrator 即可通过 `AgentRegistry.create_all()` 创建。
+2. **新增 Phase**：继承 `Phase`，在 `src/core/phases/__init__.py` 注册，更新 `Orchestrator.PHASE_MAP` 和 `state_machine.VALID_TRANSITIONS`。
+3. **新增 LLM provider**：在 `src/llm/client.py` 中扩展 `LLMClientFactory`；修改 `AgentLLMConfig.provider` 的 Literal。
+4. **新增门禁 baseline parser**：在 `src/tools/baseline_parsers/` 新增模块，名称作为 `GateCommandConfig.baseline_parser` 的值即可。
+5. **新增定制项验证类型**：扩展 `CustomizationVerification.type` Literal 与 `judge_agent._verify_*` 分支。
+6. **新增 shadow 规则**：通过 `config.shadow_rules_extra` 注入；默认规则见 `DEFAULT_SHADOW_RULES`。
+
+---
+
+## 14. 术语表
+
+| 术语 | 释义 |
+|---|---|
+| fork | 下游分叉分支，包含私有改动 |
+| upstream | 上游主干，持续迭代 |
+| merge-base | 两个 ref 的共同祖先 commit |
+| ABCDE 分类 | 五种文件变更类型（A 未变 / B upstream 独有 / C 双改 / D 新增 / E fork 独有） |
+| Phase | 一个编排阶段，对应状态机的一个状态 |
+| Gate | 门禁命令（lint/test/typecheck），必须通过才能前进 |
+| Scar | 历史上 restore/compat-fix/revert commit 命中的定制项 |
+| Sentinel | 业务哨兵：必须在 fork 中存在的正则/标记 |
+| Shadow | 同名不同扩展或 module/package 布局差异造成的隐式冲突 |
+| VETO | Judge 确定性流水线否决（不可协商，必须修复） |
+| Plan Dispute | Executor 执行时发现计划不合理，回退请求修订 |
+
+---
+
+## 相关文档
+
+- 模块级细节：`doc/modules/*.md`
+- 加固项设计：`doc/multi-agent-optimization-from-merge-experience.md`
+- 迁移感知合并：`doc/migration-aware-merge.md`
+- 参考开源项目分析：`doc/references/*.md`
