@@ -16,6 +16,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from src.agents.base_agent import BaseAgent
 from src.agents.registry import AgentRegistry
@@ -44,6 +45,7 @@ from src.core.phases import (
     PlanReviewPhase,
     ReportGenerationPhase,
 )
+from src.core.phases.base import ActivityEvent, OnActivityCallback
 from src.core.state_machine import StateMachine
 from src.memory.store import MemoryStore
 from src.memory.summarizer import PhaseSummarizer
@@ -113,8 +115,6 @@ _TERMINAL = frozenset({SystemStatus.COMPLETED, SystemStatus.FAILED})
 class Orchestrator:
     """Phase dispatcher — delegates all domain work to Phase classes."""
 
-    OnActivityCallback = Callable[[str, str], None]
-
     def __init__(
         self,
         config: MergeConfig,
@@ -158,7 +158,7 @@ class Orchestrator:
         self._log_handler: logging.FileHandler | None = None
         self._structured_handler: logging.FileHandler | None = None
         self._trace_logger: TraceLogger | None = None
-        self._on_activity: Orchestrator.OnActivityCallback | None = None
+        self._on_activity: OnActivityCallback | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -195,18 +195,20 @@ class Orchestrator:
 
         self._memory_store = MemoryStore.from_memory(state.memory)
         self._inject_memory()
+        self._inject_hooks()
 
         try:
             while state.status in PHASE_MAP and state.status not in _TERMINAL:
                 phase_cls = PHASE_MAP[state.status]
                 phase = phase_cls()
                 ctx = self._build_context()
+                previous_status = state.status
 
                 agent, before_msg, after_msg = _PHASE_ACTIVITY.get(
                     state.status, (phase.name, "running", "done")
                 )
                 self._inject_cost_tracker(phase=phase.name)
-                self._emit(agent, before_msg)
+                self._emit(agent, before_msg, event_type="start", phase=phase.name)
                 await self._hooks.emit(
                     "phase:before",
                     phase=phase.name,
@@ -218,7 +220,13 @@ class Orchestrator:
                 outcome = await phase.run(state, ctx)
                 elapsed = time.monotonic() - t0
 
-                self._emit(agent, after_msg)
+                self._emit(
+                    agent,
+                    after_msg,
+                    event_type="complete",
+                    phase=phase.name,
+                    elapsed=elapsed,
+                )
                 await self._hooks.emit(
                     "phase:after",
                     phase=phase.name,
@@ -228,6 +236,20 @@ class Orchestrator:
                     state=state,
                 )
                 logger.info("Phase %s completed in %.1fs", phase.name, elapsed)
+
+                if self._trace_logger:
+                    self._trace_logger.record_phase_transition(
+                        run_id=state.run_id,
+                        from_status=previous_status.value
+                        if hasattr(previous_status, "value")
+                        else str(previous_status),
+                        to_status=outcome.target_status.value
+                        if hasattr(outcome.target_status, "value")
+                        else str(outcome.target_status),
+                        triggered_by=phase.name,
+                        elapsed=elapsed,
+                        reason=outcome.reason,
+                    )
 
                 if outcome.should_update_memory:
                     self._update_memory(outcome.memory_phase, state)
@@ -294,9 +316,24 @@ class Orchestrator:
             },
         )
 
-    def _emit(self, agent: str, action: str) -> None:
+    def _emit(
+        self,
+        agent: str,
+        action: str,
+        event_type: Literal["start", "progress", "complete", "error"] = "progress",
+        phase: str = "",
+        elapsed: float | None = None,
+    ) -> None:
         if self._on_activity:
-            self._on_activity(agent, action)
+            self._on_activity(
+                ActivityEvent(
+                    agent=agent,
+                    action=action,
+                    phase=phase,
+                    event_type=event_type,
+                    elapsed=elapsed,
+                )
+            )
 
     def _update_memory(self, phase: str, state: MergeState) -> None:
         method = getattr(self._summarizer, f"summarize_{phase}", None)
@@ -329,6 +366,10 @@ class Orchestrator:
     def _inject_cost_tracker(self, phase: str = "") -> None:
         for agent in self._all_agents:
             agent.set_cost_tracker(self._cost_tracker, phase=phase)
+
+    def _inject_hooks(self) -> None:
+        for agent in self._all_agents:
+            agent.set_hooks(self._hooks)
 
     # ------------------------------------------------------------------
     # Run-level logging

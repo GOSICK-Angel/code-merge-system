@@ -5,6 +5,7 @@ from rich.console import Console
 from src.models.config import MergeConfig
 from src.models.state import MergeState, SystemStatus
 from src.core.orchestrator import Orchestrator
+from src.core.phases.base import ActivityEvent
 from src.cli.exit_codes import (
     EXIT_SUCCESS,
     EXIT_NEEDS_HUMAN,
@@ -57,9 +58,11 @@ def run_command_impl(
 
     if not ci:
 
-        def _print_activity(agent: str, action: str) -> None:
-            color = {"planner": "cyan", "planner_judge": "magenta"}.get(agent, "dim")
-            console.print(f"  [{color}][{agent}][/{color}] {action}")
+        def _print_activity(event: ActivityEvent) -> None:
+            color = {"planner": "cyan", "planner_judge": "magenta"}.get(
+                event.agent, "dim"
+            )
+            console.print(f"  [{color}][{event.agent}][/{color}] {event.action}")
 
         orchestrator.set_activity_callback(_print_activity)
 

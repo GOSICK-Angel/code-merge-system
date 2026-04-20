@@ -15,6 +15,15 @@ class ParseError(Exception):
     pass
 
 
+class ModelOutputError(Exception):
+    """LLM returned valid JSON but it doesn't match the expected schema."""
+
+    def __init__(self, raw: str, schema_name: str, detail: str) -> None:
+        super().__init__(f"Model output doesn't match {schema_name}: {detail}")
+        self.raw = raw
+        self.schema_name = schema_name
+
+
 class LLMClient(ABC):
     model: str
 
@@ -123,17 +132,20 @@ class AnthropicClient(LLMClient):
 
         raw = await self.complete(augmented, system=system)
 
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            cleaned = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
         try:
-            cleaned = raw.strip()
-            if cleaned.startswith("```"):
-                lines = cleaned.splitlines()
-                cleaned = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
             data = json.loads(cleaned)
-            return schema.model_validate(data)
         except Exception as e:
             raise ParseError(
                 f"Failed to parse structured response: {e}\nRaw: {raw[:500]}"
             ) from e
+        try:
+            return schema.model_validate(data)
+        except Exception as ve:
+            raise ModelOutputError(raw, schema.__name__, str(ve)) from ve
 
 
 class OpenAIClient(LLMClient):
@@ -204,17 +216,20 @@ class OpenAIClient(LLMClient):
 
         raw = await self.complete(augmented, system=system)
 
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            cleaned = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
         try:
-            cleaned = raw.strip()
-            if cleaned.startswith("```"):
-                lines = cleaned.splitlines()
-                cleaned = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
             data = json.loads(cleaned)
-            return schema.model_validate(data)
         except Exception as e:
             raise ParseError(
                 f"Failed to parse structured response: {e}\nRaw: {raw[:500]}"
             ) from e
+        try:
+            return schema.model_validate(data)
+        except Exception as ve:
+            raise ModelOutputError(raw, schema.__name__, str(ve)) from ve
 
 
 class LLMClientFactory:

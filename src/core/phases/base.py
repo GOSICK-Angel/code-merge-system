@@ -4,7 +4,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from src.models.config import MergeConfig
 from src.models.state import MergeState, SystemStatus
@@ -20,7 +20,18 @@ from src.memory.summarizer import PhaseSummarizer
 from src.core.hooks import HookManager
 from src.tools.cost_tracker import CostTracker
 
-OnActivityCallback = Callable[[str, str], None]
+
+@dataclass(frozen=True)
+class ActivityEvent:
+    agent: str
+    action: str
+    phase: str
+    event_type: Literal["start", "progress", "complete", "error"]
+    elapsed: float | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+OnActivityCallback = Callable[[ActivityEvent], None]
 
 
 @dataclass(frozen=True)
@@ -49,7 +60,11 @@ class PhaseContext:
 
     def notify(self, agent: str, action: str) -> None:
         if self.emit is not None:
-            self.emit(agent, action)
+            self.emit(
+                ActivityEvent(
+                    agent=agent, action=action, phase="", event_type="progress"
+                )
+            )
 
 
 @dataclass(frozen=True)

@@ -12,9 +12,10 @@ from typing import Any
 import websockets
 from websockets.asyncio.server import Server, ServerConnection
 
-from src.models.state import MergeState
+from src.core.phases.base import ActivityEvent
 from src.models.decision import MergeDecision
-from src.models.plan_review import PlanHumanReview, PlanHumanDecision
+from src.models.plan_review import PlanHumanDecision, PlanHumanReview
+from src.models.state import MergeState
 
 logger = logging.getLogger(__name__)
 
@@ -552,15 +553,21 @@ class MergeWSBridge:
             self._pending_broadcast = False
             self._loop.create_task(self.broadcast_state_patch())
 
-    def notify_agent_activity(self, agent: str, action: str) -> None:
-        """Push agent activity notification to TUI clients (thread-safe)."""
+    def notify_agent_activity(self, event: ActivityEvent) -> None:
+        """Push structured agent activity notification to TUI clients (thread-safe)."""
         loop = self._loop
         if loop is None or loop.is_closed():
             return
         data = json.dumps(
             {
                 "type": "agent_activity",
-                "payload": {"agent": agent, "action": action},
+                "payload": {
+                    "agent": event.agent,
+                    "action": event.action,
+                    "phase": event.phase,
+                    "event_type": event.event_type,
+                    "elapsed": event.elapsed,
+                },
             }
         )
         loop.call_soon_threadsafe(loop.create_task, self._broadcast_raw(data))

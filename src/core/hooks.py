@@ -27,6 +27,9 @@ class HookEvent:
     data: dict[str, Any] = field(default_factory=dict)
 
 
+HOOK_LLM_START = "agent:llm_start"
+HOOK_LLM_END = "agent:llm_end"
+
 # Handler signature: sync or async callable accepting **kwargs.
 HookHandler = Callable[..., Any]
 

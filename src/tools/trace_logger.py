@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -93,6 +94,30 @@ class TraceLogger:
                 stats.total_budget_tokens += budget_available
             if utilization is not None:
                 stats.peak_utilization = max(stats.peak_utilization, utilization)
+
+    def record_phase_transition(
+        self,
+        run_id: str,
+        from_status: str,
+        to_status: str,
+        triggered_by: str,
+        elapsed: float,
+        reason: str = "",
+    ) -> None:
+        entry: dict[str, Any] = {
+            "type": "phase_transition",
+            "run_id": run_id,
+            "from": from_status,
+            "to": to_status,
+            "agent": triggered_by,
+            "elapsed": round(elapsed, 2),
+            "reason": reason,
+            "ts": time.time(),
+        }
+        line = json.dumps(entry, ensure_ascii=False)
+        with self._lock:
+            with open(self._path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
 
     def get_agent_stats(self, agent: str) -> AgentUtilizationStats | None:
         return self._agent_stats.get(agent)

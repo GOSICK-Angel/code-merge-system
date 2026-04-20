@@ -2,7 +2,13 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from dataclasses import FrozenInstanceError
 
-from src.core.phases.base import Phase, PhaseContext, PhaseOutcome, OnActivityCallback
+from src.core.phases.base import (
+    ActivityEvent,
+    OnActivityCallback,
+    Phase,
+    PhaseContext,
+    PhaseOutcome,
+)
 from src.models.state import MergeState, SystemStatus
 from src.models.config import MergeConfig
 
@@ -78,7 +84,12 @@ class TestPhaseContext:
         cb = MagicMock()
         ctx = _make_context(emit=cb)
         ctx.notify("planner", "generating plan")
-        cb.assert_called_once_with("planner", "generating plan")
+        cb.assert_called_once()
+        event = cb.call_args[0][0]
+        assert isinstance(event, ActivityEvent)
+        assert event.agent == "planner"
+        assert event.action == "generating plan"
+        assert event.event_type == "progress"
 
     def test_notify_no_emit_is_noop(self):
         ctx = _make_context(emit=None)

@@ -22,6 +22,7 @@ from src.llm.retry_utils import jittered_backoff
 from src.memory.layered_loader import LayeredMemoryLoader
 from src.memory.store import MemoryStore
 from src.tools.cost_tracker import CostTracker, TokenUsage
+from src.core.hooks import HOOK_LLM_END, HOOK_LLM_START, HookManager
 from src.tools.trace_logger import TraceLogger
 
 CIRCUIT_BREAKER_THRESHOLD = 3
@@ -100,6 +101,7 @@ class BaseAgent(ABC):
         self._credential_pool: CredentialPool | None = self._init_credential_pool()
         self._cost_tracker: CostTracker | None = None
         self._current_phase: str = ""
+        self._hooks: HookManager | None = None
 
     def set_trace_logger(self, trace_logger: TraceLogger) -> None:
         self._trace_logger = trace_logger
@@ -110,6 +112,9 @@ class BaseAgent(ABC):
     def set_cost_tracker(self, tracker: CostTracker, phase: str = "") -> None:
         self._cost_tracker = tracker
         self._current_phase = phase
+
+    def set_hooks(self, hooks: HookManager) -> None:
+        self._hooks = hooks
 
     @property
     def consecutive_failures(self) -> int:
@@ -297,6 +302,18 @@ class BaseAgent(ABC):
             utilization * 100,
         )
 
+        t_call_start = time.monotonic()
+        if self._hooks:
+            await self._hooks.emit(
+                HOOK_LLM_START,
+                agent=self.agent_type.value,
+                model=routed_model,
+                provider=self.llm_config.provider,
+                prompt_chars=prompt_chars,
+                estimated_tokens=estimated_tokens,
+                phase=self._current_phase,
+            )
+
         retry_budget = RetryBudget(max_retries=retries)
         last_error: Exception | None = None
         last_classified: ClassifiedError | None = None
@@ -360,6 +377,17 @@ class BaseAgent(ABC):
                         ),
                         elapsed_seconds=elapsed,
                     )
+                if self._hooks:
+                    await self._hooks.emit(
+                        HOOK_LLM_END,
+                        agent=self.agent_type.value,
+                        model=routed_model,
+                        provider=self.llm_config.provider,
+                        elapsed=time.monotonic() - t_call_start,
+                        success=True,
+                        response_chars=resp_len,
+                        attempt=retry_budget.attempt + 1,
+                    )
                 model_override.__exit__(None, None, None)
                 return llm_result
             except Exception as e:
@@ -400,6 +428,17 @@ class BaseAgent(ABC):
                             continue
                     if classified.category in _CIRCUIT_BREAKER_CATEGORIES:
                         self._consecutive_failures += 1
+                    if self._hooks:
+                        await self._hooks.emit(
+                            HOOK_LLM_END,
+                            agent=self.agent_type.value,
+                            model=routed_model,
+                            provider=self.llm_config.provider,
+                            elapsed=time.monotonic() - t_call_start,
+                            success=False,
+                            response_chars=0,
+                            attempt=retry_budget.attempt + 1,
+                        )
                     model_override.__exit__(None, None, None)
                     raise AgentError(classified.message, classified) from e
 
@@ -452,6 +491,17 @@ class BaseAgent(ABC):
             ErrorCategory.TRANSPORT,
         ):
             self._consecutive_failures += 1
+        if self._hooks:
+            await self._hooks.emit(
+                HOOK_LLM_END,
+                agent=self.agent_type.value,
+                model=routed_model,
+                provider=self.llm_config.provider,
+                elapsed=time.monotonic() - t_call_start,
+                success=False,
+                response_chars=0,
+                attempt=retry_budget.attempt,
+            )
         model_override.__exit__(None, None, None)
         raise AgentExhaustedError(
             f"Agent {self.agent_type.value}: LLM call failed after "

@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from src.agents.guardrails import (
+    AllHumanRequiredGuardrail,
+    EmptyPlanGuardrail,
+    run_guardrails,
+)
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.models.plan import MergePhase
 from src.models.state import MergeState, PhaseResult, SystemStatus
@@ -42,3 +47,13 @@ class PlanningPhase(Phase):
             checkpoint_tag="after_phase1",
             memory_phase="planning",
         )
+
+    async def after(
+        self, state: MergeState, outcome: PhaseOutcome, ctx: PhaseContext
+    ) -> None:
+        if state.merge_plan is not None:
+            await run_guardrails(
+                [EmptyPlanGuardrail(), AllHumanRequiredGuardrail()],
+                state.merge_plan,
+                state,
+            )

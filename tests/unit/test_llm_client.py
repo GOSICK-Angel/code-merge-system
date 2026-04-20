@@ -2,7 +2,13 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from pydantic import BaseModel
 
-from src.llm.client import AnthropicClient, OpenAIClient, LLMClientFactory, ParseError
+from src.llm.client import (
+    AnthropicClient,
+    LLMClientFactory,
+    ModelOutputError,
+    OpenAIClient,
+    ParseError,
+)
 from src.llm.prompt_caching import CacheStrategy
 from src.models.config import AgentLLMConfig
 
@@ -210,7 +216,7 @@ class TestAnthropicClientCompleteStructured:
                 [{"role": "user", "content": "test"}], SimpleSchema
             )
 
-    async def test_raises_parse_error_on_schema_mismatch(self):
+    async def test_raises_model_output_error_on_schema_mismatch(self):
         client = _make_anthropic_client()
         mock_content = MagicMock()
         mock_content.text = '{"wrong_field": "oops"}'
@@ -218,10 +224,11 @@ class TestAnthropicClientCompleteStructured:
         mock_response.content = [mock_content]
         client._client.messages.create = AsyncMock(return_value=mock_response)
 
-        with pytest.raises(ParseError):
+        with pytest.raises(ModelOutputError) as exc_info:
             await client.complete_structured(
                 [{"role": "user", "content": "test"}], SimpleSchema
             )
+        assert exc_info.value.schema_name == "SimpleSchema"
 
     async def test_appends_instruction_to_last_user_message(self):
         client = _make_anthropic_client(cache_strategy=CacheStrategy.NONE)

@@ -210,7 +210,18 @@ def classify_error(error: Exception, provider: str = "") -> ClassifiedError:
             message=f"Context overflow ({provider}): {msg}",
         )
 
-    from src.llm.client import ParseError
+    from src.llm.client import ModelOutputError, ParseError
+
+    if isinstance(error, ModelOutputError):
+        return ClassifiedError(
+            category=ErrorCategory.FORMAT,
+            retryable=False,
+            should_compress=False,
+            should_rotate=False,
+            should_fallback=False,
+            cooldown_seconds=0,
+            message=f"Model output schema mismatch ({error.schema_name}): {str(error)[:180]}",
+        )
 
     if isinstance(error, ParseError):
         return ClassifiedError(

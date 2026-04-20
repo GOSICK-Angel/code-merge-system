@@ -14,6 +14,7 @@ import yaml
 from rich.console import Console
 
 from src.core.orchestrator import Orchestrator
+from src.core.phases.base import ActivityEvent
 from src.models.config import MergeConfig
 from src.models.state import MergeState
 from src.web.ws_bridge import MergeWSBridge
@@ -57,9 +58,9 @@ async def _run_tui(
 
     orchestrator.state_machine.add_observer(_on_transition)
 
-    def _on_activity(agent: str, action: str) -> None:
-        bridge.notify_agent_activity(agent, action)
-        bridge.notify_state_change(f"{agent}: {action}")
+    def _on_activity(event: ActivityEvent) -> None:
+        bridge.notify_agent_activity(event)
+        bridge.notify_state_change(f"{event.agent}: {event.action}")
 
     orchestrator.set_activity_callback(_on_activity)
 
