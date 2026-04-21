@@ -44,6 +44,15 @@ def cli() -> None:
 @click.option("--dry-run", is_flag=True, help="Analyze only, do not merge")
 @click.option("--ws-port", default=8765, type=int, help="WebSocket port for TUI bridge")
 @click.option("--reconfigure", "-r", is_flag=True, help="Force reconfiguration wizard")
+@click.option(
+    "--workflow",
+    "-w",
+    default=None,
+    help=(
+        "Named workflow preset from config/workflows.yaml "
+        "(standard|careful|fast|analysis-only). Overrides legacy flags where they overlap."
+    ),
+)
 def merge_command(
     target_branch: str,
     ci: bool,
@@ -51,11 +60,29 @@ def merge_command(
     dry_run: bool,
     ws_port: int,
     reconfigure: bool,
+    workflow: str | None,
 ) -> None:
     """Merge TARGET_BRANCH into the current branch (one-stop flow)."""
     from src.cli.commands.setup import detect_or_setup
 
     config = detect_or_setup(target_branch, repo_path=".", reconfigure=reconfigure)
+
+    if workflow is not None:
+        from src.core.workflow_loader import apply_workflow_by_name, load_workflows
+
+        try:
+            catalog = load_workflows()
+            config = apply_workflow_by_name(config, workflow, catalog)
+            wf_def = catalog.workflows[workflow]
+            if wf_def.dry_run:
+                dry_run = True
+            console.print(
+                f"[cyan]Workflow applied:[/cyan] [bold]{workflow}[/bold] "
+                f"(review_mode={wf_def.review_mode}, dry_run={wf_def.dry_run})"
+            )
+        except (FileNotFoundError, KeyError, ValueError) as e:
+            console.print(f"[red]Workflow error: {e}[/red]")
+            sys.exit(2)
 
     if not ci and not no_tui:
         from src.cli.commands.tui import tui_command_impl

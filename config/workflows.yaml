@@ -1,0 +1,42 @@
+# Workflow presets (O-B) — a single entry point for typical scenarios.
+# Selected via `merge <branch> --workflow <name>`.
+#
+# Effects are expressed as overrides on an existing MergeConfig.  Review
+# strength adjusts thresholds only; Judge / PlannerJudge always execute
+# their deterministic segments regardless of mode.
+#
+# Semantics of `review_mode`:
+#   high   auto_merge_confidence=0.95  human_escalation=0.50
+#   medium auto_merge_confidence=0.85  human_escalation=0.30   (current default)
+#   low    auto_merge_confidence=0.70  human_escalation=0.15
+#
+# `overrides` uses dotted paths (e.g. migration.sync_detection_threshold).
+
+workflows:
+  standard:
+    name: standard
+    description: Default balanced merge — lean review, full pipeline.
+    review_mode: medium
+    dry_run: false
+    overrides: {}
+
+  careful:
+    name: careful
+    description: Stricter review — raises thresholds so more files reach Judge LLM / human.
+    review_mode: high
+    dry_run: false
+    overrides: {}
+
+  fast:
+    name: fast
+    description: Loose review for small / low-risk PRs — more auto-merge, Judge deterministic still runs.
+    review_mode: low
+    dry_run: false
+    overrides: {}
+
+  analysis-only:
+    name: analysis-only
+    description: Run planning + analysis only; no file writes.  Useful for CI preview.
+    review_mode: low
+    dry_run: true
+    overrides: {}
