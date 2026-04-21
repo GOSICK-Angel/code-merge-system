@@ -1,7 +1,27 @@
 from datetime import datetime
 from enum import Enum
+from typing import Annotated, Any
 from uuid import uuid4
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
+
+
+def _coerce_line_list(v: Any) -> list[int]:
+    """Accept a list of ints or int-coercible values; silently drop non-numeric sentinels."""
+    if not isinstance(v, list):
+        return []
+    result: list[int] = []
+    for item in v:
+        if isinstance(item, int):
+            result.append(item)
+        elif isinstance(item, str):
+            try:
+                result.append(int(item))
+            except ValueError:
+                pass
+    return result
+
+
+_LineList = Annotated[list[int], BeforeValidator(_coerce_line_list)]
 
 
 class VerdictType(str, Enum):
@@ -27,7 +47,7 @@ class JudgeIssue(BaseModel):
     issue_level: IssueSeverity
     issue_type: str
     description: str
-    affected_lines: list[int] = Field(default_factory=list)
+    affected_lines: _LineList = Field(default_factory=list)
     suggested_fix: str | None = None
     must_fix_before_merge: bool = False
     veto_condition: str | None = None

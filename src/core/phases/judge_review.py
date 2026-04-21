@@ -99,6 +99,10 @@ class JudgeReviewPhase(Phase):
                 state.judge_verdict.veto_triggered,
             )
 
+            if round_num >= max_rounds - 1:
+                logger.info("Last dispute round — skipping rebuttal and repair")
+                continue
+
             rebuttal = await executor.build_rebuttal(state.judge_verdict.issues, state)
 
             if rebuttal.accepts_all:

@@ -419,6 +419,7 @@ class AutoMergePhase(Phase):
                         reason=f"layer {layer_id} judge sub-review: no consensus",
                         checkpoint_tag="after_phase2",
                         memory_phase="auto_merge",
+                        extra={"paused": True},
                     )
 
             # Layer gate checks
@@ -574,6 +575,11 @@ class AutoMergePhase(Phase):
         changed_files: list[str] = []
         for file_path in batch.file_paths:
             if file_path in replayed_set:
+                continue
+            if file_path in state.file_decision_records:
+                existing = state.file_decision_records[file_path]
+                if existing.decision != MergeDecision.ESCALATE_HUMAN:
+                    changed_files.append(file_path)
                 continue
 
             category = batch.change_category

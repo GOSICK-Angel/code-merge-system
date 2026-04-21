@@ -70,6 +70,9 @@ class MemoryExtractorAgent(BaseAgent):
         )
         return entries
 
+    def can_handle(self, state: MergeState) -> bool:
+        return False
+
     async def run(self, state: MergeState) -> AgentMessage:
         return AgentMessage(
             sender=AgentType.MEMORY_EXTRACTOR,
