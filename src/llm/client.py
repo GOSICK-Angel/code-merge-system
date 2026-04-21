@@ -77,13 +77,14 @@ class AnthropicClient(LLMClient):
         max_retries: int,
         base_url: str | None = None,
         cache_strategy: CacheStrategy = CacheStrategy.SYSTEM_AND_RECENT,
+        timeout: float = 60.0,
     ):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_retries = max_retries
         self.cache_strategy = cache_strategy
-        kwargs: dict[str, Any] = {"api_key": api_key}
+        kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout}
         if base_url:
             kwargs["base_url"] = base_url
         self._client = anthropic.AsyncAnthropic(**kwargs)
@@ -157,12 +158,13 @@ class OpenAIClient(LLMClient):
         max_tokens: int,
         max_retries: int,
         base_url: str | None = None,
+        timeout: float = 60.0,
     ):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_retries = max_retries
-        kwargs: dict[str, Any] = {"api_key": api_key}
+        kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout}
         if base_url:
             kwargs["base_url"] = base_url
         self._client = openai.AsyncOpenAI(**kwargs)
@@ -261,6 +263,7 @@ class LLMClientFactory:
                 max_retries=config.max_retries,
                 base_url=base_url,
                 cache_strategy=CacheStrategy(config.cache_strategy),
+                timeout=float(config.request_timeout_seconds),
             )
         elif config.provider == "openai":
             if base_url and not base_url.rstrip("/").endswith("/v1"):
@@ -272,5 +275,6 @@ class LLMClientFactory:
                 max_tokens=config.max_tokens,
                 max_retries=config.max_retries,
                 base_url=base_url,
+                timeout=float(config.request_timeout_seconds),
             )
         raise ValueError(f"Unknown provider: {config.provider}")

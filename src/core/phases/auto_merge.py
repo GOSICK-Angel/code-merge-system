@@ -326,7 +326,27 @@ class AutoMergePhase(Phase):
                 if not verify_layer_deps(layer_id, completed_layers, state):
                     logger.warning("Skipping layer %d: dependencies not met", layer_id)
                     for batch in batches:
-                        skipped_layer_files.extend(batch.file_paths)
+                        for fp in batch.file_paths:
+                            cat = batch.change_category
+                            if cat is None:
+                                fd_lookup = file_diffs_map.get(fp)
+                                cat = fd_lookup.change_category if fd_lookup else None
+                            if (
+                                cat == FileChangeCategory.D_MISSING
+                                and fp not in replayed_set
+                                and fp not in state.file_decision_records
+                            ):
+                                record = await executor._copy_from_upstream(fp, state)
+                                state.file_decision_records[fp] = record
+                                phase_changed_files.append(fp)
+                                batch_count += 1
+                                logger.info(
+                                    "D-missing %s copied directly (layer %d deps skipped)",
+                                    fp,
+                                    layer_id,
+                                )
+                            else:
+                                skipped_layer_files.append(fp)
                     continue
 
             # Parallel execution of all batches in this layer

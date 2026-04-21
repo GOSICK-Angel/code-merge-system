@@ -9,7 +9,7 @@ from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.models.conflict import ConflictAnalysis, ConflictType
 from src.models.config import ThresholdConfig
 from src.models.decision import MergeDecision
-from src.models.diff import FileDiff
+from src.models.diff import FileDiff, FileChangeCategory
 from src.models.human import HumanDecisionRequest, DecisionOption
 from src.models.plan import MergePhase
 from src.models.state import MergeState, PhaseResult, SystemStatus
@@ -70,7 +70,7 @@ async def _get_round_three_way(
 def _select_merge_strategy(
     analysis: ConflictAnalysis, thresholds: ThresholdConfig
 ) -> MergeDecision:
-    if analysis.confidence < thresholds.human_escalation:
+    if analysis.is_security_sensitive:
         return MergeDecision.ESCALATE_HUMAN
 
     if analysis.conflict_type == ConflictType.LOGIC_CONTRADICTION:
@@ -84,10 +84,18 @@ def _select_merge_strategy(
     if analysis.can_coexist and analysis.confidence >= thresholds.auto_merge_confidence:
         return MergeDecision.SEMANTIC_MERGE
 
-    if analysis.is_security_sensitive:
-        return MergeDecision.ESCALATE_HUMAN
-
     if analysis.confidence >= thresholds.auto_merge_confidence:
+        return analysis.recommended_strategy
+
+    # For unambiguous directional decisions (take_current / take_target),
+    # accept a lower confidence floor to reduce unnecessary human escalations.
+    # Semantic merge and security-sensitive files always require higher confidence.
+    if (
+        analysis.recommended_strategy
+        in (MergeDecision.TAKE_CURRENT, MergeDecision.TAKE_TARGET)
+        and analysis.confidence >= 0.4
+        and analysis.conflict_type != ConflictType.LOGIC_CONTRADICTION
+    ):
         return analysis.recommended_strategy
 
     return MergeDecision.ESCALATE_HUMAN
@@ -174,9 +182,36 @@ class ConflictAnalysisPhase(Phase):
             high_risk_files.append(fp)
             _seen_hr.add(fp)
 
+        # Opt-1: D-missing files (new upstream files absent from fork) need no LLM
+        # analysis — always take_target directly.
+        d_missing_resolved: set[str] = set()
+        for file_path in high_risk_files:
+            fd = file_diffs_map.get(file_path)
+            if fd is None or fd.change_category != FileChangeCategory.D_MISSING:
+                continue
+            if file_path in state.file_decision_records:
+                d_missing_resolved.add(file_path)
+                continue
+            state.conflict_analyses[file_path] = ConflictAnalysis(
+                file_path=file_path,
+                conflict_points=[],
+                overall_confidence=0.99,
+                recommended_strategy=MergeDecision.TAKE_TARGET,
+                conflict_type=ConflictType.SEMANTIC_EQUIVALENT,
+                rationale="D-missing: new upstream file, taking target directly",
+                confidence=0.99,
+            )
+            d_missing_resolved.add(file_path)
+            ctx.notify(
+                "conflict_analyst",
+                f"D-missing {file_path} → take_target (no LLM needed)",
+            )
+
         rule_resolver = RuleBasedResolver()
         rule_resolved_files: set[str] = set()
         for file_path in high_risk_files:
+            if file_path in d_missing_resolved:
+                continue
             fd = file_diffs_map.get(file_path)  # type: ignore[assignment]
             if fd is None:
                 continue
@@ -209,7 +244,11 @@ class ConflictAnalysisPhase(Phase):
                     f"Rule-resolved {file_path} ({pattern_name})",
                 )
 
-        llm_files = [fp for fp in high_risk_files if fp not in rule_resolved_files]
+        llm_files = [
+            fp
+            for fp in high_risk_files
+            if fp not in rule_resolved_files and fp not in d_missing_resolved
+        ]
         if rule_resolved_files:
             logger.info(
                 "Rule-based resolver handled %d/%d files, %d remain for LLM",

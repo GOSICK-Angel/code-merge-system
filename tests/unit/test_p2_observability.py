@@ -338,6 +338,38 @@ class TestDeterministicPipeline:
         )
 
         issues = judge._run_deterministic_pipeline(state, {})
+        assert any(i.issue_type == "d_missing_not_processed" for i in issues)
+
+    def test_d_missing_veto_when_processed_but_absent(self, tmp_path):
+        from src.agents.judge_agent import JudgeAgent
+        from src.models.config import AgentLLMConfig
+        from src.models.decision import (
+            FileDecisionRecord,
+            MergeDecision,
+            DecisionSource,
+        )
+        from src.models.diff import FileStatus
+
+        git_tool = MagicMock()
+        git_tool.repo_path = tmp_path
+
+        with patch("src.llm.client.LLMClientFactory.create"):
+            judge = JudgeAgent(AgentLLMConfig(), git_tool=git_tool)
+
+        state = self._make_state(
+            tmp_path, {"new_file.py": FileChangeCategory.D_MISSING}
+        )
+        state.file_decision_records["new_file.py"] = FileDecisionRecord(
+            file_path="new_file.py",
+            file_status=FileStatus.ADDED,
+            decision=MergeDecision.TAKE_TARGET,
+            decision_source=DecisionSource.AUTO_EXECUTOR,
+            rationale="D-missing: copying new file from upstream",
+            phase="auto_merge",
+            agent="executor",
+        )
+
+        issues = judge._run_deterministic_pipeline(state, {})
         assert any(i.issue_type == "d_missing_absent" for i in issues)
 
     def test_todo_check_veto(self, tmp_path):

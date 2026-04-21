@@ -30,6 +30,11 @@ class AgentLLMConfig(BaseModel):
         description="Optional cheaper model for trivial tasks (D1 smart routing). "
         "Set to e.g. 'claude-haiku-4-5-20251001' to auto-route simple queries.",
     )
+    request_timeout_seconds: int = Field(
+        default=60,
+        ge=5,
+        description="Per-request HTTP timeout in seconds passed to the LLM SDK.",
+    )
     compression: CompressionConfig = Field(default_factory=CompressionConfig)
 
     @property

@@ -25,6 +25,7 @@ class RulePattern(str, Enum):
     IDENTICAL_CHANGE = "identical_change"
     IMPORT_UNION = "import_union"
     ADJACENT_EDIT = "adjacent_edit"
+    LINE_ADDITION_UNION = "line_addition_union"
 
 
 class RuleResolution(BaseModel):
@@ -81,6 +82,12 @@ class RuleBasedResolver:
             return result
 
         result = self._try_adjacent_edit(base_content, current_content, target_content)
+        if result.resolved:
+            return result
+
+        result = self._try_line_addition_union(
+            base_content, current_content, target_content
+        )
         if result.resolved:
             return result
 
@@ -241,5 +248,63 @@ class RuleBasedResolver:
             description=(
                 f"Non-overlapping edits: {len(current_changed)} current, "
                 f"{len(target_changed)} target lines"
+            ),
+        )
+
+    @staticmethod
+    def _try_line_addition_union(
+        base: str, current: str, target: str
+    ) -> RuleResolution:
+        """Both sides only added lines to base (no removals); merge as union.
+
+        Handles requirements.txt, plain text lists, and similar additive files
+        where both the fork and upstream appended distinct entries.
+        """
+        base_lines = base.splitlines()
+        current_lines = current.splitlines()
+        target_lines = target.splitlines()
+
+        base_set = set(base_lines)
+        current_set = set(current_lines)
+        target_set = set(target_lines)
+
+        if not base_set.issubset(current_set):
+            return RuleResolution()
+
+        if not base_set.issubset(target_set):
+            return RuleResolution()
+
+        current_added = [ln for ln in current_lines if ln not in base_set]
+        target_added = [ln for ln in target_lines if ln not in base_set]
+
+        if not current_added and not target_added:
+            return RuleResolution()
+
+        if set(current_added) & set(target_added):
+            return RuleResolution()
+
+        seen: set[str] = set()
+        merged: list[str] = []
+        for ln in base_lines:
+            if ln not in seen:
+                merged.append(ln)
+                seen.add(ln)
+        for ln in current_lines:
+            if ln not in seen:
+                merged.append(ln)
+                seen.add(ln)
+        for ln in target_lines:
+            if ln not in seen:
+                merged.append(ln)
+                seen.add(ln)
+
+        return RuleResolution(
+            resolved=True,
+            pattern=RulePattern.LINE_ADDITION_UNION,
+            merged_content="\n".join(merged),
+            confidence=0.88,
+            description=(
+                f"Both sides only added lines: "
+                f"+{len(current_added)} current, +{len(target_added)} target"
             ),
         )

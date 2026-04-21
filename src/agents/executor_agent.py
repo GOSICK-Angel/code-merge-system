@@ -349,9 +349,10 @@ class ExecutorAgent(BaseAgent):
             raw = await self._call_llm_with_retry(messages, system=EXECUTOR_SYSTEM)
             merged_content = parse_merge_result(str(raw))
         except Exception as e:
+            logger.warning("Semantic merge failed for %s: %s", file_diff.file_path, e)
             return create_escalate_record(
                 file_diff.file_path,
-                f"Semantic merge LLM call failed: {e}",
+                f"SEMANTIC_MERGE_FAILED: {e}",
             )
 
         current_phase_str = (

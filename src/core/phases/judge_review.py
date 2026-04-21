@@ -40,6 +40,7 @@ class JudgeReviewPhase(Phase):
 
         for round_num in range(max_rounds):
             state.judge_repair_rounds = round_num
+            executor.reset_circuit_breaker()
 
             readonly = ReadOnlyStateView(state)
             msg = await judge.run(readonly)

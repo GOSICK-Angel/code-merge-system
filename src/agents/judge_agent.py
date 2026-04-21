@@ -222,16 +222,34 @@ class JudgeAgent(BaseAgent):
 
             elif cat == FileChangeCategory.D_MISSING:
                 if not three_way.verify_d_missing_present(fp):
-                    issues.append(
-                        JudgeIssue(
-                            file_path=fp,
-                            issue_level=IssueSeverity.CRITICAL,
-                            issue_type="d_missing_absent",
-                            description="D-missing file not present in HEAD after merge",
-                            must_fix_before_merge=True,
-                            veto_condition="D-missing file not present in HEAD",
+                    if fp not in state.file_decision_records:
+                        issues.append(
+                            JudgeIssue(
+                                file_path=fp,
+                                issue_level=IssueSeverity.CRITICAL,
+                                issue_type="d_missing_not_processed",
+                                description=(
+                                    "D-missing file was never processed by auto_merge "
+                                    "(likely blocked by unmet layer dependencies)"
+                                ),
+                                must_fix_before_merge=True,
+                                veto_condition="D-missing file not processed by auto_merge",
+                            )
                         )
-                    )
+                    else:
+                        issues.append(
+                            JudgeIssue(
+                                file_path=fp,
+                                issue_level=IssueSeverity.CRITICAL,
+                                issue_type="d_missing_absent",
+                                description=(
+                                    "D-missing file was processed but is not present "
+                                    "in HEAD after merge (apply_with_snapshot may have failed)"
+                                ),
+                                must_fix_before_merge=True,
+                                veto_condition="D-missing file not present in HEAD after merge",
+                            )
+                        )
 
             elif cat == FileChangeCategory.C:
                 additions = three_way.extract_upstream_additions(

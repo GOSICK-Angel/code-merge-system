@@ -355,6 +355,22 @@ def write_markdown_report(
             lines.append(f"| `{fp}` | {decision_val} | {source_val} | {conf} |")
         lines.append("")
 
+        semantic_failures = [
+            (fp, (rec.rationale or "").removeprefix("SEMANTIC_MERGE_FAILED:").strip())
+            for fp, rec in state.file_decision_records.items()
+            if (rec.rationale or "").startswith("SEMANTIC_MERGE_FAILED:")
+        ]
+        if semantic_failures:
+            sec_title = (
+                "语义合并失败（需手动处理）"
+                if lang == "zh"
+                else "Semantic Merge Failures (Manual Intervention Required)"
+            )
+            lines += [f"## ⚠️ {sec_title}", ""]
+            for fp, reason in semantic_failures:
+                lines.append(f"- `{fp}`: {reason}")
+            lines.append("")
+
     if state.judge_verdict:
         verdict = state.judge_verdict
         verdict_val = (
