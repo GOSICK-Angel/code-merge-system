@@ -37,6 +37,10 @@ from src.llm.prompts.judge_prompts import (
     build_re_evaluate_prompt,
     build_verdict_prompt,
 )
+from src.llm.prompts.memory_extractor_prompts import (
+    MEMORY_EXTRACTOR_SYSTEM,
+    build_extraction_prompt,
+)
 from src.llm.prompts.planner_judge_prompts import (
     build_plan_review_prompt,
     get_planner_judge_system,
@@ -97,6 +101,10 @@ def _analyst_system_constant(*_args: Any, **_kwargs: Any) -> str:
 
 def _judge_system_constant(*_args: Any, **_kwargs: Any) -> str:
     return JUDGE_SYSTEM
+
+
+def _memory_extractor_system_constant(*_args: Any, **_kwargs: Any) -> str:
+    return MEMORY_EXTRACTOR_SYSTEM
 
 
 # Planner (P-)
@@ -202,4 +210,16 @@ register_gate(
     "J-RE-EVALUATE",
     build_re_evaluate_prompt,
     "Judge re-evaluation prompt after Executor repair round.",
+)
+
+# MemoryExtractor (M-)
+register_gate(
+    "M-SYSTEM",
+    _memory_extractor_system_constant,
+    "MemoryExtractor system prompt (causal insight extraction).",
+)
+register_gate(
+    "M-EXTRACT-INSIGHT",
+    build_extraction_prompt,
+    "MemoryExtractor user prompt: extract causal insights from phase events.",
 )

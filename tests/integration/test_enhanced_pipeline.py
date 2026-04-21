@@ -339,15 +339,6 @@ class TestCheckpointRoundTrip:
             file_count=2,
         )
 
-        state.memory.entries = [
-            MemoryEntry(
-                entry_type=MemoryEntryType.PATTERN,
-                phase="planning",
-                content="test pattern for checkpoint",
-                confidence_level=ConfidenceLevel.EXTRACTED,
-            )
-        ]
-
         json_data = state.model_dump(mode="json")
         restored = MergeState.model_validate(json_data)
 
@@ -357,12 +348,6 @@ class TestCheckpointRoundTrip:
         assert edge.target_file == "b.py"
         assert edge.kind == DependencyKind.IMPORTS
         assert edge.confidence == ConfidenceLabel.EXTRACTED
-
-        assert len(restored.memory.entries) == 1
-        mem = restored.memory.entries[0]
-        assert mem.confidence_level == ConfidenceLevel.EXTRACTED
-        assert mem.content_hash != ""
-        assert mem.content == "test pattern for checkpoint"
 
     def test_backward_compat_missing_fields(self):
         """Old checkpoint JSON without new fields loads with defaults."""

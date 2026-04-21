@@ -28,6 +28,7 @@ import src.agents.conflict_analyst_agent  # noqa: F401
 import src.agents.executor_agent  # noqa: F401
 import src.agents.judge_agent  # noqa: F401
 import src.agents.human_interface_agent  # noqa: F401
+import src.agents.memory_extractor_agent  # noqa: F401
 
 from src.cli.paths import ensure_merge_dir, get_run_dir, get_system_log_dir, is_dev_mode
 from src.core.checkpoint import Checkpoint
@@ -47,6 +48,7 @@ from src.core.phases import (
 )
 from src.core.phases.base import ActivityEvent, OnActivityCallback
 from src.core.state_machine import StateMachine
+from src.memory.sqlite_store import SQLiteMemoryStore
 from src.memory.store import MemoryStore
 from src.memory.summarizer import PhaseSummarizer
 from src.models.config import MergeConfig
@@ -141,6 +143,7 @@ class Orchestrator:
         self.executor = agent_map["executor"]
         self.judge = agent_map["judge"]
         self.human_interface = agent_map["human_interface"]
+        self.memory_extractor = agent_map.get("memory_extractor")
 
         self._all_agents = list(agent_map.values())
 
@@ -193,7 +196,9 @@ class Orchestrator:
         run_start = time.monotonic()
         self.checkpoint.register_signal_handler(state)
 
-        self._memory_store = MemoryStore.from_memory(state.memory)
+        db_path = run_dir / "memory.db"
+        self._memory_store = SQLiteMemoryStore.open(db_path)
+        state.memory_db_path = str(db_path)
         self._inject_memory()
         self._inject_hooks()
 
@@ -252,7 +257,7 @@ class Orchestrator:
                     )
 
                 if outcome.should_update_memory:
-                    self._update_memory(outcome.memory_phase, state)
+                    await self._update_memory(outcome.memory_phase, state)
                     self._inject_memory()
 
                 if outcome.should_checkpoint:
@@ -335,7 +340,7 @@ class Orchestrator:
                 )
             )
 
-    def _update_memory(self, phase: str, state: MergeState) -> None:
+    async def _update_memory(self, phase: str, state: MergeState) -> None:
         method = getattr(self._summarizer, f"summarize_{phase}", None)
         if method is None:
             return
@@ -348,7 +353,6 @@ class Orchestrator:
             store = store.remove_superseded(phase)
             removed = count_before - store.entry_count
             self._memory_store = store
-            state.memory = store.to_memory()
             logger.info(
                 "Memory updated after %s: %d entries total, %d new, %d superseded removed",
                 phase,
@@ -358,6 +362,29 @@ class Orchestrator:
             )
         except Exception as e:
             logger.warning("Memory summarization failed for %s: %s", phase, e)
+
+        if self.memory_extractor is not None and self._should_llm_extract(phase, state):
+            try:
+                llm_entries = await self.memory_extractor.extract(phase, state)
+                for e in llm_entries:
+                    self._memory_store.add_entry(e)
+            except Exception as e:
+                logger.warning("LLM memory extraction failed for %s: %s", phase, e)
+
+    def _should_llm_extract(self, phase: str, state: MergeState) -> bool:
+        cfg = getattr(self.config, "memory", None)
+        if cfg is None or not cfg.llm_extraction:
+            return False
+        if state.errors:
+            return True
+        if phase == "planning" and state.plan_disputes:
+            return True
+        if (
+            phase == "judge_review"
+            and state.judge_repair_rounds >= cfg.min_judge_repair_rounds
+        ):
+            return True
+        return False
 
     def _inject_memory(self) -> None:
         for agent in self._all_agents:

@@ -18,7 +18,6 @@ from src.models.plan_review import (
     UserDecisionItem,
     ReviewConclusion,
 )
-from src.memory.models import MergeMemory
 from src.models.dispute import PlanDisputeRequest
 from src.models.conflict import ConflictAnalysis
 from src.models.dependency import FileDependencyGraph
@@ -153,7 +152,6 @@ class MergeState(BaseModel):
         description="P2-2: file_path -> list of sentinel hits found in the fork version.",
     )
 
-    memory: MergeMemory = Field(default_factory=MergeMemory)
     dependency_graph: FileDependencyGraph = Field(default_factory=FileDependencyGraph)
 
     file_diffs: list[FileDiff] = Field(default_factory=list)
@@ -171,6 +169,7 @@ class MergeState(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     checkpoint_path: str | None = None
+    memory_db_path: str | None = None
 
     model_config = {"use_enum_values": False}
 

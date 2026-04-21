@@ -1,0 +1,16 @@
+name: memory_extractor
+inputs:
+  - config
+  - errors
+  - plan_disputes
+  - judge_verdicts_log
+  - judge_repair_rounds
+output_schema: list[MemoryEntry]
+gates:
+  - M-SYSTEM
+  - M-EXTRACT-INSIGHT
+forbidden:
+  - writes_state
+  - direct_llm_call
+collaboration: compute
+requires_human_options: false

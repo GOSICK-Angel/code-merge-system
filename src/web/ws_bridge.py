@@ -181,21 +181,32 @@ class MergeWSBridge:
             "gateHistory": s.gate_history,
             "errors": s.errors,
             "messages": s.messages,
-            "memory": {
-                "phase_summaries": {
-                    k: str(v.key_decisions) if hasattr(v, "key_decisions") else str(v)
-                    for k, v in (
-                        s.memory.phase_summaries.items() if s.memory else {}.items()
-                    )
-                },
-                "entries": [
-                    {"key": e.entry_id, "value": e.content, "phase": e.phase}
-                    for e in (s.memory.entries if s.memory else [])
-                ],
-            },
+            "memory": self._read_memory_snapshot(s),
             "createdAt": s.created_at.isoformat()
             if s.created_at
             else datetime.now().isoformat(),
+        }
+
+    def _read_memory_snapshot(self, s: MergeState) -> dict[str, Any]:
+        if not s.memory_db_path:
+            return {"phase_summaries": {}, "entries": []}
+        from pathlib import Path
+        from src.memory.sqlite_store import SQLiteMemoryStore
+
+        db = Path(s.memory_db_path)
+        if not db.exists():
+            return {"phase_summaries": {}, "entries": []}
+        store = SQLiteMemoryStore.open(db)
+        mem = store.to_memory()
+        return {
+            "phase_summaries": {
+                k: str(v.key_decisions) if hasattr(v, "key_decisions") else str(v)
+                for k, v in mem.phase_summaries.items()
+            },
+            "entries": [
+                {"key": e.entry_id, "value": e.content, "phase": e.phase}
+                for e in mem.entries
+            ],
         }
 
     def _serialize_file_diffs(self) -> list[dict[str, Any]]:

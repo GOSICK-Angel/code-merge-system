@@ -88,6 +88,14 @@ class AgentsLLMConfig(BaseModel):
             api_key_env="ANTHROPIC_API_KEY",
         )
     )
+    memory_extractor: AgentLLMConfig = Field(
+        default_factory=lambda: AgentLLMConfig(
+            provider="anthropic",
+            model="claude-haiku-4-5-20251001",
+            max_tokens=2048,
+            api_key_env="ANTHROPIC_API_KEY",
+        )
+    )
 
 
 class LLMConfig(BaseModel):
@@ -401,6 +409,12 @@ class HistoryPreservationConfig(BaseModel):
     commit_after_phase: bool = True
 
 
+class MemoryExtractionConfig(BaseModel):
+    llm_extraction: bool = False
+    max_insights_per_phase: int = Field(default=5, ge=1, le=20)
+    min_judge_repair_rounds: int = Field(default=2, ge=1)
+
+
 class MergeConfig(BaseModel):
     upstream_ref: str = Field(
         ..., description="upstream branch ref, e.g. upstream/main"
@@ -470,8 +484,15 @@ class MergeConfig(BaseModel):
         default_factory=HistoryPreservationConfig
     )
     max_judge_repair_rounds: int = Field(default=3, ge=1, le=10)
+    memory: MemoryExtractionConfig = Field(default_factory=MemoryExtractionConfig)
     max_dispute_rounds: int = Field(default=2, ge=1, le=5)
     max_batch_repair_rounds: int = Field(default=1, ge=1, le=3)
+    parallel_file_concurrency: int | None = Field(
+        default=None,
+        ge=1,
+        description="Max concurrent per-file LLM calls in ConflictAnalyst and Judge. "
+        "None = auto-detect from the number of active API keys for each agent.",
+    )
 
     @field_validator("upstream_ref", "fork_ref")
     @classmethod

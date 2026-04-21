@@ -15,6 +15,7 @@ class AgentType(str, Enum):
     HUMAN_INTERFACE = "human_interface"
     ORCHESTRATOR = "orchestrator"
     BROADCAST = "broadcast"
+    MEMORY_EXTRACTOR = "memory_extractor"
 
 
 class MessageType(str, Enum):

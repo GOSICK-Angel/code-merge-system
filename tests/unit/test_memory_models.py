@@ -116,33 +116,3 @@ class TestMergeMemory:
         assert restored.entries[0].content == "test pattern"
         assert "planning" in restored.phase_summaries
         assert restored.codebase_profile["language"] == "python"
-
-
-class TestMergeMemoryInState:
-    def test_state_has_memory_field(self):
-        from src.models.config import MergeConfig
-        from src.models.state import MergeState
-
-        config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/fork")
-        state = MergeState(config=config)
-        assert isinstance(state.memory, MergeMemory)
-        assert state.memory.entries == []
-
-    def test_state_memory_serializes(self):
-        from src.models.config import MergeConfig
-        from src.models.state import MergeState
-
-        config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/fork")
-        state = MergeState(config=config)
-        state.memory = MergeMemory(
-            entries=[
-                MemoryEntry(
-                    entry_type=MemoryEntryType.PATTERN,
-                    phase="test",
-                    content="test",
-                )
-            ]
-        )
-        data = state.model_dump(mode="json")
-        assert "memory" in data
-        assert len(data["memory"]["entries"]) == 1
