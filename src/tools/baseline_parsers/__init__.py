@@ -59,8 +59,10 @@ def diff_new_failures(
     current: BaselineSnapshot | dict[str, object],
 ) -> list[str]:
     """Return failed_ids present in *current* but NOT in *baseline*."""
-    base_ids = set(baseline.get("failed_ids", []) or [])  # type: ignore[arg-type]
-    cur_ids = set(current.get("failed_ids", []) or [])  # type: ignore[arg-type]
+    base_raw = baseline.get("failed_ids", []) or []
+    cur_raw = current.get("failed_ids", []) or []
+    base_ids: set[str] = set(base_raw) if isinstance(base_raw, list) else set()
+    cur_ids: set[str] = set(cur_raw) if isinstance(cur_raw, list) else set()
     return sorted(cur_ids - base_ids)
 
 
@@ -80,7 +82,7 @@ def load_entry_point_parsers() -> None:
         group = (
             eps.select(group="code_merge_system.baseline_parsers")
             if hasattr(eps, "select")
-            else eps.get("code_merge_system.baseline_parsers", [])
+            else eps.get("code_merge_system.baseline_parsers", [])  # type: ignore[arg-type]
         )
     except Exception as exc:
         logger.debug("Entry-point discovery failed: %s", exc)

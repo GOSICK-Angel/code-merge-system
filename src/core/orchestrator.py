@@ -151,7 +151,7 @@ class Orchestrator:
         self._coordinator = Coordinator(config)
 
         # --- memory ---
-        self._memory_store = MemoryStore()
+        self._memory_store: MemoryStore | SQLiteMemoryStore = MemoryStore()
         self._summarizer = PhaseSummarizer()
 
         # --- hooks (C1) ---
@@ -308,7 +308,7 @@ class Orchestrator:
             message_bus=self.message_bus,
             checkpoint=self.checkpoint,
             phase_runner=self.phase_runner,
-            memory_store=self._memory_store,
+            memory_store=self._memory_store,  # type: ignore[arg-type]
             summarizer=self._summarizer,
             trace_logger=self._trace_logger,
             emit=self._on_activity,
@@ -369,11 +369,11 @@ class Orchestrator:
 
         if self.memory_extractor is not None and self._should_llm_extract(phase, state):
             try:
-                llm_entries = await self.memory_extractor.extract(phase, state)
-                for e in llm_entries:
-                    self._memory_store.add_entry(e)
-            except Exception as e:
-                logger.warning("LLM memory extraction failed for %s: %s", phase, e)
+                llm_entries = await self.memory_extractor.extract(phase, state)  # type: ignore[attr-defined]
+                for entry in llm_entries:
+                    self._memory_store.add_entry(entry)
+            except Exception as exc:
+                logger.warning("LLM memory extraction failed for %s: %s", phase, exc)
 
     def _should_llm_extract(self, phase: str, state: MergeState) -> bool:
         cfg = getattr(self.config, "memory", None)
@@ -402,7 +402,7 @@ class Orchestrator:
 
     def _inject_memory(self) -> None:
         for agent in self._all_agents:
-            agent.set_memory_store(self._memory_store)
+            agent.set_memory_store(self._memory_store)  # type: ignore[arg-type]
 
     def _inject_cost_tracker(self, phase: str = "") -> None:
         for agent in self._all_agents:

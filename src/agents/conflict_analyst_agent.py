@@ -1,3 +1,5 @@
+from typing import Any
+
 from src.agents.base_agent import BaseAgent
 from src.core.parallel_file_runner import ParallelFileRunner
 from src.models.config import AgentLLMConfig
@@ -213,7 +215,7 @@ class ConflictAnalystAgent(BaseAgent):
 
     async def analyze_commit_round(
         self,
-        round_commits: list[dict],
+        round_commits: list[dict[str, Any]],
         file_three_way: dict[str, tuple[str | None, str | None, str | None]],
         file_languages: dict[str, str],
         project_context: str = "",

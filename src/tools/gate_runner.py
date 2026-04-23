@@ -247,7 +247,8 @@ class GateRunner:
                     }
             except (ValueError, TypeError):
                 pass
-        return parser(baseline_raw)
+        result: BaselineSnapshot = parser(baseline_raw)
+        return result
 
     async def record_baseline(self, gates: list[GateCommandConfig]) -> dict[str, str]:
         baselines: dict[str, str] = {}

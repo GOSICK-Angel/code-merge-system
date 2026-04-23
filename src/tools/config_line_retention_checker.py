@@ -18,6 +18,8 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from src.models.config import ConfigRetentionRule
+
 
 class ConfigRetentionViolation(BaseModel):
     """Describes one required-line pattern that is absent from a matched file."""
@@ -41,7 +43,7 @@ class ConfigLineRetentionChecker:
 
     def check(
         self,
-        rules: list,
+        rules: list[ConfigRetentionRule],
     ) -> list[ConfigRetentionViolation]:
         """Run all retention rules against the current working tree.
 

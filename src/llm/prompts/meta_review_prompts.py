@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 META_PLAN_SYSTEM = """\
 You are a senior merge strategy advisor reviewing a failed plan negotiation.
@@ -30,8 +31,8 @@ Return ONLY a valid JSON object — no markdown, no prose:
 
 
 def build_meta_plan_review_prompt(
-    plan_review_log: list[dict],
-    plan_disputes: list[dict],
+    plan_review_log: list[dict[str, Any]],
+    plan_disputes: list[dict[str, Any]],
     total_rounds: int,
 ) -> str:
     sections = [
@@ -54,7 +55,7 @@ def build_meta_plan_review_prompt(
 
 
 def build_meta_judge_review_prompt(
-    judge_verdicts_log: list[dict],
+    judge_verdicts_log: list[dict[str, Any]],
     judge_repair_rounds: int,
 ) -> str:
     sections = [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 
 from src.agents.base_agent import BaseAgent
 from src.agents.registry import AgentRegistry
@@ -98,17 +99,25 @@ def _parse_entries(
     end = raw.rfind("]")
     if start == -1 or end == -1:
         raise ModelOutputError(
-            f"MemoryExtractor: expected JSON array in response, got: {raw[:200]!r}"
+            raw=raw,
+            schema_name="MemoryExtractor",
+            detail=f"expected JSON array in response, got: {raw[:200]!r}",
         )
     try:
-        items: list[dict] = json.loads(raw[start : end + 1])
+        items: list[dict[str, Any]] = json.loads(raw[start : end + 1])
     except json.JSONDecodeError as exc:
         raise ModelOutputError(
-            f"MemoryExtractor: JSON parse failed: {exc}. Raw: {raw[:200]!r}"
+            raw=raw,
+            schema_name="MemoryExtractor",
+            detail=f"JSON parse failed: {exc}. Raw: {raw[:200]!r}",
         ) from exc
 
     if not isinstance(items, list):
-        raise ModelOutputError("MemoryExtractor: top-level JSON value must be an array")
+        raise ModelOutputError(
+            raw=raw,
+            schema_name="MemoryExtractor",
+            detail="top-level JSON value must be an array",
+        )
 
     entries: list[MemoryEntry] = []
     for item in items[:max_insights]:

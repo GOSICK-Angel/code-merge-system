@@ -259,8 +259,8 @@ class ConflictAnalysisPhase(Phase):
         # analysis — always take_target directly.
         d_missing_resolved: set[str] = set()
         for file_path in high_risk_files:
-            fd = file_diffs_map.get(file_path)
-            if fd is None or fd.change_category != FileChangeCategory.D_MISSING:
+            fd_opt = file_diffs_map.get(file_path)
+            if fd_opt is None or fd_opt.change_category != FileChangeCategory.D_MISSING:
                 continue
             if file_path in state.file_decision_records:
                 d_missing_resolved.add(file_path)
@@ -333,13 +333,13 @@ class ConflictAnalysisPhase(Phase):
         # --- Split llm_files into two streams ---
         # Stream A: files from non_replayable_commits  → commit-round LLM (commit context)
         # Stream B: plan HUMAN_REQUIRED/AUTO_RISKY + other pending → per-file LLM
-        non_replay_file_to_commit: dict[str, dict] = {}
+        non_replay_file_to_commit: dict[str, dict[str, Any]] = {}
         for _commit in state.non_replayable_commits or []:
             for _fp in _commit.get("files", []):
                 non_replay_file_to_commit.setdefault(_fp, _commit)
 
         stream_a_shas_seen: set[str] = set()
-        stream_a_commits: list[dict] = []
+        stream_a_commits: list[dict[str, Any]] = []
         stream_a_files: set[str] = set()
         stream_b_files: list[str] = []
 

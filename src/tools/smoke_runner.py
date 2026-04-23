@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Literal
 
 from src.models.config import SmokeTestCase, SmokeTestConfig, SmokeTestSuite
 from src.models.smoke import (
@@ -91,7 +92,9 @@ class SmokeRunner:
             duration = time.monotonic() - start
             stdout = stdout_bytes.decode("utf-8", errors="replace")
             stderr = stderr_bytes.decode("utf-8", errors="replace")
-            status = "pass" if exit_code == 0 else "fail"
+            status: Literal["pass", "fail", "skipped", "error"] = (
+                "pass" if exit_code == 0 else "fail"
+            )
             return SmokeTestResult(
                 suite_name=suite.name,
                 case_id=case.id,

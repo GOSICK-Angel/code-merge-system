@@ -517,7 +517,7 @@ class AutoMergePhase(Phase):
                 auto_take = fd is not None and (
                     _is_lock_file(fp) or (is_bump and _is_dep_manifest(fp))
                 )
-                if auto_take:
+                if auto_take and fd is not None:
                     record = await executor.execute_auto_merge(
                         fd, MergeDecision.TAKE_TARGET, state
                     )
@@ -631,7 +631,7 @@ class AutoMergePhase(Phase):
 
         changed_files: list[str] = []
         for fp, result in zip(batch.file_paths, results):
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
                 logger.error("Batch file processing error for %s: %s", fp, result)
             elif result is not None:
                 changed_files.append(result)
@@ -708,7 +708,7 @@ class AutoMergePhase(Phase):
 
         logger.info("Coordinator: running plan meta-review (%s)", trigger_reason)
         try:
-            raw = await planner.meta_review(state)  # type: ignore[union-attr]
+            raw = await planner.meta_review(state)  # type: ignore[attr-defined]
             if ctx.coordinator is not None:
                 result = Coordinator.build_meta_review_result(
                     phase="auto_merge",

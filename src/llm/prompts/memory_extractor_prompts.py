@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 MEMORY_EXTRACTOR_SYSTEM = """\
 You are a memory extraction specialist for a code merge system.
@@ -23,7 +24,7 @@ Rules:
 
 def build_extraction_prompt(
     phase: str,
-    events: dict,
+    events: dict[str, Any],
     max_insights: int,
 ) -> str:
     errors = events.get("errors", [])
