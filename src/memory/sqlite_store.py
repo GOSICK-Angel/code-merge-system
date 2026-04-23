@@ -111,12 +111,27 @@ class SQLiteMemoryStore:
     # ------------------------------------------------------------------
 
     def _init_db(self) -> None:
-        conn = sqlite3.connect(str(self._db_path), timeout=5.0)
-        try:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.executescript(_CREATE_SCHEMA)
-        finally:
-            conn.close()
+        # Multiple concurrent SQLiteMemoryStore.open(db_path) callers race to
+        # set journal_mode=WAL — the PRAGMA itself needs an exclusive write
+        # lock, and sqlite3's `timeout=` does not cover it. Retry a handful of
+        # times before giving up.
+        import time
+
+        last_exc: sqlite3.OperationalError | None = None
+        for attempt in range(10):
+            conn = sqlite3.connect(str(self._db_path), timeout=5.0)
+            try:
+                conn.execute("PRAGMA busy_timeout=5000")
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.executescript(_CREATE_SCHEMA)
+                return
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                time.sleep(0.05 * (attempt + 1))
+            finally:
+                conn.close()
+        assert last_exc is not None
+        raise last_exc
 
     @contextmanager
     def _conn(self) -> Generator[sqlite3.Connection, None, None]:

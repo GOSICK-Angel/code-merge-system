@@ -50,6 +50,18 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "src/web/*",
+    "src/cli/*",
+    "src/integrations/*",
+    "src/tools/chunk_processor.py",
+    "src/tools/merge_plan_report.py",
+    "src/tools/git_tool.py",
+    "src/tools/commit_replayer.py",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
 
