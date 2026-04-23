@@ -5,6 +5,7 @@ inputs:
   - plan_disputes
   - judge_verdicts_log
   - judge_repair_rounds
+  - coordinator_directives
 output_schema: list[MemoryEntry]
 gates:
   - M-SYSTEM

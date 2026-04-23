@@ -389,6 +389,16 @@ class Orchestrator:
             and state.judge_repair_rounds >= cfg.min_judge_repair_rounds
         ):
             return True
+        # O-M2: capture failure-mode insights after Coordinator escalations.
+        if (
+            getattr(cfg, "extract_on_meta_review", False)
+            and state.coordinator_directives
+            and any(
+                d.trigger in {"judge_stall", "plan_dispute"}
+                for d in state.coordinator_directives
+            )
+        ):
+            return True
         return False
 
     def _inject_memory(self) -> None:

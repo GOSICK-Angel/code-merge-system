@@ -38,6 +38,13 @@ class AgentLLMConfig(BaseModel):
         description="Per-request HTTP timeout in seconds passed to the LLM SDK.",
     )
     compression: CompressionConfig = Field(default_factory=CompressionConfig)
+    repair_max_file_chars: int = Field(
+        default=30_000,
+        ge=1_000,
+        description="O-P1: Executor LLM-repair per-side content size cap. "
+        "Files above this threshold are skipped to avoid context-window blowups "
+        "and escalated to human review instead.",
+    )
     fallback: Optional[AgentLLMConfig] = Field(
         default=None,
         description="O-1/O-5: Optional fallback provider config activated when the "
@@ -60,18 +67,23 @@ class AgentsLLMConfig(BaseModel):
         default_factory=lambda: AgentLLMConfig(
             provider="anthropic",
             model="claude-opus-4-6",
+            max_tokens=8192,
             api_key_env="ANTHROPIC_API_KEY",
         )
     )
     planner_judge: AgentLLMConfig = Field(
         default_factory=lambda: AgentLLMConfig(
-            provider="openai", model="gpt-4o", api_key_env="OPENAI_API_KEY"
+            provider="openai",
+            model="gpt-4o",
+            max_tokens=2048,
+            api_key_env="OPENAI_API_KEY",
         )
     )
     conflict_analyst: AgentLLMConfig = Field(
         default_factory=lambda: AgentLLMConfig(
             provider="anthropic",
             model="claude-sonnet-4-6",
+            max_tokens=4096,
             api_key_env="ANTHROPIC_API_KEY",
         )
     )
@@ -80,6 +92,7 @@ class AgentsLLMConfig(BaseModel):
             provider="openai",
             model="gpt-4o",
             temperature=0.1,
+            max_tokens=4096,
             api_key_env="OPENAI_API_KEY",
         )
     )
@@ -88,6 +101,7 @@ class AgentsLLMConfig(BaseModel):
             provider="anthropic",
             model="claude-opus-4-6",
             temperature=0.1,
+            max_tokens=2048,
             api_key_env="ANTHROPIC_API_KEY",
         )
     )
@@ -95,6 +109,7 @@ class AgentsLLMConfig(BaseModel):
         default_factory=lambda: AgentLLMConfig(
             provider="anthropic",
             model="claude-haiku-4-5-20251001",
+            max_tokens=2048,
             api_key_env="ANTHROPIC_API_KEY",
         )
     )
@@ -422,7 +437,18 @@ class HistoryPreservationConfig(BaseModel):
 class MemoryExtractionConfig(BaseModel):
     llm_extraction: bool = True
     max_insights_per_phase: int = Field(default=5, ge=1, le=20)
-    min_judge_repair_rounds: int = Field(default=2, ge=1)
+    min_judge_repair_rounds: int = Field(
+        default=1,
+        ge=1,
+        description="O-M2: minimum dispute rounds before memory_extractor fires "
+        "on judge_review. Lowered from 2 so dispute-round failure modes get "
+        "persisted even when max_dispute_rounds=2 caps judge_repair_rounds at 1.",
+    )
+    extract_on_meta_review: bool = Field(
+        default=True,
+        description="O-M2: trigger extraction when Coordinator produces a "
+        "meta_review directive (captures failure-mode insights after stalls).",
+    )
 
 
 class CoordinatorConfig(BaseModel):
@@ -527,6 +553,25 @@ class MergeConfig(BaseModel):
     coordinator: CoordinatorConfig = Field(default_factory=CoordinatorConfig)
     max_dispute_rounds: int = Field(default=2, ge=1, le=5)
     max_batch_repair_rounds: int = Field(default=1, ge=1, le=3)
+    judge_skip_high_confidence: bool = Field(
+        default=True,
+        description="O-J1: skip per-file LLM judge review when record.confidence "
+        ">= judge_skip_confidence_threshold and local syntax passes. Reduces "
+        "round-0 LLM fan-out for obviously-safe auto_risky files.",
+    )
+    judge_skip_confidence_threshold: float = Field(
+        default=0.9,
+        ge=0.0,
+        le=1.0,
+        description="O-J1: minimum decision-record confidence that lets Judge skip "
+        "the LLM call when syntax validates locally.",
+    )
+    judge_freeze_prior_issues: bool = Field(
+        default=True,
+        description="O-J2: in dispute rounds, Judge only re-evaluates whether "
+        "Executor's repair closed the previously-reported issues and does not "
+        "introduce brand-new issues (those roll to meta-review as out-of-scope).",
+    )
     chunk_size_chars: int = Field(
         default=20000,
         ge=5000,

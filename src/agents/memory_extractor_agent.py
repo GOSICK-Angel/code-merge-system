@@ -44,6 +44,10 @@ class MemoryExtractorAgent(BaseAgent):
             ],
             "judge_verdicts_log": list(view.judge_verdicts_log)[-5:],
             "judge_repair_rounds": view.judge_repair_rounds,
+            "coordinator_directives": [
+                (d.model_dump() if hasattr(d, "model_dump") else dict(d))
+                for d in (getattr(view, "coordinator_directives", None) or [])
+            ][-5:],
         }
 
         existing_hashes: set[str] = set()

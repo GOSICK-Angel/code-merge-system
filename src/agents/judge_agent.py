@@ -74,6 +74,40 @@ class JudgeAgent(BaseAgent):
             elif fd and fd.is_security_sensitive:
                 high_risk_records[fp] = record
 
+        # O-J1: skip per-file LLM review for high-confidence records whose
+        # merged content parses cleanly. Security-sensitive files always stay
+        # in the LLM path regardless of confidence.
+        skip_enabled = getattr(state.config, "judge_skip_high_confidence", False)
+        skip_threshold = getattr(state.config, "judge_skip_confidence_threshold", 0.9)
+        if skip_enabled and high_risk_records:
+            skipped: list[str] = []
+            for fp in list(high_risk_records.keys()):
+                record = high_risk_records[fp]
+                fd = file_diffs_map.get(fp)
+                if fd and fd.is_security_sensitive:
+                    continue
+                if record.confidence is None or record.confidence < skip_threshold:
+                    continue
+                if not self._local_syntax_ok(fp):
+                    continue
+                skipped.append(fp)
+                del high_risk_records[fp]
+                reviewed_files.append(fp)
+            if skipped:
+                self.logger.info(
+                    "Judge skipped %d high-confidence file(s) (threshold=%.2f, local syntax OK)",
+                    len(skipped),
+                    skip_threshold,
+                )
+
+        # O-M1: on dispute rounds, group previous round's issues by file so
+        # the Judge prompt can include them as a "<prior_review>" block.
+        prior_issues_by_file: dict[str, list[JudgeIssue]] = {}
+        _prior_verdict = getattr(state, "judge_verdict", None)
+        if (getattr(state, "judge_repair_rounds", 0) or 0) > 0 and _prior_verdict:
+            for _pi in _prior_verdict.issues:
+                prior_issues_by_file.setdefault(_pi.file_path, []).append(_pi)
+
         async def _review_one(file_path: str) -> list[JudgeIssue]:
             record = high_risk_records[file_path]
             fd = file_diffs_map.get(file_path)
@@ -96,6 +130,7 @@ class JudgeAgent(BaseAgent):
                 fd,
                 project_context=state.config.project_context,
                 check_strategy=check_strategy,
+                prior_round_issues=prior_issues_by_file.get(file_path, []),
             )
 
         runner = ParallelFileRunner.from_api_key_env_list(
@@ -113,6 +148,22 @@ class JudgeAgent(BaseAgent):
             reviewed_files.append(fp)
 
         reviewed_files.extend(deterministic_veto_files)
+
+        # O-J2: in dispute rounds, narrow the Judge's scope to "did the
+        # Executor close the previously-reported issues?". New issues that
+        # surface on re-review are logged but do not gate the verdict —
+        # they roll up to meta-review as out-of-scope observations.
+        freeze_enabled = getattr(state.config, "judge_freeze_prior_issues", False)
+        dispute_round = getattr(state, "judge_repair_rounds", 0) or 0
+        prior_verdict = getattr(state, "judge_verdict", None)
+        if (
+            freeze_enabled
+            and dispute_round > 0
+            and prior_verdict is not None
+            and prior_verdict.issues
+        ):
+            all_issues = self._freeze_to_prior_issues(all_issues, prior_verdict.issues)
+
         verdict = await self._compute_final_verdict(reviewed_files, all_issues)
 
         return AgentMessage(
@@ -132,6 +183,7 @@ class JudgeAgent(BaseAgent):
         original_diff: FileDiff,
         project_context: str = "",
         check_strategy: JudgeCheckStrategy = JudgeCheckStrategy.UPSTREAM_MATCH,
+        prior_round_issues: list[JudgeIssue] | None = None,
     ) -> list[JudgeIssue]:
         issues: list[JudgeIssue] = []
 
@@ -171,6 +223,23 @@ class JudgeAgent(BaseAgent):
                     budget_tokens,
                 )
 
+        # O-M1: dispute-round prior review block. Append before LLM call so
+        # the Judge knows which issues were already reported and can focus on
+        # whether the Executor's repair closed them.
+        if prior_round_issues:
+            prior_lines = [
+                f"- [{pi.issue_level.value}] {pi.issue_type}: {pi.description}"
+                for pi in prior_round_issues[:10]
+            ]
+            prior_block = (
+                "\n\n<prior_review>\n"
+                "Previous round flagged the following issues on this file. "
+                "Evaluate whether the current file content closes each of them; "
+                "do not re-report wording differences that amount to the same "
+                "finding.\n" + "\n".join(prior_lines) + "\n</prior_review>"
+            )
+            memory_context = memory_context + prior_block
+
         prompt = build_file_review_prompt(
             file_path,
             merged_content,
@@ -205,6 +274,71 @@ class JudgeAgent(BaseAgent):
                 break
 
         return issues
+
+    @staticmethod
+    def _issue_fingerprint(issue: JudgeIssue) -> tuple[str, str]:
+        """O-J2: stable key for comparing issues across dispute rounds.
+
+        Two issues are considered "the same" if they target the same file
+        and the same issue_type. Description wording can shift slightly
+        between model calls, so we deliberately avoid hashing it.
+        """
+        return (issue.file_path or "", issue.issue_type or "")
+
+    def _freeze_to_prior_issues(
+        self,
+        current_issues: list[JudgeIssue],
+        prior_issues: list[JudgeIssue],
+    ) -> list[JudgeIssue]:
+        """Keep only issues that were already present in the prior round.
+
+        Reuse the prior ``issue_id`` so Executor ↔ Judge negotiation can
+        track issue lifecycles across rounds. Out-of-scope new issues are
+        dropped from the verdict and logged at WARNING level so a human
+        operator can inspect them in the log trail.
+        """
+        prior_map: dict[tuple[str, str], JudgeIssue] = {}
+        for prior_issue in prior_issues:
+            prior_map.setdefault(self._issue_fingerprint(prior_issue), prior_issue)
+
+        kept: list[JudgeIssue] = []
+        dropped_new = 0
+        seen_keys: set[tuple[str, str]] = set()
+        for issue in current_issues:
+            key = self._issue_fingerprint(issue)
+            matched = prior_map.get(key)
+            if matched is None:
+                dropped_new += 1
+                continue
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            kept.append(issue.model_copy(update={"issue_id": matched.issue_id}))
+
+        if dropped_new:
+            self.logger.warning(
+                "O-J2 freeze: dropped %d new issue(s) introduced in dispute round "
+                "(out-of-scope; roll up to meta-review)",
+                dropped_new,
+            )
+        return kept
+
+    def _local_syntax_ok(self, file_path: str) -> bool:
+        """O-J1 pre-filter: re-use the syntax checker to decide whether a
+        file can skip the LLM review path. Returns True only when the checker
+        definitively validates the merged content; unreadable or untestable
+        files fall through to the full LLM review.
+        """
+        if self.git_tool is None:
+            return False
+        abs_path = self.git_tool.repo_path / file_path
+        if not abs_path.exists():
+            return False
+        content = _safe_read_text(abs_path)
+        if not content:
+            return False
+        result = check_file_syntax(file_path, content)
+        return bool(result.valid and not result.errors)
 
     def _run_deterministic_pipeline(
         self,

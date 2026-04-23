@@ -5,6 +5,7 @@ inputs:
   - file_decision_records
   - file_diffs
   - judge_repair_rounds
+  - judge_verdict
   - judge_verdicts_log
   - merge_base_commit
   - status
