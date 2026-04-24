@@ -41,6 +41,22 @@ class GitTool:
         except git.GitCommandError:
             return None
 
+    def get_file_bytes(self, ref: str, file_path: str) -> bytes | None:
+        """Binary-safe file read from a git ref. Use for PNG/woff/mp3/zip
+        etc. where `git show` text decode would corrupt the payload."""
+        try:
+            result = self.repo.git.show(
+                f"{ref}:{file_path}",
+                stdout_as_string=False,
+            )
+        except git.GitCommandError:
+            return None
+        if isinstance(result, bytes):
+            return result
+        if isinstance(result, str):
+            return result.encode("utf-8", errors="surrogateescape")
+        return None
+
     def get_three_way_diff(
         self, base: str, current: str, target: str, file_path: str
     ) -> tuple[str | None, str | None, str | None]:

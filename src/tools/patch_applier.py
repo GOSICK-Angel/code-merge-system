@@ -86,6 +86,73 @@ async def apply_with_snapshot(
         return record
 
 
+async def apply_bytes_with_snapshot(
+    file_path: str,
+    new_bytes: bytes,
+    git_tool: GitTool,
+    state: MergeState,
+    phase: str = "auto_merge",
+    agent: str = "executor",
+    decision: MergeDecision = MergeDecision.TAKE_TARGET,
+    rationale: str = "",
+    confidence: float | None = None,
+) -> FileDecisionRecord:
+    """O-B4: binary-safe writer. Snapshots original bytes (base64-encoded
+    into the str `original_snapshot` field so the model stays unchanged),
+    writes raw bytes, and rolls back on failure. Skips conflict-marker
+    check since binary content cannot carry git conflict markers."""
+    import base64
+
+    abs_path = git_tool.repo_path / file_path
+
+    original_bytes: bytes | None = None
+    if abs_path.exists():
+        original_bytes = abs_path.read_bytes()
+    original_snapshot = (
+        base64.b64encode(original_bytes).decode("ascii")
+        if original_bytes is not None
+        else None
+    )
+
+    try:
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_bytes(new_bytes)
+
+        record = FileDecisionRecord(
+            file_path=file_path,
+            file_status=FileStatus.MODIFIED,
+            decision=decision,
+            decision_source=DecisionSource.AUTO_EXECUTOR,
+            confidence=confidence,
+            rationale=rationale or f"Applied {decision.value} (binary)",
+            original_snapshot=original_snapshot,
+            merged_content_preview=f"<binary:{len(new_bytes)}bytes>",
+            phase=phase,
+            agent=agent,
+            timestamp=datetime.now(),
+        )
+        return record
+
+    except Exception as e:
+        if original_bytes is not None:
+            abs_path.write_bytes(original_bytes)
+
+        return FileDecisionRecord(
+            file_path=file_path,
+            file_status=FileStatus.MODIFIED,
+            decision=MergeDecision.ESCALATE_HUMAN,
+            decision_source=DecisionSource.AUTO_EXECUTOR,
+            confidence=0.0,
+            rationale=f"Binary apply failed, rolled back: {e}",
+            original_snapshot=original_snapshot,
+            phase=phase,
+            agent=agent,
+            timestamp=datetime.now(),
+            is_rolled_back=original_bytes is not None,
+            rollback_reason=str(e),
+        )
+
+
 def create_escalate_record(
     file_path: str,
     reason: str,

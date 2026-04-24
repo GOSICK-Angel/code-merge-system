@@ -295,10 +295,32 @@ class AutoMergePhase(Phase):
 
         for fp in binary_take_target:
             try:
-                record = await executor._copy_from_upstream(fp, state)
+                # O-B4: use the bytes-safe path — executor._copy_from_upstream
+                # routes through apply_with_snapshot which write_text()s and
+                # explodes on non-UTF-8 bytes (e.g. PNG magic 0x89).
+                from src.tools.patch_applier import apply_bytes_with_snapshot
+
+                content_bytes = ctx.git_tool.get_file_bytes(
+                    state.config.upstream_ref, fp
+                )
+                if content_bytes is None:
+                    raise RuntimeError("upstream bytes not found")
+                record = await apply_bytes_with_snapshot(
+                    fp,
+                    content_bytes,
+                    ctx.git_tool,
+                    state,
+                    phase="auto_merge",
+                    agent="binary_asset_router",
+                    decision=MergeDecision.TAKE_TARGET,
+                    rationale=(
+                        "O-B3 binary asset — taking upstream version as raw "
+                        "bytes (O-B4 binary-safe writer)."
+                    ),
+                )
             except Exception as exc:
                 logger.warning(
-                    "O-B3: copy_from_upstream failed for binary asset %s: %s",
+                    "O-B3/O-B4: binary copy failed for %s: %s",
                     fp,
                     exc,
                 )
