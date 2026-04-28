@@ -245,46 +245,49 @@ def _build_run_insights_lines(
     memory_summary: dict[str, Any] | None = None,
 ) -> list[str]:
     """Build the Run Insights markdown section from CostTracker and TraceLogger summaries."""
-    if not cost_summary or cost_summary.get("total_calls", 0) == 0:
+    has_cost = bool(cost_summary) and cost_summary.get("total_calls", 0) > 0
+    has_memory = bool(memory_summary) and int(memory_summary.get("total_calls", 0)) > 0
+    if not has_cost and not has_memory:
         return []
 
-    by_agent: dict[str, Any] = cost_summary.get("by_agent", {})
-    most_expensive = ""
-    if by_agent:
-        top = max(by_agent.items(), key=lambda x: x[1].get("cost_usd", 0))
-        most_expensive = f"{top[0]} (${top[1]['cost_usd']:.4f})"
+    lines: list[str] = [f"## {t('run_insights')}", ""]
 
-    tokens = cost_summary.get("total_tokens", {})
+    if has_cost:
+        by_agent: dict[str, Any] = cost_summary.get("by_agent", {})
+        most_expensive = ""
+        if by_agent:
+            top = max(by_agent.items(), key=lambda x: x[1].get("cost_usd", 0))
+            most_expensive = f"{top[0]} (${top[1]['cost_usd']:.4f})"
 
-    lines: list[str] = [
-        f"## {t('run_insights')}",
-        "",
-        f"| {t('metric')} | {t('value')} |",
-        "|--------|-------|",
-        f"| {t('total_llm_calls')} | {cost_summary['total_calls']} |",
-        f"| {t('total_cost')} | ${cost_summary['total_cost_usd']:.4f} |",
-        f"| {t('most_expensive_agent')} | {most_expensive} |",
-        f"| {t('avg_latency')} | {cost_summary.get('avg_latency_s', 0):.1f}s |",
-        f"| {t('total_input_tokens')} | {tokens.get('input', 0):,} |",
-        f"| {t('total_output_tokens')} | {tokens.get('output', 0):,} |",
-        "",
-    ]
+        tokens = cost_summary.get("total_tokens", {})
 
-    if by_agent:
         lines += [
-            f"### {t('cost_by_agent')}",
+            f"| {t('metric')} | {t('value')} |",
+            "|--------|-------|",
+            f"| {t('total_llm_calls')} | {cost_summary['total_calls']} |",
+            f"| {t('total_cost')} | ${cost_summary['total_cost_usd']:.4f} |",
+            f"| {t('most_expensive_agent')} | {most_expensive} |",
+            f"| {t('avg_latency')} | {cost_summary.get('avg_latency_s', 0):.1f}s |",
+            f"| {t('total_input_tokens')} | {tokens.get('input', 0):,} |",
+            f"| {t('total_output_tokens')} | {tokens.get('output', 0):,} |",
             "",
-            f"| {t('agent_name')} | {t('calls')} | {t('tokens')} | {t('cost')} |",
-            "|-------|-------|--------|------|",
         ]
-        for agent_name, agg in sorted(
-            by_agent.items(), key=lambda x: x[1].get("cost_usd", 0), reverse=True
-        ):
-            lines.append(
-                f"| {agent_name} | {agg['calls']} "
-                f"| {agg.get('tokens', 0):,} | ${agg['cost_usd']:.4f} |"
-            )
-        lines.append("")
+
+        if by_agent:
+            lines += [
+                f"### {t('cost_by_agent')}",
+                "",
+                f"| {t('agent_name')} | {t('calls')} | {t('tokens')} | {t('cost')} |",
+                "|-------|-------|--------|------|",
+            ]
+            for agent_name, agg in sorted(
+                by_agent.items(), key=lambda x: x[1].get("cost_usd", 0), reverse=True
+            ):
+                lines.append(
+                    f"| {agent_name} | {agg['calls']} "
+                    f"| {agg.get('tokens', 0):,} | ${agg['cost_usd']:.4f} |"
+                )
+            lines.append("")
 
     if utilization_summary:
         lines += [
