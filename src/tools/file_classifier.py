@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import fnmatch
+import functools
 import json as json_lib
 import logging
+import re
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -15,22 +17,67 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@functools.lru_cache(maxsize=512)
+def _glob_to_regex(pattern: str) -> re.Pattern[str]:
+    """Translate a gitignore-style glob into an anchored regex.
+
+    Semantics (matches `git`/`pathspec` conventions, NOT fnmatch):
+      - ``**``        — zero or more path segments (only when standalone)
+      - ``*``         — zero or more chars within a single segment (no /)
+      - ``?``         — exactly one char within a segment
+      - segment       — literal match against one path segment
+      - leading ``**/``  — match at any depth
+      - trailing ``/**`` — match the directory and everything beneath
+      - bare ``foo``  — anchored full-path match (NOT contains)
+
+    Why this matters: the previous fnmatch + lstrip-fallback implementation
+    treated ``.github/workflows/**`` as a contains-match, which incorrectly
+    matched nested paths like
+    ``cmd/templates/.github/workflows/plugin-publish.yml``.
+    """
+    if not pattern:
+        return re.compile(r"^$")
+
+    parts = pattern.split("/")
+    placeholder = "\x00DOUBLESTAR\x00"
+    rendered_parts: list[str] = []
+    for part in parts:
+        if part == "**":
+            rendered_parts.append(placeholder)
+            continue
+        seg_chars: list[str] = []
+        for ch in part:
+            if ch == "*":
+                seg_chars.append("[^/]*")
+            elif ch == "?":
+                seg_chars.append("[^/]")
+            else:
+                seg_chars.append(re.escape(ch))
+        rendered_parts.append("".join(seg_chars))
+
+    joined = "/".join(rendered_parts)
+    joined = joined.replace(f"{placeholder}/", "(?:.+/)?")
+    joined = joined.replace(f"/{placeholder}", "(?:/.+)?")
+    joined = joined.replace(placeholder, ".*")
+
+    return re.compile(f"^{joined}$")
+
+
 def matches_any_pattern(file_path: str, patterns: list[str]) -> bool:
+    """Anchored glob match. See ``_glob_to_regex`` for semantics.
+
+    For backward compatibility with bare basename globs (no ``/``, e.g.
+    ``*_key*``) the basename is also tested for those patterns only.
+    """
+    if not patterns:
+        return False
+    basename = Path(file_path).name
     for pattern in patterns:
-        if fnmatch.fnmatch(file_path, pattern):
+        regex = _glob_to_regex(pattern)
+        if regex.fullmatch(file_path):
             return True
-        path_obj = Path(file_path)
-        try:
-            if path_obj.match(pattern):
-                return True
-        except Exception:
-            pass
-        normalized_pattern = pattern.lstrip("**/").lstrip("*")
-        if normalized_pattern:
-            if fnmatch.fnmatch(file_path, f"*{normalized_pattern}"):
-                return True
-            if fnmatch.fnmatch(path_obj.name, normalized_pattern):
-                return True
+        if "/" not in pattern and fnmatch.fnmatchcase(basename, pattern):
+            return True
     return False
 
 

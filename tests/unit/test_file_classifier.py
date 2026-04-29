@@ -1,6 +1,8 @@
+import pytest
+
 from src.models.diff import FileDiff, FileStatus, RiskLevel
 from src.models.config import FileClassifierConfig, SecuritySensitiveConfig
-from src.tools.file_classifier import compute_risk_score
+from src.tools.file_classifier import compute_risk_score, matches_any_pattern
 
 
 def _make_file_diff(
@@ -67,3 +69,80 @@ def test_risk_score_weights_sum_to_one():
     }
     total = sum(weights.values())
     assert abs(total - 1.0) < 1e-9, f"Weights must sum to 1.0, got {total}"
+
+
+# ---------------------------------------------------------------------------
+# matches_any_pattern — anchored glob semantics
+# ---------------------------------------------------------------------------
+
+
+class TestMatchesAnyPattern:
+    @pytest.mark.parametrize(
+        "path",
+        [
+            ".github/workflows/ci.yml",
+            ".github/workflows/sub/build.yml",
+            ".github/workflows/deeply/nested/file.yml",
+        ],
+    )
+    def test_trailing_doublestar_matches_under_dir(self, path):
+        assert matches_any_pattern(path, [".github/workflows/**"])
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "cmd/commandline/plugin/templates/.github/workflows/plugin-publish.yml",
+            "vendor/.github/workflows/x.yml",
+            "a/b/.github/workflows/c.yml",
+        ],
+    )
+    def test_trailing_doublestar_does_not_match_nested_segment(self, path):
+        # Regression: previously the lstrip("**/").lstrip("*") fallback +
+        # f"*{normalized}" turned ".github/workflows/**" into a contains-match.
+        assert not matches_any_pattern(path, [".github/workflows/**"])
+
+    def test_leading_doublestar_matches_at_any_depth(self):
+        for p in [
+            "license/key.go",
+            "internal/core/license/key.go",
+            "a/b/c/license/key.go",
+        ]:
+            assert matches_any_pattern(p, ["**/license/**"])
+
+    def test_doublestar_lock_glob(self):
+        assert matches_any_pattern("Cargo.lock", ["**/*.lock"])
+        assert matches_any_pattern("a/b/Cargo.lock", ["**/*.lock"])
+        assert not matches_any_pattern("Cargo.lockfile", ["**/*.lock"])
+
+    def test_anchored_prefix(self):
+        assert matches_any_pattern(
+            "internal/core/local_runtime/foo.go",
+            ["internal/core/local_runtime/**"],
+        )
+        # Same suffix but different anchor — must NOT match
+        assert not matches_any_pattern(
+            "x/internal/core/local_runtime/foo.go",
+            ["internal/core/local_runtime/**"],
+        )
+
+    def test_single_star_does_not_cross_slash(self):
+        assert matches_any_pattern("a/foo.go", ["a/*.go"])
+        assert not matches_any_pattern("a/b/foo.go", ["a/*.go"])
+
+    def test_question_mark_single_char_only(self):
+        assert matches_any_pattern("a/foo.go", ["a/fo?.go"])
+        assert not matches_any_pattern("a/fooo.go", ["a/fo?.go"])
+
+    def test_bare_basename_pattern_matches_anywhere(self):
+        # Backward-compat: patterns without "/" match against basename.
+        assert matches_any_pattern("a/b/c/private_key.pem", ["*_key*"])
+        assert matches_any_pattern("private_key.pem", ["*_key*"])
+
+    def test_empty_patterns_returns_false(self):
+        assert not matches_any_pattern("anything.go", [])
+
+    def test_special_regex_chars_in_pattern_are_escaped(self):
+        # Pattern with regex meta-characters must be treated literally.
+        assert matches_any_pattern("a/b+c.txt", ["a/b+c.txt"])
+        assert not matches_any_pattern("a/bc.txt", ["a/b+c.txt"])
+        assert matches_any_pattern("a/(brackets).txt", ["a/(brackets).txt"])
