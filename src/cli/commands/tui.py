@@ -39,7 +39,7 @@ def tui_command_impl(
         raw_config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
         merge_config = MergeConfig.model_validate(raw_config)
 
-    state = MergeState(config=merge_config)
+    state = MergeState(config=merge_config, dry_run=dry_run)
     asyncio.run(_run_tui(state, merge_config, ws_port))
 
 

@@ -307,6 +307,15 @@ class PlannerAgent(BaseAgent):
                 f"Review config files in Layer 1 (dependencies) carefully."
             )
 
+        if state.rename_pairs:
+            rename_lines = "; ".join(
+                f"{old} -> {new}" for old, new in state.rename_pairs[:20]
+            )
+            special_instructions.append(
+                f"Detected {len(state.rename_pairs)} file rename(s) "
+                f"(treat old/new paths as related): {rename_lines}"
+            )
+
         return MergePlan(
             created_at=datetime.now(),
             upstream_ref=state.config.upstream_ref,

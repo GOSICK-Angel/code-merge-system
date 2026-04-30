@@ -1046,7 +1046,7 @@ class AutoMergePhase(Phase):
             issues_by_file[issue.file_path].append(
                 f"[{level}] {issue.issue_type}: {issue.description}"
             )
-            if level.lower() in blocking_levels:
+            if level.lower() in blocking_levels or issue.must_fix_before_merge:
                 blocking_files.add(issue.file_path)
 
         non_blocking_count = 0

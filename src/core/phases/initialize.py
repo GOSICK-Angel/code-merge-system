@@ -88,6 +88,8 @@ def _build_added_file_diff(git_tool: GitTool, ref: str, file_path: str) -> str:
     Shows the first _D_MISSING_PREVIEW_LINES lines of the file with '+' prefix
     so the planner can assess content and risk without just seeing a path.
     """
+    if Path(file_path).suffix.lower() in _BINARY_EXTENSIONS:
+        return ""
     content: str | None = git_tool.get_file_content(ref, file_path)
     if not content:
         return ""

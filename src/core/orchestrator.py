@@ -238,7 +238,8 @@ class Orchestrator:
 
                 ceiling = state.config.max_cost_usd
                 if ceiling is not None:
-                    spent = self._cost_tracker.total_cost_usd
+                    prior = (state.cost_summary or {}).get("total_cost_usd", 0.0)
+                    spent = prior + self._cost_tracker.total_cost_usd
                     if spent >= ceiling:
                         self.state_machine.transition(
                             state,

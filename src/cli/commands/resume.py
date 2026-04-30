@@ -105,6 +105,13 @@ def resume_command_impl(
                     f"conflict decisions from {decisions}[/green]"
                 )
 
+    if state.dry_run:
+        console.print(
+            "[yellow]Note: checkpoint was saved in dry-run mode; "
+            "resuming as a full run (dry_run cleared).[/yellow]"
+        )
+        state.dry_run = False
+
     orchestrator = Orchestrator(state.config)
 
     async def execute() -> MergeState:
