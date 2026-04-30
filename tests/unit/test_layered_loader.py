@@ -308,3 +308,61 @@ class TestOM3DynamicCaps:
         result = loader.load_for_agent("planning", file_paths=["src/main.py"])
         relevant_lines = [ln for ln in result.splitlines() if ln.startswith("- [")]
         assert len(relevant_lines) > 0
+
+
+class TestM5TokenSimilarity:
+    """M5 route B: lightweight token Jaccard similarity for L2 retrieval.
+
+    Validation report §6.4 (M5): pure prefix matching misses sibling
+    paths that share most segments but no common parent. The loader now
+    falls back to token Jaccard so cross-package patterns are recalled.
+    """
+
+    def test_path_tokens_strip_extension(self):
+        from src.memory.store import _path_tokens
+
+        tokens = _path_tokens("pkg/plugin_manager/manager.go")
+        assert "go" not in tokens
+        assert "pkg" in tokens
+        assert "plugin" in tokens
+        assert "manager" in tokens
+
+    def test_path_jaccard_sibling_paths(self):
+        from src.memory.store import _path_jaccard
+
+        score = _path_jaccard(
+            "pkg/plugin_manager/manager.go",
+            "pkg/plugin_runtime/runtime.go",
+        )
+        assert score >= 0.4
+
+    def test_path_jaccard_unrelated_zero(self):
+        from src.memory.store import _path_jaccard
+
+        score = _path_jaccard("docs/intro.md", "vendor/foo/bar.go")
+        assert score == 0.0
+
+    def test_l2_recalls_sibling_path_via_jaccard(self):
+        """End-to-end: an entry tagged with one plugin manager file is
+        injected as L2 context for a sibling plugin runtime file even
+        though they share no common prefix beyond ``pkg/``."""
+        from src.memory.layered_loader import LayeredMemoryLoader
+
+        store = MemoryStore()
+        store = store.add_entry(
+            MemoryEntry(
+                entry_type=MemoryEntryType.PATTERN,
+                phase="planning",
+                file_paths=["pkg/plugin_manager/manager.go"],
+                content="plugin lifecycle pattern",
+                confidence=0.9,
+                confidence_level=ConfidenceLevel.EXTRACTED,
+            )
+        )
+
+        loader = LayeredMemoryLoader(store)
+        result = loader.load_for_agent(
+            "planning", file_paths=["pkg/plugin_runtime/runtime.go"]
+        )
+
+        assert "plugin lifecycle pattern" in result

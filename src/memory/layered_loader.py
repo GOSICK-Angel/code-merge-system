@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from src.memory.hit_tracker import MemoryHitTracker
-from src.memory.store import MemoryStore
+from src.memory.store import MemoryStore, _path_jaccard
+
+L2_JACCARD_OVERLAP_THRESHOLD = 0.34
 
 L1_MAX_PATTERNS = 5
 L1_MAX_DECISIONS = 5
@@ -157,5 +159,7 @@ def _has_path_overlap(entry_paths: list[str], query_paths: list[str]) -> bool:
     for ep in entry_paths:
         for qp in query_paths:
             if ep == qp or ep.startswith(qp) or qp.startswith(ep):
+                return True
+            if _path_jaccard(ep, qp) >= L2_JACCARD_OVERLAP_THRESHOLD:
                 return True
     return False

@@ -83,6 +83,16 @@ class MemoryStore:
     ) -> list[MemoryEntry]:
         """Score-rank entries by path overlap × confidence.
 
+        Path overlap blends three signals (max wins):
+        * exact path match → 1.0
+        * common-prefix ratio (legacy) — strong when files live in the same
+          subtree
+        * token Jaccard similarity (M5 route B) — captures sibling paths
+          that share most segments but no common prefix, e.g.
+          ``pkg/plugin_manager/manager.go`` vs
+          ``pkg/plugin_runtime/runtime.go``. Discounted by ``0.85`` so
+          exact / prefix matches still rank first.
+
         ``min_relevance`` (O-M3) drops entries below the threshold *before*
         truncating to ``max_entries``. Use this when the entry pool is large
         (>~100) to keep injected prompts under the context window cap.
@@ -94,9 +104,15 @@ class MemoryStore:
                 for efp in entry.file_paths:
                     if fp == efp:
                         path_score = max(path_score, 1.0)
-                    elif fp.startswith(efp) or efp.startswith(fp):
+                        continue
+                    if fp.startswith(efp) or efp.startswith(fp):
                         common = len(_common_prefix(fp, efp))
-                        path_score = max(path_score, common / max(len(fp), len(efp)))
+                        path_score = max(
+                            path_score, common / max(len(fp), len(efp))
+                        )
+                    jaccard = _path_jaccard(fp, efp)
+                    if jaccard > 0.0:
+                        path_score = max(path_score, jaccard * 0.85)
 
             if path_score == 0.0 and not entry.file_paths:
                 path_score = 0.1
@@ -185,6 +201,58 @@ def _common_prefix(a: str, b: str) -> str:
             break
         prefix_len += 1
     return a[:prefix_len]
+
+
+_TOKEN_SEPARATORS = ("/", "\\", "_", "-", ".", " ")
+
+
+def _path_tokens(path: str) -> frozenset[str]:
+    """Tokenise a path for Jaccard similarity.
+
+    Lowercase; split on `/`, `\\`, `_`, `-`, `.`, space; drop the final
+    extension token (e.g. ``go``, ``py``, ``yml``) so file-type alone does
+    not inflate the score; drop tokens shorter than 2 chars.
+    """
+    if not path:
+        return frozenset()
+    lowered = path.lower()
+    last_slash = max(lowered.rfind("/"), lowered.rfind("\\"))
+    filename = lowered[last_slash + 1:] if last_slash != -1 else lowered
+    last_dot = filename.rfind(".")
+    if 0 < last_dot < len(filename) - 1:
+        ext_start = (last_slash + 1 if last_slash != -1 else 0) + last_dot
+        body = lowered[:ext_start]
+    else:
+        body = lowered
+
+    tokens: set[str] = set()
+    current: list[str] = []
+    for ch in body:
+        if ch in _TOKEN_SEPARATORS:
+            if current:
+                token = "".join(current)
+                if len(token) >= 2:
+                    tokens.add(token)
+                current = []
+        else:
+            current.append(ch)
+    if current:
+        token = "".join(current)
+        if len(token) >= 2:
+            tokens.add(token)
+    return frozenset(tokens)
+
+
+def _path_jaccard(a: str, b: str) -> float:
+    ta = _path_tokens(a)
+    tb = _path_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    intersection = len(ta & tb)
+    if intersection == 0:
+        return 0.0
+    union = len(ta | tb)
+    return intersection / union
 
 
 def _consolidate_entries(entries: list[MemoryEntry]) -> list[MemoryEntry]:
