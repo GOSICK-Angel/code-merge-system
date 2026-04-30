@@ -1007,10 +1007,19 @@ class AutoMergePhase(Phase):
         """O-L3: persist a proper AWAITING_HUMAN signal after batch judge
         dispute exhaustion so the run does not loop.
 
+        Per the validation report's §5.3 finding ("batch dispute upgrade
+        is overly conservative"), only files that carry a blocking-level
+        issue (per ``config.judge_blocking_levels``) escalate to a
+        ``HumanDecisionRequest``. The remaining files in the batch
+        reached partial consensus — Judge raised at most advisory issues
+        — and are auto-recorded as ``SEMANTIC_MERGE`` so the user is not
+        forced to triage 100+ files when only a few are genuinely stuck.
+
         Writes:
-        * one ``HumanDecisionRequest`` per file in the stuck batch (unless one
+        * one ``HumanDecisionRequest`` per blocking-issue file (unless one
           already exists), so ``HumanReviewPhase.Case 1`` drives the user
-          through normal pending-decisions flow;
+          through the normal pending-decisions flow;
+        * a partial-consensus ``FileDecisionRecord`` for non-blocking files;
         * the exhausted ``layer_id`` onto
           ``state.auto_merge_dispute_exhausted_layers`` so
           ``HumanReviewPhase.Case 2`` refuses to bounce the run back into
@@ -1021,7 +1030,13 @@ class AutoMergePhase(Phase):
         if layer_tag not in state.auto_merge_dispute_exhausted_layers:
             state.auto_merge_dispute_exhausted_layers.append(layer_tag)
 
+        blocking_levels = {
+            level.lower()
+            for level in (state.config.judge_blocking_levels or ["critical", "high"])
+        }
+
         issues_by_file: dict[str, list[str]] = defaultdict(list)
+        blocking_files: set[str] = set()
         for issue in batch_verdict.issues:
             level = (
                 issue.issue_level.value
@@ -1031,9 +1046,48 @@ class AutoMergePhase(Phase):
             issues_by_file[issue.file_path].append(
                 f"[{level}] {issue.issue_type}: {issue.description}"
             )
+            if level.lower() in blocking_levels:
+                blocking_files.add(issue.file_path)
+
+        non_blocking_count = 0
+        for file_path in layer_files:
+            if file_path in blocking_files:
+                continue
+            if file_path in state.file_decision_records:
+                continue
+            advisory_lines = issues_by_file.get(file_path, [])
+            rationale_tail = (
+                f"; advisory issues: {len(advisory_lines)}"
+                if advisory_lines
+                else ""
+            )
+            state.file_decision_records[file_path] = FileDecisionRecord(
+                file_path=file_path,
+                file_status=FileStatus.MODIFIED,
+                decision=MergeDecision.SEMANTIC_MERGE,
+                decision_source=DecisionSource.AUTO_PLANNER,
+                confidence=0.7,
+                rationale=(
+                    f"batch dispute partial-consensus (layer={layer_tag}): "
+                    f"no blocking-level issue after {max_dispute} rounds"
+                    f"{rationale_tail}"
+                ),
+                phase="auto_merge",
+                agent="dispute_exhaustion",
+            )
+            non_blocking_count += 1
+
+        if non_blocking_count:
+            logger.info(
+                "Layer %s dispute exhaustion: %d files auto-resolved "
+                "(no blocking issue), %d files escalated to human",
+                layer_tag,
+                non_blocking_count,
+                len(blocking_files),
+            )
 
         now = datetime.now()
-        for file_path in layer_files:
+        for file_path in sorted(blocking_files):
             if file_path in state.human_decision_requests:
                 continue
             issue_lines = issues_by_file.get(file_path, [])

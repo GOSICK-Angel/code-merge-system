@@ -262,7 +262,17 @@ def test_register_dispute_exhaustion_creates_requests_and_tag():
     )
 
     assert state.auto_merge_dispute_exhausted_layers == ["2"]
-    assert set(state.human_decision_requests.keys()) == {"a.py", "b.py", "c.py"}
+    # Only a.py / b.py have blocking issues → human escalation.
+    # c.py has no blocking issue → partial-consensus auto record.
+    assert set(state.human_decision_requests.keys()) == {"a.py", "b.py"}
+    assert "c.py" in state.file_decision_records
+    assert (
+        state.file_decision_records["c.py"].decision
+        == MergeDecision.SEMANTIC_MERGE
+    )
+    assert (
+        state.file_decision_records["c.py"].agent == "dispute_exhaustion"
+    )
     for req in state.human_decision_requests.values():
         assert req.analyst_recommendation == MergeDecision.ESCALATE_HUMAN
         option_keys = {opt.option_key for opt in req.options}
@@ -283,7 +293,8 @@ def test_register_dispute_exhaustion_preserves_existing_request():
 
     phase = AutoMergePhase()
     state = _make_state_with_approved_plan()
-    # Pre-seed an existing request for 'a.py' — should not be overwritten.
+    # Pre-seed an existing request for 'a.py' — must not be overwritten
+    # when a.py later turns out to have a blocking issue.
     state.human_decision_requests["a.py"] = HumanDecisionRequest(
         file_path="a.py",
         priority=7,
@@ -303,7 +314,15 @@ def test_register_dispute_exhaustion_preserves_existing_request():
         ],
         created_at=datetime.now(),
     )
-    verdict = BatchVerdict(layer_id=None, approved=False, issues=[])
+    issues = [
+        JudgeIssue(
+            file_path="a.py",
+            issue_level=IssueSeverity.CRITICAL,
+            issue_type="x",
+            description="blocking issue on a.py",
+        )
+    ]
+    verdict = BatchVerdict(layer_id=None, approved=False, issues=issues)
 
     phase._register_dispute_exhaustion(
         state=state,
@@ -316,8 +335,94 @@ def test_register_dispute_exhaustion_preserves_existing_request():
     assert state.auto_merge_dispute_exhausted_layers == ["None"]
     # 'a.py' preserved — context_summary must still read "pre-existing"
     assert state.human_decision_requests["a.py"].context_summary == "pre-existing"
-    # 'b.py' newly created
-    assert "b.py" in state.human_decision_requests
+    # 'b.py' has no blocking issue → goes to file_decision_records.
+    assert "b.py" not in state.human_decision_requests
+    assert "b.py" in state.file_decision_records
+
+
+def test_register_dispute_exhaustion_only_blocking_files_escalate():
+    """Validation report §5.3: 5 files, 1 with critical issue → only 1
+    escalates to human, the other 4 are auto-recorded."""
+    from src.core.phases.auto_merge import AutoMergePhase
+
+    phase = AutoMergePhase()
+    state = _make_state_with_approved_plan()
+    issues = [
+        JudgeIssue(
+            file_path="src/conflict.go",
+            issue_level=IssueSeverity.CRITICAL,
+            issue_type="unresolved_conflict",
+            description="markers remain",
+        )
+    ]
+    verdict = BatchVerdict(layer_id=1, approved=False, issues=issues)
+    files = [
+        "src/conflict.go",
+        "src/safe_a.go",
+        "src/safe_b.go",
+        "src/safe_c.go",
+        "src/safe_d.go",
+    ]
+
+    phase._register_dispute_exhaustion(
+        state=state,
+        layer_id=1,
+        layer_files=files,
+        batch_verdict=verdict,
+        max_dispute=3,
+    )
+
+    assert set(state.human_decision_requests.keys()) == {"src/conflict.go"}
+    auto_recorded = {
+        fp
+        for fp, rec in state.file_decision_records.items()
+        if rec.agent == "dispute_exhaustion"
+    }
+    assert auto_recorded == {
+        "src/safe_a.go",
+        "src/safe_b.go",
+        "src/safe_c.go",
+        "src/safe_d.go",
+    }
+
+
+def test_register_dispute_exhaustion_advisory_only_no_escalation():
+    """When the batch only carries medium/low advisory issues, no file
+    should escalate to human; all are auto-recorded."""
+    from src.core.phases.auto_merge import AutoMergePhase
+
+    phase = AutoMergePhase()
+    state = _make_state_with_approved_plan()
+    issues = [
+        JudgeIssue(
+            file_path="x.go",
+            issue_level=IssueSeverity.MEDIUM,
+            issue_type="style_drift",
+            description="cosmetic",
+        ),
+        JudgeIssue(
+            file_path="y.go",
+            issue_level=IssueSeverity.LOW,
+            issue_type="info",
+            description="info",
+        ),
+    ]
+    verdict = BatchVerdict(layer_id=0, approved=False, issues=issues)
+
+    phase._register_dispute_exhaustion(
+        state=state,
+        layer_id=0,
+        layer_files=["x.go", "y.go"],
+        batch_verdict=verdict,
+        max_dispute=2,
+    )
+
+    assert state.human_decision_requests == {}
+    assert "x.go" in state.file_decision_records
+    assert "y.go" in state.file_decision_records
+    rec = state.file_decision_records["x.go"]
+    assert rec.decision == MergeDecision.SEMANTIC_MERGE
+    assert "advisory issues: 1" in rec.rationale
 
 
 @pytest.mark.asyncio
