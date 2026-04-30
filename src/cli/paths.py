@@ -100,6 +100,28 @@ def get_plans_dir(repo_path: str = ".") -> Path:
     return get_project_merge_dir(repo_path) / "plans"
 
 
+def get_project_memory_db_path(repo_path: str = ".") -> Path:
+    """Project-level shared memory.db path.
+
+    Dev mode:  <repo>/outputs/debug/memory.db
+    Prod mode: <repo>/.merge/memory.db
+    """
+    if is_dev_mode(repo_path):
+        return Path(repo_path).resolve() / "outputs" / "debug" / "memory.db"
+    return get_project_merge_dir(repo_path) / "memory.db"
+
+
+def get_project_hit_stats_path(repo_path: str = ".") -> Path:
+    """Project-level shared MemoryHitTracker sidecar JSON.
+
+    Dev mode:  <repo>/outputs/debug/memory_hit_stats.json
+    Prod mode: <repo>/.merge/memory_hit_stats.json
+    """
+    if is_dev_mode(repo_path):
+        return Path(repo_path).resolve() / "outputs" / "debug" / "memory_hit_stats.json"
+    return get_project_merge_dir(repo_path) / "memory_hit_stats.json"
+
+
 def get_system_log_dir(repo_path: str = ".") -> Path:
     """Directory for run logs and LLM traces.
 

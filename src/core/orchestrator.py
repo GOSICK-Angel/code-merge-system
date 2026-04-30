@@ -29,7 +29,14 @@ import src.agents.judge_agent  # noqa: F401
 import src.agents.human_interface_agent  # noqa: F401
 import src.agents.memory_extractor_agent  # noqa: F401
 
-from src.cli.paths import ensure_merge_dir, get_run_dir, get_system_log_dir, is_dev_mode
+from src.cli.paths import (
+    ensure_merge_dir,
+    get_project_hit_stats_path,
+    get_project_memory_db_path,
+    get_run_dir,
+    get_system_log_dir,
+    is_dev_mode,
+)
 from src.core.checkpoint import Checkpoint
 from src.core.message_bus import MessageBus
 from src.core.phase_runner import PhaseRunner
@@ -48,6 +55,7 @@ from src.core.phases import (
 from src.core.phases.base import ActivityEvent, OnActivityCallback
 from src.core.coordinator import Coordinator
 from src.core.state_machine import StateMachine
+from src.memory.bootstrap import bootstrap_from_claude_md
 from src.memory.hit_tracker import MemoryHitTracker
 from src.memory.sqlite_store import SQLiteMemoryStore
 from src.memory.store import MemoryStore
@@ -201,10 +209,17 @@ class Orchestrator:
         run_start = time.monotonic()
         self.checkpoint.register_signal_handler(state)
 
-        db_path = run_dir / "memory.db"
+        db_path = get_project_memory_db_path(self.config.repo_path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
         self._memory_store = SQLiteMemoryStore.open(db_path)
         state.memory_db_path = str(db_path)
-        self._memory_hit_tracker.set_persist_path(run_dir / "memory_hit_stats.json")
+        self._memory_hit_tracker.set_persist_path(
+            get_project_hit_stats_path(self.config.repo_path)
+        )
+        try:
+            bootstrap_from_claude_md(self._memory_store, self.config.repo_path)
+        except Exception:
+            logger.debug("memory bootstrap failed (non-blocking)", exc_info=True)
         self._inject_memory()
         self._inject_hooks()
 

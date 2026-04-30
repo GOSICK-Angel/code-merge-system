@@ -107,9 +107,17 @@ class LayeredMemoryLoader:
         if not relevant:
             return "", 0
 
+        harmful_ids: frozenset[str] = (
+            self._tracker.harmful_entry_ids()
+            if self._tracker is not None
+            else frozenset()
+        )
+
         lines: list[str] = []
         injected_ids: list[str] = []
         for entry in relevant:
+            if entry.entry_id in harmful_ids:
+                continue
             if not _has_path_overlap(entry.file_paths, file_paths):
                 continue
             label = entry.confidence_level.value.upper()

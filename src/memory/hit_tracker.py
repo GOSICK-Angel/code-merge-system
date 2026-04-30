@@ -199,3 +199,28 @@ class MemoryHitTracker:
             if counters is None:
                 return {"pass": 0, "fail": 0}
             return dict(counters)
+
+    def harmful_entry_ids(
+        self,
+        threshold: float = -0.5,
+        min_observations: int = 2,
+    ) -> frozenset[str]:
+        """O-M6: entry_ids whose outcome score is at/below ``threshold``.
+
+        Score is ``(pass - fail) / (pass + fail)``; values approach -1 when
+        an entry is consistently associated with judge failures. Requires
+        at least ``min_observations`` total observations to avoid pruning
+        entries on a single bad run.
+        """
+        with self._lock:
+            harmful: set[str] = set()
+            for eid, counters in self._entry_outcomes.items():
+                p = counters.get("pass", 0)
+                f = counters.get("fail", 0)
+                total = p + f
+                if total < min_observations:
+                    continue
+                score = (p - f) / total
+                if score <= threshold:
+                    harmful.add(eid)
+            return frozenset(harmful)
