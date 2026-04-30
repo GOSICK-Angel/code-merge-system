@@ -9,13 +9,13 @@ made multiple calls.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import git as _git
 
 from src.core.orchestrator import Orchestrator
 from src.models.config import MergeConfig, OutputConfig
-from src.models.state import MergeState
+from src.models.state import MergeState, SystemStatus
 from src.tools.cost_tracker import CostTracker, TokenUsage
 
 
@@ -117,3 +117,49 @@ class TestTelemetrySnapshot:
         payload = json_lib.loads(state.model_dump_json())
         assert payload["cost_summary"]["total_calls"] == 1
         assert payload["cost_summary"]["by_model"]["gpt-5.4"]["calls"] == 1
+
+
+class TestCostCeiling:
+    """Verify max_cost_usd halts the orchestrator when threshold exceeded."""
+
+    def test_max_cost_usd_field_defaults_none(self, tmp_path):
+        config = _make_config(tmp_path)
+        assert config.max_cost_usd is None
+
+    async def test_orchestrator_halts_when_cost_ceiling_exceeded(self, tmp_path):
+        from src.models.config import MergeConfig, OutputConfig
+
+        if not (tmp_path / ".git").exists():
+            _git.Repo.init(str(tmp_path))
+
+        config = MergeConfig(
+            upstream_ref="upstream/main",
+            fork_ref="fork/main",
+            repo_path=str(tmp_path),
+            output=OutputConfig(directory=str(tmp_path / "outputs")),
+            max_cost_usd=1.0,
+        )
+
+        with patch("src.core.orchestrator.GitTool"):
+            orch = Orchestrator(config, agents={})
+
+        orch._cost_tracker.record(
+            agent="planner",
+            phase="planning",
+            model="claude-opus-4-6",
+            provider="anthropic",
+            usage=TokenUsage(input_tokens=1_000_000, output_tokens=500_000),
+            elapsed_seconds=5.0,
+        )
+
+        state = MergeState(config=config)
+        state.status = SystemStatus.AUTO_MERGING
+
+        with (
+            patch.object(orch, "_finalize_log"),
+            patch.object(orch, "_snapshot_telemetry"),
+            patch.object(orch.checkpoint, "save"),
+        ):
+            result = await orch.run(state)
+
+        assert result.status == SystemStatus.AWAITING_HUMAN

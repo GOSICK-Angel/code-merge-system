@@ -225,6 +225,20 @@ class Orchestrator:
 
         try:
             while state.status in PHASE_MAP and state.status not in _TERMINAL:
+                ceiling = state.config.max_cost_usd
+                if ceiling is not None:
+                    spent = self._cost_tracker.total_cost_usd
+                    if spent >= ceiling:
+                        self.state_machine.transition(
+                            state,
+                            SystemStatus.AWAITING_HUMAN,
+                            f"cost ceiling reached: ${spent:.4f} >= ${ceiling:.4f}",
+                        )
+                        self._snapshot_telemetry(state)
+                        self.checkpoint.save(state, "cost_ceiling_halt")
+                        self._finalize_log(state, run_start)
+                        return state
+
                 phase_cls = PHASE_MAP[state.status]
                 phase = phase_cls()
                 ctx = self._build_context()

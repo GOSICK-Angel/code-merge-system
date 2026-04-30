@@ -655,6 +655,13 @@ class MergeConfig(BaseModel):
         description="Max concurrent per-file LLM calls in ConflictAnalyst and Judge. "
         "None = auto-detect from the number of active API keys for each agent.",
     )
+    max_cost_usd: float | None = Field(
+        default=None,
+        gt=0,
+        description="7.7: If set, the orchestrator halts with AWAITING_HUMAN when "
+        "the cumulative LLM cost for this run exceeds this threshold (USD). "
+        "Prevents runaway spend on large repos. None = no ceiling.",
+    )
 
     @field_validator("upstream_ref", "fork_ref")
     @classmethod
