@@ -1,0 +1,26 @@
+src/core/phases/auto_merge.py
+  4eb9716dcb78d255 1010-1017,1019,1021-1022,1033-1036,1039,1049-1050,1052,1054-1090
+tests/unit/test_p0_fixes.py
+  4eb9716dcb78d255 265-275,296-297,317-325,338-425
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.10",
+  "base_commit_sha": "3f7608cbeee5c935443b50e0d6d7fce213dff208",
+  "prompts": {
+    "4eb9716dcb78d255": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "def269f8-7dc6-4174-ac5f-089bd8f25cf3",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Angel",
+      "messages": [],
+      "total_additions": 167,
+      "total_deletions": 8,
+      "accepted_lines": 167,
+      "overriden_lines": 0,
+      "messages_url": "https://gitai.gz.cvte.cn/cas/32df82e8cc603fac6f3038a2d2e39d8de418ffc712599158ac3784ff733439bc"
+    }
+  }
+}
