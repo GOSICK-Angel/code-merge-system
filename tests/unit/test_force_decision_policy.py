@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from src.core.phases.base import PhaseContext
-from src.core.phases.initialize import InitializePhase
+from src.core.phases.initialize import InitializePhase, _build_added_file_diff
 from src.models.config import (
     FileClassifierConfig,
     MergeConfig,
@@ -206,3 +206,95 @@ class TestForceDecisionPolicy:
         assert not target.exists()
         rec = state.file_decision_records["dead/old.go"]
         assert "deleted" in rec.rationale
+
+    def test_force_take_target_appends_trailing_newline_for_text(self, tmp_path):
+        config = _make_config(
+            tmp_path, always_take_upstream_patterns=[".github/**"]
+        )
+        mock_git = MagicMock()
+        mock_git.get_file_bytes.return_value = b"name: ci\non: push"
+        ctx = _make_ctx(config, git_tool=mock_git)
+
+        state = MergeState(config=config)
+        phase = InitializePhase()
+        phase._apply_forced_decisions(
+            state, ctx, {".github/workflows/ci.yml": FileChangeCategory.B}
+        )
+
+        written = (tmp_path / ".github/workflows/ci.yml").read_bytes()
+        assert written == b"name: ci\non: push\n"
+
+    def test_force_take_target_preserves_binary_content(self, tmp_path):
+        config = _make_config(
+            tmp_path, always_take_upstream_patterns=["assets/**"]
+        )
+        binary_blob = b"\x89PNG\r\n\x1a\n\x00\x00ihdr"
+        mock_git = MagicMock()
+        mock_git.get_file_bytes.return_value = binary_blob
+        ctx = _make_ctx(config, git_tool=mock_git)
+
+        state = MergeState(config=config)
+        phase = InitializePhase()
+        phase._apply_forced_decisions(
+            state, ctx, {"assets/logo.png": FileChangeCategory.D_MISSING}
+        )
+
+        assert (tmp_path / "assets/logo.png").read_bytes() == binary_blob
+
+    def test_force_take_target_does_not_double_newline(self, tmp_path):
+        config = _make_config(
+            tmp_path, always_take_upstream_patterns=["docs/**"]
+        )
+        mock_git = MagicMock()
+        mock_git.get_file_bytes.return_value = b"already terminated\n"
+        ctx = _make_ctx(config, git_tool=mock_git)
+
+        state = MergeState(config=config)
+        phase = InitializePhase()
+        phase._apply_forced_decisions(
+            state, ctx, {"docs/readme.md": FileChangeCategory.B}
+        )
+
+        assert (tmp_path / "docs/readme.md").read_bytes() == b"already terminated\n"
+
+
+class TestBuildAddedFileDiff:
+    def _make_git(self, content: str | None) -> MagicMock:
+        m = MagicMock()
+        m.get_file_content.return_value = content
+        return m
+
+    def test_returns_empty_when_file_absent(self):
+        git = self._make_git(None)
+        result = _build_added_file_diff(git, "upstream/main", "new/file.go")
+        assert result == ""
+
+    def test_returns_empty_when_content_empty(self):
+        git = self._make_git("")
+        result = _build_added_file_diff(git, "upstream/main", "new/file.go")
+        assert result == ""
+
+    def test_all_lines_shown_when_under_limit(self):
+        content = "\n".join(f"line {i}" for i in range(10))
+        git = self._make_git(content)
+        result = _build_added_file_diff(git, "upstream/main", "pkg/foo.go")
+        assert result.startswith("--- /dev/null")
+        assert "+++ b/pkg/foo.go" in result
+        assert "+line 0" in result
+        assert "+line 9" in result
+        assert "more lines not shown" not in result
+
+    def test_truncation_marker_shown_over_limit(self):
+        content = "\n".join(f"line {i}" for i in range(300))
+        git = self._make_git(content)
+        result = _build_added_file_diff(git, "upstream/main", "big.go")
+        lines = result.splitlines()
+        plus_lines = [l for l in lines if l.startswith("+") and not l.startswith("+++")]
+        assert len(plus_lines) == 200
+        assert "more lines not shown" in result
+
+    def test_hunk_header_shows_preview_count(self):
+        content = "\n".join(f"x" for _ in range(5))
+        git = self._make_git(content)
+        result = _build_added_file_diff(git, "ref", "a.py")
+        assert "@@ -0,0 +1,5 @@" in result

@@ -25,6 +25,7 @@ from src.tools.file_classifier import (
     is_security_sensitive,
     matches_any_pattern,
 )
+from src.tools.git_tool import GitTool
 from src.tools.pollution_auditor import PollutionAuditor
 from src.tools.config_drift_detector import ConfigDriftDetector
 from src.tools.commit_replayer import CommitReplayer
@@ -35,6 +36,42 @@ from src.tools.reverse_impact_scanner import ReverseImpactScanner
 logger = logging.getLogger(__name__)
 
 
+_D_MISSING_PREVIEW_LINES = 200
+
+_BINARY_EXTENSIONS = frozenset(
+    {
+        ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp", ".tiff",
+        ".pdf", ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
+        ".woff", ".woff2", ".ttf", ".otf", ".eot",
+        ".mp3", ".mp4", ".wav", ".ogg", ".flac", ".avi", ".mov",
+        ".so", ".dylib", ".dll", ".exe", ".class", ".jar", ".pyc",
+        ".db", ".sqlite", ".sqlite3",
+    }
+)
+
+
+def _normalize_text_eof(content: bytes, file_path: str) -> bytes:
+    """Append a trailing LF when the blob is plain text and lacks one.
+
+    Avoids introducing trailing-newline diff noise when force-taking upstream
+    files via `git show` — most editors/tools save text files with a final LF
+    and `git diff` flags missing-EOL as a change.
+
+    Binary files are detected by extension allowlist plus a NUL-byte probe
+    over the first 8 KiB; binary content is returned unchanged.
+    """
+    if not content:
+        return content
+    suffix = Path(file_path).suffix.lower()
+    if suffix in _BINARY_EXTENSIONS:
+        return content
+    if b"\x00" in content[:8192]:
+        return content
+    if not content.endswith(b"\n"):
+        return content + b"\n"
+    return content
+
+
 def _parse_file_status(status_char: str) -> FileStatus:
     mapping = {
         "A": FileStatus.ADDED,
@@ -43,6 +80,25 @@ def _parse_file_status(status_char: str) -> FileStatus:
         "R": FileStatus.RENAMED,
     }
     return mapping.get(status_char.upper(), FileStatus.MODIFIED)
+
+
+def _build_added_file_diff(git_tool: GitTool, ref: str, file_path: str) -> str:
+    """Return a pseudo-unified-diff for a D_MISSING file (new in upstream_ref).
+
+    Shows the first _D_MISSING_PREVIEW_LINES lines of the file with '+' prefix
+    so the planner can assess content and risk without just seeing a path.
+    """
+    content: str | None = git_tool.get_file_content(ref, file_path)
+    if not content:
+        return ""
+    lines = content.splitlines()
+    truncated = len(lines) > _D_MISSING_PREVIEW_LINES
+    preview = lines[:_D_MISSING_PREVIEW_LINES]
+    diff_lines = [f"--- /dev/null", f"+++ b/{file_path}", f"@@ -0,0 +1,{len(preview)} @@"]
+    diff_lines.extend(f"+{line}" for line in preview)
+    if truncated:
+        diff_lines.append(f"\\ ... ({len(lines) - _D_MISSING_PREVIEW_LINES} more lines not shown)")
+    return "\n".join(diff_lines)
 
 
 class InitializePhase(Phase):
@@ -172,7 +228,9 @@ class InitializePhase(Phase):
 
             if cat == FileChangeCategory.D_MISSING:
                 file_status = FileStatus.ADDED
-                raw_diff = ""
+                raw_diff = _build_added_file_diff(
+                    ctx.git_tool, state.config.upstream_ref, file_path
+                )
             else:
                 raw_diff = ctx.git_tool.get_unified_diff(
                     merge_base, state.config.fork_ref, file_path
@@ -196,6 +254,24 @@ class InitializePhase(Phase):
             file_diffs.append(fd)
 
         state.file_diffs = file_diffs
+
+        upstream_renames = ctx.git_tool.detect_renames(
+            merge_base, state.config.upstream_ref
+        )
+        fork_renames = ctx.git_tool.detect_renames(merge_base, state.config.fork_ref)
+        seen: set[tuple[str, str]] = set()
+        rename_pairs: list[tuple[str, str]] = []
+        for pair in upstream_renames + fork_renames:
+            if pair not in seen:
+                seen.add(pair)
+                rename_pairs.append(pair)
+        state.rename_pairs = rename_pairs
+        if rename_pairs:
+            ctx.notify(
+                "orchestrator",
+                f"Rename detection: {len(rename_pairs)} rename pair(s) found "
+                f"(upstream={len(upstream_renames)}, fork={len(fork_renames)})",
+            )
 
         if state.config.history.enabled:
             ctx.notify("orchestrator", "Enumerating upstream commits for replay")
@@ -314,7 +390,8 @@ class InitializePhase(Phase):
                     write_status = "absent_noop"
             else:
                 target_path.parent.mkdir(parents=True, exist_ok=True)
-                target_path.write_bytes(content)
+                normalized = _normalize_text_eof(content, file_path)
+                target_path.write_bytes(normalized)
                 write_status = "written_from_upstream"
         except Exception as e:
             logger.error(
