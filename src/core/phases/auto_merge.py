@@ -33,6 +33,7 @@ from src.tools.binary_assets import is_binary_asset
 from src.tools.commit_replayer import CommitReplayer
 from src.tools.conflict_markers import file_has_conflict_markers
 from src.tools.git_committer import GitCommitter
+from src.tools.patch_applier import create_escalate_record
 
 logger = logging.getLogger(__name__)
 
@@ -694,7 +695,21 @@ class AutoMergePhase(Phase):
 
             if layer_id is not None:
                 if not verify_layer_deps(layer_id, completed_layers, state):
-                    logger.warning("Skipping layer %d: dependencies not met", layer_id)
+                    missing_deps: list[int] = []
+                    if state.merge_plan and state.merge_plan.layers:
+                        for layer in state.merge_plan.layers:
+                            if layer.layer_id == layer_id:
+                                missing_deps = [
+                                    d
+                                    for d in layer.depends_on
+                                    if d not in completed_layers
+                                ]
+                                break
+                    logger.warning(
+                        "Skipping layer %d: dependencies not met (missing %s)",
+                        layer_id,
+                        missing_deps,
+                    )
                     for batch in batches:
                         for fp in batch.file_paths:
                             cat = batch.change_category
@@ -717,6 +732,19 @@ class AutoMergePhase(Phase):
                                 )
                             else:
                                 skipped_layer_files.append(fp)
+                                if fp not in state.file_decision_records:
+                                    state.file_decision_records[fp] = (
+                                        create_escalate_record(
+                                            fp,
+                                            (
+                                                f"layer {layer_id} skipped: "
+                                                f"dependencies {missing_deps} "
+                                                "not in completed_layers"
+                                            ),
+                                            phase="auto_merge",
+                                            agent="layer_dep_gate",
+                                        )
+                                    )
                     continue
 
             # Parallel execution of all batches in this layer
@@ -904,6 +932,37 @@ class AutoMergePhase(Phase):
                 dep_bump_applied,
                 len(unhandled_conflict_files),
             )
+        # O-B5-leak: invariant — every plan file must be accounted for via
+        # cherry-pick replay, an executor decision, or the layer-skip queue.
+        # A "leak" (plan file in none of those buckets) means the batch
+        # dispatcher silently dropped it; create an ESCALATE_HUMAN record so
+        # downstream sees the gap instead of mistaking it for B-class drift.
+        plan_files: set[str] = set()
+        if state.merge_plan is not None:
+            for ph in state.merge_plan.phases:
+                plan_files.update(ph.file_paths)
+        accounted = (
+            set(state.file_decision_records.keys())
+            | set(replayed_set)
+            | set(skipped_layer_files)
+        )
+        leaked = sorted(plan_files - accounted)
+        if leaked:
+            logger.error(
+                "O-B5-leak: %d plan files unaccounted after auto_merge "
+                "(neither replayed, decided, nor layer-skipped). First 10: %s",
+                len(leaked),
+                leaked[:10],
+            )
+            for fp in leaked:
+                state.file_decision_records[fp] = create_escalate_record(
+                    fp,
+                    "Plan file unaccounted after auto_merge — likely batch "
+                    "dispatcher gap (no replay, no decision, no layer-skip)",
+                    phase="auto_merge",
+                    agent="invariant_check",
+                )
+
         # O-B5: byte-level sanity-check on B-class files. Plan promises these
         # equal upstream after auto-merge; if not, the take_target path
         # silently failed somewhere (e.g. cherry-pick `-X theirs` resolved to
@@ -1168,6 +1227,9 @@ class AutoMergePhase(Phase):
             if batch.change_category != FileChangeCategory.B:
                 continue
             for fp in batch.file_paths:
+                existing = state.file_decision_records.get(fp)
+                if existing is not None and existing.decision == MergeDecision.ESCALATE_HUMAN:
+                    continue
                 checked += 1
                 upstream_sha = ctx.git_tool.get_file_hash(upstream_ref, fp)
                 worktree_sha = ctx.git_tool.get_worktree_blob_sha(fp)

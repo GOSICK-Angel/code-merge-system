@@ -1,9 +1,15 @@
+import hashlib
 from datetime import datetime
 from src.models.decision import FileDecisionRecord, MergeDecision, DecisionSource
 from src.models.diff import FileStatus
 from src.models.state import MergeState
 from src.tools.conflict_markers import has_conflict_markers
 from src.tools.git_tool import GitTool
+
+
+def _git_blob_sha(payload: bytes) -> str:
+    header = f"blob {len(payload)}\0".encode("ascii")
+    return hashlib.sha1(header + payload).hexdigest()
 
 
 async def apply_with_snapshot(
@@ -46,6 +52,34 @@ async def apply_with_snapshot(
     try:
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(new_content, encoding="utf-8")
+
+        expected_blob = _git_blob_sha(new_content.encode("utf-8"))
+        actual_blob = git_tool.get_worktree_blob_sha(file_path)
+        if actual_blob != expected_blob:
+            if original is not None:
+                abs_path.write_text(original, encoding="utf-8")
+            return FileDecisionRecord(
+                file_path=file_path,
+                file_status=FileStatus.MODIFIED,
+                decision=MergeDecision.ESCALATE_HUMAN,
+                decision_source=DecisionSource.AUTO_EXECUTOR,
+                confidence=0.0,
+                rationale=(
+                    f"Post-write self-check failed: expected blob "
+                    f"{expected_blob}, worktree blob {actual_blob}. "
+                    "Likely encoding/line-ending corruption or concurrent "
+                    "modification — rolled back without overwriting."
+                ),
+                original_snapshot=original,
+                phase=phase,
+                agent=agent,
+                timestamp=datetime.now(),
+                is_rolled_back=original is not None,
+                rollback_reason=(
+                    f"blob_sha_mismatch:expected={expected_blob}"
+                    f":actual={actual_blob}"
+                ),
+            )
 
         preview_lines = new_content.splitlines()[:50]
         preview = "\n".join(preview_lines)
@@ -117,6 +151,33 @@ async def apply_bytes_with_snapshot(
     try:
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_bytes(new_bytes)
+
+        expected_blob = _git_blob_sha(new_bytes)
+        actual_blob = git_tool.get_worktree_blob_sha(file_path)
+        if actual_blob != expected_blob:
+            if original_bytes is not None:
+                abs_path.write_bytes(original_bytes)
+            return FileDecisionRecord(
+                file_path=file_path,
+                file_status=FileStatus.MODIFIED,
+                decision=MergeDecision.ESCALATE_HUMAN,
+                decision_source=DecisionSource.AUTO_EXECUTOR,
+                confidence=0.0,
+                rationale=(
+                    f"Post-write self-check failed (binary): expected blob "
+                    f"{expected_blob}, worktree blob {actual_blob}. "
+                    "Rolled back without overwriting."
+                ),
+                original_snapshot=original_snapshot,
+                phase=phase,
+                agent=agent,
+                timestamp=datetime.now(),
+                is_rolled_back=original_bytes is not None,
+                rollback_reason=(
+                    f"blob_sha_mismatch:expected={expected_blob}"
+                    f":actual={actual_blob}"
+                ),
+            )
 
         record = FileDecisionRecord(
             file_path=file_path,

@@ -145,6 +145,36 @@ class TestOB5SanityCheck:
         drift = await AutoMergePhase()._b_class_sanity_check(state, ctx)
         assert drift == []
 
+    @pytest.mark.asyncio
+    async def test_skips_files_already_escalated(self):
+        """Files that the layer-skip path (or any earlier stage) already
+        marked ESCALATE_HUMAN are intentional escalations, not silent
+        drift — sanity-check must not double-count them."""
+        from src.models.decision import FileDecisionRecord, MergeDecision, DecisionSource
+        from src.models.diff import FileStatus
+
+        state = self._make_phase_with_b_batch(["escalated.py", "real_drift.py"])
+        state.file_decision_records = {
+            "escalated.py": FileDecisionRecord(
+                file_path="escalated.py",
+                file_status=FileStatus.MODIFIED,
+                decision=MergeDecision.ESCALATE_HUMAN,
+                decision_source=DecisionSource.AUTO_EXECUTOR,
+                rationale="layer dep gate",
+                phase="auto_merge",
+                agent="layer_dep_gate",
+            ),
+        }
+
+        ctx = MagicMock()
+        ctx.git_tool.get_file_hash.return_value = "upstream_sha"
+        ctx.git_tool.get_worktree_blob_sha.return_value = "fork_sha"
+
+        drift = await AutoMergePhase()._b_class_sanity_check(state, ctx)
+
+        assert drift == ["real_drift.py"]
+        assert ctx.git_tool.get_file_hash.call_count == 1
+
 
 class TestOJ3VerifyTakeDecisions:
     """O-J3: deterministic verification of take_target / take_current."""

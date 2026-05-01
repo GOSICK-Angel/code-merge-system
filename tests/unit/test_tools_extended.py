@@ -492,13 +492,17 @@ class TestGitTool:
         assert len(results) == 2
 
     def test_get_file_content_returns_content(self):
-        self.mock_repo.git.show.return_value = "file content here"
+        self.mock_repo.git.show.return_value = b"file content here\n"
         tool = self._create_git_tool()
 
         result = tool.get_file_content("main", "src/main.py")
 
-        assert result == "file content here"
-        self.mock_repo.git.show.assert_called_once_with("main:src/main.py")
+        assert result == "file content here\n"
+        self.mock_repo.git.show.assert_called_once_with(
+            "main:src/main.py",
+            stdout_as_string=False,
+            strip_newline_in_stdout=False,
+        )
 
     def test_get_file_content_returns_none_on_error(self):
         import git

@@ -490,6 +490,8 @@ class TestHumanReviewPhase:
         state.human_decision_requests = {already_decided_file: decided_req}
 
         # Mock git_tool to serve upstream content for catch-up files.
+        from src.tools.patch_applier import _git_blob_sha
+
         git_tool = MagicMock()
         git_tool.repo_path = tmp_path
         git_tool.get_file_content.side_effect = lambda ref, fp: {
@@ -497,6 +499,9 @@ class TestHumanReviewPhase:
             d_file: "upstream-D-content\n",
         }.get(fp)
         git_tool.get_unmerged_files.return_value = []
+        git_tool.get_worktree_blob_sha.side_effect = lambda fp: _git_blob_sha(
+            (tmp_path / fp).read_bytes()
+        )
 
         executor = AsyncMock()
         executor.execute_human_decision = AsyncMock(

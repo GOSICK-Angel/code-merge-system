@@ -36,18 +36,24 @@ class GitTool:
         return results
 
     def get_file_content(self, ref: str, file_path: str) -> str | None:
-        try:
-            return str(self.repo.git.show(f"{ref}:{file_path}"))
-        except git.GitCommandError:
+        raw = self.get_file_bytes(ref, file_path)
+        if raw is None:
             return None
+        return raw.decode("utf-8", errors="surrogateescape")
 
     def get_file_bytes(self, ref: str, file_path: str) -> bytes | None:
         """Binary-safe file read from a git ref. Use for PNG/woff/mp3/zip
-        etc. where `git show` text decode would corrupt the payload."""
+        etc. where `git show` text decode would corrupt the payload.
+
+        strip_newline_in_stdout=False is critical: GitPython's default
+        (True) silently drops a trailing 0x0a, which broke B-class
+        take_target byte-equality with upstream blobs.
+        """
         try:
             result = self.repo.git.show(
                 f"{ref}:{file_path}",
                 stdout_as_string=False,
+                strip_newline_in_stdout=False,
             )
         except git.GitCommandError:
             return None
