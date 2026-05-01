@@ -15,7 +15,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from src.agents.base_agent import BaseAgent
 from src.agents.registry import AgentRegistry
@@ -170,6 +170,10 @@ class Orchestrator:
 
         # --- cost tracking (C3) ---
         self._cost_tracker = CostTracker()
+        # Snapshot of state.cost_summary captured at run() start. Used to
+        # preserve prior-process spending across resume; in-process tracker
+        # only knows about LLM calls since this Orchestrator was created.
+        self._prior_cost_summary: dict[str, Any] = {}
 
         # --- logging/activity ---
         self._log_handler: logging.FileHandler | None = None
@@ -190,6 +194,15 @@ class Orchestrator:
         self._on_activity = cb
 
     async def run(self, state: MergeState) -> MergeState:
+        # Capture prior spending from any previous process (e.g. checkpoint
+        # resume) before this run does anything. _snapshot_telemetry adds the
+        # in-process CostTracker on top of this so cumulative totals survive
+        # resumes. Without this snapshot, subsequent _snapshot_telemetry()
+        # calls would either lose prior spend or double-count it.
+        import copy
+
+        self._prior_cost_summary = copy.deepcopy(state.cost_summary or {})
+
         # Re-initialize checkpoint with the per-run directory now that run_id is known.
         run_dir = get_run_dir(self.config.repo_path, state.run_id)
         self.checkpoint = Checkpoint(
@@ -239,8 +252,13 @@ class Orchestrator:
 
                 ceiling = state.config.max_cost_usd
                 if ceiling is not None:
-                    prior = (state.cost_summary or {}).get("total_cost_usd", 0.0)
-                    spent = prior + self._cost_tracker.total_cost_usd
+                    # _prior_cost_summary holds spending from earlier processes
+                    # (resume case); the in-process tracker holds spending
+                    # since this Orchestrator started. Add them — never read
+                    # state.cost_summary here, that field is the merged
+                    # snapshot (prior + current) and would double-count.
+                    prior = self._prior_cost_summary.get("total_cost_usd", 0.0)
+                    spent = float(prior) + self._cost_tracker.total_cost_usd
                     if spent >= ceiling:
                         self.state_machine.transition(
                             state,
@@ -472,15 +490,89 @@ class Orchestrator:
         report_generation runs and the run's token/cost/memory data is
         lost entirely (checkpoint shows zero LLM activity even when the
         planner + planner_judge made several calls).
+
+        On resume the in-process CostTracker starts fresh, so summary()
+        only reflects spending of the current process. Merge it with the
+        prior checkpoint snapshot so cumulative totals (and the cost
+        ceiling check) remain correct across resumes.
         """
         try:
-            state.cost_summary = self._cost_tracker.summary()
+            current = self._cost_tracker.summary()
+            state.cost_summary = self._merge_cost_summaries(
+                self._prior_cost_summary, current
+            )
         except Exception:
             logger.debug("cost_tracker.summary() failed", exc_info=True)
         try:
             state.memory_summary = self._memory_hit_tracker.summary()
         except Exception:
             logger.debug("memory_hit_tracker.summary() failed", exc_info=True)
+
+    @staticmethod
+    def _merge_cost_summaries(
+        prior: dict[str, Any], current: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Combine two CostTracker.summary() outputs additively.
+
+        Used by _snapshot_telemetry to preserve spending recorded in
+        prior runs (e.g. before a checkpoint resume).
+        """
+
+        def _add_scalar(a: float | int, b: float | int) -> float:
+            return round(float(a) + float(b), 6)
+
+        def _add_token_dict(a: dict[str, Any], b: dict[str, Any]) -> dict[str, int]:
+            keys = {"input", "output", "cache_read", "cache_write"}
+            return {k: int(a.get(k, 0)) + int(b.get(k, 0)) for k in keys}
+
+        def _add_grouped(
+            a: dict[str, dict[str, Any]],
+            b: dict[str, dict[str, Any]],
+        ) -> dict[str, dict[str, Any]]:
+            out: dict[str, dict[str, Any]] = {}
+            for key in set(a) | set(b):
+                ae = a.get(key, {})
+                be = b.get(key, {})
+                row: dict[str, Any] = {}
+                for field in {"calls", "cost_usd", "tokens"} | set(ae) | set(be):
+                    if field == "calls":
+                        row["calls"] = int(ae.get("calls", 0)) + int(be.get("calls", 0))
+                    elif field == "tokens":
+                        row["tokens"] = int(ae.get("tokens", 0)) + int(
+                            be.get("tokens", 0)
+                        )
+                    elif field == "cost_usd":
+                        row["cost_usd"] = _add_scalar(
+                            ae.get("cost_usd", 0.0), be.get("cost_usd", 0.0)
+                        )
+                out[key] = row
+            return out
+
+        merged: dict[str, Any] = {
+            "total_cost_usd": _add_scalar(
+                prior.get("total_cost_usd", 0.0),
+                current.get("total_cost_usd", 0.0),
+            ),
+            "total_calls": int(prior.get("total_calls", 0))
+            + int(current.get("total_calls", 0)),
+            "total_tokens": _add_token_dict(
+                prior.get("total_tokens", {}) or {},
+                current.get("total_tokens", {}) or {},
+            ),
+            "by_agent": _add_grouped(
+                prior.get("by_agent", {}) or {},
+                current.get("by_agent", {}) or {},
+            ),
+            "by_phase": _add_grouped(
+                prior.get("by_phase", {}) or {},
+                current.get("by_phase", {}) or {},
+            ),
+            "by_model": _add_grouped(
+                prior.get("by_model", {}) or {},
+                current.get("by_model", {}) or {},
+            ),
+        }
+        return merged
 
     def _inject_hooks(self) -> None:
         for agent in self._all_agents:

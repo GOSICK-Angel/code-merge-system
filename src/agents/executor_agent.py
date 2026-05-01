@@ -274,6 +274,19 @@ class ExecutorAgent(BaseAgent):
                 timestamp=datetime.now(),
             )
 
+        if strategy == MergeDecision.SEMANTIC_MERGE:
+            # Defensive guard. SEMANTIC_MERGE must be routed through
+            # ConflictAnalysisPhase, which produces the ConflictAnalysis
+            # required by execute_semantic_merge(). Reaching this branch
+            # means the auto_merge dispatcher failed to defer the file.
+            return create_escalate_record(
+                file_diff.file_path,
+                "SEMANTIC_MERGE reached execute_auto_merge without a "
+                "ConflictAnalysis — the auto_merge dispatcher should defer "
+                "this strategy to conflict_analysis (see auto_merge.py).",
+                phase=current_phase_str,
+            )
+
         return create_escalate_record(
             file_diff.file_path,
             f"Unsupported auto-merge strategy: {strategy}",

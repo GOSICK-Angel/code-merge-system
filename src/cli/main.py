@@ -146,6 +146,107 @@ def init_command(repo_path: str) -> None:
     init_command_impl(repo_path)
 
 
+@cli.command("plan-suggest")
+@click.option(
+    "--target",
+    default="upstream/main",
+    show_default=True,
+    help="Upstream ref to enumerate baselines from.",
+)
+@click.option(
+    "--repo-path",
+    default=".",
+    show_default=True,
+    type=click.Path(exists=True, file_okay=False),
+    help="Repository root.",
+)
+@click.option(
+    "--patterns",
+    default="cvte",
+    show_default=True,
+    help=(
+        "Comma-separated substrings to count against changed file paths. "
+        "Use '*' to disable filtering and report total file counts only."
+    ),
+)
+@click.option(
+    "--candidates",
+    default="5,10,30,50",
+    show_default=True,
+    help="Comma-separated commit-window sizes to evaluate.",
+)
+def plan_suggest_command(
+    target: str, repo_path: str, patterns: str, candidates: str
+) -> None:
+    """Suggest a baseline commit window for the next merge run.
+
+    For each ``~N`` window relative to TARGET, prints commit count, total
+    changed-file count, and how many of those files match the substring
+    PATTERNS (default 'cvte'). Helps pick a baseline with enough
+    fork-customised coverage to exercise SEMANTIC_MERGE without blowing
+    up the budget.
+    """
+    from src.tools.git_tool import GitTool
+
+    try:
+        gt = GitTool(repo_path)
+    except Exception as e:
+        console.print(f"[red]Cannot open repo at '{repo_path}': {e}[/red]")
+        sys.exit(1)
+
+    try:
+        head_sha = gt.repo.git.rev_parse(target).strip()
+    except Exception as e:
+        console.print(f"[red]Ref '{target}' not found: {e}[/red]")
+        sys.exit(1)
+
+    needles = [s for s in (p.strip() for p in patterns.split(",")) if s]
+    use_filter = needles != ["*"] and bool(needles)
+
+    sizes: list[int] = []
+    for token in candidates.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            sizes.append(int(token))
+        except ValueError:
+            console.print(f"[yellow]Skipping invalid candidate '{token}'[/yellow]")
+    if not sizes:
+        console.print("[red]No valid --candidates values[/red]")
+        sys.exit(1)
+
+    console.print(
+        f"[bold]Baseline suggestions vs {target}[/bold] "
+        f"(pattern filter: {patterns})"
+    )
+    console.print(
+        f"{'baseline':<22} {'commits':>8} {'files':>8} {'matches':>9}"
+    )
+    for n in sorted(set(sizes)):
+        baseline = f"{target}~{n}"
+        try:
+            base_sha = gt.repo.git.rev_parse(baseline).strip()
+        except Exception:
+            console.print(f"{baseline:<22} (resolve failed)")
+            continue
+        try:
+            files_raw = gt.repo.git.diff(
+                "--name-only", f"{base_sha}..{head_sha}"
+            )
+        except Exception as exc:
+            console.print(f"{baseline:<22} (diff failed: {exc})")
+            continue
+        files = [line for line in files_raw.splitlines() if line]
+        if use_filter:
+            matches = sum(
+                1 for f in files if any(needle in f for needle in needles)
+            )
+        else:
+            matches = len(files)
+        console.print(f"{baseline:<22} {n:>8} {len(files):>8} {matches:>9}")
+
+
 @cli.command("validate")
 @click.option("--config", "-c", required=True, type=click.Path(exists=True))
 def validate_command(config: str) -> None:
@@ -181,11 +282,25 @@ def validate_config_and_env(config: MergeConfig) -> list[str]:
                 f"Agent '{agent_name}' requires env var '{env_var}' (not set)"
             )
 
+    repo_root = Path(config.repo_path).expanduser()
+    if not repo_root.exists():
+        errors.append(
+            f"repo_path '{config.repo_path}' does not exist on disk "
+            "(check that the path is correct relative to the current "
+            "directory, or use an absolute path)"
+        )
+        return errors
+    if not repo_root.is_dir():
+        errors.append(
+            f"repo_path '{config.repo_path}' is not a directory"
+        )
+        return errors
+
     try:
         from src.tools.git_tool import GitTool
 
-        gt = GitTool(config.repo_path)
-    except ValueError as e:
+        gt = GitTool(str(repo_root))
+    except Exception as e:
         errors.append(
             f"repo_path '{config.repo_path}' is not a valid git repository: {e}"
         )

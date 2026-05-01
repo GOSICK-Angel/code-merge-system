@@ -505,20 +505,43 @@ class PlanReviewPhase(Phase):
             ),
         )
 
+    # When LLM is unavailable we still need explicit user approval, but we
+    # cap how many decision items we surface. A 1500-file plan would
+    # otherwise produce 1500 pending decisions and the CLI/TUI is unusable.
+    _FALLBACK_MAX_ITEMS: int = 200
+
     def _build_fallback_decision_items(
         self, state: MergeState
     ) -> list[UserDecisionItem]:
-        """When the LLM judge is unavailable, surface every actionable file so
-        the user is forced to approve the plan explicitly — no silent merge.
+        """When the LLM judge is unavailable, surface only the files the user
+        actually has to triage — HUMAN_REQUIRED + AUTO_RISKY — capped at
+        ``_FALLBACK_MAX_ITEMS``.
+
+        AUTO_SAFE files are excluded: the planner already classified them as
+        safe, and there is no benefit in forcing the user to click through
+        thousands of trivially-mergeable files just because the LLM judge
+        couldn't run. A single batch ``approve_plan`` decision is appended so
+        the user can accept the remaining unreviewed plan in one click.
         """
         if state.merge_plan is None:
             return []
 
         diff_map = self._collect_file_diff_info(state)
+        cap = self._FALLBACK_MAX_ITEMS
 
+        risky_levels = {RiskLevel.HUMAN_REQUIRED, RiskLevel.AUTO_RISKY}
         items: list[UserDecisionItem] = []
+        truncated = 0
+        auto_safe_count = 0
         for batch in state.merge_plan.phases:
+            if batch.risk_level not in risky_levels:
+                if batch.risk_level == RiskLevel.AUTO_SAFE:
+                    auto_safe_count += len(batch.file_paths)
+                continue
             for fp in batch.file_paths:
+                if len(items) >= cap:
+                    truncated += 1
+                    continue
                 context = self._build_risk_context(fp, batch.risk_level, {}, diff_map)
                 options = self._build_decision_options(fp, batch.risk_level, context)
                 description = (
@@ -535,6 +558,15 @@ class PlanReviewPhase(Phase):
                         options=options,
                     )
                 )
+
+        if auto_safe_count or truncated:
+            logger.warning(
+                "plan_review fallback: hid %d AUTO_SAFE files and truncated "
+                "%d additional risky files (cap=%d) from pending decisions",
+                auto_safe_count,
+                truncated,
+                cap,
+            )
         return items
 
     def _build_user_decision_items(self, state: MergeState) -> list[UserDecisionItem]:

@@ -941,10 +941,30 @@ class AutoMergePhase(Phase):
         if state.merge_plan is not None:
             for ph in state.merge_plan.phases:
                 plan_files.update(ph.file_paths)
+
+        # AUTO_RISKY + C-class files that the strategy router classified as
+        # SEMANTIC_MERGE are intentionally deferred to ConflictAnalysisPhase
+        # (which owns the LLM merge path). They are NOT a dispatcher leak.
+        deferred_for_conflict_analysis: set[str] = set()
+        if state.merge_plan is not None:
+            for ph in state.merge_plan.phases:
+                if ph.risk_level != RiskLevel.AUTO_RISKY:
+                    continue
+                for fp in ph.file_paths:
+                    if fp in state.file_decision_records or fp in replayed_set:
+                        continue
+                    cat = ph.change_category
+                    if cat is None:
+                        fd_lookup = file_diffs_map.get(fp)
+                        cat = fd_lookup.change_category if fd_lookup else None
+                    if cat == FileChangeCategory.C:
+                        deferred_for_conflict_analysis.add(fp)
+
         accounted = (
             set(state.file_decision_records.keys())
             | set(replayed_set)
             | set(skipped_layer_files)
+            | deferred_for_conflict_analysis
         )
         leaked = sorted(plan_files - accounted)
         if leaked:
@@ -1278,6 +1298,17 @@ class AutoMergePhase(Phase):
                 return None
 
             strategy = executor._select_strategy_by_category(category, batch.risk_level)
+
+            # SEMANTIC_MERGE files cannot be resolved here — they need a
+            # ConflictAnalysis produced by the conflict_analysis phase, which
+            # owns the LLM-driven merge path (executor.execute_semantic_merge).
+            # Defer instead of writing an ESCALATE_HUMAN record (the prior
+            # behaviour escalated 250+ files per run, all of which were really
+            # auto-mergeable). The file remains in an AUTO_RISKY plan batch and
+            # is collected by ConflictAnalysisPhase as part of high_risk_files.
+            if strategy == MergeDecision.SEMANTIC_MERGE:
+                return None
+
             record = await executor.execute_auto_merge(fd_item, strategy, state)
             state.file_decision_records[file_path] = record
             return file_path

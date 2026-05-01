@@ -119,6 +119,7 @@ class InitializePhase(Phase):
 
     def _run_sync(self, state: MergeState, ctx: PhaseContext) -> None:
         self._resolve_project_context(state, ctx)
+        self._check_untracked_files(state, ctx)
         ctx.notify("orchestrator", "Computing merge base")
         git_merge_base = ctx.git_tool.get_merge_base(
             state.config.upstream_ref, state.config.fork_ref
@@ -446,6 +447,41 @@ class InitializePhase(Phase):
             ),
             phase="initialize",
             agent="force_decision_policy",
+        )
+
+    def _check_untracked_files(self, state: MergeState, ctx: PhaseContext) -> None:
+        """Warn the user about untracked files in the working tree.
+
+        Untracked files (e.g. `_assets/*.png` from prior plugin work) can
+        collide with upstream paths during merge and surprise the user
+        when the run rewrites the working directory. This is informational
+        only — does not abort the run.
+        """
+        try:
+            entries = ctx.git_tool.get_status()
+        except Exception as exc:
+            logger.debug("untracked file check failed: %s", exc)
+            return
+
+        untracked = [path for code, path in entries if code == "??"]
+        if not untracked:
+            return
+
+        preview = ", ".join(untracked[:5])
+        if len(untracked) > 5:
+            preview = f"{preview}, ... (+{len(untracked) - 5} more)"
+        logger.warning(
+            "Working tree has %d untracked file(s) — they will not be "
+            "merged automatically and may collide with upstream paths. "
+            "Consider `git add`, `git stash -u`, or `git clean -fd` before "
+            "running merge. First files: %s",
+            len(untracked),
+            preview,
+        )
+        ctx.notify(
+            "orchestrator",
+            f"⚠ {len(untracked)} untracked file(s) in working tree "
+            f"(e.g. {preview}). Consider git add/stash/clean before merge.",
         )
 
     def _resolve_project_context(self, state: MergeState, ctx: PhaseContext) -> None:
