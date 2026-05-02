@@ -29,11 +29,13 @@ class LayeredMemoryLoader:
         tracker: MemoryHitTracker | None = None,
         min_relevance: float = 0.0,
         relevance_filter_threshold: int = 100,
+        upstream_ref: str = "",
     ) -> None:
         self._store = store
         self._tracker = tracker
         self._min_relevance = min_relevance
         self._relevance_filter_threshold = relevance_filter_threshold
+        self._upstream_ref = upstream_ref[:8] if upstream_ref else ""
 
     def load_for_agent(
         self,
@@ -104,7 +106,10 @@ class LayeredMemoryLoader:
         cap = self._dynamic_l2_cap()
         min_rel = self._effective_min_relevance()
         relevant = self._store.get_relevant_context(
-            file_paths, max_entries=cap, min_relevance=min_rel
+            file_paths,
+            max_entries=cap,
+            min_relevance=min_rel,
+            current_upstream_ref=self._upstream_ref,
         )
         if not relevant:
             return "", 0

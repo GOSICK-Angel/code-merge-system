@@ -162,7 +162,7 @@ class Orchestrator:
         # --- memory ---
         self._memory_store: MemoryStore | SQLiteMemoryStore = MemoryStore()
         self._memory_hit_tracker = MemoryHitTracker()
-        self._summarizer = PhaseSummarizer()
+        self._summarizer = PhaseSummarizer(upstream_ref=config.upstream_ref)
         self._phases_since_last_extract: int = 0
 
         # --- hooks (C1) ---
@@ -478,6 +478,7 @@ class Orchestrator:
             agent.set_memory_store(self._memory_store)  # type: ignore[arg-type]
             agent.set_memory_hit_tracker(self._memory_hit_tracker)
             agent.set_memory_config(memory_cfg)
+            agent.set_upstream_ref(self.config.upstream_ref)
 
     def _inject_cost_tracker(self, phase: str = "") -> None:
         for agent in self._all_agents:

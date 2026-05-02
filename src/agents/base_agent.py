@@ -119,6 +119,7 @@ class BaseAgent(ABC):
         self._memory_store: MemoryStore | None = None
         self._memory_hit_tracker: MemoryHitTracker | None = None
         self._memory_config: object | None = None
+        self._upstream_ref: str = ""
         self._consecutive_failures: int = 0
         self._sliding_window: deque[bool] = deque(maxlen=_SLIDING_WINDOW_SIZE)
         self._credential_pool: CredentialPool | None = self._init_credential_pool()
@@ -206,6 +207,9 @@ class BaseAgent(ABC):
         """
         self._memory_config = cfg
 
+    def set_upstream_ref(self, ref: str) -> None:
+        self._upstream_ref = ref
+
     def set_cost_tracker(self, tracker: CostTracker, phase: str = "") -> None:
         self._cost_tracker = tracker
         self._current_phase = phase
@@ -254,10 +258,9 @@ class BaseAgent(ABC):
                 memory_cfg.relevance_min_score if memory_cfg is not None else 0.0
             ),
             relevance_filter_threshold=(
-                memory_cfg.relevance_filter_threshold
-                if memory_cfg is not None
-                else 100
+                memory_cfg.relevance_filter_threshold if memory_cfg is not None else 100
             ),
+            upstream_ref=self._upstream_ref,
         )
         text = loader.load_for_agent(current_phase, file_paths)
         if text:

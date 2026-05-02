@@ -264,10 +264,12 @@ class SQLiteMemoryStore:
         file_paths: list[str],
         max_entries: int = 10,
         min_relevance: float = 0.0,
+        current_upstream_ref: str = "",
     ) -> list[MemoryEntry]:
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM memory_entries").fetchall()
 
+        ref_short = current_upstream_ref[:8] if current_upstream_ref else ""
         scored: dict[str, tuple[float, MemoryEntry]] = {}
         for row in rows:
             entry = _row_to_entry(row)
@@ -284,7 +286,20 @@ class SQLiteMemoryStore:
             if path_score == 0.0 and not entry_fps:
                 path_score = 0.1
 
-            relevance = path_score * 0.5 + entry.confidence * 0.5
+            confidence = entry.confidence
+            if ref_short:
+                entry_ref = next(
+                    (
+                        t[len("upstream_ref:") :]
+                        for t in entry.tags
+                        if t.startswith("upstream_ref:")
+                    ),
+                    "",
+                )
+                if entry_ref and entry_ref != ref_short:
+                    confidence *= 0.5
+
+            relevance = path_score * 0.5 + confidence * 0.5
             if relevance > 0.0 and relevance >= min_relevance:
                 scored[entry.entry_id] = (relevance, entry)
 

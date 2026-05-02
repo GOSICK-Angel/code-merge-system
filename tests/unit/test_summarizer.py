@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+from datetime import datetime
+
 from src.memory.models import MemoryEntryType
 from src.memory.summarizer import PhaseSummarizer
 from src.models.config import MergeConfig
@@ -12,6 +14,13 @@ from src.models.decision import (
     MergeDecision,
 )
 from src.models.diff import FileChangeCategory, FileStatus
+from src.models.judge import (
+    IssueSeverity,
+    IssueResolvability,
+    JudgeIssue,
+    JudgeVerdict,
+    VerdictType,
+)
 from src.models.state import MergeState
 
 
@@ -161,6 +170,64 @@ class TestSummarizeConflictAnalysis:
         assert len(entries) >= 1
         assert any("concurrent_modification" in e.content for e in entries)
 
+    def test_writes_per_file_decision_entries(self):
+        state = _make_state()
+        state.conflict_analyses = {
+            "models/azure_openai/llm.py": self._make_analysis(
+                "models/azure_openai/llm.py", ConflictType.CONCURRENT_MODIFICATION
+            ),
+            "models/tongyi/tts.py": self._make_analysis(
+                "models/tongyi/tts.py", ConflictType.LOGIC_CONTRADICTION
+            ),
+        }
+        summarizer = PhaseSummarizer()
+        _, entries = summarizer.summarize_conflict_analysis(state)
+
+        decision_entries = [
+            e for e in entries if e.entry_type == MemoryEntryType.DECISION
+        ]
+        assert len(decision_entries) == 2
+        paths_in_entries = {fp for e in decision_entries for fp in e.file_paths}
+        assert "models/azure_openai/llm.py" in paths_in_entries
+        assert "models/tongyi/tts.py" in paths_in_entries
+        assert any("models/azure_openai" in fp for fp in paths_in_entries)
+
+    def test_upstream_ref_tag_in_decision_entries(self):
+        state = _make_state()
+        state.conflict_analyses = {
+            "models/vertex_ai/llm.py": self._make_analysis(
+                "models/vertex_ai/llm.py", ConflictType.CONCURRENT_MODIFICATION
+            ),
+        }
+        summarizer = PhaseSummarizer(upstream_ref="26d88b58abcd1234")
+        _, entries = summarizer.summarize_conflict_analysis(state)
+
+        decision_entries = [
+            e for e in entries if e.entry_type == MemoryEntryType.DECISION
+        ]
+        assert len(decision_entries) == 1
+        tags = decision_entries[0].tags
+        assert any(t == "upstream_ref:26d88b58" for t in tags)
+
+    def test_plugin_dir_in_file_paths(self):
+        state = _make_state()
+        state.conflict_analyses = {
+            "models/volcengine_maas/models/llm/llm.py": self._make_analysis(
+                "models/volcengine_maas/models/llm/llm.py",
+                ConflictType.CONCURRENT_MODIFICATION,
+            ),
+        }
+        summarizer = PhaseSummarizer()
+        _, entries = summarizer.summarize_conflict_analysis(state)
+
+        decision_entries = [
+            e for e in entries if e.entry_type == MemoryEntryType.DECISION
+        ]
+        assert len(decision_entries) == 1
+        file_paths = decision_entries[0].file_paths
+        assert "models/volcengine_maas/models/llm/llm.py" in file_paths
+        assert "models/volcengine_maas" in file_paths
+
 
 class TestSummarizeJudgeReview:
     def test_basic_summary(self):
@@ -207,3 +274,64 @@ class TestSummarizeJudgeReview:
         summary, entries = summarizer.summarize_judge_review(state)
         assert summary.statistics["total_rounds"] == 0
         assert len(entries) == 0
+
+    def _make_verdict(self, failed_files: list[str], issue_type: str) -> JudgeVerdict:
+        issues = [
+            JudgeIssue(
+                file_path=fp,
+                issue_level=IssueSeverity.HIGH,
+                issue_type=issue_type,
+                description="test",
+                resolvability=IssueResolvability.FIXABLE,
+            )
+            for fp in failed_files
+        ]
+        return JudgeVerdict(
+            verdict=VerdictType.FAIL,
+            reviewed_files_count=len(failed_files),
+            passed_files=[],
+            failed_files=failed_files,
+            conditional_files=[],
+            issues=issues,
+            critical_issues_count=0,
+            high_issues_count=len(failed_files),
+            overall_confidence=0.5,
+            summary="test",
+            blocking_issues=[],
+            timestamp=datetime.now(),
+            judge_model="test-model",
+        )
+
+    def test_writes_failed_file_decision_entries(self):
+        state = _make_state()
+        state.judge_verdicts_log = []
+        state.judge_verdict = self._make_verdict(
+            ["models/azure_openai/llm.py", "models/tongyi/llm.py"],
+            "b_class_drift",
+        )
+        summarizer = PhaseSummarizer()
+        _, entries = summarizer.summarize_judge_review(state)
+
+        decision_entries = [
+            e for e in entries if e.entry_type == MemoryEntryType.DECISION
+        ]
+        assert len(decision_entries) == 2
+        contents = [e.content for e in decision_entries]
+        assert any("azure_openai" in c for c in contents)
+        assert any("judge FAIL" in c for c in contents)
+        assert all("b_class_drift" in c for c in contents)
+
+    def test_judge_fail_entries_include_plugin_dir(self):
+        state = _make_state()
+        state.judge_verdicts_log = []
+        state.judge_verdict = self._make_verdict(
+            ["models/vertex_ai/models/llm/llm.py"], "upstream_content_mismatch"
+        )
+        summarizer = PhaseSummarizer()
+        _, entries = summarizer.summarize_judge_review(state)
+
+        decision_entries = [
+            e for e in entries if e.entry_type == MemoryEntryType.DECISION
+        ]
+        assert len(decision_entries) == 1
+        assert "models/vertex_ai" in decision_entries[0].file_paths

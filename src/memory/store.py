@@ -80,6 +80,7 @@ class MemoryStore:
         file_paths: list[str],
         max_entries: int = 10,
         min_relevance: float = 0.0,
+        current_upstream_ref: str = "",
     ) -> list[MemoryEntry]:
         """Score-rank entries by path overlap × confidence.
 
@@ -96,7 +97,12 @@ class MemoryStore:
         ``min_relevance`` (O-M3) drops entries below the threshold *before*
         truncating to ``max_entries``. Use this when the entry pool is large
         (>~100) to keep injected prompts under the context window cap.
+
+        ``current_upstream_ref`` (Opt-3) applies a 0.5× confidence penalty
+        to entries tagged with a different ``upstream_ref:*``, so stale
+        patterns from a prior upstream commit rank lower than fresh ones.
         """
+        ref_short = current_upstream_ref[:8] if current_upstream_ref else ""
         scored: dict[str, tuple[float, MemoryEntry]] = {}
         for entry in self._memory.entries:
             path_score = 0.0
@@ -107,9 +113,7 @@ class MemoryStore:
                         continue
                     if fp.startswith(efp) or efp.startswith(fp):
                         common = len(_common_prefix(fp, efp))
-                        path_score = max(
-                            path_score, common / max(len(fp), len(efp))
-                        )
+                        path_score = max(path_score, common / max(len(fp), len(efp)))
                     jaccard = _path_jaccard(fp, efp)
                     if jaccard > 0.0:
                         path_score = max(path_score, jaccard * 0.85)
@@ -117,7 +121,20 @@ class MemoryStore:
             if path_score == 0.0 and not entry.file_paths:
                 path_score = 0.1
 
-            relevance = path_score * 0.5 + entry.confidence * 0.5
+            confidence = entry.confidence
+            if ref_short:
+                entry_ref = next(
+                    (
+                        t[len("upstream_ref:") :]
+                        for t in entry.tags
+                        if t.startswith("upstream_ref:")
+                    ),
+                    "",
+                )
+                if entry_ref and entry_ref != ref_short:
+                    confidence *= 0.5
+
+            relevance = path_score * 0.5 + confidence * 0.5
             if relevance > 0.0 and relevance >= min_relevance:
                 scored[entry.entry_id] = (relevance, entry)
 
@@ -217,7 +234,7 @@ def _path_tokens(path: str) -> frozenset[str]:
         return frozenset()
     lowered = path.lower()
     last_slash = max(lowered.rfind("/"), lowered.rfind("\\"))
-    filename = lowered[last_slash + 1:] if last_slash != -1 else lowered
+    filename = lowered[last_slash + 1 :] if last_slash != -1 else lowered
     last_dot = filename.rfind(".")
     if 0 < last_dot < len(filename) - 1:
         ext_start = (last_slash + 1 if last_slash != -1 else 0) + last_dot

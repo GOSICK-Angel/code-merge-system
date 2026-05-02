@@ -15,9 +15,14 @@ from src.models.state import MergeState
 _MAX_KEY_DECISIONS = 10
 _MAX_PATTERNS = 10
 _DIR_DOMINANCE_THRESHOLD = 0.7
+_MAX_DECISION_ENTRIES = 50
+_NOTES_TRUNCATE = 200
 
 
 class PhaseSummarizer:
+    def __init__(self, upstream_ref: str = "") -> None:
+        self._upstream_ref = upstream_ref[:8] if upstream_ref else ""
+
     def summarize_planning(
         self, state: MergeState
     ) -> tuple[PhaseSummary, list[MemoryEntry]]:
@@ -184,6 +189,42 @@ class PhaseSummarizer:
                     )
                 )
 
+        # Opt-1: per-file DECISION entries for future runs to reuse.
+        # Opt-3: tag with upstream_ref so confidence decays on ref change.
+        # Opt-4: file_paths includes plugin_dir for plugin-level retrieval.
+        ref_tag = f"upstream_ref:{self._upstream_ref}" if self._upstream_ref else ""
+        for file_path, analysis in list(analyses.items())[:_MAX_DECISION_ENTRIES]:
+            parts = file_path.split(os.sep)
+            plugin_dir = os.sep.join(parts[:2]) if len(parts) > 1 else "."
+            strategy = analysis.recommended_strategy.value
+            notes = (analysis.analysis_notes or analysis.rationale or "")[
+                :_NOTES_TRUNCATE
+            ]
+            content = (
+                f"{file_path}: {strategy} [{analysis.conflict_type.value}]"
+                f" confidence={analysis.overall_confidence:.2f}"
+                + (f" — {notes}" if notes else "")
+            )
+            tags = [
+                "conflict_decision",
+                strategy,
+                plugin_dir,
+                analysis.conflict_type.value,
+            ]
+            if ref_tag:
+                tags.append(ref_tag)
+            entries.append(
+                MemoryEntry(
+                    entry_type=MemoryEntryType.DECISION,
+                    phase="conflict_analysis",
+                    content=content,
+                    file_paths=[file_path, plugin_dir],
+                    tags=tags,
+                    confidence=min(0.92, analysis.overall_confidence + 0.1),
+                    confidence_level=ConfidenceLevel.EXTRACTED,
+                )
+            )
+
         summary = PhaseSummary(
             phase="conflict_analysis",
             files_processed=len(analyses),
@@ -233,6 +274,33 @@ class PhaseSummarizer:
                         tags=["judge_issue", issue_type],
                         confidence=0.8,
                         confidence_level=ConfidenceLevel.HEURISTIC,
+                    )
+                )
+
+        # Opt-2: per-file DECISION entries from final judge verdict so
+        # future runs see which files needed repair and why.
+        if state.judge_verdict is not None:
+            ref_tag = f"upstream_ref:{self._upstream_ref}" if self._upstream_ref else ""
+            issues_by_file: dict[str, list[str]] = {}
+            for issue in state.judge_verdict.issues:
+                issues_by_file.setdefault(issue.file_path, []).append(issue.issue_type)
+            for fp in state.judge_verdict.failed_files:
+                parts = fp.split(os.sep)
+                plugin_dir = os.sep.join(parts[:2]) if len(parts) > 1 else "."
+                issue_summary = ", ".join(issues_by_file.get(fp, ["unknown"]))
+                content = f"{fp}: judge FAIL — {issue_summary}"
+                tags = ["judge_fail", plugin_dir] + list(issues_by_file.get(fp, []))
+                if ref_tag:
+                    tags.append(ref_tag)
+                entries.append(
+                    MemoryEntry(
+                        entry_type=MemoryEntryType.DECISION,
+                        phase="judge_review",
+                        content=content,
+                        file_paths=[fp, plugin_dir],
+                        tags=tags,
+                        confidence=0.85,
+                        confidence_level=ConfidenceLevel.EXTRACTED,
                     )
                 )
 
