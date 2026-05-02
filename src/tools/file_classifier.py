@@ -211,6 +211,11 @@ def classify_file(
     if file_diff.file_status == FileStatus.DELETED and file_diff.lines_added == 0:
         return RiskLevel.DELETED_ONLY
 
+    force_safe_patterns = getattr(config, "force_auto_safe_patterns", [])
+    if force_safe_patterns and not file_diff.is_security_sensitive:
+        if matches_any_pattern(file_diff.file_path, force_safe_patterns):
+            return RiskLevel.AUTO_SAFE
+
     risk_score = file_diff.risk_score
 
     if risk_score < 0.3:

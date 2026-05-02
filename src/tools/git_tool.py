@@ -72,9 +72,14 @@ class GitTool:
         return base_content, current_content, target_content
 
     def create_working_branch(self, branch_name: str, base_ref: str) -> str:
+        from datetime import datetime
+
+        resolved = branch_name.replace(
+            "{timestamp}", datetime.now().strftime("%Y%m%d-%H%M%S")
+        )
         self.repo.git.checkout(base_ref)
-        self.repo.git.checkout("-b", branch_name)
-        return branch_name
+        self.repo.git.checkout("-b", resolved)
+        return resolved
 
     def apply_patch(self, patch_content: str) -> bool:
         try:

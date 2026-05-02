@@ -237,6 +237,15 @@ class Orchestrator:
         self._inject_memory()
         self._inject_hooks()
 
+        if self.config.enable_working_branch and state.active_branch is None:
+            branch = self.git_tool.create_working_branch(
+                self.config.working_branch, self.config.fork_ref
+            )
+            state = state.model_copy(update={"active_branch": branch})
+            logger.info(
+                "Working branch created: %s (fork_ref=%s)", branch, self.config.fork_ref
+            )
+
         try:
             while state.status in PHASE_MAP and state.status not in _TERMINAL:
                 if state.dry_run and state.status == SystemStatus.AUTO_MERGING:

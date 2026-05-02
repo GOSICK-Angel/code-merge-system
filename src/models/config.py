@@ -33,7 +33,7 @@ class AgentLLMConfig(BaseModel):
         "Set to e.g. 'claude-haiku-4-5-20251001' to auto-route simple queries.",
     )
     request_timeout_seconds: int = Field(
-        default=60,
+        default=300,
         ge=5,
         description="Per-request HTTP timeout in seconds passed to the LLM SDK.",
     )
@@ -156,7 +156,25 @@ class SecuritySensitiveConfig(BaseModel):
 
 class FileClassifierConfig(BaseModel):
     excluded_patterns: list[str] = Field(
-        default_factory=lambda: ["**/*.lock", "**/node_modules/**", "**/.git/**"]
+        default_factory=lambda: [
+            "**/*.lock",
+            "**/node_modules/**",
+            "**/.git/**",
+            ".github/workflows/**",
+        ]
+    )
+    force_auto_safe_patterns: list[str] = Field(
+        default_factory=lambda: [
+            "**/requirements.txt",
+            "**/pyproject.toml",
+        ],
+        description=(
+            "Paths matching these glob patterns are forced to AUTO_SAFE risk level "
+            "regardless of their computed risk_score or C-class category, unless "
+            "they are marked security_sensitive. Intended for dependency manifests "
+            "(requirements.txt, pyproject.toml) that are frequently modified by both "
+            "sides but rarely require semantic conflict analysis."
+        ),
     )
     binary_extensions: list[str] = Field(
         default_factory=lambda: [".png", ".jpg", ".pdf", ".zip", ".tar", ".whl"]
@@ -668,6 +686,15 @@ class MergeConfig(BaseModel):
         description="7.7: If set, the orchestrator halts with AWAITING_HUMAN when "
         "the cumulative LLM cost for this run exceeds this threshold (USD). "
         "Prevents runaway spend on large repos. None = no ceiling.",
+    )
+    enable_working_branch: bool = Field(
+        default=False,
+        description="When True, the orchestrator creates a new branch from fork_ref "
+        "at run start (using the working_branch name template) and operates on it "
+        "instead of modifying fork_ref HEAD directly. The branch name supports a "
+        "{timestamp} placeholder (e.g. 'merge/auto-{timestamp}'). On resume, the "
+        "existing branch is reused via active_branch in the checkpoint. Default "
+        "False preserves the original behavior of operating directly on fork_ref.",
     )
 
     @field_validator("upstream_ref", "fork_ref")

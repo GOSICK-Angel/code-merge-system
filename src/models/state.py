@@ -206,6 +206,15 @@ class MergeState(BaseModel):
         ),
     )
 
+    active_branch: str | None = Field(
+        default=None,
+        description=(
+            "The branch the orchestrator is currently operating on. "
+            "Set at run start when enable_working_branch=True; reused on resume. "
+            "None means the run is operating directly on fork_ref HEAD."
+        ),
+    )
+
     dry_run: bool = Field(
         default=False,
         description=(

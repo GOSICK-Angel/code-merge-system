@@ -213,6 +213,7 @@ def _interactive_setup(target_branch: str, repo_path: str) -> MergeConfig:
         "upstream_ref": target_branch,
         "fork_ref": fork_ref,
         "working_branch": "merge/auto-{timestamp}",
+        "enable_working_branch": False,
         "repo_path": repo_path,
         "project_context": project_context,
         "max_files_per_run": 500,
