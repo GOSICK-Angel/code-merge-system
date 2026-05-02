@@ -4,6 +4,7 @@ import logging
 
 from src.cli.paths import get_report_dir
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
+from src.models.diff import RiskLevel
 from src.models.plan import MergePhase
 from src.models.plan_review import PlanHumanDecision
 from src.models.state import MergeState, SystemStatus
@@ -316,6 +317,24 @@ class HumanReviewPhase(Phase):
                             upstream_context=upstream_ctx,
                         )
 
+                _pending_conflict = _unanalyzed_conflict_files(state)
+                if _pending_conflict:
+                    logger.info(
+                        "resume-path: %d conflict file(s) still unanalyzed "
+                        "after human decisions — routing to ANALYZING_CONFLICTS",
+                        len(_pending_conflict),
+                    )
+                    ctx.state_machine.transition(
+                        state,
+                        SystemStatus.ANALYZING_CONFLICTS,
+                        "pending conflict files require analysis before judge review",
+                    )
+                    return PhaseOutcome(
+                        target_status=SystemStatus.ANALYZING_CONFLICTS,
+                        reason="pending conflict files require analysis",
+                        checkpoint_tag="after_human_decisions_to_conflict",
+                        memory_phase="conflict_analysis",
+                    )
                 ctx.state_machine.transition(
                     state,
                     SystemStatus.JUDGE_REVIEWING,
@@ -447,3 +466,33 @@ class HumanReviewPhase(Phase):
                 checkpoint_tag="awaiting_human",
                 extra={"paused": True},
             )
+
+
+def _unanalyzed_conflict_files(state: MergeState) -> list[str]:
+    """Return files that still need conflict_analysis on the resume path.
+
+    Covers two sources that ConflictAnalysisPhase reads as its worklist:
+    1. merge_plan batches with risk_level in (HUMAN_REQUIRED, AUTO_RISKY)
+    2. state.pending_conflict_files surfaced by auto_merge (skipped layers)
+
+    A file is considered 'unanalyzed' when it has no entry in
+    state.file_decision_records yet.
+    """
+    decided: set[str] = set(state.file_decision_records)
+    pending: list[str] = []
+
+    if state.merge_plan:
+        _conflict_risks = {RiskLevel.HUMAN_REQUIRED, RiskLevel.AUTO_RISKY}
+        for batch in state.merge_plan.phases:
+            if batch.risk_level in _conflict_risks:
+                for fp in batch.file_paths:
+                    if fp not in decided:
+                        pending.append(fp)
+
+    seen: set[str] = set(pending)
+    for fp in state.pending_conflict_files or []:
+        if fp not in decided and fp not in seen:
+            pending.append(fp)
+            seen.add(fp)
+
+    return pending
