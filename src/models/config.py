@@ -623,7 +623,6 @@ class MergeConfig(BaseModel):
     history: HistoryPreservationConfig = Field(
         default_factory=HistoryPreservationConfig
     )
-    max_judge_repair_rounds: int = Field(default=3, ge=1, le=10)
     memory: MemoryExtractionConfig = Field(default_factory=MemoryExtractionConfig)
     coordinator: CoordinatorConfig = Field(default_factory=CoordinatorConfig)
     max_dispute_rounds: int = Field(default=2, ge=1, le=5)

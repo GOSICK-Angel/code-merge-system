@@ -600,7 +600,6 @@ class TestRepairLoopOrchestration:
             upstream_ref="upstream/main",
             fork_ref="feature/fork",
             output=MergeConfig.model_fields["output"].default_factory(),
-            max_judge_repair_rounds=3,
         )
         config.output.directory = str(tmp_path)
         config.output.debug_directory = str(tmp_path / "debug")
