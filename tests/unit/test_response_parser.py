@@ -347,20 +347,40 @@ class TestParseJudgeVerdict:
         result = parse_judge_verdict(self._base_payload(), ["src/a.py"])
         assert result.verdict == VerdictType.PASS
 
-    def test_verdict_fail(self):
+    def test_verdict_fail_requires_critical_or_high_issue(self):
+        # P0-3: verdict is now deterministic from issues. To declare FAIL,
+        # the Judge must produce a CRITICAL/HIGH issue — the LLM's
+        # "verdict": "fail" alone is ignored.
+        issue = JudgeIssue(
+            file_path="src/a.py",
+            issue_level=IssueSeverity.CRITICAL,
+            issue_type="security",
+            description="forces FAIL",
+        )
         payload = {**self._base_payload(), "verdict": "fail"}
-        result = parse_judge_verdict(payload, ["src/a.py"])
+        result = parse_judge_verdict(payload, ["src/a.py"], all_issues=[issue])
         assert result.verdict == VerdictType.FAIL
 
-    def test_verdict_conditional(self):
+    def test_verdict_conditional_requires_a_non_critical_issue(self):
+        # P0-3: CONDITIONAL is reserved for "issues exist but none are
+        # CRITICAL/HIGH". An LLM-supplied "verdict": "conditional" with no
+        # issues must NOT keep that label — it means there's nothing to fix.
+        issue = JudgeIssue(
+            file_path="src/a.py",
+            issue_level=IssueSeverity.MEDIUM,
+            issue_type="style",
+            description="forces CONDITIONAL",
+        )
         payload = {**self._base_payload(), "verdict": "conditional"}
-        result = parse_judge_verdict(payload, ["src/a.py"])
+        result = parse_judge_verdict(payload, ["src/a.py"], all_issues=[issue])
         assert result.verdict == VerdictType.CONDITIONAL
 
-    def test_invalid_verdict_falls_back_to_conditional(self):
+    def test_invalid_llm_verdict_string_does_not_break_parse(self):
+        # P0-3: garbage in the LLM "verdict" field is ignored; verdict is
+        # always recomputed from issues.
         payload = {**self._base_payload(), "verdict": "bogus_verdict"}
-        result = parse_judge_verdict(payload, ["src/a.py"])
-        assert result.verdict == VerdictType.CONDITIONAL
+        result = parse_judge_verdict(payload, ["src/a.py"], all_issues=[])
+        assert result.verdict == VerdictType.PASS
 
     def test_reviewed_files_count(self):
         result = parse_judge_verdict(self._base_payload(), ["a.py", "b.py", "c.py"])

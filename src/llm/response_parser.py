@@ -209,17 +209,20 @@ def parse_judge_verdict(
     data = _extract_json(raw)
     all_issues = all_issues or []
 
-    verdict_raw = data.get("verdict", "conditional")
-    try:
-        _validate_enum(verdict_raw, VerdictType, "verdict")
-        verdict = VerdictType(verdict_raw)
-    except ParseError:
-        verdict = VerdictType.CONDITIONAL
-
     critical_count = sum(
         1 for i in all_issues if i.issue_level == IssueSeverity.CRITICAL
     )
     high_count = sum(1 for i in all_issues if i.issue_level == IssueSeverity.HIGH)
+
+    # P0-3: verdict is deterministic from issue counts. The LLM's free-form
+    # `verdict` field is intentionally ignored — to declare failure, the Judge
+    # must produce a structured JudgeIssue at CRITICAL/HIGH severity.
+    if critical_count > 0 or high_count > 0:
+        verdict = VerdictType.FAIL
+    elif all_issues:
+        verdict = VerdictType.CONDITIONAL
+    else:
+        verdict = VerdictType.PASS
 
     passed_files: list[str] = []
     failed_files: list[str] = []
