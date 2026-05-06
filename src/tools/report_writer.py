@@ -118,6 +118,13 @@ _I18N: dict[str, dict[str, str]] = {
         "plan_diff_hdr": "Plan Diff",
         "negotiation_hdr": "Negotiation Log",
         "counter_proposal": "Counter-proposal",
+        "feature_inventory": "Feature Inventory",
+        "col_feature": "Feature",
+        "col_files": "Files",
+        "col_status": "Status",
+        "inv_status_pass": "PASS",
+        "inv_status_fail": "FAIL",
+        "inv_status_not_checked": "NOT_CHECKED",
     },
     "zh": {
         "merge_report": "合并报告",
@@ -230,6 +237,13 @@ _I18N: dict[str, dict[str, str]] = {
         "plan_diff_hdr": "计划变更 Diff",
         "negotiation_hdr": "协商记录",
         "counter_proposal": "替代方案",
+        "feature_inventory": "特性清单",
+        "col_feature": "特性",
+        "col_files": "文件",
+        "col_status": "状态",
+        "inv_status_pass": "PASS",
+        "inv_status_fail": "FAIL",
+        "inv_status_not_checked": "NOT_CHECKED",
     },
 }
 
@@ -341,6 +355,56 @@ def _build_run_insights_lines(
     return lines
 
 
+def _build_feature_inventory_lines(state: MergeState, t: Any) -> list[str]:
+    """P2-2: render the customization audit results.
+
+    Each row pairs a declared ``CustomizationEntry`` with its verification
+    outcome derived from ``state.judge_verdict.customization_violations``:
+
+    - ``judge_verdict is None`` => NOT_CHECKED for all rows
+    - name appears in violations => FAIL
+    - otherwise => PASS
+
+    Returns an empty list when there are no customizations so callers can
+    splat it without a guard.
+    """
+    customizations = state.config.customizations
+    if not customizations:
+        return []
+
+    verdict = state.judge_verdict
+    violated_names: set[str] = set()
+    if verdict is not None:
+        violated_names = {
+            v.customization_name for v in verdict.customization_violations
+        }
+
+    pass_label = t("inv_status_pass")
+    fail_label = t("inv_status_fail")
+    not_checked_label = t("inv_status_not_checked")
+
+    lines: list[str] = [
+        f"## {t('feature_inventory')}",
+        "",
+        (
+            f"| {t('col_feature')} | {t('col_files')} | "
+            f"{t('col_source')} | {t('col_status')} |"
+        ),
+        "|------|-------|--------|--------|",
+    ]
+    for entry in customizations:
+        files_cell = ", ".join(f"`{f}`" for f in entry.files) or "—"
+        if verdict is None:
+            status = not_checked_label
+        elif entry.name in violated_names:
+            status = fail_label
+        else:
+            status = pass_label
+        lines.append(f"| {entry.name} | {files_cell} | {entry.source} | {status} |")
+    lines.append("")
+    return lines
+
+
 def write_markdown_report(
     state: MergeState,
     output_dir: str,
@@ -448,6 +512,8 @@ def write_markdown_report(
             f"- {t('high_issues')}: {verdict.high_issues_count}",
             "",
         ]
+
+    lines.extend(_build_feature_inventory_lines(state, t))
 
     if state.errors:
         lines += [f"## {t('errors')}", ""]
