@@ -1,0 +1,26 @@
+doc/test-report/dify-plugin-daemon.md
+  7bd4d32fddbb8d15 1-70
+doc/test-report/upstream-29-full-flow-analysis.md
+  7bd4d32fddbb8d15 1-529
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.11",
+  "base_commit_sha": "4f9b358f6866684845c4a2dbf95110b295d67293",
+  "prompts": {
+    "7bd4d32fddbb8d15": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1fb83dc4-7bd3-4e35-80aa-ebbde516757c",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Angel <heanqi@cvte.com>",
+      "messages": [],
+      "total_additions": 599,
+      "total_deletions": 0,
+      "accepted_lines": 599,
+      "overriden_lines": 0,
+      "messages_url": "https://gitai.gz.cvte.cn/cas/96d91f1fb624574b89fb5ce579c2151fa8b7e7f946ea3e01053a9df1b2538e94"
+    }
+  }
+}
