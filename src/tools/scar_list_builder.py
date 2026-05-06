@@ -31,7 +31,7 @@ class Scar(BaseModel):
     commit_sha: str
     commit_subject: str
     files: list[str]
-    pattern_kind: Literal["restore", "fix_compat", "revert"]
+    pattern_kind: Literal["restore", "fix_compat", "revert", "feature"]
 
     model_config = {"frozen": True}
 
@@ -40,6 +40,13 @@ DEFAULT_GREP_PATTERNS: list[str] = [
     r"restore",
     r"fix[._\-\s]?compat",
     r"revert",
+]
+
+DEFAULT_FEATURE_PATTERNS: list[str] = [
+    r"^feat[\(:]",
+    r"^feature[\(:]",
+    r"^add\s",
+    r"^implement\s",
 ]
 
 _KIND_MAP: list[tuple[str, Literal["restore", "fix_compat", "revert"]]] = [
@@ -132,6 +139,87 @@ class ScarListBuilder:
                     commit_subject=subject,
                     files=files,
                     pattern_kind=_classify_kind(subject),
+                )
+            )
+
+        return scars
+
+    def build_from_feature_commits(
+        self,
+        repo_path: Path,
+        fork_ref: str,
+        base_ref: str,
+        feature_patterns: list[str] | None = None,
+    ) -> list[Scar]:
+        """P2-1: scan ``base_ref..fork_ref`` for feature-add commits.
+
+        ``build()`` only catches restore/revert/compat-fix. Live forks (e.g.
+        cvte's dify plugin daemon) protect customizations through positive
+        commits — ``feat: add Cvte SSO``, ``add custom auth``, ``implement
+        plugin reload``. Those introduce fork-only files that must be
+        registered as ``CustomizationEntry`` so the next merge can verify
+        they survived.
+
+        Args:
+            repo_path: Repository root.
+            fork_ref: Fork branch / sha (HEAD of customizations).
+            base_ref: Merge-base / upstream sha (commits reachable from
+                here are excluded).
+            feature_patterns: Override regex patterns matched against commit
+                subjects. Defaults to ``DEFAULT_FEATURE_PATTERNS``.
+
+        Returns:
+            Deduplicated list of ``Scar`` objects with ``pattern_kind``
+            ``"feature"``.
+        """
+        patterns = (
+            feature_patterns
+            if feature_patterns is not None
+            else DEFAULT_FEATURE_PATTERNS
+        )
+        try:
+            repo = git.Repo(str(repo_path), search_parent_directories=True)
+        except (InvalidGitRepositoryError, Exception):
+            return []
+
+        combined = "|".join(f"(?:{p})" for p in patterns)
+        compiled = re.compile(combined, re.IGNORECASE)
+
+        try:
+            log_output: str = repo.git.log(
+                f"{base_ref}..{fork_ref}",
+                "--format=%H|%s",
+                "--no-merges",
+            )
+        except Exception:
+            return []
+
+        scars: list[Scar] = []
+        seen_shas: set[str] = set()
+        for line in log_output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("|", 1)
+            if len(parts) != 2:
+                continue
+            sha, subject = parts[0].strip(), parts[1].strip()
+            if sha in seen_shas:
+                continue
+            if not compiled.search(subject):
+                continue
+
+            files = self._get_commit_files(repo, sha)
+            if not files:
+                continue
+
+            seen_shas.add(sha)
+            scars.append(
+                Scar(
+                    commit_sha=sha,
+                    commit_subject=subject,
+                    files=files,
+                    pattern_kind="feature",
                 )
             )
 
