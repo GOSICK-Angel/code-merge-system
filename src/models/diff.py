@@ -50,6 +50,8 @@ class FileDiff(BaseModel):
     lines_added: int = 0
     lines_deleted: int = 0
     lines_changed: int = 0
+    upstream_lines_added: int = 0
+    upstream_lines_deleted: int = 0
     conflict_count: int = 0
     hunks: list[DiffHunk] = Field(default_factory=list)
     change_category: FileChangeCategory | None = None

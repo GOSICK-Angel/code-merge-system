@@ -942,13 +942,14 @@ class AutoMergePhase(Phase):
             for ph in state.merge_plan.phases:
                 plan_files.update(ph.file_paths)
 
-        # AUTO_RISKY + C-class files that the strategy router classified as
-        # SEMANTIC_MERGE are intentionally deferred to ConflictAnalysisPhase
-        # (which owns the LLM merge path). They are NOT a dispatcher leak.
+        # All C-class files (regardless of AUTO_SAFE / AUTO_RISKY) that the
+        # strategy router classified as SEMANTIC_MERGE are intentionally
+        # deferred to ConflictAnalysisPhase. C-class means both sides changed,
+        # so they must never be auto-overwritten. They are NOT a dispatcher leak.
         deferred_for_conflict_analysis: set[str] = set()
         if state.merge_plan is not None:
             for ph in state.merge_plan.phases:
-                if ph.risk_level != RiskLevel.AUTO_RISKY:
+                if ph.risk_level not in (RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY):
                     continue
                 for fp in ph.file_paths:
                     if fp in state.file_decision_records or fp in replayed_set:
@@ -1136,9 +1137,7 @@ class AutoMergePhase(Phase):
                 continue
             advisory_lines = issues_by_file.get(file_path, [])
             rationale_tail = (
-                f"; advisory issues: {len(advisory_lines)}"
-                if advisory_lines
-                else ""
+                f"; advisory issues: {len(advisory_lines)}" if advisory_lines else ""
             )
             state.file_decision_records[file_path] = FileDecisionRecord(
                 file_path=file_path,
@@ -1248,7 +1247,10 @@ class AutoMergePhase(Phase):
                 continue
             for fp in batch.file_paths:
                 existing = state.file_decision_records.get(fp)
-                if existing is not None and existing.decision == MergeDecision.ESCALATE_HUMAN:
+                if (
+                    existing is not None
+                    and existing.decision == MergeDecision.ESCALATE_HUMAN
+                ):
                     continue
                 checked += 1
                 upstream_sha = ctx.git_tool.get_file_hash(upstream_ref, fp)

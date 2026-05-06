@@ -162,9 +162,7 @@ class ExecutorAgent(BaseAgent):
         if category == FileChangeCategory.C:
             if risk_level == RiskLevel.HUMAN_REQUIRED:
                 return MergeDecision.ESCALATE_HUMAN
-            if risk_level == RiskLevel.AUTO_RISKY:
-                return MergeDecision.SEMANTIC_MERGE
-            return MergeDecision.TAKE_TARGET
+            return MergeDecision.SEMANTIC_MERGE
         return MergeDecision.TAKE_TARGET
 
     async def _copy_from_upstream(

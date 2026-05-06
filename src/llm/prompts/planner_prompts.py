@@ -30,9 +30,13 @@ def build_classification_prompt(
 ) -> str:
     file_list_lines: list[str] = []
     for fd in file_diffs:
+        cat = fd.change_category.value if fd.change_category is not None else "unknown"
         file_list_lines.append(
             f"- {fd.file_path} | status={fd.file_status.value} | "
-            f"lines_added={fd.lines_added} | lines_deleted={fd.lines_deleted} | "
+            f"category={cat} | "
+            f"fork_lines_added={fd.lines_added} | fork_lines_deleted={fd.lines_deleted} | "
+            f"upstream_lines_added={fd.upstream_lines_added} | "
+            f"upstream_lines_deleted={fd.upstream_lines_deleted} | "
             f"conflicts={fd.conflict_count} | security_sensitive={fd.is_security_sensitive}"
         )
 
@@ -44,9 +48,7 @@ def build_classification_prompt(
 
     rename_section = ""
     if rename_pairs:
-        rename_lines = "\n".join(
-            f"  {old} → {new}" for old, new in rename_pairs
-        )
+        rename_lines = "\n".join(f"  {old} → {new}" for old, new in rename_pairs)
         rename_section = (
             f"\n## Detected File Renames\n"
             f"The following paths are the same file moved/renamed (treat them as related):\n"
@@ -68,11 +70,15 @@ Changed files ({len(file_diffs)} total):
 **auto_safe** — DEFAULT for most files. Use when ALL of:
   - conflicts = 0
   - security_sensitive = false
-  - lines_added + lines_deleted < 200
+  - fork_lines_added + fork_lines_deleted < 200
+  - upstream_lines_added + upstream_lines_deleted < 200
+  - category != both_changed (C-class needs at minimum auto_risky)
   - Routine changes: deps, config, docs, tests, minor refactors
 
-**auto_risky** — Use ONLY when there is a specific reason despite no conflicts:
-  - Large diffs (lines_added + lines_deleted >= 200) touching shared interfaces
+**auto_risky** — Use when ANY of:
+  - Large fork diffs (fork_lines_added + fork_lines_deleted >= 200) touching shared interfaces
+  - Large upstream diffs (upstream_lines_added + upstream_lines_deleted >= 200) — even if fork delta is small, a big upstream refactor risks silently dropping fork edits
+  - category = both_changed (both sides modified the file — must go through ConflictAnalyst)
   - Cross-cutting changes that affect many callers
   - Database schema or migration files (even without conflicts)
 
@@ -85,8 +91,10 @@ Changed files ({len(file_diffs)} total):
 **binary** — binary files (images, compiled artifacts)
 **excluded** — generated files, lock files, .gitignore patterns
 
-⚠️  BIAS TOWARD AUTO_SAFE. When in doubt between auto_safe and auto_risky, choose auto_safe.
-⚠️  NEVER use human_required for a file with conflicts=0 and security_sensitive=false unless it is core business logic with clear semantic conflict.
+⚠️  HARD RULE: If category=both_changed, you MUST NOT classify auto_safe. Choose at least auto_risky so ConflictAnalyst can inspect the file.
+⚠️  HARD RULE: If upstream_lines_added + upstream_lines_deleted >= 200 AND category=both_changed, choose human_required (large upstream refactor over fork edits is high-risk).
+⚠️  BIAS TOWARD AUTO_SAFE for category=upstream_only files (B-class). When in doubt between auto_safe and auto_risky for B-class, choose auto_safe.
+⚠️  NEVER use human_required for a file with conflicts=0 and security_sensitive=false unless category=both_changed with large upstream delta.
 
 Create a phased merge plan with the following structure:
 1. Classify each file by risk level using the rules above

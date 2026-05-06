@@ -40,12 +40,43 @@ _D_MISSING_PREVIEW_LINES = 200
 
 _BINARY_EXTENSIONS = frozenset(
     {
-        ".png", ".jpg", ".jpeg", ".gif", ".ico", ".bmp", ".webp", ".tiff",
-        ".pdf", ".zip", ".tar", ".gz", ".bz2", ".7z", ".rar",
-        ".woff", ".woff2", ".ttf", ".otf", ".eot",
-        ".mp3", ".mp4", ".wav", ".ogg", ".flac", ".avi", ".mov",
-        ".so", ".dylib", ".dll", ".exe", ".class", ".jar", ".pyc",
-        ".db", ".sqlite", ".sqlite3",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".ico",
+        ".bmp",
+        ".webp",
+        ".tiff",
+        ".pdf",
+        ".zip",
+        ".tar",
+        ".gz",
+        ".bz2",
+        ".7z",
+        ".rar",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".otf",
+        ".eot",
+        ".mp3",
+        ".mp4",
+        ".wav",
+        ".ogg",
+        ".flac",
+        ".avi",
+        ".mov",
+        ".so",
+        ".dylib",
+        ".dll",
+        ".exe",
+        ".class",
+        ".jar",
+        ".pyc",
+        ".db",
+        ".sqlite",
+        ".sqlite3",
     }
 )
 
@@ -82,6 +113,31 @@ def _parse_file_status(status_char: str) -> FileStatus:
     return mapping.get(status_char.upper(), FileStatus.MODIFIED)
 
 
+def _count_diff_lines(
+    git_tool: GitTool, base: str, head: str, file_path: str
+) -> tuple[int, int]:
+    """Return (added, deleted) line counts for `git diff base..head -- file`.
+
+    Used to surface the upstream-side delta to the planner so a C-class file
+    with a small fork delta but a large upstream refactor still gets routed
+    to ConflictAnalyst instead of being silently overwritten.
+    """
+    raw = git_tool.get_unified_diff(base, head, file_path)
+    if not raw:
+        return 0, 0
+    added = sum(
+        1
+        for line in raw.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
+    deleted = sum(
+        1
+        for line in raw.splitlines()
+        if line.startswith("-") and not line.startswith("---")
+    )
+    return added, deleted
+
+
 def _build_added_file_diff(git_tool: GitTool, ref: str, file_path: str) -> str:
     """Return a pseudo-unified-diff for a D_MISSING file (new in upstream_ref).
 
@@ -96,10 +152,16 @@ def _build_added_file_diff(git_tool: GitTool, ref: str, file_path: str) -> str:
     lines = content.splitlines()
     truncated = len(lines) > _D_MISSING_PREVIEW_LINES
     preview = lines[:_D_MISSING_PREVIEW_LINES]
-    diff_lines = [f"--- /dev/null", f"+++ b/{file_path}", f"@@ -0,0 +1,{len(preview)} @@"]
+    diff_lines = [
+        f"--- /dev/null",
+        f"+++ b/{file_path}",
+        f"@@ -0,0 +1,{len(preview)} @@",
+    ]
     diff_lines.extend(f"+{line}" for line in preview)
     if truncated:
-        diff_lines.append(f"\\ ... ({len(lines) - _D_MISSING_PREVIEW_LINES} more lines not shown)")
+        diff_lines.append(
+            f"\\ ... ({len(lines) - _D_MISSING_PREVIEW_LINES} more lines not shown)"
+        )
     return "\n".join(diff_lines)
 
 
@@ -243,11 +305,18 @@ class InitializePhase(Phase):
             language = detect_language(file_path)
             fd = build_file_diff(file_path, raw_diff, file_status)
             sensitive = is_security_sensitive(file_path, state.config.file_classifier)
+
+            upstream_added, upstream_deleted = _count_diff_lines(
+                ctx.git_tool, merge_base, state.config.upstream_ref, file_path
+            )
+
             fd = fd.model_copy(
                 update={
                     "language": language,
                     "is_security_sensitive": sensitive,
                     "change_category": cat,
+                    "upstream_lines_added": upstream_added,
+                    "upstream_lines_deleted": upstream_deleted,
                 }
             )
             score = compute_risk_score(fd, state.config.file_classifier)
@@ -397,9 +466,7 @@ class InitializePhase(Phase):
                 target_path.write_bytes(normalized)
                 write_status = "written_from_upstream"
         except Exception as e:
-            logger.error(
-                "Force TAKE_TARGET write failed for %s: %s", file_path, e
-            )
+            logger.error("Force TAKE_TARGET write failed for %s: %s", file_path, e)
             raise
 
         file_status = (
