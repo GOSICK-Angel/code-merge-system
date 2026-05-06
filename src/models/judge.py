@@ -59,6 +59,7 @@ class JudgeIssue(BaseModel):
     issue_type: str
     description: str
     affected_lines: _LineList = Field(default_factory=list)
+    evidence_excerpt: str | None = None
     suggested_fix: str | None = None
     must_fix_before_merge: bool = False
     veto_condition: str | None = None

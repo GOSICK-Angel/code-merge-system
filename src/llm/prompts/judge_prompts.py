@@ -105,6 +105,12 @@ For each issue also set "resolvability":
 - "system_limitation": a known system boundary that cannot be auto-fixed (e.g. D-missing file skipped due to unsatisfied layer deps, unsupported merge strategy)
 - "human_required": needs manual human intervention (e.g. escalate_human file with complex conflicts, ambiguous business logic)
 
+GROUNDING RULE (P1-3): every CRITICAL or HIGH issue MUST include either a
+non-empty "affected_lines" array OR a non-empty "evidence_excerpt" string
+quoting a verbatim line from the merged content. Ungrounded CRITICAL/HIGH
+issues will be auto-downgraded to MEDIUM by the parser, so failing to cite
+evidence weakens your verdict.
+
 Return JSON:
 {{
   "issues": [
@@ -114,6 +120,7 @@ Return JSON:
       "issue_type": "missing_logic | wrong_merge | unresolved_conflict | syntax_error | other",
       "description": "Specific issue description",
       "affected_lines": [],
+      "evidence_excerpt": "verbatim line from merged content backing the claim",
       "suggested_fix": "How to fix this issue",
       "must_fix_before_merge": true,
       "resolvability": "fixable | system_limitation | human_required"
@@ -201,6 +208,11 @@ For each issue set "resolvability":
 - "system_limitation": known system boundary (D-missing skipped, unsupported strategy)
 - "human_required": needs manual human intervention
 
+GROUNDING RULE (P1-3): every CRITICAL or HIGH issue MUST include either a
+non-empty "affected_lines" array OR a non-empty "evidence_excerpt" string
+quoting a verbatim line from the merged content. Ungrounded CRITICAL/HIGH
+issues are auto-downgraded to MEDIUM by the parser.
+
 Return JSON:
 {
   "files": [
@@ -212,6 +224,7 @@ Return JSON:
           "issue_type": "missing_logic | wrong_merge | unresolved_conflict | syntax_error | other",
           "description": "Specific issue description",
           "affected_lines": [],
+          "evidence_excerpt": "verbatim line from merged content backing the claim",
           "suggested_fix": "How to fix",
           "must_fix_before_merge": true,
           "resolvability": "fixable | system_limitation | human_required"

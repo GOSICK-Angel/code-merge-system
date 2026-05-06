@@ -291,6 +291,33 @@ def parse_merge_result(raw: str | dict[str, Any]) -> str:
     return result
 
 
+_GROUNDING_REQUIRED_LEVELS: frozenset[IssueSeverity] = frozenset(
+    {IssueSeverity.CRITICAL, IssueSeverity.HIGH}
+)
+_DOWNGRADE_SUFFIX = " [downgraded: ungrounded]"
+
+
+def _apply_grounding_rule(
+    level: IssueSeverity,
+    affected_lines: list[int],
+    evidence_excerpt: str | None,
+    description: str,
+) -> tuple[IssueSeverity, str]:
+    """P1-3: CRITICAL/HIGH issues without ``affected_lines`` and without a
+    non-empty ``evidence_excerpt`` are auto-downgraded to MEDIUM. The LLM
+    sometimes fires off severity-without-evidence claims that, after P0-3,
+    deterministically force FAIL — drop those to MEDIUM so they end up as
+    CONDITIONAL noise instead of blocking the merge.
+    """
+    if level not in _GROUNDING_REQUIRED_LEVELS:
+        return level, description
+    has_lines = bool(affected_lines)
+    has_excerpt = bool(evidence_excerpt and evidence_excerpt.strip())
+    if has_lines or has_excerpt:
+        return level, description
+    return IssueSeverity.MEDIUM, description + _DOWNGRADE_SUFFIX
+
+
 def parse_file_review_issues(
     raw: str | dict[str, Any], default_file_path: str
 ) -> list[JudgeIssue]:
@@ -305,13 +332,21 @@ def parse_file_review_issues(
         except ParseError:
             level = IssueSeverity.MEDIUM
 
+        affected_lines = item.get("affected_lines", []) or []
+        evidence_excerpt = item.get("evidence_excerpt")
+        description = item.get("description", "")
+        level, description = _apply_grounding_rule(
+            level, affected_lines, evidence_excerpt, description
+        )
+
         issues.append(
             JudgeIssue(
                 file_path=item.get("file_path", default_file_path),
                 issue_level=level,
                 issue_type=item.get("issue_type", "other"),
-                description=item.get("description", ""),
-                affected_lines=item.get("affected_lines", []),
+                description=description,
+                affected_lines=affected_lines,
+                evidence_excerpt=evidence_excerpt,
                 suggested_fix=item.get("suggested_fix"),
                 must_fix_before_merge=bool(item.get("must_fix_before_merge", False)),
             )
@@ -413,13 +448,20 @@ def parse_batch_file_review_issues(
                 level = IssueSeverity(level_raw)
             except ParseError:
                 level = IssueSeverity.MEDIUM
+            affected_lines = item.get("affected_lines", []) or []
+            evidence_excerpt = item.get("evidence_excerpt")
+            description = item.get("description", "")
+            level, description = _apply_grounding_rule(
+                level, affected_lines, evidence_excerpt, description
+            )
             result[fp].append(
                 JudgeIssue(
                     file_path=fp,
                     issue_level=level,
                     issue_type=item.get("issue_type", "other"),
-                    description=item.get("description", ""),
-                    affected_lines=item.get("affected_lines", []),
+                    description=description,
+                    affected_lines=affected_lines,
+                    evidence_excerpt=evidence_excerpt,
                     suggested_fix=item.get("suggested_fix"),
                     must_fix_before_merge=bool(
                         item.get("must_fix_before_merge", False)
