@@ -4,6 +4,7 @@ from src.models.decision import FileDecisionRecord, MergeDecision, DecisionSourc
 from src.models.diff import FileStatus
 from src.models.state import MergeState
 from src.tools.conflict_markers import has_conflict_markers
+from src.tools.elision_detector import has_elision
 from src.tools.git_tool import GitTool
 
 
@@ -49,6 +50,28 @@ async def apply_with_snapshot(
             rollback_reason="conflict_markers_in_proposed_content",
         )
 
+    elision_hit, elision_sample = has_elision(new_content)
+    if elision_hit:
+        return FileDecisionRecord(
+            file_path=file_path,
+            file_status=FileStatus.MODIFIED,
+            decision=MergeDecision.ESCALATE_HUMAN,
+            decision_source=DecisionSource.AUTO_EXECUTOR,
+            confidence=0.0,
+            rationale=(
+                f"Elision marker detected in proposed merge content "
+                f"({elision_sample!r}) — likely truncated LLM output. "
+                f"Refusing to write a partial file; escalating to human "
+                f"review (P0-2)."
+            ),
+            original_snapshot=original,
+            phase=phase,
+            agent=agent,
+            timestamp=datetime.now(),
+            is_rolled_back=False,
+            rollback_reason="elision_marker_in_proposed_content",
+        )
+
     try:
         abs_path.parent.mkdir(parents=True, exist_ok=True)
         abs_path.write_text(new_content, encoding="utf-8")
@@ -76,8 +99,7 @@ async def apply_with_snapshot(
                 timestamp=datetime.now(),
                 is_rolled_back=original is not None,
                 rollback_reason=(
-                    f"blob_sha_mismatch:expected={expected_blob}"
-                    f":actual={actual_blob}"
+                    f"blob_sha_mismatch:expected={expected_blob}:actual={actual_blob}"
                 ),
             )
 
@@ -174,8 +196,7 @@ async def apply_bytes_with_snapshot(
                 timestamp=datetime.now(),
                 is_rolled_back=original_bytes is not None,
                 rollback_reason=(
-                    f"blob_sha_mismatch:expected={expected_blob}"
-                    f":actual={actual_blob}"
+                    f"blob_sha_mismatch:expected={expected_blob}:actual={actual_blob}"
                 ),
             )
 

@@ -261,18 +261,31 @@ def parse_judge_verdict(
 
 def parse_merge_result(raw: str | dict[str, Any]) -> str:
     if isinstance(raw, dict):
-        return str(raw.get("content", ""))
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        start = 1
-        end = len(lines)
-        for i in range(len(lines) - 1, 0, -1):
-            if lines[i].strip() == "```":
-                end = i
-                break
-        return "\n".join(lines[start:end])
-    return text
+        result = str(raw.get("content", ""))
+    else:
+        text = raw.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            start = 1
+            end = len(lines)
+            for i in range(len(lines) - 1, 0, -1):
+                if lines[i].strip() == "```":
+                    end = i
+                    break
+            result = "\n".join(lines[start:end])
+        else:
+            result = text
+
+    from src.tools.elision_detector import has_elision
+
+    hit, sample = has_elision(result)
+    if hit:
+        raise ParseError(
+            f"Refusing merge result containing elision marker (likely "
+            f"truncated LLM output): {sample!r}. Escalate to human review "
+            f"instead of writing a partial file."
+        )
+    return result
 
 
 def parse_file_review_issues(
