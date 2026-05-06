@@ -27,6 +27,7 @@ from src.tools.file_classifier import (
 )
 from src.tools.git_tool import GitTool
 from src.tools.pollution_auditor import PollutionAuditor
+from src.tools.scar_list_builder import ScarListBuilder
 from src.tools.config_drift_detector import ConfigDriftDetector
 from src.tools.commit_replayer import CommitReplayer
 from src.tools.sync_point_detector import SyncPointDetector
@@ -217,6 +218,31 @@ class InitializePhase(Phase):
                 merge_base = result.effective_merge_base
 
         state.merge_base_commit = merge_base
+
+        if state.config.scar_learning.enabled:
+            try:
+                learned = ScarListBuilder().auto_learn(
+                    repo_path=Path(state.config.repo_path).resolve(),
+                    fork_ref=state.config.fork_ref,
+                    base_ref=merge_base,
+                    since=state.config.scar_learning.since,
+                    grep_patterns=(state.config.scar_learning.grep_patterns or None),
+                    existing=state.config.customizations,
+                )
+            except Exception as e:
+                logger.warning("Scar auto-learn failed: %s", e)
+                learned = []
+            if learned and state.config.scar_learning.auto_append_to_customizations:
+                state.config = state.config.model_copy(
+                    update={
+                        "customizations": (list(state.config.customizations) + learned)
+                    }
+                )
+                logger.info(
+                    "Scar auto-learn appended %d customization(s) "
+                    "(restore + feature commits)",
+                    len(learned),
+                )
 
         ctx.notify("orchestrator", "Classifying files (three-way)")
         file_categories = classify_all_files(

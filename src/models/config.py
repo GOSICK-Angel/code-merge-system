@@ -297,7 +297,7 @@ class CustomizationEntry(BaseModel):
 class ScarLearningConfig(BaseModel):
     """P2-1: configure automatic scar-list learning from git history."""
 
-    enabled: bool = False
+    enabled: bool = True
     since: str = Field(
         default="1 year ago",
         description="Git date spec for how far back to scan (e.g. '1 year ago', '2025-01-01').",

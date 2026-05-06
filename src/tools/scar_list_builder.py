@@ -233,6 +233,47 @@ class ScarListBuilder:
         except Exception:
             return []
 
+    def auto_learn(
+        self,
+        repo_path: Path,
+        fork_ref: str,
+        base_ref: str,
+        *,
+        since: str = "1 year ago",
+        grep_patterns: list[str] | None = None,
+        feature_patterns: list[str] | None = None,
+        existing: list[CustomizationEntry] | None = None,
+    ) -> list[CustomizationEntry]:
+        """P2-3: one-shot orchestration that wires both Scar sources together.
+
+        Combines:
+        - ``build()`` (restore / revert / fix-compat over the whole history)
+        - ``build_from_feature_commits()`` (feat: / add / implement in the
+          ``base_ref..fork_ref`` range)
+
+        Then materializes the union as ``CustomizationEntry`` objects, with
+        files already covered by ``existing`` skipped to avoid duplicates.
+
+        Returns ``[]`` when the repo is invalid or when no matching commits
+        exist — matches the silent-fallback behaviour of the underlying
+        builders so callers can splat the result into config without guards.
+        """
+        legacy_scars = self.build(
+            repo_path=repo_path,
+            since=since,
+            grep_patterns=grep_patterns,
+        )
+        feature_scars = self.build_from_feature_commits(
+            repo_path=repo_path,
+            fork_ref=fork_ref,
+            base_ref=base_ref,
+            feature_patterns=feature_patterns,
+        )
+        combined = legacy_scars + feature_scars
+        if not combined:
+            return []
+        return self.materialize_as_customizations(combined, existing or [])
+
     def materialize_as_customizations(
         self,
         scars: list[Scar],

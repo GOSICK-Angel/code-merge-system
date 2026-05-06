@@ -541,7 +541,7 @@ class TestP2ModelConfig:
 
     def test_scar_learning_config_defaults(self):
         c = ScarLearningConfig()
-        assert c.enabled is False
+        assert c.enabled is True  # P2-3: zero-config repos protected by default
         assert c.since == "1 year ago"
         assert c.auto_append_to_customizations is True
 
