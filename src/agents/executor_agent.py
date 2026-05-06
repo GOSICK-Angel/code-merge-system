@@ -92,6 +92,7 @@ class ExecutorAgent(BaseAgent):
                     )
                     if fork_content:
                         hits = sentinel_scanner.scan(fork_content, file_path)
+                        hits = hits + sentinel_scanner.check_fork_delta(fd)
                         if hits:
                             state.sentinel_hits[file_path] = hits
                             if fd is None:

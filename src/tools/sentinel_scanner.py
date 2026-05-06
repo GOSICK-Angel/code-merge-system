@@ -15,8 +15,16 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
+
+if TYPE_CHECKING:
+    from src.models.diff import FileDiff
+
+
+FORK_DELTA_PATTERN: str = "__fork_delta_threshold__"
+DEFAULT_FORK_DELTA_MIN_LINES: int = 50
 
 
 DEFAULT_SENTINELS: list[str] = [
@@ -90,6 +98,36 @@ class SentinelScanner:
                     )
                     break
         return hits
+
+    def check_fork_delta(
+        self,
+        file_diff: "FileDiff | None",
+        *,
+        min_lines: int = DEFAULT_FORK_DELTA_MIN_LINES,
+    ) -> list[SentinelHit]:
+        """P1-2: emit a synthetic hit when fork-side line delta crosses
+        ``min_lines``. Complements text-marker scanning: a fork file that
+        diverged 50+ lines from merge_base is customized regardless of
+        whether anyone wrote ``@fork-only``.
+
+        Returns at most one hit so downstream plan-dispute logic stays
+        symmetric with text-marker hits.
+        """
+        if file_diff is None:
+            return []
+        delta = file_diff.lines_added + file_diff.lines_deleted
+        if delta < min_lines:
+            return []
+        return [
+            SentinelHit(
+                file_path=file_diff.file_path,
+                line_number=0,
+                pattern=FORK_DELTA_PATTERN,
+                matched_text=(
+                    f"fork delta {delta} lines >= {min_lines} (customization signal)"
+                ),
+            )
+        ]
 
     def scan_file(self, file_path: Path) -> list[SentinelHit]:
         """Read *file_path* from disk and scan its content.
