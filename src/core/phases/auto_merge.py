@@ -34,6 +34,7 @@ from src.tools.commit_replayer import CommitReplayer
 from src.tools.conflict_markers import file_has_conflict_markers
 from src.tools.git_committer import GitCommitter
 from src.tools.patch_applier import create_escalate_record
+from src.tools.preservation_auditor import audit_fork_preservation
 
 logger = logging.getLogger(__name__)
 
@@ -1020,6 +1021,38 @@ class AutoMergePhase(Phase):
                 if fp not in seen:
                     unhandled_conflict_files.append(fp)
                     seen.add(fp)
+
+        preservation_losses = audit_fork_preservation(state, ctx.git_tool)
+        if len(preservation_losses) > _B_CLASS_DRIFT_FATAL_THRESHOLD:
+            lost_paths = [loss.file_path for loss in preservation_losses]
+            logger.error(
+                "P1-1: fork preservation audit found %d C-class files where "
+                "worktree==upstream despite material fork delta (threshold=%d) "
+                "— escalating to human, likely systemic bug. First 10: %s",
+                len(preservation_losses),
+                _B_CLASS_DRIFT_FATAL_THRESHOLD,
+                lost_paths[:10],
+            )
+            state.pending_conflict_files = lost_paths
+            return PhaseOutcome(
+                target_status=SystemStatus.AWAITING_HUMAN,
+                reason=(
+                    f"fork preservation losses ({len(preservation_losses)} "
+                    f"files) exceed threshold {_B_CLASS_DRIFT_FATAL_THRESHOLD}"
+                ),
+                checkpoint_tag="after_phase2",
+                memory_phase="auto_merge",
+            )
+        elif preservation_losses:
+            logger.warning(
+                "P1-1: %d C-class files lost fork content "
+                "(worktree==upstream) — adding to conflict analysis queue",
+                len(preservation_losses),
+            )
+            for loss in preservation_losses:
+                if loss.file_path not in seen:
+                    unhandled_conflict_files.append(loss.file_path)
+                    seen.add(loss.file_path)
 
         if unhandled_conflict_files:
             logger.info(
