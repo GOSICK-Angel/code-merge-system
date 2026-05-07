@@ -1,0 +1,36 @@
+tests/unit/test_initialize_forks_profile_routing.py
+  07ebd9aa16d5ae39 1-297
+src/core/phases/initialize.py
+  07ebd9aa16d5ae39 38-45,329-331,484-487,651-830
+src/tools/forks_profile_loader.py
+  07ebd9aa16d5ae39 1-136
+src/models/forks_profile.py
+  07ebd9aa16d5ae39 1-125
+src/cli/paths.py
+  07ebd9aa16d5ae39 68-77
+src/models/state.py
+  07ebd9aa16d5ae39 12,83-90
+tests/unit/test_forks_profile.py
+  07ebd9aa16d5ae39 1-251
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.11",
+  "base_commit_sha": "8783475ff5a65d957c8d9055fe41d1e47b6a1bb9",
+  "prompts": {
+    "07ebd9aa16d5ae39": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6755c406-7f59-49e0-b8e8-47375cb9f48b",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Angel <heanqi@cvte.com>",
+      "messages": [],
+      "total_additions": 1028,
+      "total_deletions": 0,
+      "accepted_lines": 1028,
+      "overriden_lines": 0,
+      "messages_url": "https://gitai.gz.cvte.cn/cas/e5319fd637b800d51ff550e8d7b7a358cd423638e956c554229afab898d3d06e"
+    }
+  }
+}
