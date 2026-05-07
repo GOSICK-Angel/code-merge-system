@@ -4,6 +4,7 @@ inputs:
   - config
   - conflict_analyses
   - file_diffs
+  - forks_profile
   - merge_plan
   - status
 output_schema: ConflictAnalysis

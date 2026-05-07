@@ -184,7 +184,6 @@ class TestForksProfileRouting:
         rec = state.file_decision_records["pkg/registry.json"]
         assert rec.decision == MergeDecision.TAKE_CURRENT
         assert "take_current_with_diff_note" in rec.rationale
-        assert "P1" in rec.rationale
 
     def test_rewritten_module_semantic_merge_with_alert_does_not_force(
         self, tmp_path: Path

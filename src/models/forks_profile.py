@@ -93,12 +93,25 @@ class MigrationCollisionRule(BaseModel):
 
 
 class MigrationPolicy(BaseModel):
-    """Numbering-space ownership for sequential DB migrations.
+    """Numbering-space ownership for sequential migration files.
 
-    Reserved for P1 — schema is captured now so authors can populate it,
-    but plan-stage routing currently emits a warning rather than acting.
+    Used by plan-stage routing to detect when upstream introduces a
+    migration whose number falls inside the fork's reserved space, and
+    apply ``on_collision.action`` to the file before the AI flow runs.
+
+    ``path_globs`` is required for detection — leaving it empty disables
+    the check (a number-only rule would otherwise hijack any path with a
+    leading numeric component).
     """
 
+    path_globs: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Path globs identifying which files are migrations (e.g. "
+            "['**/migrations/*.sql', '**/db/migrate/*.py']). Empty = "
+            "collision detection disabled."
+        ),
+    )
     fork_owns_numbers_above: int | None = Field(default=None, ge=0)
     upstream_take_target_max: int | None = Field(default=None, ge=0)
     on_collision: MigrationCollisionRule | None = None

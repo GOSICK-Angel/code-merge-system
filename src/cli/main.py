@@ -217,12 +217,9 @@ def plan_suggest_command(
         sys.exit(1)
 
     console.print(
-        f"[bold]Baseline suggestions vs {target}[/bold] "
-        f"(pattern filter: {patterns})"
+        f"[bold]Baseline suggestions vs {target}[/bold] (pattern filter: {patterns})"
     )
-    console.print(
-        f"{'baseline':<22} {'commits':>8} {'files':>8} {'matches':>9}"
-    )
+    console.print(f"{'baseline':<22} {'commits':>8} {'files':>8} {'matches':>9}")
     for n in sorted(set(sizes)):
         baseline = f"{target}~{n}"
         try:
@@ -231,17 +228,13 @@ def plan_suggest_command(
             console.print(f"{baseline:<22} (resolve failed)")
             continue
         try:
-            files_raw = gt.repo.git.diff(
-                "--name-only", f"{base_sha}..{head_sha}"
-            )
+            files_raw = gt.repo.git.diff("--name-only", f"{base_sha}..{head_sha}")
         except Exception as exc:
             console.print(f"{baseline:<22} (diff failed: {exc})")
             continue
         files = [line for line in files_raw.splitlines() if line]
         if use_filter:
-            matches = sum(
-                1 for f in files if any(needle in f for needle in needles)
-            )
+            matches = sum(1 for f in files if any(needle in f for needle in needles))
         else:
             matches = len(files)
         console.print(f"{baseline:<22} {n:>8} {len(files):>8} {matches:>9}")
@@ -291,9 +284,7 @@ def validate_config_and_env(config: MergeConfig) -> list[str]:
         )
         return errors
     if not repo_root.is_dir():
-        errors.append(
-            f"repo_path '{config.repo_path}' is not a directory"
-        )
+        errors.append(f"repo_path '{config.repo_path}' is not a directory")
         return errors
 
     try:
@@ -313,6 +304,11 @@ def validate_config_and_env(config: MergeConfig) -> list[str]:
             errors.append(f"Git ref '{ref}' does not exist in repository")
 
     return errors
+
+
+from src.cli.commands.forks_profile import forks_profile as _forks_profile_group
+
+cli.add_command(_forks_profile_group)
 
 
 if __name__ == "__main__":

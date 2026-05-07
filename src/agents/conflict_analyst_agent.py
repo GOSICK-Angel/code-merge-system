@@ -15,6 +15,8 @@ from src.llm.prompts.analyst_prompts import (
     build_conflict_analysis_prompt,
 )
 from src.llm.response_parser import parse_commit_round_analyses, parse_conflict_analysis
+from src.models.forks_profile import ForksProfile
+from src.tools.forks_profile_loader import format_analyst_context
 from src.tools.git_tool import GitTool
 
 
@@ -51,6 +53,8 @@ class ConflictAnalystAgent(BaseAgent):
         for fd in view.file_diffs:
             file_diffs_map[fd.file_path] = fd
 
+        forks_profile: ForksProfile | None = getattr(view, "forks_profile", None)
+
         async def _analyze_one(file_path: str) -> ConflictAnalysis | None:
             fd = file_diffs_map.get(file_path)
             if fd is None:
@@ -71,6 +75,7 @@ class ConflictAnalystAgent(BaseAgent):
                 current_content=current_content,
                 target_content=target_content,
                 project_context=view.config.project_context,
+                forks_profile=forks_profile,
             )
 
         runner = ParallelFileRunner.from_api_key_env_list(
@@ -105,6 +110,7 @@ class ConflictAnalystAgent(BaseAgent):
         current_content: str | None,
         target_content: str | None,
         project_context: str = "",
+        forks_profile: ForksProfile | None = None,
     ) -> ConflictAnalysis:
         enriched_context = project_context
         builder = None
@@ -122,6 +128,19 @@ class ConflictAnalystAgent(BaseAgent):
                     f"{project_context}\n\n{memory_text}"
                     if project_context
                     else memory_text
+                )
+
+        # §9 P0/P1: prepend a short forks-profile context block so the
+        # analyst won't recommend take_target on paths the fork has
+        # deliberately dropped or rewritten. ``format_analyst_context``
+        # returns ``""`` when the profile has nothing useful to inject.
+        if forks_profile is not None:
+            profile_block = format_analyst_context(forks_profile, file_diff.file_path)
+            if profile_block:
+                enriched_context = (
+                    f"{profile_block}\n\n{enriched_context}"
+                    if enriched_context
+                    else profile_block
                 )
 
         if builder is not None:

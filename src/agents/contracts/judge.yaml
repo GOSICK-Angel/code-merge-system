@@ -4,6 +4,8 @@ inputs:
   - file_categories
   - file_decision_records
   - file_diffs
+  - fork_divergence_map
+  - forks_profile
   - judge_repair_rounds
   - judge_verdict
   - judge_verdicts_log

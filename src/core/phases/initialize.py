@@ -37,12 +37,19 @@ from src.tools.interface_change_extractor import InterfaceChangeExtractor
 from src.tools.reverse_impact_scanner import ReverseImpactScanner
 from src.tools.forks_profile_loader import (
     ForksProfileError,
+    find_migration_collision,
     find_removed_domain_match,
     find_rewritten_module_match,
     load_forks_profile,
     summarize_for_log,
 )
-from src.models.forks_profile import RewriteMergePolicy
+from src.tools.diff_stasher import stash_upstream_diff
+from src.cli.paths import get_diff_stash_dir
+from src.models.forks_profile import (
+    MigrationCollisionAction,
+    MigrationCollisionRule,
+    RewriteMergePolicy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -682,22 +689,16 @@ class InitializePhase(Phase):
 
         ctx.notify("orchestrator", summarize_for_log(profile))
 
-        if profile.migration_policy is not None:
-            logger.warning(
-                "forks-profile: migration_policy declared but plan-stage "
-                "routing for it is not yet implemented (P1). Numbers will "
-                "be ignored this run."
-            )
-
         consumed: set[str] = set()
         rewritten_counts: dict[str, int] = {}
         removed_count = 0
+        migration_collisions: list[tuple[str, int]] = []
 
         for fp, cat in file_categories.items():
             module = find_rewritten_module_match(profile, fp)
             if module is not None:
                 if self._route_rewritten_module(
-                    state, fp, cat, module.path, module.policy, module.note
+                    state, ctx, fp, cat, module.path, module.policy, module.note
                 ):
                     consumed.add(fp)
                     rewritten_counts[module.policy.value] = (
@@ -718,19 +719,47 @@ class InitializePhase(Phase):
                 )
                 consumed.add(fp)
                 removed_count += 1
+                continue
 
-        if consumed or rewritten_counts:
+            # Migration collision detection runs only on D_MISSING entries
+            # (upstream-introduced files). Fork-side migrations are by
+            # definition outside upstream's reach and don't collide.
+            if cat != FileChangeCategory.D_MISSING:
+                continue
+            collision = find_migration_collision(profile, fp)
+            if collision is None:
+                continue
+            number, rule = collision
+            self._route_migration_collision(state, fp, cat, number, rule)
+            consumed.add(fp)
+            migration_collisions.append((fp, number))
+
+        if consumed or rewritten_counts or migration_collisions:
             logger.info(
-                "forks-profile routing: %d removed_domains, %s rewritten_modules "
-                "pre-resolved before AI flow",
+                "forks-profile routing: %d removed_domains, %s rewritten_modules, "
+                "%d migration collisions pre-resolved before AI flow",
                 removed_count,
                 rewritten_counts or "{}",
+                len(migration_collisions),
             )
+            if migration_collisions:
+                preview = ", ".join(f"{fp}#{n}" for fp, n in migration_collisions[:5])
+                more = (
+                    f" (+{len(migration_collisions) - 5} more)"
+                    if len(migration_collisions) > 5
+                    else ""
+                )
+                ctx.notify(
+                    "orchestrator",
+                    f"forks-profile: {len(migration_collisions)} migration "
+                    f"collision(s) detected: {preview}{more}",
+                )
         return consumed
 
     def _route_rewritten_module(
         self,
         state: MergeState,
+        ctx: PhaseContext,
         file_path: str,
         category: FileChangeCategory,
         module_path: str,
@@ -768,19 +797,89 @@ class InitializePhase(Phase):
             return True
 
         if policy == RewriteMergePolicy.TAKE_CURRENT_WITH_DIFF_NOTE:
+            stash_note = self._stash_upstream_diff_at_plan(state, ctx, file_path)
+            rationale = (
+                f"forks-profile.rewritten_modules[{module_path}] "
+                f"policy=take_current_with_diff_note (category={category.value}, "
+                f"note={note or 'n/a'})"
+            )
+            if stash_note:
+                rationale = f"{rationale}; {stash_note}"
             self._record_profile_take_current(
                 state,
                 file_path,
                 category,
-                rationale=(
-                    f"forks-profile.rewritten_modules[{module_path}] "
-                    f"policy=take_current_with_diff_note (category={category.value}, "
-                    f"note={note or 'n/a'}); P1: executor will stash upstream diff"
-                ),
+                rationale=rationale,
             )
             return True
 
         return False
+
+    def _stash_upstream_diff_at_plan(
+        self, state: MergeState, ctx: PhaseContext, file_path: str
+    ) -> str | None:
+        """Capture `git diff <merge_base>..<upstream> -- <file>` to a patch
+        file so a human reviewer can integrate the upstream delta later.
+
+        Returns a short rationale fragment with the patch path, or ``None``
+        when prerequisites (merge_base / git_tool / non-empty diff) are
+        missing — never raises, since failure to stash must not block
+        plan-stage routing.
+        """
+        merge_base = state.merge_base_commit or ""
+        upstream_ref = state.config.upstream_ref
+        if not merge_base or not upstream_ref or ctx.git_tool is None:
+            return None
+        stash_dir = get_diff_stash_dir(state.config.repo_path, state.run_id)
+        try:
+            patch_path = stash_upstream_diff(
+                file_path,
+                merge_base,
+                upstream_ref,
+                ctx.git_tool,
+                stash_dir,
+            )
+        except Exception as exc:
+            logger.warning(
+                "forks-profile: stash_upstream_diff failed for %s: %s",
+                file_path,
+                exc,
+            )
+            return None
+        if patch_path is None:
+            return None
+        return (
+            f"upstream delta stashed at {patch_path} "
+            "(apply with `git apply --3way` to integrate manually)"
+        )
+
+    def _route_migration_collision(
+        self,
+        state: MergeState,
+        file_path: str,
+        category: FileChangeCategory,
+        number: int,
+        rule: MigrationCollisionRule,
+    ) -> None:
+        """Apply a migration_policy.on_collision verdict to ``file_path``.
+
+        ``escalate_human`` (default) writes an ESCALATE_HUMAN decision so
+        the operator must reconcile the numbering manually; ``take_current``
+        keeps the fork's view (D_MISSING stays absent) and records the
+        collision in the rationale for audit.
+        """
+        rationale = (
+            f"forks-profile.migration_policy collision: number={number} "
+            f"(category={category.value}); "
+            f"action={rule.action.value}"
+        )
+        if rule.note:
+            rationale = f"{rationale}; note={rule.note}"
+
+        if rule.action == MigrationCollisionAction.TAKE_CURRENT:
+            self._record_profile_take_current(state, file_path, category, rationale)
+        else:
+            self._record_profile_escalate_human(state, file_path, category, rationale)
 
     def _record_profile_take_current(
         self,

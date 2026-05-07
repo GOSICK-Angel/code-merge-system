@@ -35,6 +35,10 @@ from src.llm.response_parser import (
     parse_judge_verdict,
 )
 from src.tools.file_classifier import matches_any_pattern
+from src.tools.forks_profile_loader import (
+    find_removed_domain_match,
+    find_rewritten_module_match,
+)
 from src.tools.git_tool import GitTool
 from src.tools.three_way_diff import ThreeWayDiff, _safe_read_text
 from src.tools.syntax_checker import check_syntax as check_file_syntax
@@ -466,6 +470,12 @@ class JudgeAgent(BaseAgent):
         # merge bugs.
         fork_div_map: dict[str, str] = state.fork_divergence_map or {}
 
+        # §9 P0-2: forks-profile.yaml is a third fork-aware signal —
+        # explicit author-declared "this domain/module is fork-special",
+        # ranked alongside always_take_current_patterns and the divergence
+        # map. Falsey when the target ships no profile.
+        forks_profile = getattr(state, "forks_profile", None)
+
         todo_merge_total = 0
 
         for fp, cat in categories.items():
@@ -481,23 +491,61 @@ class JudgeAgent(BaseAgent):
                 ForkDivergence.FORK_ONLY.value,
             )
             fork_intentional_modify = fork_div == ForkDivergence.FORK_MODIFIED.value
-            fork_aware_skip = fork_pinned or fork_intentional_skip
-            fork_aware_modify = fork_pinned or fork_intentional_modify
+
+            removed_domain = (
+                find_removed_domain_match(forks_profile, fp)
+                if forks_profile is not None
+                else None
+            )
+            rewritten_module = (
+                find_rewritten_module_match(forks_profile, fp)
+                if forks_profile is not None
+                else None
+            )
+            profile_pinned = removed_domain is not None or rewritten_module is not None
+
+            fork_aware_skip = fork_pinned or fork_intentional_skip or profile_pinned
+            fork_aware_modify = fork_pinned or fork_intentional_modify or profile_pinned
+
+            # Pick a single label/suffix that explains *why* a fork-aware
+            # downgrade fired on this path. Priority reflects specificity:
+            # explicit per-path glob > author-declared profile entry > the
+            # passive divergence map.
+            if fork_pinned:
+                fork_aware_reason = "matched always_take_current_patterns"
+                fork_aware_suffix = "_fork_pinned"
+            elif rewritten_module is not None:
+                fork_aware_reason = (
+                    f"forks-profile.rewritten_modules[{rewritten_module.path}] "
+                    f"policy={rewritten_module.policy.value}"
+                )
+                fork_aware_suffix = "_profile_pinned"
+            elif removed_domain is not None:
+                fork_aware_reason = (
+                    f"forks-profile.removed_domains[{removed_domain.name}] "
+                    f"(reason={removed_domain.reason or 'n/a'})"
+                )
+                fork_aware_suffix = "_profile_pinned"
+            elif fork_div:
+                fork_aware_reason = f"fork-divergence={fork_div}"
+                fork_aware_suffix = "_fork_pinned"
+            else:
+                fork_aware_reason = ""
+                fork_aware_suffix = ""
 
             if cat == FileChangeCategory.B:
                 if not three_way.verify_b_class_diff_applied(
                     fp, merge_base, upstream_ref
                 ):
-                    if fork_pinned:
+                    if fork_aware_modify:
                         issues.append(
                             JudgeIssue(
                                 file_path=fp,
                                 issue_level=IssueSeverity.INFO,
-                                issue_type="b_class_mismatch_fork_pinned",
+                                issue_type=f"b_class_mismatch{fork_aware_suffix}",
                                 description=(
-                                    "B-class file diverges from upstream — "
-                                    "expected: matched always_take_current_patterns "
-                                    "(fork retains its customization)"
+                                    f"B-class file diverges from upstream — "
+                                    f"expected: {fork_aware_reason}"
                                 ),
                             )
                         )
@@ -522,22 +570,18 @@ class JudgeAgent(BaseAgent):
                 if not three_way.verify_d_missing_present(fp):
                     if fork_aware_skip:
                         # fork explicitly chose to keep the file deleted —
-                        # either via glob whitelist or because the frozen
-                        # fork-divergence map shows the fork actively
-                        # removed it (FORK_DELETED). Surface as
-                        # informational only to keep the audit trail.
-                        reason = (
-                            "matched always_take_current_patterns"
-                            if fork_pinned
-                            else f"fork-divergence={fork_div}"
-                        )
+                        # via glob whitelist, the frozen fork-divergence
+                        # map (FORK_DELETED), or an author-declared
+                        # forks-profile.removed_domains / rewritten_modules
+                        # entry. Surface as informational only.
                         issues.append(
                             JudgeIssue(
                                 file_path=fp,
                                 issue_level=IssueSeverity.INFO,
-                                issue_type="d_missing_absent_fork_pinned",
+                                issue_type=f"d_missing_absent{fork_aware_suffix}",
                                 description=(
-                                    f"D-missing file kept absent — expected: {reason}"
+                                    f"D-missing file kept absent — "
+                                    f"expected: {fork_aware_reason}"
                                 ),
                             )
                         )
@@ -578,19 +622,16 @@ class JudgeAgent(BaseAgent):
                     missing = three_way.verify_additions_present(fp, additions)
                     if missing:
                         if fork_aware_modify:
-                            reason = (
-                                "fork-pinned"
-                                if fork_pinned
-                                else f"fork-divergence={fork_div}"
-                            )
                             issues.append(
                                 JudgeIssue(
                                     file_path=fp,
                                     issue_level=IssueSeverity.INFO,
-                                    issue_type="missing_upstream_addition_fork_pinned",
+                                    issue_type=(
+                                        f"missing_upstream_addition{fork_aware_suffix}"
+                                    ),
                                     description=(
                                         f"Upstream additions intentionally not "
-                                        f"integrated ({reason}): "
+                                        f"integrated ({fork_aware_reason}): "
                                         f"{', '.join(missing[:5])}"
                                         f"{'...' if len(missing) > 5 else ''}"
                                     ),
