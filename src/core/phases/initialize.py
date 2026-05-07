@@ -13,6 +13,7 @@ from src.models.decision import (
 from src.models.diff import (
     FileDiff,
     FileChangeCategory,
+    ForkDivergence,
     FileStatus,
 )
 from src.models.state import MergeState, SystemStatus
@@ -21,6 +22,7 @@ from src.tools.file_classifier import (
     classify_all_files,
     classify_file,
     category_summary,
+    compute_fork_divergence_map,
     compute_risk_score,
     is_security_sensitive,
     matches_any_pattern,
@@ -272,6 +274,29 @@ class InitializePhase(Phase):
             )
 
         state.file_categories = file_categories
+
+        fork_div_map = compute_fork_divergence_map(
+            merge_base,
+            state.config.fork_ref,
+            state.config.upstream_ref,
+            ctx.git_tool,
+        )
+        state.fork_divergence_map = {fp: fd.value for fp, fd in fork_div_map.items()}
+        logger.info(
+            "Fork-divergence map: %d files (fork_modified=%d fork_deleted=%d "
+            "fork_only=%d upstream_added=%d upstream_only_change=%d unchanged=%d)",
+            len(fork_div_map),
+            sum(1 for v in fork_div_map.values() if v == ForkDivergence.FORK_MODIFIED),
+            sum(1 for v in fork_div_map.values() if v == ForkDivergence.FORK_DELETED),
+            sum(1 for v in fork_div_map.values() if v == ForkDivergence.FORK_ONLY),
+            sum(1 for v in fork_div_map.values() if v == ForkDivergence.UPSTREAM_ADDED),
+            sum(
+                1
+                for v in fork_div_map.values()
+                if v == ForkDivergence.UPSTREAM_ONLY_CHANGE
+            ),
+            sum(1 for v in fork_div_map.values() if v == ForkDivergence.UNCHANGED),
+        )
 
         cat_counts = category_summary(file_categories)
         logger.info(

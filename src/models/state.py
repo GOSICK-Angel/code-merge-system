@@ -68,6 +68,17 @@ class MergeState(BaseModel):
     merge_plan: MergePlan | None = None
     file_classifications: dict[str, RiskLevel] = Field(default_factory=dict)
     file_categories: dict[str, FileChangeCategory] = Field(default_factory=dict)
+    fork_divergence_map: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "P2-3 (§6.2 item 3): per-file fork-vs-upstream divergence kind, "
+            "frozen after plan_review. Values are ForkDivergence enum strings "
+            "('fork_modified' | 'fork_deleted' | 'fork_only' | "
+            "'upstream_only_change' | 'upstream_added' | 'unchanged'). "
+            "Read by judge_agent to downgrade deterministic checks when the "
+            "divergence is intentional fork behavior."
+        ),
+    )
     merge_base_commit: str = ""
     plan_revision_rounds: int = 0
 

@@ -11,6 +11,20 @@ class FileChangeCategory(str, Enum):
     E = "current_only_change"
 
 
+class ForkDivergence(str, Enum):
+    """P2-3 (§6.2 item 3): per-file fork-vs-upstream divergence kind,
+    frozen at plan_review time and read by judge to downgrade
+    deterministic checks when the divergence is intentional fork
+    behavior rather than a merge bug."""
+
+    UNCHANGED = "unchanged"
+    UPSTREAM_ADDED = "upstream_added"
+    UPSTREAM_ONLY_CHANGE = "upstream_only_change"
+    FORK_MODIFIED = "fork_modified"
+    FORK_DELETED = "fork_deleted"
+    FORK_ONLY = "fork_only"
+
+
 class FileStatus(str, Enum):
     ADDED = "added"
     DELETED = "deleted"

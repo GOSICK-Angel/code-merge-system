@@ -8,7 +8,13 @@ import re
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
-from src.models.diff import FileDiff, FileChangeCategory, RiskLevel, FileStatus
+from src.models.diff import (
+    FileDiff,
+    FileChangeCategory,
+    ForkDivergence,
+    RiskLevel,
+    FileStatus,
+)
 from src.models.config import FileClassifierConfig
 
 if TYPE_CHECKING:
@@ -295,6 +301,60 @@ def classify_all_files(
         else:
             cat = FileChangeCategory.C
         result[file_path] = cat
+    return result
+
+
+def compute_fork_divergence_map(
+    merge_base: str,
+    head_ref: str,
+    upstream_ref: str,
+    git_tool: GitTool,
+) -> dict[str, ForkDivergence]:
+    """P2-3 (§6.2 item 3): per-file fork-vs-upstream divergence
+    classification used by judge to suppress false-positive critical
+    issues when the divergence is intentional fork behavior.
+
+    Returns one entry per file present in head, upstream, or base.
+    Mapping rules:
+
+    - head_hash != base_hash and base_hash is not None  →  FORK_MODIFIED
+    - head_hash is None and base_hash is not None
+      and up_hash is not None                           →  FORK_DELETED
+    - head_hash is not None and up_hash is None         →  FORK_ONLY
+    - head_hash == base_hash and up_hash != base_hash   →  UPSTREAM_ONLY_CHANGE
+    - head_hash is None and base_hash is None
+      and up_hash is not None                           →  UPSTREAM_ADDED
+    - all equal / file absent everywhere                →  UNCHANGED
+    """
+    base_hashes = git_tool.list_files_with_hashes(merge_base) if merge_base else {}
+    head_hashes = git_tool.list_files_with_hashes(head_ref)
+    up_hashes = git_tool.list_files_with_hashes(upstream_ref)
+    all_paths = set(head_hashes) | set(up_hashes) | set(base_hashes)
+
+    result: dict[str, ForkDivergence] = {}
+    for file_path in sorted(all_paths):
+        head_hash = head_hashes.get(file_path)
+        up_hash = up_hashes.get(file_path)
+        base_hash = base_hashes.get(file_path)
+
+        if head_hash is not None and base_hash is not None and head_hash != base_hash:
+            result[file_path] = ForkDivergence.FORK_MODIFIED
+        elif head_hash is None and base_hash is not None and up_hash is not None:
+            result[file_path] = ForkDivergence.FORK_DELETED
+        elif head_hash is not None and up_hash is None:
+            result[file_path] = ForkDivergence.FORK_ONLY
+        elif head_hash is None and base_hash is None and up_hash is not None:
+            result[file_path] = ForkDivergence.UPSTREAM_ADDED
+        elif (
+            head_hash is not None
+            and base_hash is not None
+            and head_hash == base_hash
+            and up_hash is not None
+            and up_hash != base_hash
+        ):
+            result[file_path] = ForkDivergence.UPSTREAM_ONLY_CHANGE
+        else:
+            result[file_path] = ForkDivergence.UNCHANGED
     return result
 
 

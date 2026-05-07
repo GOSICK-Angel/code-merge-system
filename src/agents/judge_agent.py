@@ -20,7 +20,7 @@ from src.models.judge import (
     IssueSeverity,
 )
 from src.models.config import CustomizationEntry, CustomizationVerification
-from src.models.diff import FileChangeCategory
+from src.models.diff import FileChangeCategory, ForkDivergence
 from src.models.state import MergeState
 from src.llm.prompt_builders import AgentPromptBuilder
 from src.core.read_only_state_view import ReadOnlyStateView
@@ -458,6 +458,14 @@ class JudgeAgent(BaseAgent):
             fc.always_take_target_patterns
         )
 
+        # P2-3 (§6.2 item 3): the per-file fork-vs-upstream divergence map
+        # frozen at plan_review. When a deterministic check fires on a
+        # file whose divergence is intentional fork behavior (fork
+        # actively deleted / fork rewrote vs base), downgrade CRITICAL
+        # to INFO so judge stops flagging the fork's own decisions as
+        # merge bugs.
+        fork_div_map: dict[str, str] = state.fork_divergence_map or {}
+
         todo_merge_total = 0
 
         for fp, cat in categories.items():
@@ -467,6 +475,14 @@ class JudgeAgent(BaseAgent):
             upstream_pinned = bool(upstream_pinned_patterns) and matches_any_pattern(
                 fp, upstream_pinned_patterns
             )
+            fork_div = fork_div_map.get(fp, "")
+            fork_intentional_skip = fork_div in (
+                ForkDivergence.FORK_DELETED.value,
+                ForkDivergence.FORK_ONLY.value,
+            )
+            fork_intentional_modify = fork_div == ForkDivergence.FORK_MODIFIED.value
+            fork_aware_skip = fork_pinned or fork_intentional_skip
+            fork_aware_modify = fork_pinned or fork_intentional_modify
 
             if cat == FileChangeCategory.B:
                 if not three_way.verify_b_class_diff_applied(
@@ -504,18 +520,24 @@ class JudgeAgent(BaseAgent):
 
             elif cat == FileChangeCategory.D_MISSING:
                 if not three_way.verify_d_missing_present(fp):
-                    if fork_pinned:
+                    if fork_aware_skip:
                         # fork explicitly chose to keep the file deleted —
-                        # no issue needed; surface as informational only
-                        # to keep the audit trail visible.
+                        # either via glob whitelist or because the frozen
+                        # fork-divergence map shows the fork actively
+                        # removed it (FORK_DELETED). Surface as
+                        # informational only to keep the audit trail.
+                        reason = (
+                            "matched always_take_current_patterns"
+                            if fork_pinned
+                            else f"fork-divergence={fork_div}"
+                        )
                         issues.append(
                             JudgeIssue(
                                 file_path=fp,
                                 issue_level=IssueSeverity.INFO,
                                 issue_type="d_missing_absent_fork_pinned",
                                 description=(
-                                    "D-missing file kept absent — expected: "
-                                    "matched always_take_current_patterns"
+                                    f"D-missing file kept absent — expected: {reason}"
                                 ),
                             )
                         )
@@ -555,7 +577,12 @@ class JudgeAgent(BaseAgent):
                 if additions:
                     missing = three_way.verify_additions_present(fp, additions)
                     if missing:
-                        if fork_pinned:
+                        if fork_aware_modify:
+                            reason = (
+                                "fork-pinned"
+                                if fork_pinned
+                                else f"fork-divergence={fork_div}"
+                            )
                             issues.append(
                                 JudgeIssue(
                                     file_path=fp,
@@ -563,7 +590,7 @@ class JudgeAgent(BaseAgent):
                                     issue_type="missing_upstream_addition_fork_pinned",
                                     description=(
                                         f"Upstream additions intentionally not "
-                                        f"integrated (fork-pinned): "
+                                        f"integrated ({reason}): "
                                         f"{', '.join(missing[:5])}"
                                         f"{'...' if len(missing) > 5 else ''}"
                                     ),
