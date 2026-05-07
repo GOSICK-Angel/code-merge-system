@@ -46,6 +46,17 @@ class MemoryStore:
         new_memory = self._memory.model_copy(update={"codebase_profile": profile})
         return MemoryStore(new_memory)
 
+    def update_codebase_profile_inplace(self, key: str, value: str) -> None:
+        """Mutate the underlying ``codebase_profile`` dict directly.
+
+        Phases run with a frozen ``PhaseContext`` and cannot replace the
+        orchestrator's ``MemoryStore`` reference, so the immutable
+        ``set_codebase_profile`` (which returns a new instance) is not
+        useful from inside a phase. This in-place variant lets phases
+        seed the L0 profile so subsequent phases observe the entry.
+        """
+        self._memory.codebase_profile[key] = value
+
     def query_by_path(self, file_path: str, limit: int = 5) -> list[MemoryEntry]:
         results: list[MemoryEntry] = []
         for entry in self._memory.entries:

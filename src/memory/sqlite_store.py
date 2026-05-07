@@ -200,6 +200,15 @@ class SQLiteMemoryStore:
             )
         return self
 
+    def update_codebase_profile_inplace(self, key: str, value: str) -> None:
+        """Mirror of ``MemoryStore.update_codebase_profile_inplace``.
+
+        SQLite already mutates on disk via ``set_codebase_profile``; this
+        wrapper exists so phases can call the same method on either
+        store type without a runtime type check.
+        """
+        self.set_codebase_profile(key, value)
+
     def import_from_memory(self, memory: MergeMemory) -> None:
         """Bulk-import a MergeMemory snapshot (INSERT OR IGNORE for dedup)."""
         for entry in memory.entries:

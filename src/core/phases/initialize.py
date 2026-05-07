@@ -302,6 +302,8 @@ class InitializePhase(Phase):
                 f"{len(actionable_paths)} remain for AI flow",
             )
 
+        self._seed_fork_profile_l0(state, ctx, file_categories)
+
         ctx.notify(
             "orchestrator",
             f"Building diffs for {len(actionable_paths)} actionable files",
@@ -513,6 +515,69 @@ class InitializePhase(Phase):
             phase="initialize",
             agent="force_decision_policy",
         )
+
+    def _seed_fork_profile_l0(
+        self,
+        state: MergeState,
+        ctx: PhaseContext,
+        file_categories: dict[str, FileChangeCategory],
+    ) -> None:
+        """P1-1: write fork-pinned 'deleted features' summary into L0.
+
+        Aggregates files matching ``always_take_current_patterns`` and
+        notes how many fall into each category (D_MISSING = fork removed
+        the file, B/C = fork retains its own version). Subsequent phases
+        see this via ``LayeredMemoryLoader._build_l0`` so judge / analyst
+        can reason about "fork = upstream minus these features" without
+        re-deriving it from scratch.
+        """
+        fc = state.config.file_classifier
+        current_patterns = list(fc.always_take_current_patterns)
+        if not current_patterns:
+            return
+
+        deleted: list[str] = []
+        retained: list[str] = []
+        for fp, cat in file_categories.items():
+            if not matches_any_pattern(fp, current_patterns):
+                continue
+            if cat == FileChangeCategory.D_MISSING:
+                deleted.append(fp)
+            else:
+                retained.append(fp)
+
+        if not deleted and not retained:
+            return
+
+        parts: list[str] = []
+        if deleted:
+            sample = ", ".join(sorted(deleted)[:8])
+            more = f" (+{len(deleted) - 8} more)" if len(deleted) > 8 else ""
+            parts.append(
+                f"Fork explicitly removed {len(deleted)} upstream file(s) "
+                f"(D_MISSING + always_take_current): {sample}{more}"
+            )
+        if retained:
+            sample = ", ".join(sorted(retained)[:8])
+            more = f" (+{len(retained) - 8} more)" if len(retained) > 8 else ""
+            parts.append(
+                f"Fork pins {len(retained)} customised file(s) against "
+                f"upstream changes: {sample}{more}"
+            )
+        parts.append(
+            "Treat divergence on these paths as expected, not as a merge regression."
+        )
+
+        try:
+            ctx.memory_store.update_codebase_profile_inplace(
+                "fork_deleted_features",
+                " ".join(parts),
+            )
+        except AttributeError:
+            logger.debug(
+                "memory_store does not support update_codebase_profile_inplace; "
+                "skipping fork-profile L0 seed"
+            )
 
     def _force_take_current(
         self,
