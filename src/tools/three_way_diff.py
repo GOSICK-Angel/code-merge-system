@@ -52,6 +52,13 @@ class ThreeWayDiff:
         )
 
     def verify_b_class(self, file_path: str, upstream_ref: str) -> bool:
+        """Strict equality check: HEAD blob == upstream blob.
+
+        Retained for callers / tests that want byte-exact verification.
+        Most B-class checks should prefer ``verify_b_class_diff_applied``
+        which tolerates fork-side customizations layered on top of
+        upstream changes.
+        """
         upstream_content = self.git_tool.get_file_content(upstream_ref, file_path)
         abs_path = self.git_tool.repo_path / file_path
 
@@ -65,6 +72,43 @@ class ThreeWayDiff:
         if merged_content is None:
             return False
         return merged_content == upstream_content
+
+    def verify_b_class_diff_applied(
+        self, file_path: str, merge_base: str, upstream_ref: str
+    ) -> bool:
+        """Check that the upstream-vs-base diff is reflected in HEAD.
+
+        For B-class files (modified on both sides), strict equality
+        ``HEAD == upstream`` is too aggressive — a fork may legitimately
+        layer additional changes on top of upstream's. The relaxed check
+        verifies that every symbol upstream *added* (relative to
+        merge-base) is present in the merged HEAD content, reusing the
+        same signal C-class checks already use.
+
+        Returns True when:
+        * upstream did not change anything since merge-base (no symbols
+          added) — nothing to verify;
+        * all upstream-added symbols are present in HEAD.
+
+        Returns False when upstream-added symbols are missing in HEAD,
+        i.e. the upstream change was lost during the merge.
+        """
+        base_content = self.git_tool.get_file_content(merge_base, file_path)
+        upstream_content = self.git_tool.get_file_content(upstream_ref, file_path)
+
+        if upstream_content is None:
+            abs_path = self.git_tool.repo_path / file_path
+            return not abs_path.exists()
+
+        base_symbols = _extract_symbols(base_content or "")
+        upstream_symbols = _extract_symbols(upstream_content)
+        added = sorted(upstream_symbols - base_symbols)
+
+        if not added:
+            return True
+
+        missing = self.verify_additions_present(file_path, added)
+        return not missing
 
     def verify_d_missing_present(self, file_path: str) -> bool:
         abs_path = self.git_tool.repo_path / file_path
