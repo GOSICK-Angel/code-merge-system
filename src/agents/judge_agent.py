@@ -34,6 +34,7 @@ from src.llm.response_parser import (
     parse_file_review_issues,
     parse_judge_verdict,
 )
+from src.tools.file_classifier import matches_any_pattern
 from src.tools.git_tool import GitTool
 from src.tools.three_way_diff import ThreeWayDiff, _safe_read_text
 from src.tools.syntax_checker import check_syntax as check_file_syntax
@@ -448,27 +449,77 @@ class JudgeAgent(BaseAgent):
         if not merge_base or not upstream_ref:
             return []
 
+        # P0-1: read fork-pinned / upstream-pinned glob whitelists from
+        # config so deterministic checks degrade to INFO when a divergence
+        # is the *intended* outcome of a force-decision policy.
+        fc = state.config.file_classifier
+        fork_pinned_patterns = list(fc.always_take_current_patterns)
+        upstream_pinned_patterns = list(fc.always_take_upstream_patterns) + list(
+            fc.always_take_target_patterns
+        )
+
         todo_merge_total = 0
 
         for fp, cat in categories.items():
+            fork_pinned = bool(fork_pinned_patterns) and matches_any_pattern(
+                fp, fork_pinned_patterns
+            )
+            upstream_pinned = bool(upstream_pinned_patterns) and matches_any_pattern(
+                fp, upstream_pinned_patterns
+            )
+
             if cat == FileChangeCategory.B:
-                if not three_way.verify_b_class(fp, upstream_ref):
-                    issues.append(
-                        JudgeIssue(
-                            file_path=fp,
-                            issue_level=IssueSeverity.CRITICAL,
-                            issue_type="b_class_mismatch",
-                            description=(
-                                "B-class file differs from upstream after merge"
-                            ),
-                            must_fix_before_merge=True,
-                            veto_condition="B-class file differs from upstream",
+                if not three_way.verify_b_class_diff_applied(
+                    fp, merge_base, upstream_ref
+                ):
+                    if fork_pinned:
+                        issues.append(
+                            JudgeIssue(
+                                file_path=fp,
+                                issue_level=IssueSeverity.INFO,
+                                issue_type="b_class_mismatch_fork_pinned",
+                                description=(
+                                    "B-class file diverges from upstream — "
+                                    "expected: matched always_take_current_patterns "
+                                    "(fork retains its customization)"
+                                ),
+                            )
                         )
-                    )
+                    else:
+                        issues.append(
+                            JudgeIssue(
+                                file_path=fp,
+                                issue_level=IssueSeverity.CRITICAL,
+                                issue_type="b_class_mismatch",
+                                description=(
+                                    "B-class file: upstream changes (vs merge-base) "
+                                    "not applied to HEAD"
+                                ),
+                                must_fix_before_merge=True,
+                                veto_condition=(
+                                    "B-class file: upstream diff not applied"
+                                ),
+                            )
+                        )
 
             elif cat == FileChangeCategory.D_MISSING:
                 if not three_way.verify_d_missing_present(fp):
-                    if fp not in state.file_decision_records:
+                    if fork_pinned:
+                        # fork explicitly chose to keep the file deleted —
+                        # no issue needed; surface as informational only
+                        # to keep the audit trail visible.
+                        issues.append(
+                            JudgeIssue(
+                                file_path=fp,
+                                issue_level=IssueSeverity.INFO,
+                                issue_type="d_missing_absent_fork_pinned",
+                                description=(
+                                    "D-missing file kept absent — expected: "
+                                    "matched always_take_current_patterns"
+                                ),
+                            )
+                        )
+                    elif fp not in state.file_decision_records:
                         issues.append(
                             JudgeIssue(
                                 file_path=fp,
@@ -504,29 +555,51 @@ class JudgeAgent(BaseAgent):
                 if additions:
                     missing = three_way.verify_additions_present(fp, additions)
                     if missing:
-                        issues.append(
-                            JudgeIssue(
-                                file_path=fp,
-                                issue_level=IssueSeverity.HIGH,
-                                issue_type="missing_upstream_addition",
-                                description=(
-                                    f"Upstream additions missing in merged: "
-                                    f"{', '.join(missing[:5])}"
-                                    f"{'...' if len(missing) > 5 else ''}"
-                                ),
-                                must_fix_before_merge=True,
-                                veto_condition=(
-                                    "Upstream function block missing in merged"
-                                    if any(
-                                        self._is_large_addition(
-                                            fp, name, merge_base, upstream_ref
-                                        )
-                                        for name in missing
-                                    )
-                                    else None
-                                ),
+                        if fork_pinned:
+                            issues.append(
+                                JudgeIssue(
+                                    file_path=fp,
+                                    issue_level=IssueSeverity.INFO,
+                                    issue_type="missing_upstream_addition_fork_pinned",
+                                    description=(
+                                        f"Upstream additions intentionally not "
+                                        f"integrated (fork-pinned): "
+                                        f"{', '.join(missing[:5])}"
+                                        f"{'...' if len(missing) > 5 else ''}"
+                                    ),
+                                )
                             )
-                        )
+                        else:
+                            issues.append(
+                                JudgeIssue(
+                                    file_path=fp,
+                                    issue_level=IssueSeverity.HIGH,
+                                    issue_type="missing_upstream_addition",
+                                    description=(
+                                        f"Upstream additions missing in merged: "
+                                        f"{', '.join(missing[:5])}"
+                                        f"{'...' if len(missing) > 5 else ''}"
+                                    ),
+                                    must_fix_before_merge=True,
+                                    veto_condition=(
+                                        "Upstream function block missing in merged"
+                                        if any(
+                                            self._is_large_addition(
+                                                fp, name, merge_base, upstream_ref
+                                            )
+                                            for name in missing
+                                        )
+                                        else None
+                                    ),
+                                )
+                            )
+
+            # upstream_pinned reserved for future (currently the
+            # initialize phase already force-writes the upstream blob, so
+            # no additional INFO is needed unless apply silently failed —
+            # which the existing CRITICAL d_missing_absent path already
+            # catches without a fork-pinned exemption).
+            _ = upstream_pinned
 
             todo_check_lines = three_way.find_todo_check(fp)
             if todo_check_lines:

@@ -307,11 +307,25 @@ class TestDeterministicPipeline:
         from src.agents.judge_agent import JudgeAgent
         from src.models.config import AgentLLMConfig
 
+        # Upstream introduces ``def upstream_only_fn`` on top of base; the
+        # merged HEAD never picked it up — the failure mode the B-class
+        # check should veto. Same-content base/upstream means "upstream
+        # did not change this file" and is *not* a veto under the
+        # relaxed diff-applied semantics.
+        def fake_get(ref, path):
+            if ref == "base123":
+                return "x = 1\n"
+            if ref == "upstream/main":
+                return "x = 1\ndef upstream_only_fn():\n    return 42\n"
+            return None
+
         git_tool = MagicMock()
         git_tool.repo_path = tmp_path
-        git_tool.get_file_content.return_value = "upstream_version"
+        git_tool.get_file_content.side_effect = fake_get
 
-        (tmp_path / "b_file.py").write_text("different_merged")
+        (tmp_path / "b_file.py").write_text(
+            "x = 1\n# fork keeps its own customisation\n"
+        )
 
         with patch("src.llm.client.LLMClientFactory.create"):
             judge = JudgeAgent(AgentLLMConfig(), git_tool=git_tool)
@@ -320,7 +334,7 @@ class TestDeterministicPipeline:
 
         issues = judge._run_deterministic_pipeline(state, {})
         assert len(issues) == 1
-        assert issues[0].veto_condition == "B-class file differs from upstream"
+        assert issues[0].veto_condition == "B-class file: upstream diff not applied"
         assert issues[0].issue_type == "b_class_mismatch"
 
     def test_d_missing_veto_when_absent(self, tmp_path):
