@@ -70,16 +70,72 @@ class HumanReviewPhase(Phase):
                     checkpoint_tag="judge_aborted",
                 )
             if res == "rerun":
-                # Clear resolution so next pause requires fresh input
+                # P2-1: rerun budget guard. Hard-cap reruns so a user
+                # answering "rerun" to every Judge FAIL cannot loop the
+                # system forever (the v2.1.0 run did this 7 times,
+                # stacking new conflicts each round).
+                max_rerun = state.config.max_rerun_rounds
+                if state.rerun_round >= max_rerun:
+                    state.judge_resolution = None
+                    ctx.state_machine.transition(
+                        state,
+                        SystemStatus.FAILED,
+                        f"rerun budget exhausted ({state.rerun_round}/{max_rerun})",
+                    )
+                    return PhaseOutcome(
+                        target_status=SystemStatus.FAILED,
+                        reason=(
+                            f"rerun budget exhausted "
+                            f"({state.rerun_round}/{max_rerun}); "
+                            "either accept the verdict or re-plan"
+                        ),
+                        checkpoint_tag="judge_rerun_exhausted",
+                    )
+
+                # P2-1: incremental rerun — clear records ONLY for files
+                # the Judge flagged as failed, so AutoMergePhase
+                # reprocesses just those (and not every file in the
+                # plan). The rest of file_decision_records keeps its
+                # already-applied decisions, dedup-skipped on re-entry.
+                failed_files = (
+                    list(state.judge_verdict.failed_files)
+                    if state.judge_verdict is not None
+                    else []
+                )
+                cleared = 0
+                for fp in failed_files:
+                    if fp in state.file_decision_records:
+                        del state.file_decision_records[fp]
+                        cleared += 1
+
+                state.rerun_round += 1
                 state.judge_resolution = None
+                # Drop the prior verdict — it's about to be replaced.
+                # Keeping it would leak FAIL through the next
+                # JUDGE_REVIEWING and short-circuit the new judgment.
+                state.judge_verdict = None
+
+                logger.info(
+                    "rerun round=%d/%d: cleared %d/%d failed-file records "
+                    "for re-execution; cherry-pick replay will be skipped",
+                    state.rerun_round,
+                    max_rerun,
+                    cleared,
+                    len(failed_files),
+                )
+
                 ctx.state_machine.transition(
                     state,
                     SystemStatus.AUTO_MERGING,
-                    "user requested rerun of auto-merge after judge FAIL",
+                    f"user requested rerun (round={state.rerun_round}, "
+                    f"{cleared} failed-file record(s) cleared)",
                 )
                 return PhaseOutcome(
                     target_status=SystemStatus.AUTO_MERGING,
-                    reason="user requested rerun",
+                    reason=(
+                        f"user requested rerun (round={state.rerun_round}, "
+                        f"{cleared} failed file(s) reset)"
+                    ),
                     checkpoint_tag="judge_rerun",
                 )
 

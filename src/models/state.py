@@ -117,6 +117,17 @@ class MergeState(BaseModel):
             "rerun=return to AUTO_MERGING for another attempt."
         ),
     )
+    rerun_round: int = Field(
+        default=0,
+        description=(
+            "P2-1: number of rerun rounds the user has triggered after a "
+            "non-PASS judge verdict. >0 signals AutoMergePhase to run in "
+            "incremental mode — skip cherry-pick replay (worktree already "
+            "modified by the previous round) and only reprocess files "
+            "whose records were cleared by HumanReviewPhase from "
+            "judge_verdict.failed_files."
+        ),
+    )
 
     gate_baselines: dict[str, str] = Field(
         default_factory=dict,

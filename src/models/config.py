@@ -627,6 +627,18 @@ class MergeConfig(BaseModel):
     coordinator: CoordinatorConfig = Field(default_factory=CoordinatorConfig)
     max_dispute_rounds: int = Field(default=2, ge=1, le=5)
     max_batch_repair_rounds: int = Field(default=1, ge=1, le=3)
+    max_rerun_rounds: int = Field(
+        default=1,
+        ge=0,
+        le=5,
+        description=(
+            "P2-1: cap on rerun rounds the user can trigger after a "
+            "non-PASS judge verdict. Default 1 — rerun once, then a "
+            "second rerun request is rejected and the run terminates as "
+            "FAILED. Prevents the system from looping over Judge FAIL → "
+            "rerun → Judge FAIL indefinitely. Set to 0 to disable rerun."
+        ),
+    )
     judge_skip_high_confidence: bool = Field(
         default=True,
         description="O-J1: skip per-file LLM judge review when record.confidence "

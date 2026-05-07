@@ -121,7 +121,26 @@ class AutoMergePhase(Phase):
         }
 
         replayed_set: set[str] = set()
-        if ctx.config.history.enabled and ctx.config.history.cherry_pick_clean:
+        # P2-1: on rerun (round >= 1) the worktree has already been
+        # mutated by the previous round's executor writes. Re-running
+        # cherry-pick on top of that produces *new* conflict markers in
+        # files that had nothing to do with the original failure —
+        # exactly the regression observed in the v2.1.0 run (round-5
+        # rerun → 31 fresh marker files in round 6). Skip replay; the
+        # per-file dedup below will only re-execute files whose records
+        # HumanReviewPhase cleared from judge_verdict.failed_files.
+        skip_replay = state.rerun_round > 0
+        if skip_replay:
+            logger.info(
+                "auto_merge: rerun_round=%d — skipping cherry-pick replay "
+                "(worktree already contains prior round's writes)",
+                state.rerun_round,
+            )
+        if (
+            not skip_replay
+            and ctx.config.history.enabled
+            and ctx.config.history.cherry_pick_clean
+        ):
             replayable = state.replayable_commits
             partial = state.partial_replayable_commits
             if replayable or partial:
