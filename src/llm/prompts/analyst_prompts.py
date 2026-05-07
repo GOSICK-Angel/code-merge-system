@@ -89,6 +89,48 @@ def build_conflict_analysis_prompt(
         f"```{language}\n{target_content}\n```" if target_content else "Not available"
     )
 
+    fork_added = file_diff.lines_added
+    fork_deleted = file_diff.lines_deleted
+    upstream_added = file_diff.upstream_lines_added
+    upstream_deleted = file_diff.upstream_lines_deleted
+    fork_total = fork_added + fork_deleted
+    upstream_total = upstream_added + upstream_deleted
+
+    if upstream_total == 0 and fork_total == 0:
+        size_signal = "Both sides made no line changes (suspect rename / mode-only)."
+    elif upstream_total == 0:
+        size_signal = (
+            "FORK changed lines only — upstream did not modify this file. "
+            "Strongly prefer take_current."
+        )
+    elif fork_total == 0:
+        size_signal = (
+            "UPSTREAM changed lines only — fork did not modify this file. "
+            "Strongly prefer take_target."
+        )
+    else:
+        ratio = fork_total / upstream_total
+        if ratio >= 5.0:
+            size_signal = (
+                f"FORK changes ({fork_total} lines) dominate upstream "
+                f"({upstream_total} lines) by {ratio:.1f}x. Prefer take_current "
+                f"or semantic_merge — take_target would discard substantial "
+                f"fork customization."
+            )
+        elif ratio <= 0.2:
+            size_signal = (
+                f"UPSTREAM changes ({upstream_total} lines) dominate fork "
+                f"({fork_total} lines). take_target is usually safe, but "
+                f"verify that fork's small change isn't load-bearing."
+            )
+        else:
+            size_signal = (
+                f"Both sides made comparable changes "
+                f"(fork={fork_total} vs upstream={upstream_total} lines). "
+                f"semantic_merge is the default; only choose take_target / "
+                f"take_current if one side's change clearly subsumes the other."
+            )
+
     return f"""Analyze this Git merge conflict and provide a structured analysis.
 
 # Project Context
@@ -97,9 +139,12 @@ def build_conflict_analysis_prompt(
 # File Information
 Path: {file_diff.file_path}
 Language: {language}
-Lines added: {file_diff.lines_added}
-Lines deleted: {file_diff.lines_deleted}
+Fork-side change (base→fork): +{fork_added} / -{fork_deleted}
+Upstream-side change (base→upstream): +{upstream_added} / -{upstream_deleted}
 Conflict count: {file_diff.conflict_count}
+
+# Change-volume signal
+{size_signal}
 
 # Three-way Diff
 
