@@ -35,6 +35,14 @@ from src.tools.commit_replayer import CommitReplayer
 from src.tools.sync_point_detector import SyncPointDetector
 from src.tools.interface_change_extractor import InterfaceChangeExtractor
 from src.tools.reverse_impact_scanner import ReverseImpactScanner
+from src.tools.forks_profile_loader import (
+    ForksProfileError,
+    find_removed_domain_match,
+    find_rewritten_module_match,
+    load_forks_profile,
+    summarize_for_log,
+)
+from src.models.forks_profile import RewriteMergePolicy
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +326,10 @@ class InitializePhase(Phase):
             fp for fp, cat in file_categories.items() if cat in actionable_categories
         }
 
+        profile_paths = self._apply_forks_profile_routing(state, ctx, file_categories)
+        if profile_paths:
+            actionable_paths -= profile_paths
+
         forced_paths = self._apply_forced_decisions(state, ctx, file_categories)
         if forced_paths:
             actionable_paths -= forced_paths
@@ -469,6 +481,10 @@ class InitializePhase(Phase):
         forced_target: list[tuple[str, FileChangeCategory]] = []
         forced_current: list[tuple[str, FileChangeCategory]] = []
         for fp, cat in file_categories.items():
+            if fp in state.file_decision_records:
+                # forks-profile routing already pre-decided this file;
+                # never overwrite a higher-priority decision.
+                continue
             if upstream_patterns and matches_any_pattern(fp, upstream_patterns):
                 forced_target.append((fp, cat))
                 continue
@@ -630,6 +646,188 @@ class InitializePhase(Phase):
             ),
             phase="initialize",
             agent="force_decision_policy",
+        )
+
+    def _apply_forks_profile_routing(
+        self,
+        state: MergeState,
+        ctx: PhaseContext,
+        file_categories: dict[str, FileChangeCategory],
+    ) -> set[str]:
+        """Apply `.merge/forks-profile.yaml` routing before the AI flow.
+
+        Priority is higher than `always_take_*_patterns`: a path matching
+        both is decided here and skipped by `_apply_forced_decisions`.
+
+        Match precedence per file:
+          1. rewritten_modules — explicit per-module policy wins.
+          2. removed_domains   — bulk "fork dropped this area" → TAKE_CURRENT.
+
+        Returns the set of paths whose decision was recorded.
+        """
+        repo_path = state.config.repo_path
+        try:
+            profile = load_forks_profile(repo_path)
+        except ForksProfileError as e:
+            logger.error("forks-profile load failed: %s", e)
+            ctx.notify(
+                "orchestrator",
+                f"⚠ forks-profile.yaml present but invalid — skipping routing: {e}",
+            )
+            return set()
+
+        state.forks_profile = profile
+        if profile is None or profile.is_empty():
+            return set()
+
+        ctx.notify("orchestrator", summarize_for_log(profile))
+
+        if profile.migration_policy is not None:
+            logger.warning(
+                "forks-profile: migration_policy declared but plan-stage "
+                "routing for it is not yet implemented (P1). Numbers will "
+                "be ignored this run."
+            )
+
+        consumed: set[str] = set()
+        rewritten_counts: dict[str, int] = {}
+        removed_count = 0
+
+        for fp, cat in file_categories.items():
+            module = find_rewritten_module_match(profile, fp)
+            if module is not None:
+                if self._route_rewritten_module(
+                    state, fp, cat, module.path, module.policy, module.note
+                ):
+                    consumed.add(fp)
+                    rewritten_counts[module.policy.value] = (
+                        rewritten_counts.get(module.policy.value, 0) + 1
+                    )
+                continue
+
+            domain = find_removed_domain_match(profile, fp)
+            if domain is not None:
+                self._record_profile_take_current(
+                    state,
+                    fp,
+                    cat,
+                    rationale=(
+                        f"forks-profile.removed_domains[{domain.name}] "
+                        f"(category={cat.value}, reason={domain.reason or 'n/a'})"
+                    ),
+                )
+                consumed.add(fp)
+                removed_count += 1
+
+        if consumed or rewritten_counts:
+            logger.info(
+                "forks-profile routing: %d removed_domains, %s rewritten_modules "
+                "pre-resolved before AI flow",
+                removed_count,
+                rewritten_counts or "{}",
+            )
+        return consumed
+
+    def _route_rewritten_module(
+        self,
+        state: MergeState,
+        file_path: str,
+        category: FileChangeCategory,
+        module_path: str,
+        policy: RewriteMergePolicy,
+        note: str,
+    ) -> bool:
+        """Apply a single rewritten_modules entry. Returns True if the file
+        was force-decided (and should be removed from actionable_paths).
+
+        `semantic_merge_with_alert` deliberately does NOT force a decision —
+        the file flows through the normal AI path with an advisory log so
+        ConflictAnalyst can pick up the alert via state.forks_profile.
+        """
+        if policy == RewriteMergePolicy.SEMANTIC_MERGE_WITH_ALERT:
+            logger.warning(
+                "forks-profile rewritten_module[%s] policy=semantic_merge_with_alert "
+                "for %s — flagged for elevated analyst review (note=%s)",
+                module_path,
+                file_path,
+                note or "n/a",
+            )
+            return False
+
+        if policy == RewriteMergePolicy.ESCALATE_HUMAN:
+            self._record_profile_escalate_human(
+                state,
+                file_path,
+                category,
+                rationale=(
+                    f"forks-profile.rewritten_modules[{module_path}] "
+                    f"policy=escalate_human (category={category.value}, "
+                    f"note={note or 'n/a'})"
+                ),
+            )
+            return True
+
+        if policy == RewriteMergePolicy.TAKE_CURRENT_WITH_DIFF_NOTE:
+            self._record_profile_take_current(
+                state,
+                file_path,
+                category,
+                rationale=(
+                    f"forks-profile.rewritten_modules[{module_path}] "
+                    f"policy=take_current_with_diff_note (category={category.value}, "
+                    f"note={note or 'n/a'}); P1: executor will stash upstream diff"
+                ),
+            )
+            return True
+
+        return False
+
+    def _record_profile_take_current(
+        self,
+        state: MergeState,
+        file_path: str,
+        category: FileChangeCategory,
+        rationale: str,
+    ) -> None:
+        if category == FileChangeCategory.D_MISSING:
+            file_status = FileStatus.DELETED
+        elif category == FileChangeCategory.D_EXTRA:
+            file_status = FileStatus.ADDED
+        else:
+            file_status = FileStatus.MODIFIED
+        state.file_decision_records[file_path] = FileDecisionRecord(
+            file_path=file_path,
+            file_status=file_status,
+            decision=MergeDecision.TAKE_CURRENT,
+            decision_source=DecisionSource.AUTO_PLANNER,
+            confidence=1.0,
+            rationale=rationale,
+            phase="initialize",
+            agent="forks_profile_routing",
+        )
+
+    def _record_profile_escalate_human(
+        self,
+        state: MergeState,
+        file_path: str,
+        category: FileChangeCategory,
+        rationale: str,
+    ) -> None:
+        if category == FileChangeCategory.D_MISSING:
+            file_status = FileStatus.ADDED
+        elif category == FileChangeCategory.D_EXTRA:
+            file_status = FileStatus.ADDED
+        else:
+            file_status = FileStatus.MODIFIED
+        state.file_decision_records[file_path] = FileDecisionRecord(
+            file_path=file_path,
+            file_status=file_status,
+            decision=MergeDecision.ESCALATE_HUMAN,
+            decision_source=DecisionSource.AUTO_PLANNER,
+            confidence=1.0,
+            rationale=rationale,
+            phase="initialize",
+            agent="forks_profile_routing",
         )
 
     def _check_untracked_files(self, state: MergeState, ctx: PhaseContext) -> None:

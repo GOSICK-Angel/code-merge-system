@@ -9,6 +9,7 @@ from src.models.config import MergeConfig
 from src.models.plan import MergePlan, MergePhase
 from src.models.diff import FileDiff, RiskLevel, FileChangeCategory
 from src.models.decision import MergeDecision, FileDecisionRecord
+from src.models.forks_profile import ForksProfile
 from src.models.judge import JudgeVerdict
 from src.models.human import HumanDecisionRequest
 from src.models.plan_judge import PlanJudgeVerdict
@@ -77,6 +78,16 @@ class MergeState(BaseModel):
             "'upstream_only_change' | 'upstream_added' | 'unchanged'). "
             "Read by judge_agent to downgrade deterministic checks when the "
             "divergence is intentional fork behavior."
+        ),
+    )
+    forks_profile: ForksProfile | None = Field(
+        default=None,
+        description=(
+            "Optional fork-identity contract loaded from "
+            "<repo>/.merge/forks-profile.yaml. When present, plan-stage "
+            "routing pre-decides files matching removed_domains / "
+            "rewritten_modules before they enter the AI flow. None means "
+            "the file is absent or empty (no-op)."
         ),
     )
     merge_base_commit: str = ""

@@ -65,6 +65,16 @@ def get_config_path(repo_path: str = ".") -> Path:
     return get_project_merge_dir(repo_path) / "config.yaml"
 
 
+def get_forks_profile_path(repo_path: str = ".") -> Path:
+    """<repo>/.merge/forks-profile.yaml — fork-level identity contract.
+
+    Authored by fork maintainers; the merge system reads this file to
+    pre-decide files matching removed_domains / rewritten_modules before
+    the AI flow. Absence is allowed (no-op).
+    """
+    return get_project_merge_dir(repo_path) / "forks-profile.yaml"
+
+
 def get_run_dir(repo_path: str = ".", run_id: str = "") -> Path:
     """Per-run directory used for checkpoint.json.
 
