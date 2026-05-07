@@ -24,11 +24,12 @@ agents:
     api_key_env: "ANTHROPIC_API_KEY"
   planner_judge:
     provider: "openai"
-    model: "gpt-4o"
+    model: "gpt-5.4"
     temperature: 0.2
     max_tokens: 8192
     max_retries: 3
     api_key_env: "OPENAI_API_KEY"
+    cache_strategy: "none"
     # O-1/O-5: uncomment to enable Anthropic fallback when OpenAI circuit breaker opens
     # fallback:
     #   provider: "anthropic"
@@ -36,18 +37,19 @@ agents:
     #   api_key_env: "ANTHROPIC_API_KEY"
   conflict_analyst:
     provider: "anthropic"
-    model: "claude-sonnet-4-6"
+    model: "claude-opus-4-6"
     temperature: 0.2
     max_tokens: 8192
     max_retries: 3
     api_key_env: "ANTHROPIC_API_KEY"
   executor:
     provider: "openai"
-    model: "gpt-4o"
+    model: "gpt-5.4"
     temperature: 0.1
     max_tokens: 8192
     max_retries: 3
     api_key_env: "OPENAI_API_KEY"
+    cache_strategy: "none"
     # O-1/O-5: uncomment to enable Anthropic fallback when OpenAI circuit breaker opens
     # fallback:
     #   provider: "anthropic"
@@ -79,6 +81,7 @@ file_classifier:
     - "**/*.lock"
     - "**/node_modules/**"
     - "**/.git/**"
+    - "logs/**"
   binary_extensions:
     - ".png"
     - ".jpg"
