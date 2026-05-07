@@ -16,6 +16,54 @@ from src.tools.report_writer import (
 logger = logging.getLogger(__name__)
 
 
+def _finalize_working_tree(state: MergeState, ctx: PhaseContext) -> None:
+    """P2-2: stage and commit any working-tree leftovers before the report.
+
+    The merge flow can leave behind untracked or modified files (e.g.
+    ``take_target`` writes that bypass git's index, or escalate_human
+    fallbacks that drop fresh content into the worktree). Without this
+    step the run reports ``COMPLETED`` while the tree still holds
+    uncommitted changes — surprising the operator and breaking diff
+    reproducibility. Commit failures are downgraded to warnings so the
+    report itself still gets written.
+    """
+    if state.dry_run:
+        return
+    try:
+        entries = ctx.git_tool.get_status()
+    except Exception as exc:
+        logger.warning("finalize: git status failed: %s", exc)
+        return
+    if not entries:
+        return
+
+    untracked = sum(1 for code, _ in entries if code == "??")
+    modified = len(entries) - untracked
+    try:
+        ctx.git_tool.repo.git.add("-A")
+        sha = ctx.git_tool.repo.git.commit(
+            "-m",
+            (
+                f"chore(merge): finalize working tree "
+                f"(+{untracked} untracked, ~{modified} modified, "
+                f"run={state.run_id[:8]})"
+            ),
+        )
+        logger.info(
+            "finalize: committed %d untracked + %d modified file(s) (%s)",
+            untracked,
+            modified,
+            str(sha)[:80],
+        )
+    except Exception as exc:
+        logger.warning(
+            "finalize: auto-commit failed (%d untracked + %d modified left in tree): %s",
+            untracked,
+            modified,
+            exc,
+        )
+
+
 class ReportGenerationPhase(Phase):
     name = "report_generation"
 
@@ -27,6 +75,8 @@ class ReportGenerationPhase(Phase):
             started_at=datetime.now(),
         )
         state.phase_results[MergePhase.REPORT.value] = phase_result
+
+        _finalize_working_tree(state, ctx)
 
         output_dir = str(
             get_report_dir(
