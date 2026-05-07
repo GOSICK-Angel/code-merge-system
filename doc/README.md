@@ -18,6 +18,7 @@
 | [risk-levels.md](risk-levels.md) | `RiskLevel` 枚举定义与触发条件 |
 | [migration-aware-merge.md](migration-aware-merge.md) | 迁移感知合并（bulk-copy 场景） |
 | [multi-agent-optimization-from-merge-experience.md](multi-agent-optimization-from-merge-experience.md) | 六大丢失模式 + P0/P1/P2 加固项（最新） |
+| [forks-profile-init.md](forks-profile-init.md) | `merge forks-profile init` / `diff` 起草+增量审阅（已实施） |
 
 ## 模块技术文档（`modules/`）
 
