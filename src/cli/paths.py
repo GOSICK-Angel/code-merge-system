@@ -89,6 +89,18 @@ def get_report_dir(
     return get_project_merge_dir(repo_path) / "runs" / run_id
 
 
+def get_diff_stash_dir(repo_path: str = ".", run_id: str = "") -> Path:
+    """Directory for upstream diff stashes produced when executor's
+    LLM semantic_merge fails (P2-3, §6.2 item 2).
+
+    Dev mode:  <repo>/outputs/debug/upstream_diff_stashes/
+    Prod mode: <repo>/.merge/runs/<run_id>/upstream_diff_stashes/
+    """
+    if is_dev_mode(repo_path):
+        return Path(repo_path).resolve() / "outputs" / "debug" / "upstream_diff_stashes"
+    return get_project_merge_dir(repo_path) / "runs" / run_id / "upstream_diff_stashes"
+
+
 def get_plans_dir(repo_path: str = ".") -> Path:
     """Directory for MERGE_PLAN_*.md reports.
 

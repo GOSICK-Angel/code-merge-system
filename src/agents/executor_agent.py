@@ -30,6 +30,8 @@ from src.llm.prompts.executor_prompts import (
 from src.llm.response_parser import parse_merge_result
 from src.tools.patch_applier import apply_with_snapshot, create_escalate_record
 from src.tools.git_tool import GitTool
+from src.tools.diff_stasher import stash_upstream_diff
+from src.cli.paths import get_diff_stash_dir
 
 logger = logging.getLogger(__name__)
 
@@ -292,6 +294,45 @@ class ExecutorAgent(BaseAgent):
             phase=current_phase_str,
         )
 
+    def _stash_upstream_diff_for_escalation(
+        self, file_path: str, state: MergeState
+    ) -> str | None:
+        """P2-3 (§6.2 item 2): write the upstream-side delta to a patch
+        file so the human reviewer has the missing piece in hand when
+        an LLM semantic_merge falls back to escalate_human.
+
+        Returns a short note suitable for appending to the escalation
+        rationale, or ``None`` if the diff could not be produced (no
+        git_tool, missing merge_base, empty diff, etc.).
+        """
+        if self.git_tool is None:
+            return None
+        merge_base = state.merge_base_commit or ""
+        upstream_ref = state.config.upstream_ref
+        if not merge_base or not upstream_ref:
+            return None
+        stash_dir = get_diff_stash_dir(state.config.repo_path, state.run_id)
+        try:
+            patch_path = stash_upstream_diff(
+                file_path,
+                merge_base,
+                upstream_ref,
+                self.git_tool,
+                stash_dir,
+            )
+        except Exception as exc:
+            logger.warning(
+                "executor: stash_upstream_diff failed for %s: %s", file_path, exc
+            )
+            return None
+        if patch_path is None:
+            return None
+        return (
+            f"upstream delta stashed at {patch_path} "
+            f"(take_current_with_diff_note: fork blob preserved; "
+            f"apply this patch to integrate upstream changes manually)"
+        )
+
     async def execute_semantic_merge(
         self,
         file_diff: FileDiff,
@@ -383,9 +424,15 @@ class ExecutorAgent(BaseAgent):
             merged_content = parse_merge_result(str(raw))
         except Exception as e:
             logger.warning("Semantic merge failed for %s: %s", file_diff.file_path, e)
+            stash_note = self._stash_upstream_diff_for_escalation(
+                file_diff.file_path, state
+            )
+            reason = f"SEMANTIC_MERGE_FAILED: {e}"
+            if stash_note:
+                reason = f"{reason} — {stash_note}"
             return create_escalate_record(
                 file_diff.file_path,
-                f"SEMANTIC_MERGE_FAILED: {e}",
+                reason,
             )
 
         current_phase_str = (
@@ -466,9 +513,13 @@ class ExecutorAgent(BaseAgent):
                     file_path,
                     e,
                 )
+                stash_note = self._stash_upstream_diff_for_escalation(file_path, state)
+                reason = f"CHUNKED_MERGE_FAILED (chunk {idx + 1}/{len(pairs)}): {e}"
+                if stash_note:
+                    reason = f"{reason} — {stash_note}"
                 return create_escalate_record(
                     file_path,
-                    f"CHUNKED_MERGE_FAILED (chunk {idx + 1}/{len(pairs)}): {e}",
+                    reason,
                 )
 
         merged_content = merge_chunks(merged_chunks)
