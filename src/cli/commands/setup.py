@@ -24,6 +24,7 @@ from src.cli.env import read_env_file, write_env_file
 from src.cli.paths import (
     ensure_merge_dir,
     get_config_path,
+    get_forks_profile_path,
     get_global_env_path,
     get_project_merge_dir,
 )
@@ -276,6 +277,8 @@ def _interactive_setup(target_branch: str, repo_path: str) -> MergeConfig:
 
     merge_config = MergeConfig.model_validate(config_data)
 
+    _offer_forks_profile_draft(target_branch, fork_ref, repo_path)
+
     console.print(
         Panel(
             f"  API keys ........ [green]OK[/green]\n"
@@ -331,6 +334,130 @@ def _prompt_float(label: str, default: float) -> float:
             console.print("    [red]Must be between 0.0 and 1.0[/red]")
         except ValueError:
             console.print("    [red]Please enter a valid number[/red]")
+
+
+FORKS_PROFILE_INIT_THRESHOLD = 30
+"""Minimum count of fork-deleted files required before offering an init.
+
+Calibrated against historical merge reports:
+  - insforge v2.1.0: 30+ fork-deleted files (6 removed_domains in yaml) →
+    a forks-profile.yaml materially reduced judge false positives.
+  - dify-plugin-daemon 0.6.0: 251 D_EXTRA but mostly path reorganization
+    (rename-class, not domain removal) — yaml still helps but not critical.
+
+Below ~30 the auto overlay (PR-A) covers the routing on its own and a
+yaml is just maintenance burden, so the wizard stays silent.
+"""
+
+
+def _offer_forks_profile_draft(
+    target_branch: str, fork_ref: str, repo_path: str
+) -> None:
+    """Offer to draft `.merge/forks-profile.yaml` when the fork looks divergent.
+
+    Called once during the first-time wizard, after config has been
+    written but before "press Enter to start". The trigger is the
+    cheapest possible signal — number of files the fork deleted relative
+    to the upstream merge-base — so it never blocks setup on a slow
+    full-divergence scan. When the user accepts, we run the full
+    drafter and open the result in ``$EDITOR`` so they can review the
+    TODO-marked entries before they ever flow into a real run.
+
+    All git failures and IO errors silently skip; setup must never
+    abort on this best-effort prompt.
+    """
+    profile_path = get_forks_profile_path(repo_path)
+    if profile_path.exists():
+        return
+
+    try:
+        merge_base = subprocess.run(
+            ["git", "merge-base", target_branch, fork_ref],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        if not merge_base:
+            return
+        deleted = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--diff-filter=D",
+                "--name-only",
+                f"{merge_base}..{fork_ref}",
+            ],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except Exception:
+        return
+
+    deleted_count = sum(1 for line in deleted.splitlines() if line.strip())
+    if deleted_count < FORKS_PROFILE_INIT_THRESHOLD:
+        return
+
+    console.print(
+        f"\n[bold yellow]Fork divergence detected:[/bold yellow] "
+        f"{deleted_count} files deleted vs upstream merge-base."
+    )
+    console.print(
+        "  Generating a forks-profile.yaml draft helps the merge system "
+        "skip false-positive 'missing file' alerts and keep your "
+        "deliberate removals/rewrites out of the AI flow."
+    )
+    if not Confirm.ask("  Draft forks-profile.yaml now?", default=True):
+        return
+
+    try:
+        _draft_and_open_editor(profile_path, target_branch, fork_ref, repo_path)
+    except Exception as e:
+        console.print(
+            f"  [yellow]forks-profile draft failed (run "
+            f"`merge forks-profile init` later): {e}[/yellow]"
+        )
+
+
+def _draft_and_open_editor(
+    profile_path: Path, target_branch: str, fork_ref: str, repo_path: str
+) -> None:
+    """Run the drafter, write the yaml, and open ``$EDITOR`` for review."""
+    import datetime as _dt
+
+    import click
+
+    from src.tools.forks_profile_drafter import (
+        draft_profile,
+        render_profile_yaml,
+    )
+    from src.tools.git_tool import GitTool
+
+    git_tool = GitTool(repo_path)
+    merge_base = git_tool.get_merge_base(target_branch, fork_ref)
+    drafted = draft_profile(
+        git_tool,
+        upstream_ref=target_branch,
+        fork_ref=fork_ref,
+        merge_base=merge_base,
+    )
+    text = render_profile_yaml(drafted, today=_dt.date.today().isoformat())
+
+    profile_path.parent.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(text, encoding="utf-8")
+    console.print(f"  [green]Draft written to:[/green] {profile_path}")
+    stats = ", ".join(f"{k}={v}" for k, v in drafted.stats.items())
+    console.print(f"  Stats: {stats}. Review every TODO before committing.")
+
+    try:
+        click.edit(filename=str(profile_path))
+    except Exception:
+        console.print(
+            f"  [yellow]Could not open editor; review the draft manually "
+            f"at {profile_path}.[/yellow]"
+        )
 
 
 def migrate_merge_record(repo_path: str = ".") -> None:

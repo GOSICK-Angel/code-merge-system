@@ -53,6 +53,8 @@ merge upstream/main
 
 首次运行会自动生成 `<repo>/.merge/config.yaml` 与 `.env`（后者自动写入 `.gitignore`）。
 
+如果仓库相对上游有 ≥30 个被 fork 删除的文件（典型「整域裁剪」场景），向导会主动提示生成 `.merge/forks-profile.yaml` 草稿并打开 `$EDITOR` 让你审阅 — 用于声明 `removed_domains` / `rewritten_modules`。低于阈值则完全静默：`fork_only_features` 与 `migration_policy` 已在每次 run 时从 git 自动推算，无需手工维护。
+
 ## 常用命令
 
 ```bash
