@@ -1,5 +1,11 @@
 # InsForge v2.1.0 → cvte-snapshot 正式合并测试报告
 
+> **历史报告，§9 整合后部分内容失效**（2026-05-07 标注）。本文 §9.6 的 yaml 示例
+> 包含 `fork_only_features` 与 `migration_policy` 顶层段，这两个字段已在
+> §9 PR-A（commit `9158856`）废弃 — 自动从 git 推算，写入 yaml 会被
+> `ForksProfileError` 拒绝。其他章节（合并过程、Memory、Judge 行为分析）
+> 仍准确，作为合并实证保留。
+
 **生成时间**：2026-05-06 14:44 EDT
 **Run ID**：`a9c1ce60-4427-4256-bd62-4730cfa93fd4`
 **执行模式**：无人值守（scheduled-task），LLM 预算无上限

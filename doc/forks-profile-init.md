@@ -1,8 +1,26 @@
 # `merge forks-profile init` — Auto-draft 起草器实施计划
 
-> **状态**：已实施（init/diff 子命令 + drafter/differ + 49 单测）
+> **状态**：已实施 + §9 整合三连击（PR-A `9158856` / PR-B `1fd27bd` / PR-C `32798cc`）
 > **关联 RFE**：[multi-agent-optimization-from-merge-experience.md §9](multi-agent-optimization-from-merge-experience.md)
 > **前置依赖**：`8783475`（P0-1 schema + plan 路由）、`c07b34d`（P0-2/P1/P2 全链路 + JSON Schema CLI）
+>
+> ## 与本文档原始设计的差异（§9 整合后）
+>
+> 本文初版按"yaml 单一真源 + 手工维护 + init/diff 仅作旁路工具"设计。
+> 落地后发现这与"开箱即用"定位割裂，于是做了三 PR 整合：
+>
+> | 原文档主张 | 现状（§9 整合后） |
+> |---|---|
+> | yaml 含 4 类条目（removed_domains / rewritten_modules / fork_only_features / migration_policy） | yaml 仅认 2 类 + `fork`：`removed_domains` / `rewritten_modules`。`fork_only_features` 与 `migration_policy` 每次 run 自动从 git 推算（`compute_auto_overlay`），yaml 写入会被 `ForksProfileError` 拒绝 |
+> | "不把 init / diff 接入 `merge <branch>` 主流程"（§8） | 主流程**已接入两类自动化**：(i) 首次向导按阈值（30 fork-deleted 文件）触发 init；(ii) 每次 run 自动跑 diff，drift ≥3 项写入 `state.forks_profile_drift` 并附录到 `MERGE_PLAN_<run_id>.md` |
+> | init/diff 渲染输出含全部 4 节 | drafter `render_profile_yaml` 不再输出 `fork_only_features:` / `migration_policy:` 顶层段，改为信息化注释；differ 不再比对这两类（已无可能漂移） |
+>
+> 用户感知：从"必须知道有这个文件 + 必须手写 + 必须手维护"三层负担，
+> 变成"按需向导提示 + 起草自动 + 漂移自动浮出"。
+>
+> 原文档的设计目标（§2）与字段语义（§3 / §5 / §7）仍为准；以下细节保留作为算法参考，但落地范围以本节及上述 PR 为准。
+>
+> ---
 
 ## 1. 问题陈述
 
@@ -299,8 +317,8 @@ PR B 也可独立合并 —— `diff` 内部仍跑 drafter 算 fresh draft，再
 | 不用 LLM 给 `reason` / `note` 起草中文 | 起草器必须 0 网络 0 API key，能在 fork PR 流水线裸跑；reason 由人改最准 |
 | **init 不自动 merge 进已有 yaml** | 启发式重跑会撤销用户人工删除的误报 / 覆盖 reason 的人工编辑；增量场景走 `diff` 子命令让人审阅每一项 |
 | **init 拒绝覆盖已存在文件，且不提供 `--force`** | 覆盖是不可逆决定，让用户显式 `rm` / `mv` 比命令行 flag 更醒目；`init` 一生跑几次，无须优化 |
-| 不把 `init` / `diff` 接入 `merge <branch>` 主流程 | 主流程必须可重入幂等；init/diff 是手动审阅工具 |
-| 不在 init / diff 时检查 `migration_policy` 的实际碰撞 | 那是 plan-stage routing 的职责；这两个子命令只描述当前事实 |
+| ~~不把 `init` / `diff` 接入 `merge <branch>` 主流程~~ **已撤销 (§9 PR-B/C)** | 原顾虑是"主流程必须可重入幂等"。整合后保留幂等性的方式：init 仅在首次向导（无 yaml + 阈值触发）跑一次；diff 每次 run 跑但**只读**，仅写 `state.forks_profile_drift` 与 plan 报告附录，不修改 yaml |
+| 不在 init / diff 时检查 `migration_policy` 的实际碰撞 | 那是 plan-stage routing 的职责（已由 `compute_auto_overlay` + `find_migration_collision` 实现） |
 | 不输出 JSON 格式 | yaml 注释承载关键的 TODO 信息；diff 的人类可读输出非结构化 |
 
 ## 9. 已知局限

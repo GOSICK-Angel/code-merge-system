@@ -57,6 +57,30 @@ These are load-bearing design rules enforced by unit tests — do not violate th
 - **Plan revision limit** — when `plan_revision_rounds >= max_plan_revision_rounds`, transition to `AWAITING_HUMAN`, not `FAILED`
 - **Plan human review** — after PlannerJudge approves the plan, the system checks `pending_user_decisions`. If any files are `HUMAN_REQUIRED`, it transitions to `AWAITING_HUMAN` for human sign-off. If no files need human decisions (all files are auto-mergeable), the system skips `AWAITING_HUMAN` and transitions directly to `AUTO_MERGING`. For non-converged plans (MAX_ROUNDS / STALLED / LLM_FAILURE), `AWAITING_HUMAN` is always required. A `plan_review_<run_id>.md` report is generated regardless.
 
+## Forks-profile authoring contract
+
+`<repo>/.merge/forks-profile.yaml` is **optional** and accepts only four
+top-level keys: `version`, `fork`, `removed_domains`, `rewritten_modules`.
+The schema model is `ForksProfileYaml` (`src/models/forks_profile.py`),
+distinct from the runtime `ForksProfile` which carries auto-computed
+fields. Loader behavior:
+
+- **`fork_only_features` / `migration_policy` are auto-computed every run**
+  by `compute_auto_overlay()` (`src/tools/forks_profile_loader.py`) from
+  `ForkDivergence.FORK_ONLY` paths and migration-glob numbering. yaml
+  declarations of either field raise `ForksProfileError` with a migration
+  message — they were deprecated in §9 PR-A and have no override path.
+- **First-run wizard** offers `merge forks-profile init` automatically
+  when fork-deleted file count ≥ `FORKS_PROFILE_INIT_THRESHOLD` (30,
+  calibrated from insforge v2.1.0). Below the threshold the prompt is
+  silent — auto overlay alone covers routing.
+- **Drift detection** runs in the initialize phase whenever a yaml
+  exists; ≥3 drift items populate `state.forks_profile_drift` and emit
+  a `ctx.notify` summary. The drift text is appended to
+  `MERGE_PLAN_<run_id>.md` so reviewers see staleness alongside the
+  plan they are approving. Drift is best-effort — any drafter / git
+  failure logs and continues without aborting the merge.
+
 ## Agent Contracts
 
 Every agent that inherits from `BaseAgent` and opts in via `contract_name = "<name>"` has a yaml at `src/agents/contracts/<name>.yaml` that declares its input whitelist, output schema, allowed prompt gate IDs, forbidden behaviors, and collaboration pattern. See `src/agents/contracts/_schema.md` for the full spec.
