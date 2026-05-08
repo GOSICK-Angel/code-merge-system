@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from src.models.forks_profile import (
     ForksProfile,
-    ForkOnlyFeature,
     RemovedDomain,
     RewriteMergePolicy,
     RewrittenModule,
@@ -71,14 +70,6 @@ class TestUnmatchedDeclarations:
         assert len(diff.unmatched_declarations) == 1
         assert diff.unmatched_declarations[0].category == "rewritten_module"
 
-    def test_fork_only_feature_no_longer_detected(self) -> None:
-        profile = ForksProfile(
-            fork_only_features=[ForkOnlyFeature(path="pkg/extra/**")]
-        )
-        diff = diff_profile_vs_heuristic(profile, _drafted())
-        assert len(diff.unmatched_declarations) == 1
-        assert diff.unmatched_declarations[0].category == "fork_only_feature"
-
 
 class TestUnmatchedHeuristics:
     def test_new_removed_domain_candidate(self) -> None:
@@ -136,13 +127,14 @@ class TestUnmatchedHeuristics:
         diff = diff_profile_vs_heuristic(profile, drafted)
         assert diff.unmatched_heuristics == ()
 
-    def test_new_fork_only_feature_candidate(self) -> None:
+    def test_fork_only_drafted_does_not_emit_diff(self) -> None:
+        # fork_only_features no longer participate in yaml-vs-heuristic diff
+        # — they are auto-computed on every run, so there is nothing to drift.
         drafted = _drafted(
             fork_only=(DraftedForkOnlyFeature(path="pkg/visualizer/**", note=""),),
         )
         diff = diff_profile_vs_heuristic(ForksProfile(), drafted)
-        assert len(diff.unmatched_heuristics) == 1
-        assert diff.unmatched_heuristics[0].category == "fork_only_feature"
+        assert diff.unmatched_heuristics == ()
 
 
 class TestClassificationMismatch:
@@ -234,7 +226,14 @@ class TestFormatAndEdges:
 
     def test_none_profile_treated_as_empty(self) -> None:
         drafted = _drafted(
-            fork_only=(DraftedForkOnlyFeature(path="pkg/x/**", note=""),)
+            removed=(
+                DraftedRemovedDomain(
+                    name="payments",
+                    paths=("svc/payments/**",),
+                    reason="TODO",
+                    removed_in="abc1234",
+                ),
+            )
         )
         diff = diff_profile_vs_heuristic(None, drafted)
         assert len(diff.unmatched_heuristics) == 1

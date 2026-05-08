@@ -106,15 +106,18 @@ class TestSchema:
         schema = json.loads(result.output)
         assert schema["title"] == "ForksProfile"
         props = schema.get("properties", {})
+        # Only user-authored keys are exposed as schema properties.
         for key in (
             "version",
             "fork",
             "removed_domains",
             "rewritten_modules",
-            "fork_only_features",
-            "migration_policy",
         ):
             assert key in props, f"missing top-level property: {key}"
+        # fork_only_features and migration_policy are auto-computed at
+        # runtime; they must not appear as authorable yaml properties.
+        assert "fork_only_features" not in props
+        assert "migration_policy" not in props
 
     def test_schema_writes_to_output_file(self, tmp_path: Path):
         out = tmp_path / "forks-profile.schema.json"
@@ -252,14 +255,16 @@ class TestInit:
         text = result.output
         assert "removed_domains:" in text
         assert "svc/payments/**" in text
-        assert "fork_only_features:" in text
+        # fork_only_features and migration_policy are surfaced as
+        # informational comments only — they're not user-authored.
+        assert "# fork_only_features (auto-computed at runtime)" in text
         assert "pkg/dashboard/**" in text
         # rewrite heuristic catches auth/login.py either via low retention
         # or fork-only commit count
         assert "svc/auth" in text
         # migration policy emitted because fork holds 100 vs upstream max 2
-        assert "migration_policy:" in text
-        assert "upstream_take_target_max: 2" in text
+        assert "# migration_policy (auto-computed at runtime)" in text
+        assert "upstream_take_target_max=2" in text
 
     def test_output_to_existing_file_refuses(self, tmp_path: Path):
         base, upstream, fork = _init_git_repo_with_divergence(tmp_path)

@@ -103,11 +103,9 @@ def diff_profile_vs_heuristic(
 
     yaml_removed = list(profile.removed_domains) if profile else []
     yaml_rewritten = list(profile.rewritten_modules) if profile else []
-    yaml_fork_only = list(profile.fork_only_features) if profile else []
 
     drafted_rewritten_paths = [m.path for m in drafted.rewritten_modules]
     drafted_removed_paths = _heuristic_paths_from_removed(drafted.removed_domains)
-    drafted_fork_only_paths = [f.path for f in drafted.fork_only_features]
 
     for entry in yaml_removed:
         if entry.paths and not _matches_any_in(entry.paths, drafted_removed_paths):
@@ -135,22 +133,9 @@ def diff_profile_vs_heuristic(
                     ),
                 )
             )
-    for feat in yaml_fork_only:
-        if not _matches_any_in([feat.path], drafted_fork_only_paths):
-            unmatched_declarations.append(
-                DiffEntry(
-                    category="fork_only_feature",
-                    identifier=feat.path,
-                    rationale=(
-                        "no FORK_ONLY files match anymore; feature may have "
-                        "been merged upstream or moved"
-                    ),
-                )
-            )
 
     yaml_removed_globs = _yaml_paths_from_removed(yaml_removed)
     yaml_rewritten_globs = [m.path for m in yaml_rewritten]
-    yaml_fork_only_globs = [f.path for f in yaml_fork_only]
 
     for d_entry in drafted.removed_domains:
         if not _matches_any_in(list(d_entry.paths), yaml_removed_globs):
@@ -171,15 +156,6 @@ def diff_profile_vs_heuristic(
                     category="rewritten_module",
                     identifier=d_module.path,
                     rationale=d_module.note,
-                )
-            )
-    for d_feat in drafted.fork_only_features:
-        if not _heuristic_glob_already_covered(d_feat.path, yaml_fork_only_globs):
-            unmatched_heuristics.append(
-                DiffEntry(
-                    category="fork_only_feature",
-                    identifier=d_feat.path,
-                    rationale="add to yaml or confirm fork-only",
                 )
             )
 

@@ -117,8 +117,46 @@ class MigrationPolicy(BaseModel):
     on_collision: MigrationCollisionRule | None = None
 
 
+DEPRECATED_YAML_FIELDS: tuple[str, ...] = ("fork_only_features", "migration_policy")
+"""Top-level keys that yaml authors must NOT set anymore.
+
+These fields are auto-computed from git divergence at the start of every
+run and live only on the runtime ``ForksProfile`` constructed by the
+loader. ``ForksProfileYaml.model_validate`` rejects yaml that still
+declares them so a stale checked-in profile surfaces as a hard error
+rather than silently shadowing the auto-computed view.
+"""
+
+
+class ForksProfileYaml(BaseModel):
+    """Strict schema for the user-authored `.merge/forks-profile.yaml`.
+
+    Distinct from the runtime :class:`ForksProfile`: yaml authors only
+    declare the subset that requires human judgement
+    (``removed_domains`` / ``rewritten_modules`` / ``fork``). The
+    mechanical ``fork_only_features`` and ``migration_policy`` are
+    derived from git at runtime and rejected here so a yaml never
+    silently shadows the auto-computed view.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = Field(default=1, ge=1)
+    fork: ForkIdentity = Field(default_factory=ForkIdentity)
+    removed_domains: list[RemovedDomain] = Field(default_factory=list)
+    rewritten_modules: list[RewrittenModule] = Field(default_factory=list)
+
+
 class ForksProfile(BaseModel):
-    """Top-level `.merge/forks-profile.yaml` schema."""
+    """Runtime effective fork profile.
+
+    Combines yaml-authored fields (``removed_domains`` /
+    ``rewritten_modules`` / ``fork``) with auto-computed fields
+    (``fork_only_features`` / ``migration_policy``) the loader derives
+    from the current git state on every run. Code paths that previously
+    read directly from the yaml-loaded profile keep working — they just
+    see the effective view now.
+    """
 
     model_config = ConfigDict(extra="forbid")
 

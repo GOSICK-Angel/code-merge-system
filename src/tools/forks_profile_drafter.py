@@ -535,6 +535,10 @@ def render_profile_yaml(drafted: DraftedProfile, *, today: str) -> str:
         "#   only after reading the actual diff.",
         "# - Delete entries that were over-classified (e.g. an unrelated test",
         '#   cleanup misread as a "removed domain").',
+        "#",
+        "# `fork_only_features` and `migration_policy` are NOT user-authored:",
+        "# they are auto-computed from git divergence on every run and the",
+        "# loader rejects them here as deprecated yaml fields.",
         "",
         "version: 1",
         "",
@@ -576,32 +580,20 @@ def render_profile_yaml(drafted: DraftedProfile, *, today: str) -> str:
         lines.append("")
 
     if drafted.fork_only_features:
-        lines.append("fork_only_features:")
-        for f in drafted.fork_only_features:
-            lines.append(f"  - path: {_yaml_quote(f.path)}")
-            lines.append('    note: ""             # TODO: describe')
-        lines.append("")
-    else:
-        lines.append("fork_only_features: []")
-        lines.append("")
-
+        feature_paths = ", ".join(f.path for f in drafted.fork_only_features)
+        lines.append(
+            f"# fork_only_features (auto-computed at runtime): {feature_paths}"
+        )
     if drafted.migration_policy is not None:
         mp = drafted.migration_policy
-        lines.append("migration_policy:")
-        lines.append("  path_globs:")
-        for g in mp.path_globs:
-            lines.append(f"    - {_yaml_quote(g)}")
-        lines.append(f"  fork_owns_numbers_above: {mp.fork_owns_numbers_above}")
-        lines.append(f"  upstream_take_target_max: {mp.upstream_take_target_max}")
-        lines.append("  on_collision:")
-        lines.append(f"    action: {mp.on_collision}")
-    else:
-        lines.append("# migration_policy:      # uncomment if relevant")
-        lines.append('#   path_globs: ["backend/db/migrations/*.sql"]')
-        lines.append("#   fork_owns_numbers_above: 0")
-        lines.append("#   upstream_take_target_max: 0")
-        lines.append("#   on_collision:")
-        lines.append("#     action: escalate_human")
+        globs = ", ".join(mp.path_globs)
+        lines.append(
+            f"# migration_policy (auto-computed at runtime): "
+            f"globs=[{globs}], "
+            f"fork_owns_numbers_above={mp.fork_owns_numbers_above}, "
+            f"upstream_take_target_max={mp.upstream_take_target_max}, "
+            f"on_collision={mp.on_collision}"
+        )
 
     return "\n".join(lines).rstrip() + "\n"
 

@@ -273,11 +273,15 @@ class TestRenderProfileYaml:
         assert "version: 1" in text
         assert "removed_domains: []" in text
         assert "rewritten_modules: []" in text
-        assert "fork_only_features: []" in text
-        assert "# migration_policy:" in text
         assert "# TODO: name your fork" in text
+        assert "auto-computed" in text
+        # Deprecated yaml sections must NOT appear as authorable keys.
+        assert "fork_only_features:" not in text
+        assert "migration_policy:" not in text
 
-    def test_drafted_yaml_is_loadable(self) -> None:
+    def test_drafted_yaml_is_loadable_via_user_schema(self) -> None:
+        from src.models.forks_profile import ForksProfileYaml
+
         drafted = _empty_drafted(
             removed_domains=(
                 DraftedRemovedDomain(
@@ -313,15 +317,20 @@ class TestRenderProfileYaml:
         text = render_profile_yaml(drafted, today="2026-05-07")
         data = _yaml.safe_load(text)
         try:
-            profile = ForksProfile.model_validate(data)
+            yaml_profile = ForksProfileYaml.model_validate(data)
         except ValidationError as e:
             raise AssertionError(
-                f"rendered yaml failed schema validation: {e}\n---\n{text}"
+                f"rendered yaml failed user-schema validation: {e}\n---\n{text}"
             ) from e
-        assert len(profile.removed_domains) == 1
-        assert profile.removed_domains[0].name == "payments"
-        assert len(profile.rewritten_modules) == 1
-        assert profile.rewritten_modules[0].policy == RewriteMergePolicy.ESCALATE_HUMAN
-        assert len(profile.fork_only_features) == 1
-        assert profile.migration_policy is not None
-        assert profile.migration_policy.upstream_take_target_max == 25
+        assert len(yaml_profile.removed_domains) == 1
+        assert yaml_profile.removed_domains[0].name == "payments"
+        assert len(yaml_profile.rewritten_modules) == 1
+        assert (
+            yaml_profile.rewritten_modules[0].policy
+            == RewriteMergePolicy.ESCALATE_HUMAN
+        )
+        # Auto-computed sections appear only as informational comments.
+        assert "# fork_only_features (auto-computed at runtime)" in text
+        assert "pkg/dashboard/**" in text
+        assert "# migration_policy (auto-computed at runtime)" in text
+        assert "upstream_take_target_max=25" in text

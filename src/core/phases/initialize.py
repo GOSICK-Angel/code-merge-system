@@ -37,6 +37,8 @@ from src.tools.interface_change_extractor import InterfaceChangeExtractor
 from src.tools.reverse_impact_scanner import ReverseImpactScanner
 from src.tools.forks_profile_loader import (
     ForksProfileError,
+    build_effective_profile,
+    compute_auto_overlay,
     find_migration_collision,
     find_removed_domain_match,
     find_rewritten_module_match,
@@ -46,8 +48,10 @@ from src.tools.forks_profile_loader import (
 from src.tools.diff_stasher import stash_upstream_diff
 from src.cli.paths import get_diff_stash_dir
 from src.models.forks_profile import (
+    ForkOnlyFeature,
     MigrationCollisionAction,
     MigrationCollisionRule,
+    MigrationPolicy,
     RewriteMergePolicy,
 )
 
@@ -661,10 +665,19 @@ class InitializePhase(Phase):
         ctx: PhaseContext,
         file_categories: dict[str, FileChangeCategory],
     ) -> set[str]:
-        """Apply `.merge/forks-profile.yaml` routing before the AI flow.
+        """Apply forks-profile routing before the AI flow.
 
-        Priority is higher than `always_take_*_patterns`: a path matching
-        both is decided here and skipped by `_apply_forced_decisions`.
+        Two data sources combine into a single effective profile:
+
+          - **yaml side** (optional): ``<repo>/.merge/forks-profile.yaml``
+            declares ``removed_domains`` / ``rewritten_modules`` / ``fork``
+            — the parts that need human judgement.
+          - **auto side** (always on): ``fork_only_features`` and
+            ``migration_policy`` recomputed from the current git state.
+
+        Priority is higher than ``always_take_*_patterns``: a path
+        matching both is decided here and skipped by
+        ``_apply_forced_decisions``.
 
         Match precedence per file:
           1. rewritten_modules — explicit per-module policy wins.
@@ -674,7 +687,7 @@ class InitializePhase(Phase):
         """
         repo_path = state.config.repo_path
         try:
-            profile = load_forks_profile(repo_path)
+            yaml_profile = load_forks_profile(repo_path)
         except ForksProfileError as e:
             logger.error("forks-profile load failed: %s", e)
             ctx.notify(
@@ -683,6 +696,24 @@ class InitializePhase(Phase):
             )
             return set()
 
+        auto_features: list[ForkOnlyFeature] = []
+        auto_migration: MigrationPolicy | None = None
+        merge_base = state.merge_base_commit or ""
+        if ctx.git_tool is not None and merge_base:
+            try:
+                auto_features, auto_migration = compute_auto_overlay(
+                    ctx.git_tool,
+                    merge_base=merge_base,
+                    fork_ref=state.config.fork_ref,
+                    upstream_ref=state.config.upstream_ref,
+                )
+            except Exception as exc:  # noqa: BLE001 — auto overlay is best-effort
+                logger.warning(
+                    "forks-profile auto overlay failed (yaml-only routing): %s",
+                    exc,
+                )
+
+        profile = build_effective_profile(yaml_profile, auto_features, auto_migration)
         state.forks_profile = profile
         if profile is None or profile.is_empty():
             return set()

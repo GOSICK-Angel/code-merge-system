@@ -16,17 +16,26 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 from pydantic import ValidationError
 
 from src.models.forks_profile import (
+    DEPRECATED_YAML_FIELDS,
+    ForkOnlyFeature,
     ForksProfile,
+    ForksProfileYaml,
+    MigrationCollisionAction,
     MigrationCollisionRule,
+    MigrationPolicy,
     RemovedDomain,
     RewrittenModule,
 )
 from src.tools.file_classifier import matches_any_pattern
+
+if TYPE_CHECKING:
+    from src.tools.git_tool import GitTool
 
 
 # Inlined to avoid `tools → cli` import dependency (cli/__init__ eagerly
@@ -86,22 +95,36 @@ def load_forks_profile(repo_path: str | Path = ".") -> ForksProfile | None:
             f"at {profile_path}"
         )
 
+    deprecated_present = [k for k in DEPRECATED_YAML_FIELDS if k in data]
+    if deprecated_present:
+        raise ForksProfileError(
+            f"forks-profile.yaml at {profile_path} declares deprecated "
+            f"field(s) {deprecated_present}. These are now auto-computed "
+            "from git divergence on every run; remove these sections from "
+            "your yaml. Only `version`, `fork`, `removed_domains`, and "
+            "`rewritten_modules` are user-authored."
+        )
+
     try:
-        profile = ForksProfile.model_validate(data)
+        yaml_profile = ForksProfileYaml.model_validate(data)
     except ValidationError as e:
         raise ForksProfileError(
             f"forks-profile schema validation failed at {profile_path}: {e}"
         ) from e
 
+    profile = ForksProfile(
+        version=yaml_profile.version,
+        fork=yaml_profile.fork,
+        removed_domains=yaml_profile.removed_domains,
+        rewritten_modules=yaml_profile.rewritten_modules,
+    )
+
     logger.info(
-        "Loaded forks-profile from %s: %d removed_domain(s), "
-        "%d rewritten_module(s), %d fork_only_feature(s), "
-        "migration_policy=%s",
+        "Loaded forks-profile (yaml-side) from %s: %d removed_domain(s), "
+        "%d rewritten_module(s)",
         profile_path,
         len(profile.removed_domains),
         len(profile.rewritten_modules),
-        len(profile.fork_only_features),
-        "set" if profile.migration_policy is not None else "unset",
     )
     return profile
 
@@ -283,6 +306,106 @@ def find_migration_collision(
     return (number, rule)
 
 
+def compute_auto_overlay(
+    git_tool: "GitTool",
+    *,
+    merge_base: str,
+    fork_ref: str,
+    upstream_ref: str,
+    migration_globs: list[str] | None = None,
+    cluster_min_files: int | None = None,
+) -> tuple[list[ForkOnlyFeature], MigrationPolicy | None]:
+    """Compute the mechanically-derivable subset of the fork profile.
+
+    Replaces what fork maintainers used to author by hand:
+      - ``fork_only_features``: every FORK_ONLY path, clustered to a
+        deepest-common-prefix glob.
+      - ``migration_policy``: emitted only when fork-only migrations
+        occupy numbers strictly above the upstream max; uses
+        ``DEFAULT_MIGRATION_GLOBS`` when ``migration_globs`` is None.
+
+    The git lookups are deferred imports so module load order stays
+    clean: this loader is on the import path of every agent that touches
+    state, but the drafter pulls in tree-sitter and other heavy deps
+    only relevant to ``merge forks-profile init``.
+    """
+    from src.tools.forks_profile_drafter import (
+        DEFAULT_MIGRATION_GLOBS,
+        draft_fork_only_features,
+        draft_migration_policy,
+    )
+    from src.models.diff import ForkDivergence
+    from src.tools.file_classifier import compute_fork_divergence_map
+
+    divergence = compute_fork_divergence_map(
+        merge_base=merge_base,
+        head_ref=fork_ref,
+        upstream_ref=upstream_ref,
+        git_tool=git_tool,
+    )
+
+    drafted_features = draft_fork_only_features(
+        divergence, cluster_min_files=cluster_min_files
+    )
+    auto_features = [
+        ForkOnlyFeature(path=f.path, note=f.note) for f in drafted_features
+    ]
+
+    globs = list(migration_globs) if migration_globs else list(DEFAULT_MIGRATION_GLOBS)
+    base_files = git_tool.list_files(merge_base) if merge_base else []
+    fork_files = git_tool.list_files(fork_ref)
+    fork_only_paths = [
+        p for p, d in divergence.items() if d == ForkDivergence.FORK_ONLY
+    ]
+    drafted_policy = draft_migration_policy(
+        base_files=base_files,
+        fork_files=fork_files,
+        fork_only_files=fork_only_paths,
+        path_globs=globs,
+    )
+    auto_migration: MigrationPolicy | None = None
+    if drafted_policy is not None:
+        auto_migration = MigrationPolicy(
+            path_globs=list(drafted_policy.path_globs),
+            fork_owns_numbers_above=drafted_policy.fork_owns_numbers_above,
+            upstream_take_target_max=drafted_policy.upstream_take_target_max,
+            on_collision=MigrationCollisionRule(
+                action=MigrationCollisionAction(drafted_policy.on_collision),
+            ),
+        )
+
+    return auto_features, auto_migration
+
+
+def build_effective_profile(
+    yaml_profile: ForksProfile | None,
+    auto_features: list[ForkOnlyFeature],
+    auto_migration: MigrationPolicy | None,
+) -> ForksProfile | None:
+    """Combine the yaml-loaded profile with auto-computed overlay fields.
+
+    Returns ``None`` only when both inputs contribute nothing — the
+    caller can short-circuit routing in that case. Otherwise the
+    effective profile carries:
+
+      - yaml side: ``fork`` / ``removed_domains`` / ``rewritten_modules``
+      - auto side: ``fork_only_features`` / ``migration_policy``
+
+    The function is pure — no git, no I/O — so initialize phase can
+    construct it deterministically from already-collected data.
+    """
+    if yaml_profile is None and not auto_features and auto_migration is None:
+        return None
+
+    base = yaml_profile or ForksProfile()
+    return base.model_copy(
+        update={
+            "fork_only_features": auto_features,
+            "migration_policy": auto_migration,
+        }
+    )
+
+
 __all__ = [
     "ForksProfileError",
     "load_forks_profile",
@@ -293,4 +416,6 @@ __all__ = [
     "extract_migration_number",
     "find_migration_collision",
     "summarize_for_log",
+    "compute_auto_overlay",
+    "build_effective_profile",
 ]

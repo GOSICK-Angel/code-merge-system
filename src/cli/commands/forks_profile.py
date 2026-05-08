@@ -38,7 +38,7 @@ import click
 from rich.console import Console
 
 from src.cli.paths import get_forks_profile_path
-from src.models.forks_profile import ForksProfile
+from src.models.forks_profile import ForksProfile, ForksProfileYaml
 from src.tools.forks_profile_differ import (
     diff_profile_vs_heuristic,
     format_profile_diff,
@@ -125,6 +125,8 @@ def _load_explicit(profile_path: Path) -> ForksProfile | None:
     import yaml
     from pydantic import ValidationError
 
+    from src.models.forks_profile import DEPRECATED_YAML_FIELDS
+
     raw = profile_path.read_text(encoding="utf-8")
     if not raw.strip():
         return None
@@ -141,12 +143,27 @@ def _load_explicit(profile_path: Path) -> ForksProfile | None:
             f"forks-profile root must be a mapping, got {type(data).__name__} "
             f"at {profile_path}"
         )
+    deprecated_present = [k for k in DEPRECATED_YAML_FIELDS if k in data]
+    if deprecated_present:
+        raise ForksProfileError(
+            f"forks-profile.yaml at {profile_path} declares deprecated "
+            f"field(s) {deprecated_present}. These are now auto-computed "
+            "from git divergence on every run; remove these sections from "
+            "your yaml. Only `version`, `fork`, `removed_domains`, and "
+            "`rewritten_modules` are user-authored."
+        )
     try:
-        return ForksProfile.model_validate(data)
+        yaml_profile = ForksProfileYaml.model_validate(data)
     except ValidationError as e:
         raise ForksProfileError(
             f"forks-profile schema validation failed at {profile_path}: {e}"
         ) from e
+    return ForksProfile(
+        version=yaml_profile.version,
+        fork=yaml_profile.fork,
+        removed_domains=yaml_profile.removed_domains,
+        rewritten_modules=yaml_profile.rewritten_modules,
+    )
 
 
 @forks_profile.command("schema")
@@ -166,10 +183,12 @@ def _load_explicit(profile_path: Path) -> ForksProfile | None:
 )
 def schema_command(output: str | None, indent: int) -> None:
     """Emit the JSON Schema for forks-profile.yaml."""
-    schema = ForksProfile.model_json_schema()
+    schema = ForksProfileYaml.model_json_schema()
     schema["title"] = "ForksProfile"
     schema["$comment"] = (
-        "Generated from src/models/forks_profile.py — do not edit by hand."
+        "Generated from src/models/forks_profile.py — do not edit by hand. "
+        "Covers user-authored fields only; `fork_only_features` and "
+        "`migration_policy` are auto-computed at runtime and not declarable."
     )
     text = json.dumps(schema, indent=indent, sort_keys=False, ensure_ascii=False)
 

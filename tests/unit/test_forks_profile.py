@@ -11,7 +11,9 @@ import pytest
 
 from src.cli.paths import get_forks_profile_path
 from src.models.forks_profile import (
+    DEPRECATED_YAML_FIELDS,
     ForksProfile,
+    ForksProfileYaml,
     MigrationCollisionAction,
     RewriteMergePolicy,
 )
@@ -125,6 +127,35 @@ class TestSchema:
         assert profile.fork.name == "demo"
 
 
+class TestForksProfileYamlSchema:
+    def test_minimal_yaml_loads(self):
+        yp = ForksProfileYaml.model_validate({"version": 1})
+        assert yp.version == 1
+        assert yp.removed_domains == []
+        assert yp.rewritten_modules == []
+
+    def test_yaml_rejects_fork_only_features(self):
+        with pytest.raises(Exception):
+            ForksProfileYaml.model_validate(
+                {"fork_only_features": [{"path": "pkg/extra/**"}]}
+            )
+
+    def test_yaml_rejects_migration_policy(self):
+        with pytest.raises(Exception):
+            ForksProfileYaml.model_validate(
+                {
+                    "migration_policy": {
+                        "path_globs": ["db/*.sql"],
+                        "fork_owns_numbers_above": 10,
+                    }
+                }
+            )
+
+    def test_deprecated_fields_constant_exposes_both(self):
+        assert "fork_only_features" in DEPRECATED_YAML_FIELDS
+        assert "migration_policy" in DEPRECATED_YAML_FIELDS
+
+
 class TestLoader:
     def test_missing_file_returns_none(self, tmp_path: Path):
         assert load_forks_profile(tmp_path) is None
@@ -164,6 +195,50 @@ class TestLoader:
     def test_path_resolution_uses_get_forks_profile_path(self, tmp_path: Path):
         path = get_forks_profile_path(str(tmp_path))
         assert path == tmp_path / ".merge" / "forks-profile.yaml"
+
+    def test_deprecated_fork_only_features_rejected_with_migration_message(
+        self, tmp_path: Path
+    ):
+        _write_profile(
+            tmp_path,
+            ('version: 1\nfork_only_features:\n  - path: "pkg/legacy/**"\n'),
+        )
+        with pytest.raises(ForksProfileError) as exc:
+            load_forks_profile(tmp_path)
+        msg = str(exc.value)
+        assert "fork_only_features" in msg
+        assert "auto-computed" in msg
+
+    def test_deprecated_migration_policy_rejected_with_migration_message(
+        self, tmp_path: Path
+    ):
+        _write_profile(
+            tmp_path,
+            (
+                "migration_policy:\n"
+                '  path_globs: ["db/*.sql"]\n'
+                "  fork_owns_numbers_above: 10\n"
+            ),
+        )
+        with pytest.raises(ForksProfileError) as exc:
+            load_forks_profile(tmp_path)
+        msg = str(exc.value)
+        assert "migration_policy" in msg
+        assert "auto-computed" in msg
+
+    def test_loader_returns_runtime_profile_with_empty_auto_fields(
+        self, tmp_path: Path
+    ):
+        _write_profile(
+            tmp_path,
+            ('removed_domains:\n  - name: alpha\n    paths: ["svc/alpha/**"]\n'),
+        )
+        profile = load_forks_profile(tmp_path)
+        assert profile is not None
+        assert len(profile.removed_domains) == 1
+        # auto-computed fields stay empty until initialize phase fills them
+        assert profile.fork_only_features == []
+        assert profile.migration_policy is None
 
 
 class TestMatchHelpers:

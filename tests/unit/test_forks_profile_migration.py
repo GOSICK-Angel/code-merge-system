@@ -21,12 +21,48 @@ from src.models.config import (
 )
 from src.models.decision import MergeDecision
 from src.models.diff import FileChangeCategory
-from src.models.forks_profile import ForksProfile, MigrationCollisionAction
+from src.models.forks_profile import (
+    ForksProfile,
+    MigrationCollisionAction,
+    MigrationCollisionRule,
+    MigrationPolicy,
+)
 from src.models.state import MergeState
 from src.tools.forks_profile_loader import (
     extract_migration_number,
     find_migration_collision,
 )
+
+
+def _stub_policy(
+    *,
+    path_globs: list[str],
+    upstream_max: int = 25,
+    action: MigrationCollisionAction = MigrationCollisionAction.ESCALATE_HUMAN,
+    note: str = "",
+) -> MigrationPolicy:
+    """Build the MigrationPolicy ``compute_auto_overlay`` would synthesize."""
+    return MigrationPolicy(
+        path_globs=path_globs,
+        fork_owns_numbers_above=upstream_max,
+        upstream_take_target_max=upstream_max,
+        on_collision=MigrationCollisionRule(action=action, note=note),
+    )
+
+
+def _patch_overlay(
+    monkeypatch, *, policy: MigrationPolicy | None = None, features=None
+) -> None:
+    """Replace ``compute_auto_overlay`` with a deterministic stub.
+
+    The real implementation needs a git tree to compute fork divergence;
+    routing tests don't care about the inputs, only that the overlay
+    returns a known policy.
+    """
+    monkeypatch.setattr(
+        "src.core.phases.initialize.compute_auto_overlay",
+        lambda *args, **kwargs: (features or [], policy),
+    )
 
 
 def _write_profile(repo_root: Path, body: str) -> None:
@@ -173,21 +209,27 @@ class TestFindMigrationCollision:
 
 
 class TestPlanStageMigrationRouting:
-    def test_d_missing_collision_routes_to_escalate_human(self, tmp_path: Path):
-        _write_profile(
-            tmp_path,
-            (
-                "migration_policy:\n"
-                '  path_globs: ["db/migrations/*.sql"]\n'
-                "  upstream_take_target_max: 25\n"
-                "  on_collision:\n"
-                "    action: escalate_human\n"
-                '    note: "manual reconcile"\n'
+    """End-to-end routing now sources ``migration_policy`` from the auto
+    overlay (``compute_auto_overlay``) — yaml can no longer declare it.
+    Tests stub the overlay to keep the routing logic isolated from git.
+    """
+
+    def test_d_missing_collision_routes_to_escalate_human(
+        self, tmp_path: Path, monkeypatch
+    ):
+        _patch_overlay(
+            monkeypatch,
+            policy=_stub_policy(
+                path_globs=["db/migrations/*.sql"],
+                upstream_max=25,
+                action=MigrationCollisionAction.ESCALATE_HUMAN,
+                note="manual reconcile",
             ),
         )
         config = _make_config(tmp_path)
         ctx = _make_ctx(config)
         state = MergeState(config=config)
+        state.merge_base_commit = "deadbeef"
         phase = InitializePhase()
 
         consumed = phase._apply_forks_profile_routing(
@@ -202,20 +244,21 @@ class TestPlanStageMigrationRouting:
         assert "escalate_human" in rec.rationale
         assert "manual reconcile" in rec.rationale
 
-    def test_d_missing_collision_routes_to_take_current(self, tmp_path: Path):
-        _write_profile(
-            tmp_path,
-            (
-                "migration_policy:\n"
-                '  path_globs: ["db/migrations/*.sql"]\n'
-                "  upstream_take_target_max: 25\n"
-                "  on_collision:\n"
-                "    action: take_current\n"
+    def test_d_missing_collision_routes_to_take_current(
+        self, tmp_path: Path, monkeypatch
+    ):
+        _patch_overlay(
+            monkeypatch,
+            policy=_stub_policy(
+                path_globs=["db/migrations/*.sql"],
+                upstream_max=25,
+                action=MigrationCollisionAction.TAKE_CURRENT,
             ),
         )
         config = _make_config(tmp_path)
         ctx = _make_ctx(config)
         state = MergeState(config=config)
+        state.merge_base_commit = "deadbeef"
         phase = InitializePhase()
 
         consumed = phase._apply_forks_profile_routing(
@@ -228,20 +271,15 @@ class TestPlanStageMigrationRouting:
         assert rec.decision == MergeDecision.TAKE_CURRENT
         assert "take_current" in rec.rationale
 
-    def test_safe_upstream_migration_not_consumed(self, tmp_path: Path):
-        _write_profile(
-            tmp_path,
-            (
-                "migration_policy:\n"
-                '  path_globs: ["db/migrations/*.sql"]\n'
-                "  upstream_take_target_max: 25\n"
-                "  on_collision:\n"
-                "    action: escalate_human\n"
-            ),
+    def test_safe_upstream_migration_not_consumed(self, tmp_path: Path, monkeypatch):
+        _patch_overlay(
+            monkeypatch,
+            policy=_stub_policy(path_globs=["db/migrations/*.sql"], upstream_max=25),
         )
         config = _make_config(tmp_path)
         ctx = _make_ctx(config)
         state = MergeState(config=config)
+        state.merge_base_commit = "deadbeef"
         phase = InitializePhase()
 
         consumed = phase._apply_forks_profile_routing(
@@ -252,20 +290,15 @@ class TestPlanStageMigrationRouting:
         assert consumed == set()
         assert state.file_decision_records == {}
 
-    def test_b_class_migration_not_consumed(self, tmp_path: Path):
-        _write_profile(
-            tmp_path,
-            (
-                "migration_policy:\n"
-                '  path_globs: ["db/migrations/*.sql"]\n'
-                "  upstream_take_target_max: 25\n"
-                "  on_collision:\n"
-                "    action: escalate_human\n"
-            ),
+    def test_b_class_migration_not_consumed(self, tmp_path: Path, monkeypatch):
+        _patch_overlay(
+            monkeypatch,
+            policy=_stub_policy(path_globs=["db/migrations/*.sql"], upstream_max=25),
         )
         config = _make_config(tmp_path)
         ctx = _make_ctx(config)
         state = MergeState(config=config)
+        state.merge_base_commit = "deadbeef"
         phase = InitializePhase()
 
         consumed = phase._apply_forks_profile_routing(
@@ -277,7 +310,7 @@ class TestPlanStageMigrationRouting:
         assert state.file_decision_records == {}
 
     def test_rewritten_module_takes_priority_over_migration_policy(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch
     ):
         _write_profile(
             tmp_path,
@@ -285,17 +318,16 @@ class TestPlanStageMigrationRouting:
                 "rewritten_modules:\n"
                 '  - path: "db/migrations/030_payments.sql"\n'
                 "    policy: take_current_with_diff_note\n"
-                "migration_policy:\n"
-                '  path_globs: ["db/migrations/*.sql"]\n'
-                "  upstream_take_target_max: 25\n"
-                "  on_collision:\n"
-                "    action: escalate_human\n"
             ),
+        )
+        _patch_overlay(
+            monkeypatch,
+            policy=_stub_policy(path_globs=["db/migrations/*.sql"], upstream_max=25),
         )
         config = _make_config(tmp_path)
         ctx = _make_ctx(config)
         state = MergeState(config=config)
-        state.merge_base_commit = ""
+        state.merge_base_commit = "deadbeef"
         phase = InitializePhase()
 
         consumed = phase._apply_forks_profile_routing(
