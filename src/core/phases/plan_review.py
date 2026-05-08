@@ -53,9 +53,7 @@ class PlanReviewPhase(Phase):
             try:
                 validate_plan_shape(state.merge_plan)
             except PlanValidationError as exc:
-                logger.error(
-                    "Plan shape validation failed before LLM judge: %s", exc
-                )
+                logger.error("Plan shape validation failed before LLM judge: %s", exc)
                 phase_result = phase_result.model_copy(
                     update={"status": "completed", "completed_at": datetime.now()}
                 )

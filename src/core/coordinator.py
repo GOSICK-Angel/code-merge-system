@@ -159,9 +159,7 @@ class Coordinator:
         return plan.model_copy(update={"phases": new_phases})
 
     @staticmethod
-    def _split_by_count(
-        batch: PhaseFileBatch, max_size: int
-    ) -> list[PhaseFileBatch]:
+    def _split_by_count(batch: PhaseFileBatch, max_size: int) -> list[PhaseFileBatch]:
         if len(batch.file_paths) <= max_size:
             return [batch]
         out: list[PhaseFileBatch] = []

@@ -115,9 +115,7 @@ def _apply_item_choices(state: MergeState, rnd: DecisionRound) -> int:
     return applied
 
 
-def _apply_conflict_decisions(
-    state: MergeState, rnd: DecisionRound
-) -> dict[str, int]:
+def _apply_conflict_decisions(state: MergeState, rnd: DecisionRound) -> dict[str, int]:
     """Mirror what ``HumanInterfaceAgent.collect_decisions_file`` does, but
     drive it from a parsed ``DecisionRound`` (in-memory) rather than re-reading
     the yaml from disk."""
@@ -174,11 +172,7 @@ def _apply_conflict_decisions(
             "decisions": [d.model_dump() for d in rnd.decisions],
             "group_decisions": [g.model_dump() for g in rnd.group_decisions],
         }
-        tmp = (
-            Path(state.config.repo_path)
-            / ".merge"
-            / "_auto_decisions_round.tmp.yaml"
-        )
+        tmp = Path(state.config.repo_path) / ".merge" / "_auto_decisions_round.tmp.yaml"
         tmp.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(yaml.safe_dump(synthetic_yaml), encoding="utf-8")
         try:
@@ -227,8 +221,7 @@ def detect_current_phase(state: MergeState) -> DecisionPhase | None:
         return DecisionPhase.CONFLICT_MARKER
 
     if any(
-        req.human_decision is None
-        for req in state.human_decision_requests.values()
+        req.human_decision is None for req in state.human_decision_requests.values()
     ):
         return DecisionPhase.CONFLICT_RESOLUTION
 

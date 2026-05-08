@@ -260,7 +260,10 @@ def _build_run_insights_lines(
 ) -> list[str]:
     """Build the Run Insights markdown section from CostTracker and TraceLogger summaries."""
     has_cost = bool(cost_summary) and cost_summary.get("total_calls", 0) > 0
-    has_memory = bool(memory_summary) and int(memory_summary.get("total_calls", 0)) > 0
+    has_memory = (
+        memory_summary is not None
+        and int(memory_summary.get("total_calls", 0) or 0) > 0
+    )
     if not has_cost and not has_memory:
         return []
 

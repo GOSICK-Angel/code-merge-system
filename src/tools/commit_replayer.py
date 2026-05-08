@@ -183,7 +183,9 @@ class CommitReplayer:
                         "bailing out, remaining %d commits will skip "
                         "per-file cherry-pick and go straight to apply",
                         consecutive_failures,
-                        max(0, len(partial_commits) - partial_commits.index(commit) - 1),
+                        max(
+                            0, len(partial_commits) - partial_commits.index(commit) - 1
+                        ),
                     )
                     bailed = True
                 continue

@@ -4,8 +4,9 @@ import yaml
 import click
 from pathlib import Path
 from rich.console import Console
-from src.models.config import MergeConfig
+from src.cli.commands.forks_profile import forks_profile as _forks_profile_group
 from src.cli.env import load_env
+from src.models.config import MergeConfig
 
 
 console = Console()
@@ -305,8 +306,6 @@ def validate_config_and_env(config: MergeConfig) -> list[str]:
 
     return errors
 
-
-from src.cli.commands.forks_profile import forks_profile as _forks_profile_group
 
 cli.add_command(_forks_profile_group)
 

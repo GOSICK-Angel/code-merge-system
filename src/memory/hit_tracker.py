@@ -129,8 +129,7 @@ class MemoryHitTracker:
                 for phase, layers in self._entries_by_phase_layer.items()
             },
             "entry_outcomes": {
-                eid: dict(counters)
-                for eid, counters in self._entry_outcomes.items()
+                eid: dict(counters) for eid, counters in self._entry_outcomes.items()
             },
         }
         tmp = path.with_suffix(path.suffix + ".tmp")

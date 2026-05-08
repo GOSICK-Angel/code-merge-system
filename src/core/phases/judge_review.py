@@ -168,10 +168,7 @@ class JudgeReviewPhase(Phase):
         # O-M4: credit/blame memory entries based on the final verdict's
         # passed/failed file lists. Outcomes accumulate across runs via the
         # tracker's sidecar JSON; future runs use them to bias confidence.
-        if (
-            state.judge_verdict is not None
-            and ctx.memory_hit_tracker is not None
-        ):
+        if state.judge_verdict is not None and ctx.memory_hit_tracker is not None:
             for fp in state.judge_verdict.passed_files:
                 ctx.memory_hit_tracker.record_outcome(fp, success=True)
             for fp in state.judge_verdict.failed_files:

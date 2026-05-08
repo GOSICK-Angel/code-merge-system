@@ -1,7 +1,8 @@
 upstream_ref: "upstream/main"
 fork_ref: "origin/cvte-main"
 working_branch: "merge/auto-{timestamp}"
-repo_path: "/Users/angel/Desktop/WA_AI/project/dify-official-plugins"
+enable_working_branch: true
+repo_path: "/Users/angel/AI/project/dify-official-plugins"
 project_context: >
   Dify official plugins monorepo. Contains models, tools, extensions,and triggers as independent plugin packages, each with its own manifest.yaml, pyproject.toml, and uv.lock. The cvte-main branch carries custom modifications (naming, CI, model configs) on top of the upstream main branch.Plugins with cvte as the author in the manifest.yaml file need to be carefully evaluated. If they contain customized content, be careful not to modify the author
 max_files_per_run: 50

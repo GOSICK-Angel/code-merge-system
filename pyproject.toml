@@ -49,6 +49,12 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = [
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]
+
+[tool.coverage.report]
+fail_under = 80
 
 [tool.coverage.run]
 source = ["src"]

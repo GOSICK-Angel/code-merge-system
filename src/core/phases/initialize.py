@@ -171,7 +171,7 @@ def _build_added_file_diff(git_tool: GitTool, ref: str, file_path: str) -> str:
     truncated = len(lines) > _D_MISSING_PREVIEW_LINES
     preview = lines[:_D_MISSING_PREVIEW_LINES]
     diff_lines = [
-        f"--- /dev/null",
+        "--- /dev/null",
         f"+++ b/{file_path}",
         f"@@ -0,0 +1,{len(preview)} @@",
     ]

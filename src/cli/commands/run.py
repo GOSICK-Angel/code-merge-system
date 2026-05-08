@@ -124,8 +124,10 @@ def _run_with_auto_decisions(
         try:
             stats = apply_round(final_state, rnd)
         except ValueError as exc:
-            console.print(f"[red]--auto-decisions failed at iteration "
-                          f"{iteration + 1}: {exc}[/red]")
+            console.print(
+                f"[red]--auto-decisions failed at iteration "
+                f"{iteration + 1}: {exc}[/red]"
+            )
             sys.exit(EXIT_UNKNOWN_ERROR)
         if not ci:
             console.print(

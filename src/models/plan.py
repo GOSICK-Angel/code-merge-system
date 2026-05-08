@@ -279,8 +279,7 @@ def validate_plan_shape(plan: "MergePlan") -> None:
                 f"batch {batch_id} references layer_id {lid} (not declared)"
             )
         raise PlanValidationError(
-            "Plan layer graph references undeclared layers: "
-            + "; ".join(problems)
+            "Plan layer graph references undeclared layers: " + "; ".join(problems)
         )
 
     try:

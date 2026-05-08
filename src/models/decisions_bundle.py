@@ -144,9 +144,7 @@ def parse_bundle(raw: dict[str, Any]) -> DecisionsBundle:
 
 def _v1_to_round(raw: dict[str, Any]) -> DecisionRound:
     has_plan_keys = (
-        "plan_approval" in raw
-        or "item_decisions" in raw
-        or "judge_resolution" in raw
+        "plan_approval" in raw or "item_decisions" in raw or "judge_resolution" in raw
     )
     has_conflict_keys = "decisions" in raw or "group_decisions" in raw
 

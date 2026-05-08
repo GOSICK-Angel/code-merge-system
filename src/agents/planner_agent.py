@@ -95,7 +95,11 @@ class PlannerAgent(BaseAgent):
                 "Classifying batch %d/%d (%d files)", idx + 1, total_batches, len(batch)
             )
             plan_data = await self._classify_batch(
-                batch, project_context, system_prompt, idx, total_batches,
+                batch,
+                project_context,
+                system_prompt,
+                idx,
+                total_batches,
                 rename_pairs=state.rename_pairs or None,
             )
             all_plan_data.append(plan_data)

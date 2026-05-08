@@ -72,9 +72,7 @@ def resume_command_impl(
         # single-pass path keeps backwards compatibility with the legacy
         # one-round resume workflow.
         current_phase = detect_current_phase(state)
-        round_to_apply = (
-            bundle.take_round(current_phase) if current_phase else None
-        )
+        round_to_apply = bundle.take_round(current_phase) if current_phase else None
         if round_to_apply is None and bundle.rounds:
             # Fall back to the first round when the V1 path detector cannot
             # pin down a phase but a single round is unambiguously available.
