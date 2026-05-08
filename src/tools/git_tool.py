@@ -1,6 +1,9 @@
+import logging
 from pathlib import Path
 import git
 from git import Repo, InvalidGitRepositoryError
+
+logger = logging.getLogger(__name__)
 
 
 class GitTool:
@@ -300,7 +303,15 @@ class GitTool:
                     self.repo.git.cherry_pick(sha)
                 return True, label
             except git.GitCommandError:
-                self.cherry_pick_abort()
+                if not self.cherry_pick_abort():
+                    logger.warning(
+                        "cherry_pick_strategy_ladder: abort failed for %s "
+                        "after strategy %s — bailing out to prevent "
+                        "cascading 'cherry-pick already in progress' errors",
+                        sha[:8],
+                        label,
+                    )
+                    return False, label
                 continue
         return False, last_label
 
@@ -356,11 +367,17 @@ class GitTool:
         except git.GitCommandError:
             return ""
 
-    def cherry_pick_abort(self) -> None:
+    def cherry_pick_abort(self) -> bool:
         try:
             self.repo.git.cherry_pick("--abort")
-        except git.GitCommandError:
-            pass
+            return True
+        except git.GitCommandError as exc:
+            logger.warning(
+                "cherry_pick_abort failed (worktree may still hold "
+                "CHERRY_PICK_HEAD or unmerged paths): %s",
+                exc,
+            )
+            return False
 
     def commit_staged(self, message: str) -> str:
         commit = self.repo.index.commit(message)

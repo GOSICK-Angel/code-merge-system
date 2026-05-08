@@ -129,12 +129,22 @@ class AutoMergePhase(Phase):
         # rerun → 31 fresh marker files in round 6). Skip replay; the
         # per-file dedup below will only re-execute files whose records
         # HumanReviewPhase cleared from judge_verdict.failed_files.
-        skip_replay = state.rerun_round > 0
+        #
+        # P2-1+: the same regression fires for AWAITING_HUMAN-induced
+        # resumes (plan_review / conflict_marker / binary_escalate). Those
+        # cycles do NOT bump rerun_round, but the worktree already holds
+        # the prior pass's cherry-picks. Use ``state.replayed_commits`` —
+        # populated by ``CommitReplayer.replay_clean_commits`` — as the
+        # "replay already produced commits this run" signal so any
+        # re-entry, regardless of trigger, short-circuits the replay.
+        skip_replay = state.rerun_round > 0 or bool(state.replayed_commits)
         if skip_replay:
             logger.info(
-                "auto_merge: rerun_round=%d — skipping cherry-pick replay "
-                "(worktree already contains prior round's writes)",
+                "auto_merge: rerun_round=%d, prior_replayed=%d — skipping "
+                "cherry-pick replay (worktree already contains prior "
+                "round's writes)",
                 state.rerun_round,
+                len(state.replayed_commits),
             )
         if (
             not skip_replay
