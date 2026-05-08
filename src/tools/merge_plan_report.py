@@ -59,6 +59,7 @@ def _build_report(state: MergeState, lang: str) -> list[str]:
     _batch_plan(lines, plan, zh)
     _layer_dependencies(lines, plan, zh)
     _planner_judge_log(lines, state, zh)
+    _forks_profile_drift_section(lines, state, zh)
 
     return lines
 
@@ -382,3 +383,35 @@ def _planner_judge_log(lines: list[str], state: MergeState, zh: bool) -> None:
                     f"({issue.get('current', '?')} → {issue.get('suggested', '?')})"
                 )
         lines.append("")
+
+
+def _forks_profile_drift_section(lines: list[str], state: MergeState, zh: bool) -> None:
+    """Append a forks-profile drift appendix when initialize phase populated it.
+
+    No-op when ``state.forks_profile_drift is None`` (typical: yaml absent
+    or drift below the notify threshold). Reviewers see this section
+    alongside the plan they're approving so stale yaml entries surface
+    at the same moment they have context to act on them.
+    """
+    drift = state.forks_profile_drift
+    if not drift:
+        return
+
+    title = "Forks-profile 漂移" if zh else "Forks-profile drift"
+    intro = (
+        "yaml 与启发式重新检测的结果不一致；用 `merge forks-profile diff` "
+        "复现并按需手动修补。"
+        if zh
+        else "The checked-in yaml diverges from a fresh heuristic draft. "
+        "Run `merge forks-profile diff` to reproduce and patch by hand."
+    )
+    lines += [
+        f"## {title}",
+        "",
+        f"_{intro}_",
+        "",
+        "```",
+        drift.rstrip(),
+        "```",
+        "",
+    ]

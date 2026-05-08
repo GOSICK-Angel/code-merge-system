@@ -49,6 +49,7 @@ from src.tools.diff_stasher import stash_upstream_diff
 from src.cli.paths import get_diff_stash_dir
 from src.models.forks_profile import (
     ForkOnlyFeature,
+    ForksProfile,
     MigrationCollisionAction,
     MigrationCollisionRule,
     MigrationPolicy,
@@ -718,6 +719,9 @@ class InitializePhase(Phase):
         if profile is None or profile.is_empty():
             return set()
 
+        if yaml_profile is not None and ctx.git_tool is not None and merge_base:
+            self._detect_forks_profile_drift(state, ctx, yaml_profile, merge_base)
+
         ctx.notify("orchestrator", summarize_for_log(profile))
 
         consumed: set[str] = set()
@@ -786,6 +790,63 @@ class InitializePhase(Phase):
                     f"collision(s) detected: {preview}{more}",
                 )
         return consumed
+
+    _DRIFT_NOTIFY_THRESHOLD = 3
+
+    def _detect_forks_profile_drift(
+        self,
+        state: MergeState,
+        ctx: PhaseContext,
+        yaml_profile: ForksProfile,
+        merge_base: str,
+    ) -> None:
+        """Compare yaml-declared profile against a fresh heuristic draft.
+
+        Only runs when a yaml exists — that's when drift is even possible.
+        Drift below ``_DRIFT_NOTIFY_THRESHOLD`` items is suppressed to
+        avoid noise on routine merges; at or above it the formatted
+        report is stored on state for the merge plan appendix and a
+        one-line summary is announced to the orchestrator.
+
+        Best-effort — any failure (drafter import, retention scan, git
+        timeout) is logged and silently dropped. The main flow must not
+        regress for a diagnostic.
+        """
+        try:
+            from src.tools.forks_profile_differ import (
+                diff_profile_vs_heuristic,
+                format_profile_diff,
+            )
+            from src.tools.forks_profile_drafter import draft_profile
+
+            drafted = draft_profile(
+                ctx.git_tool,
+                upstream_ref=state.config.upstream_ref,
+                fork_ref=state.config.fork_ref,
+                merge_base=merge_base,
+            )
+            diff = diff_profile_vs_heuristic(yaml_profile, drafted)
+        except Exception as exc:  # noqa: BLE001 — drift is best-effort
+            logger.warning("forks-profile drift detection failed: %s", exc)
+            return
+
+        item_count = (
+            len(diff.unmatched_declarations)
+            + len(diff.unmatched_heuristics)
+            + len(diff.classification_mismatches)
+        )
+        if item_count < self._DRIFT_NOTIFY_THRESHOLD:
+            return
+
+        state.forks_profile_drift = format_profile_diff(diff)
+        ctx.notify(
+            "orchestrator",
+            f"forks-profile drift: {item_count} item(s) "
+            f"({len(diff.unmatched_declarations)} stale declaration(s), "
+            f"{len(diff.unmatched_heuristics)} new candidate(s), "
+            f"{len(diff.classification_mismatches)} policy mismatch(es)) "
+            "— see plan report appendix.",
+        )
 
     def _route_rewritten_module(
         self,

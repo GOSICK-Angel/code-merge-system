@@ -294,3 +294,133 @@ class TestForksProfileRouting:
         assert consumed == set()
         assert state.file_decision_records == {}
         assert any("forks-profile" in r.message for r in caplog.records)
+
+
+class TestForksProfileDriftDetection:
+    """Drift between yaml and a fresh heuristic draft surfaces in state."""
+
+    def _patch_overlay_empty(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "src.core.phases.initialize.compute_auto_overlay",
+            lambda *args, **kwargs: ([], None),
+        )
+
+    def _patch_drift(
+        self, monkeypatch, *, decl: int = 0, heur: int = 0, mism: int = 0
+    ) -> None:
+        from src.tools.forks_profile_differ import DiffEntry, ProfileDiff
+
+        diff = ProfileDiff(
+            unmatched_declarations=tuple(
+                DiffEntry(category="removed_domain", identifier=f"d{i}", rationale="r")
+                for i in range(decl)
+            ),
+            unmatched_heuristics=tuple(
+                DiffEntry(
+                    category="rewritten_module",
+                    identifier=f"h{i}",
+                    rationale="retention=12%",
+                )
+                for i in range(heur)
+            ),
+            classification_mismatches=tuple(
+                DiffEntry(
+                    category="rewritten_module",
+                    identifier=f"m{i}",
+                    rationale="policy mismatch",
+                )
+                for i in range(mism)
+            ),
+        )
+        monkeypatch.setattr(
+            "src.tools.forks_profile_drafter.draft_profile",
+            lambda *args, **kwargs: object(),
+        )
+        monkeypatch.setattr(
+            "src.tools.forks_profile_differ.diff_profile_vs_heuristic",
+            lambda *args, **kwargs: diff,
+        )
+
+    def _ctx_with_emit_capture(
+        self, config: MergeConfig
+    ) -> tuple[PhaseContext, list[str]]:
+        """Build a PhaseContext whose emit() appends to a list.
+
+        ``PhaseContext`` is a frozen dataclass; rebuild it via
+        ``dataclasses.replace`` to substitute ``emit`` with a capture
+        function. ``ActivityEvent.action`` is the field that
+        ``ctx.notify(agent, action)`` writes into.
+        """
+        import dataclasses
+
+        ctx = _make_ctx(config)
+        notifications: list[str] = []
+        return (
+            dataclasses.replace(ctx, emit=lambda evt: notifications.append(evt.action)),
+            notifications,
+        )
+
+    def test_drift_above_threshold_writes_state_and_notifies(
+        self, tmp_path: Path, monkeypatch
+    ):
+        _write_profile(
+            tmp_path,
+            ('removed_domains:\n  - name: alpha\n    paths:\n      - "svc/alpha/**"\n'),
+        )
+        self._patch_overlay_empty(monkeypatch)
+        self._patch_drift(monkeypatch, decl=2, heur=1, mism=0)
+
+        config = _make_config(tmp_path)
+        ctx, notifications = self._ctx_with_emit_capture(config)
+        state = MergeState(config=config)
+        state.merge_base_commit = "deadbeef"
+
+        phase = InitializePhase()
+        phase._apply_forks_profile_routing(
+            state, ctx, {"svc/alpha/login.py": FileChangeCategory.B}
+        )
+
+        assert state.forks_profile_drift is not None
+        assert any("drift" in n.lower() for n in notifications)
+
+    def test_drift_below_threshold_skipped(self, tmp_path: Path, monkeypatch):
+        _write_profile(
+            tmp_path,
+            ('removed_domains:\n  - name: alpha\n    paths:\n      - "svc/alpha/**"\n'),
+        )
+        self._patch_overlay_empty(monkeypatch)
+        self._patch_drift(monkeypatch, decl=1, heur=1, mism=0)
+
+        config = _make_config(tmp_path)
+        ctx, notifications = self._ctx_with_emit_capture(config)
+        state = MergeState(config=config)
+        state.merge_base_commit = "deadbeef"
+
+        phase = InitializePhase()
+        phase._apply_forks_profile_routing(
+            state, ctx, {"svc/alpha/login.py": FileChangeCategory.B}
+        )
+
+        assert state.forks_profile_drift is None
+        assert not any("drift" in n.lower() for n in notifications)
+
+    def test_no_yaml_skips_drift_detection_entirely(self, tmp_path: Path, monkeypatch):
+        # No yaml file written. Drift only makes sense for yaml vs
+        # heuristic, so the drafter must never run when yaml is absent.
+        self._patch_overlay_empty(monkeypatch)
+
+        def boom(*args, **kwargs):
+            raise AssertionError("draft_profile must not run without yaml")
+
+        monkeypatch.setattr("src.tools.forks_profile_drafter.draft_profile", boom)
+
+        config = _make_config(tmp_path)
+        ctx = _make_ctx(config)
+        state = MergeState(config=config)
+        state.merge_base_commit = "deadbeef"
+        phase = InitializePhase()
+        phase._apply_forks_profile_routing(
+            state, ctx, {"src/foo.py": FileChangeCategory.B}
+        )
+
+        assert state.forks_profile_drift is None

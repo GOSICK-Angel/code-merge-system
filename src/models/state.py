@@ -90,6 +90,16 @@ class MergeState(BaseModel):
             "the file is absent or empty (no-op)."
         ),
     )
+    forks_profile_drift: str | None = Field(
+        default=None,
+        description=(
+            "Pre-rendered diff between the checked-in forks-profile.yaml "
+            "and a fresh heuristic draft, populated by initialize phase "
+            "when ≥3 drift items are detected. Surfaced in the merge "
+            "plan report appendix so reviewers see profile staleness "
+            "alongside the plan they are approving."
+        ),
+    )
     merge_base_commit: str = ""
     plan_revision_rounds: int = 0
 
