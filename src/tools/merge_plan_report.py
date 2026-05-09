@@ -55,7 +55,7 @@ def _build_report(state: MergeState, lang: str) -> list[str]:
     _migration_section(lines, state, zh)
     _classification_summary(lines, state, zh)
     _directory_matrix(lines, state, zh)
-    _risk_files(lines, file_diffs, zh)
+    _risk_files(lines, file_diffs, plan, zh)
     _batch_plan(lines, plan, zh)
     _layer_dependencies(lines, plan, zh)
     _planner_judge_log(lines, state, zh)
@@ -75,11 +75,18 @@ def _header(lines: list[str], state: MergeState, zh: bool) -> None:
         f"Run ID: `{state.run_id}`",
     ]
 
-    if state.config.project_context:
+    # Render the user-authored snippet (set by initialize.py before
+    # CLAUDE.md/README.md are concatenated into config.project_context).
+    # Falling back to config.project_context preserves behaviour for
+    # checkpoints/states predating the user_project_context field.
+    user_ctx = (state.user_project_context or "").strip()
+    if not user_ctx:
+        user_ctx = state.config.project_context.strip()
+    if user_ctx:
         ctx_label = "项目背景" if zh else "Project Context"
         lines += [
             "",
-            f"**{ctx_label}**: {state.config.project_context.strip()}",
+            f"**{ctx_label}**: {user_ctx}",
         ]
 
     if plan:
@@ -257,7 +264,9 @@ def _directory_matrix(lines: list[str], state: MergeState, zh: bool) -> None:
     lines += ["", "---", ""]
 
 
-def _risk_files(lines: list[str], file_diffs: list[FileDiff], zh: bool) -> None:
+def _risk_files(
+    lines: list[str], file_diffs: list[FileDiff], plan: Any, zh: bool
+) -> None:
     risky = [
         fd
         for fd in file_diffs
@@ -267,14 +276,26 @@ def _risk_files(lines: list[str], file_diffs: list[FileDiff], zh: bool) -> None:
     if not risky:
         return
 
+    batch_risk_map: dict[str, str] = {}
+    if plan is not None:
+        for batch in plan.phases:
+            br = (
+                batch.risk_level.value
+                if hasattr(batch.risk_level, "value")
+                else str(batch.risk_level)
+            )
+            for fp in batch.file_paths:
+                batch_risk_map[fp] = br
+
     title = "高风险文件清单" if zh else "High-risk Files"
     lines += [
         f"## {title}",
         "",
         f"| {'文件' if zh else 'File'} | {'风险等级' if zh else 'Risk'} "
+        f"| {'批次风险' if zh else 'Batch Risk'} "
         f"| {'风险分' if zh else 'Score'} | {'安全敏感' if zh else 'Security'} "
         f"| {'分类' if zh else 'Category'} |",
-        "|------|------|-------|------|------|",
+        "|------|------|------|-------|------|------|",
     ]
 
     risky.sort(key=lambda fd: fd.risk_score, reverse=True)
@@ -286,8 +307,16 @@ def _risk_files(lines: list[str], file_diffs: list[FileDiff], zh: bool) -> None:
             else str(fd.change_category or "")
         )
         sec = "⚠️" if fd.is_security_sensitive else ""
+        batch_rl = batch_risk_map.get(fd.file_path)
+        if batch_rl is None:
+            batch_cell = "❌ NOT-BATCHED" if not zh else "❌ 未入批"
+        elif batch_rl != risk:
+            mismatch_label = "MISMATCH" if not zh else "不一致"
+            batch_cell = f"⚠️ {batch_rl} ({mismatch_label})"
+        else:
+            batch_cell = batch_rl
         lines.append(
-            f"| `{fd.file_path}` | {risk} | {fd.risk_score:.2f} | {sec} | {cat} |"
+            f"| `{fd.file_path}` | {risk} | {batch_cell} | {fd.risk_score:.2f} | {sec} | {cat} |"
         )
 
     lines += ["", "---", ""]

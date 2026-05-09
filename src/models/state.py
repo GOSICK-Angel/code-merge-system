@@ -103,6 +103,14 @@ class MergeState(BaseModel):
     merge_base_commit: str = ""
     plan_revision_rounds: int = 0
 
+    # The user-authored ``project_context`` from .merge/config.yaml,
+    # captured *before* the initialize phase concatenates CLAUDE.md /
+    # README.md excerpts into ``config.project_context``. Plan reports
+    # render this short version (the user's intent in plain words) while
+    # LLM agents keep using the merged-with-docs version on
+    # ``config.project_context``. Empty when the user didn't author one.
+    user_project_context: str = ""
+
     plan_judge_verdict: PlanJudgeVerdict | None = None
     plan_review_log: list[PlanReviewRound] = Field(default_factory=list)
     plan_human_review: PlanHumanReview | None = None

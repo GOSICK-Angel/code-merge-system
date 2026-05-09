@@ -202,6 +202,11 @@ def classify_error(error: Exception, provider: str = "") -> ClassifiedError:
         )
 
     if status is not None and status >= 500:
+        # Cloudflare edge errors 520-527 (524 = origin response timeout) signal
+        # the proxy gave up waiting for the upstream LLM. A 2-5s cooldown lands
+        # us right back on the same overloaded origin; bump to 30s so the
+        # upstream has a real chance to drain before we retry.
+        is_cf_edge = status >= 520
         if _matches_any(msg, _OVERLOAD_PATTERNS):
             return ClassifiedError(
                 category=ErrorCategory.OVERLOAD,
@@ -209,7 +214,7 @@ def classify_error(error: Exception, provider: str = "") -> ClassifiedError:
                 should_compress=False,
                 should_rotate=False,
                 should_fallback=False,
-                cooldown_seconds=5,
+                cooldown_seconds=30 if is_cf_edge else 5,
                 message=f"Server overloaded ({provider}): {msg}",
             )
         return ClassifiedError(
@@ -218,7 +223,7 @@ def classify_error(error: Exception, provider: str = "") -> ClassifiedError:
             should_compress=False,
             should_rotate=False,
             should_fallback=False,
-            cooldown_seconds=2,
+            cooldown_seconds=30 if is_cf_edge else 2,
             message=f"Server error {status} ({provider}): {msg}",
         )
 

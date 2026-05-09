@@ -1,6 +1,6 @@
 import pytest
 
-from src.models.diff import FileDiff, FileStatus, RiskLevel
+from src.models.diff import FileChangeCategory, FileDiff, FileStatus, RiskLevel
 from src.models.config import FileClassifierConfig, SecuritySensitiveConfig
 from src.tools.file_classifier import compute_risk_score, matches_any_pattern
 
@@ -69,6 +69,71 @@ def test_risk_score_weights_sum_to_one():
     }
     total = sum(weights.values())
     assert abs(total - 1.0) < 1e-9, f"Weights must sum to 1.0, got {total}"
+
+
+def test_d_missing_skips_change_ratio_dimension():
+    # Regression (Issue 3): a brand-new upstream-only .py file used to
+    # ride the change_ratio cap straight into AUTO_RISKY (~0.42) even
+    # without any conflict. After dropping change_ratio for D_MISSING
+    # and renormalising, the same file lands well below the AUTO_RISKY
+    # boundary (0.30).
+    config = FileClassifierConfig()
+    fd = FileDiff(
+        file_path="models/openai/tools/new_handler.py",
+        file_status=FileStatus.ADDED,
+        risk_level=RiskLevel.AUTO_SAFE,
+        risk_score=0.0,
+        lines_added=120,
+        lines_deleted=0,
+        lines_changed=120,
+        conflict_count=0,
+        hunks=[],
+        is_security_sensitive=False,
+        change_category=FileChangeCategory.D_MISSING,
+    )
+    score = compute_risk_score(fd, config)
+    assert score < 0.30, (
+        f"Upstream-new file with no conflict must stay under AUTO_RISKY "
+        f"(0.30), got {score}"
+    )
+
+
+def test_risk_hint_pattern_does_not_floor_to_human_required():
+    # Regression (Issue 4): file path *containing* "credentials" used to
+    # match the strict pattern list and floor the score to 0.8 (forcing
+    # HUMAN_REQUIRED) — bricking test fixtures like
+    # ``test_validate_credentials.py``. The default config now routes
+    # such weak filename matches through ``risk_hint_patterns``, which
+    # only adds a small bump.
+    config = FileClassifierConfig()  # uses production defaults
+    fd = _make_file_diff(
+        file_path="models/openai_api_compatible/tests/test_validate_credentials.py",
+        lines_added=50,
+        lines_deleted=0,
+        lines_changed=50,
+    )
+    score = compute_risk_score(fd, config)
+    assert score < 0.7, (
+        f"Weak-signal credential filename must NOT be floored to 0.8; got {score}"
+    )
+
+
+def test_strict_security_pattern_still_floors_to_human_required():
+    # Counter-test (Issue 4): the strong-signal patterns (.env / *.pem /
+    # exact ``credentials.py``) must still floor the score so the
+    # always_require_human path keeps working for real secrets.
+    config = FileClassifierConfig()  # uses production defaults
+    for path in (
+        "src/foo/.env",
+        "src/foo/.env.local",
+        "src/foo/private.pem",
+        "src/foo/credentials.py",
+    ):
+        fd = _make_file_diff(file_path=path, lines_added=5, lines_deleted=2)
+        score = compute_risk_score(fd, config)
+        assert score >= 0.8, (
+            f"Strong-signal security path {path!r} must floor to 0.8, got {score}"
+        )
 
 
 # ---------------------------------------------------------------------------

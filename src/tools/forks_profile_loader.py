@@ -199,8 +199,13 @@ def format_analyst_context(profile: ForksProfile, file_path: str) -> str:
         lines.append("")
         lines.append("Removed domains (fork dropped these areas):")
         for domain in profile.removed_domains[:_ANALYST_MAX_DOMAINS]:
-            reason = domain.reason or "n/a"
-            lines.append(f"- {domain.name}: {reason}")
+            # Empty ``reason`` (drafter found no delete-commit evidence)
+            # is dropped here rather than padded with ``n/a`` so the LLM
+            # context isn't polluted with placeholder noise.
+            if domain.reason:
+                lines.append(f"- {domain.name}: {domain.reason}")
+            else:
+                lines.append(f"- {domain.name}")
         if len(profile.removed_domains) > _ANALYST_MAX_DOMAINS:
             extra = len(profile.removed_domains) - _ANALYST_MAX_DOMAINS
             lines.append(f"- (+{extra} more)")
@@ -227,10 +232,13 @@ def format_analyst_context(profile: ForksProfile, file_path: str) -> str:
                 f"policy={module_hit.policy.value}"
             )
         if domain_hit is not None:
-            lines.append(
-                f"- matches removed_domains[{domain_hit.name}] "
-                f"(reason={domain_hit.reason or 'n/a'})"
-            )
+            if domain_hit.reason:
+                lines.append(
+                    f"- matches removed_domains[{domain_hit.name}] "
+                    f"(reason={domain_hit.reason})"
+                )
+            else:
+                lines.append(f"- matches removed_domains[{domain_hit.name}]")
         lines.append(
             "Avoid recommending take_target on paths the fork has "
             "deliberately dropped or rewritten."

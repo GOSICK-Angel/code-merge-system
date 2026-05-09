@@ -67,6 +67,21 @@ async def _run_tui(
     tui_stdout_fd = os.dup(sys.stdout.fileno())
     tui_proc = _spawn_tui_process(ws_port, tui_stdout_fd)
 
+    if tui_proc is None:
+        # _spawn_tui_process already explained why (missing entry point /
+        # missing npx / npm install failure) on the live stdout. We must
+        # NOT mute Python stdio in this branch — that would also hide
+        # the bridge.wait_for_client timeout 30s later, which is exactly
+        # the "merge hangs silently after `Press Enter`" symptom users
+        # reported when ``tui/node_modules`` is absent.
+        console.print(
+            "[red]TUI failed to start.[/red] "
+            "Re-run with `--no-tui` to fall back to plain-text output."
+        )
+        await bridge.stop()
+        os.close(tui_stdout_fd)
+        raise SystemExit(1)
+
     _mute_python_stdio()
 
     try:
@@ -125,6 +140,58 @@ def _restore_python_stdio() -> None:
     sys.stderr = sys.__stderr__
 
 
+def _ensure_tui_deps(tui_dir: Path, stdout_fd: int) -> bool:
+    """Make sure ``tui/node_modules`` is populated before launching tsx.
+
+    First-run users frequently hit a silent hang because ``npx tsx`` will
+    happily start, fail to resolve ``react`` / ``ink`` / ``ws`` from the
+    bare ``tui/`` directory, and exit immediately — meanwhile the Python
+    side has muted stdio and is waiting on the WebSocket handshake. This
+    helper short-circuits that path: if ``node_modules`` is missing we
+    run ``npm install`` *before* muting stdio, with output piped to the
+    live terminal so progress is visible. Returns False (and prints a
+    diagnostic) on any failure so the caller can bail out cleanly.
+    """
+    node_modules = tui_dir / "node_modules"
+    if node_modules.exists():
+        return True
+
+    npm = shutil.which("npm")
+    if npm is None:
+        console.print(
+            "[yellow]npm not found; cannot install TUI dependencies.[/yellow] "
+            "Install Node.js or re-run merge with `--no-tui`."
+        )
+        return False
+
+    console.print(
+        f"[bold]Installing TUI dependencies at {tui_dir} "
+        "(first run only, ~1 min)...[/bold]"
+    )
+    try:
+        result = subprocess.run(
+            [npm, "install"],
+            cwd=str(tui_dir),
+            stdout=stdout_fd,
+            stderr=stdout_fd,
+            check=False,
+        )
+    except OSError as exc:
+        console.print(f"[red]npm install failed to launch:[/red] {exc}")
+        return False
+
+    if result.returncode != 0:
+        console.print(
+            f"[red]npm install exited with code {result.returncode}.[/red] "
+            f"Run `cd {tui_dir} && npm install` manually, or re-run merge "
+            "with `--no-tui`."
+        )
+        return False
+
+    console.print("[green]TUI dependencies installed.[/green]")
+    return True
+
+
 def _spawn_tui_process(ws_port: int, stdout_fd: int) -> subprocess.Popen[bytes] | None:
     tui_dir = Path(__file__).resolve().parents[3] / "tui"
     entry_point = tui_dir / "src" / "index.tsx"
@@ -139,6 +206,9 @@ def _spawn_tui_process(ws_port: int, stdout_fd: int) -> subprocess.Popen[bytes] 
     npx = shutil.which("npx")
     if npx is None:
         console.print("[yellow]npx not found; TUI requires Node.js.[/yellow]")
+        return None
+
+    if not _ensure_tui_deps(tui_dir, stdout_fd):
         return None
 
     try:

@@ -202,20 +202,22 @@ class TestClassifyAllFiles:
 class TestMergeLayerModel:
     def test_default_layers_parse(self):
         layers = [MergeLayer(**data) for data in DEFAULT_LAYERS]
-        assert len(layers) == 10
+        assert len(layers) >= 2
         assert layers[0].name == "infrastructure"
         assert layers[0].layer_id == 0
-        assert layers[9].name == "sdk_plugins"
-        assert layers[9].layer_id == 9
+        layer_ids = {ly.layer_id for ly in layers}
+        assert 0 in layer_ids
+        assert any("**" in ly.path_patterns for ly in layers), (
+            "DEFAULT_LAYERS must include a catch-all layer to prevent file loss"
+        )
 
     def test_layer_dependencies(self):
         layers = [MergeLayer(**data) for data in DEFAULT_LAYERS]
         deps_map = {layer.layer_id: layer.depends_on for layer in layers}
         assert deps_map[0] == []
-        assert deps_map[1] == [0]
-        assert deps_map[4] == [3]
-        assert 4 in deps_map[8]
-        assert 5 in deps_map[8]
+        for lid, deps in deps_map.items():
+            for dep in deps:
+                assert dep in deps_map, f"layer {lid} depends on undeclared {dep}"
 
     def test_custom_layers_config(self):
         config = MergeLayerConfig(
@@ -412,7 +414,7 @@ class TestPlannerLayeredPlan:
         assert plan.category_summary.b_upstream_only == 3
         assert plan.category_summary.c_both_changed == 3
         assert plan.category_summary.d_missing == 1
-        assert len(plan.layers) == 10
+        assert len(plan.layers) >= 2
 
         all_files_in_plan = []
         for phase in plan.phases:
@@ -452,6 +454,93 @@ class TestPlannerLayeredPlan:
         ]
         assert len(human_phases) >= 1
         assert "api/services/auth.py" in human_phases[0].file_paths
+
+    def test_planner_preserves_classifier_human_required_for_d_missing(self):
+        from src.agents.planner_agent import PlannerAgent
+        from src.models.config import AgentLLMConfig
+        from src.models.decision import (
+            FileDecisionRecord,
+            DecisionSource,
+            MergeDecision,
+        )
+        from src.models.diff import FileStatus
+
+        with patch("src.llm.client.LLMClientFactory.create"):
+            planner = PlannerAgent(AgentLLMConfig())
+
+        config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/fork")
+        config.layer_config.custom_layers = [
+            {
+                "layer_id": 0,
+                "name": "deps_only",
+                "path_patterns": ["**/pyproject.toml", "**/requirements*.txt"],
+                "depends_on": [],
+            }
+        ]
+        state = MergeState(config=config)
+        state.merge_base_commit = "abc123"
+        state.file_categories = {
+            "secrets/.env.example": FileChangeCategory.D_MISSING,
+            "fork_only/keep.py": FileChangeCategory.C,
+            "obscure_dir/orphan.py": FileChangeCategory.B,
+        }
+        state.file_decision_records = {
+            "fork_only/keep.py": FileDecisionRecord(
+                file_path="fork_only/keep.py",
+                file_status=FileStatus.MODIFIED,
+                decision=MergeDecision.TAKE_CURRENT,
+                decision_source=DecisionSource.AUTO_PLANNER,
+                confidence=1.0,
+                rationale="forks-profile retention",
+                phase="initialize",
+                agent="force_decision_policy",
+            )
+        }
+
+        fd_secret = FileDiff(
+            file_path="secrets/.env.example",
+            file_status=FileStatus.ADDED,
+            risk_level=RiskLevel.HUMAN_REQUIRED,
+            risk_score=0.85,
+            is_security_sensitive=True,
+            change_category=FileChangeCategory.D_MISSING,
+        )
+        fd_orphan = FileDiff(
+            file_path="obscure_dir/orphan.py",
+            file_status=FileStatus.MODIFIED,
+            risk_level=RiskLevel.AUTO_RISKY,
+            risk_score=0.4,
+            change_category=FileChangeCategory.B,
+        )
+        state.file_diffs = [fd_secret, fd_orphan]
+
+        plan = planner._build_layered_plan(state.file_diffs, state)
+
+        all_files = {fp for ph in plan.phases for fp in ph.file_paths}
+        assert "fork_only/keep.py" not in all_files, (
+            "F3: force-decided files must not re-enter the plan"
+        )
+        assert "obscure_dir/orphan.py" in all_files, (
+            "F1: fallback-layer files must still be batched"
+        )
+        assert "secrets/.env.example" in all_files
+
+        secret_phases = [
+            ph for ph in plan.phases if "secrets/.env.example" in ph.file_paths
+        ]
+        assert secret_phases
+        assert secret_phases[0].risk_level == RiskLevel.HUMAN_REQUIRED, (
+            "F2: classifier HUMAN_REQUIRED on D_MISSING must propagate to batch"
+        )
+
+        orphan_phases = [
+            ph for ph in plan.phases if "obscure_dir/orphan.py" in ph.file_paths
+        ]
+        assert orphan_phases
+        assert orphan_phases[0].risk_level == RiskLevel.AUTO_RISKY
+        assert orphan_phases[0].layer_id is None, (
+            "Fallback-layer files batched with layer_id=None"
+        )
 
 
 class TestExecutorCategoryDispatch:

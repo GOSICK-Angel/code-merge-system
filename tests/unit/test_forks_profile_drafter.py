@@ -9,7 +9,7 @@ import yaml as _yaml
 from pydantic import ValidationError
 
 from src.models.diff import ForkDivergence
-from src.models.forks_profile import ForksProfile, RewriteMergePolicy
+from src.models.forks_profile import RewriteMergePolicy
 from src.tools.forks_profile_drafter import (
     DraftedForkOnlyFeature,
     DraftedMigrationPolicy,
@@ -17,11 +17,13 @@ from src.tools.forks_profile_drafter import (
     DraftedRemovedDomain,
     DraftedRewrittenModule,
     RetentionInfo,
+    _suppress_removed_overlapping_rewritten,
     cluster_paths,
     draft_fork_only_features,
     draft_migration_policy,
     draft_removed_domains,
     draft_rewritten_modules,
+    extract_owner_repo,
     render_profile_yaml,
 )
 
@@ -68,6 +70,29 @@ class TestClusterPaths:
         assert "deep/dir/**" in globs
         assert "loose.py" in globs
 
+    def test_min_depth_default_suppresses_top_level_rollup(self) -> None:
+        # All five files live directly under ``tools/`` — at the legacy
+        # ``min_depth=1`` setting the algorithm would emit ``tools/**``,
+        # but the new default (``min_depth=2``) keeps them as orphans
+        # so the maintainer doesn't accidentally drop the entire tree.
+        paths = [f"tools/file_{i}.py" for i in range(5)]
+        out = cluster_paths(paths, min_files=3)
+        globs = sorted(c.glob for c in out)
+        assert "tools/**" not in globs
+        assert globs == sorted(paths)
+
+    def test_min_depth_one_restores_legacy_rollup(self) -> None:
+        paths = [f"tools/file_{i}.py" for i in range(5)]
+        out = cluster_paths(paths, min_files=3, min_depth=1)
+        assert len(out) == 1
+        assert out[0].glob == "tools/**"
+
+    def test_min_depth_two_still_clusters_at_subtree(self) -> None:
+        paths = [f"tools/comfyui/file_{i}.py" for i in range(5)]
+        out = cluster_paths(paths, min_files=3)
+        assert len(out) == 1
+        assert out[0].glob == "tools/comfyui/**"
+
 
 class TestDraftForkOnlyFeatures:
     def test_picks_only_fork_only(self) -> None:
@@ -99,26 +124,91 @@ class TestDraftRemovedDomains:
             lookup_calls.append(path)
             return ("abcdef1234", "remove billing layer")
 
-        out = draft_removed_domains(divergence, delete_commit_lookup=lookup)
-        assert len(out) == 1
-        domain = out[0]
+        kept, filtered = draft_removed_domains(divergence, delete_commit_lookup=lookup)
+        assert len(kept) == 1
+        domain = kept[0]
         assert domain.name == "payments"
         assert domain.paths == ("svc/payments/**",)
         assert domain.removed_in == "abcdef1234"
         assert "remove billing layer" in domain.reason
         assert "abcdef1" in domain.reason
         assert lookup_calls == ["svc/payments/file0.py"]
+        assert filtered == ()
 
     def test_no_lookup_callable(self) -> None:
         divergence = {f"x/y/f{i}.py": ForkDivergence.FORK_DELETED for i in range(3)}
-        out = draft_removed_domains(divergence, delete_commit_lookup=None)
-        assert len(out) == 1
-        assert out[0].removed_in == ""
-        assert "TODO" in out[0].reason
+        kept, filtered = draft_removed_domains(divergence, delete_commit_lookup=None)
+        assert len(kept) == 1
+        assert kept[0].removed_in == ""
+        # Empty when no commit evidence — drafter no longer emits a
+        # "TODO" sentinel that would leak into LLM prompts.
+        assert kept[0].reason == ""
+        # No lookup → cannot determine evidence → no filtering.
+        assert filtered == ()
 
     def test_no_deleted_returns_empty(self) -> None:
         divergence = {"a.py": ForkDivergence.FORK_ONLY}
-        assert draft_removed_domains(divergence) == ()
+        assert draft_removed_domains(divergence) == ((), ())
+
+    def test_duplicate_domain_names_get_disambiguated(self) -> None:
+        # Two distinct cluster subtrees share the basename ``tools``;
+        # uniquification walks up the path so the yaml is unambiguous.
+        divergence = {
+            **{f"tools/a/b/f{i}.py": ForkDivergence.FORK_DELETED for i in range(4)},
+            **{
+                f"tools/comfyui/tools/f{i}.py": ForkDivergence.FORK_DELETED
+                for i in range(4)
+            },
+        }
+        kept, _ = draft_removed_domains(divergence, delete_commit_lookup=None)
+        names = sorted(d.name for d in kept)
+        # The two clusters cannot both be ``tools``.
+        assert len(names) == len(set(names))
+
+    def test_clusters_without_evidence_are_filtered(self) -> None:
+        # Models a real dify-plugins case: tree-diff says fork is missing
+        # this file, but no fork commit ever deleted it (it's an
+        # upstream-added file the fork hasn't pulled). With evidence
+        # required (default), the cluster is dropped from the kept set
+        # and surfaced via the filtered list instead.
+        divergence = {f"x/y/file{i}.py": ForkDivergence.FORK_DELETED for i in range(4)}
+
+        def lookup(_path: str) -> tuple[str, str] | None:
+            return None
+
+        kept, filtered = draft_removed_domains(divergence, delete_commit_lookup=lookup)
+        assert kept == ()
+        assert filtered == ("x/y/**",)
+
+    def test_partial_evidence_keeps_cluster(self) -> None:
+        # Single member with a delete commit is enough to count as
+        # genuine fork-policy evidence.
+        divergence = {f"x/y/file{i}.py": ForkDivergence.FORK_DELETED for i in range(4)}
+
+        def lookup(path: str) -> tuple[str, str] | None:
+            return (
+                ("abcdef1", "intentional drop") if path.endswith("file0.py") else None
+            )
+
+        kept, filtered = draft_removed_domains(divergence, delete_commit_lookup=lookup)
+        assert len(kept) == 1
+        assert kept[0].removed_in == "abcdef1"
+        assert filtered == ()
+
+    def test_evidence_filter_can_be_disabled(self) -> None:
+        # CLI escape hatch: keep all clusters even without evidence.
+        divergence = {f"x/y/file{i}.py": ForkDivergence.FORK_DELETED for i in range(4)}
+
+        def lookup(_path: str) -> tuple[str, str] | None:
+            return None
+
+        kept, filtered = draft_removed_domains(
+            divergence,
+            delete_commit_lookup=lookup,
+            require_commit_evidence=False,
+        )
+        assert len(kept) == 1
+        assert filtered == ()
 
 
 class TestDraftRewrittenModules:
@@ -175,6 +265,40 @@ class TestDraftRewrittenModules:
         out = draft_rewritten_modules(retention)
         assert len(out) == 1
         assert out[0].path == "svc/active/area.py"
+        # High retention triggered only by commit churn → light policy
+        # so AI flow still runs (with stash) instead of forcing human.
+        assert out[0].policy == RewriteMergePolicy.TAKE_CURRENT_WITH_DIFF_NOTE
+
+    def test_many_commits_with_zero_diff_filtered(self) -> None:
+        # Real dify case: ``.gitignore`` was touched by >=5 fork commits
+        # but never actually modified (retention=100%, lines_changed=0).
+        # It must NOT be flagged as rewritten — there's nothing to rewrite,
+        # so the file should flow through the default AI path instead of
+        # being short-circuited to ``take_current_with_diff_note``.
+        retention = [
+            RetentionInfo(
+                path=".gitignore",
+                lines_at_base=42,
+                lines_changed=0,
+                retention=1.0,
+                fork_only_commits=8,
+            )
+        ]
+        assert draft_rewritten_modules(retention) == ()
+
+    def test_partial_retention_picks_semantic_merge_alert(self) -> None:
+        retention = [
+            RetentionInfo(
+                path="svc/auth/handler.py",
+                lines_at_base=200,
+                lines_changed=120,
+                retention=0.55,
+                fork_only_commits=6,
+            )
+        ]
+        out = draft_rewritten_modules(retention)
+        assert len(out) == 1
+        assert out[0].policy == RewriteMergePolicy.SEMANTIC_MERGE_WITH_ALERT
 
     def test_clusters_multiple_qualifying_files(self) -> None:
         retention = [
@@ -191,6 +315,72 @@ class TestDraftRewrittenModules:
         assert len(out) == 1
         assert out[0].path == "svc/auth/**"
         assert "5 file(s)" in out[0].note
+
+
+class TestSuppressRemovedOverlappingRewritten:
+    def test_drops_removed_when_rewritten_covers_same_subtree(self) -> None:
+        removed = (
+            DraftedRemovedDomain(
+                name="models",
+                paths=("models/**",),
+                reason="",
+                removed_in="",
+            ),
+        )
+        rewritten = (
+            DraftedRewrittenModule(
+                path="models/azure_openai/**",
+                policy=RewriteMergePolicy.ESCALATE_HUMAN,
+                note="",
+            ),
+        )
+        out = _suppress_removed_overlapping_rewritten(removed, rewritten)
+        assert out == ()
+
+    def test_keeps_removed_when_rewritten_is_disjoint(self) -> None:
+        removed = (
+            DraftedRemovedDomain(
+                name="bug-template",
+                paths=(".github/ISSUE_TEMPLATE/bug_report.yml",),
+                reason="",
+                removed_in="",
+            ),
+        )
+        rewritten = (
+            DraftedRewrittenModule(
+                path="models/azure_openai/**",
+                policy=RewriteMergePolicy.ESCALATE_HUMAN,
+                note="",
+            ),
+        )
+        out = _suppress_removed_overlapping_rewritten(removed, rewritten)
+        assert out == removed
+
+
+class TestExtractOwnerRepo:
+    def test_ssh_remote(self) -> None:
+        assert (
+            extract_owner_repo("git@github.com:cvte/dify-plugins.git")
+            == "cvte/dify-plugins"
+        )
+
+    def test_https_remote_with_dot_git(self) -> None:
+        assert (
+            extract_owner_repo("https://github.com/cvte/dify-plugins.git")
+            == "cvte/dify-plugins"
+        )
+
+    def test_https_remote_no_suffix(self) -> None:
+        assert (
+            extract_owner_repo("https://github.com/cvte/dify-plugins")
+            == "cvte/dify-plugins"
+        )
+
+    def test_empty_string_returns_none(self) -> None:
+        assert extract_owner_repo("") is None
+
+    def test_unrecognized_url_returns_none(self) -> None:
+        assert extract_owner_repo("not a url") is None
 
 
 class TestDraftMigrationPolicy:

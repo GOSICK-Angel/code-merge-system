@@ -164,6 +164,19 @@ def get_global_env_path() -> Path:
     return Path("~/.config/code-merge-system/.env").expanduser()
 
 
+def get_global_config_path() -> Path:
+    """Global config defaults: ~/.config/code-merge-system/config.yaml.
+
+    Consulted by the first-run wizard only — project
+    ``<repo>/.merge/config.yaml`` always wins on subsequent runs.
+    Global defaults seed *new* project yamls; they do not override
+    existing ones.
+    """
+    if _HAS_PLATFORMDIRS:
+        return Path(_pd.user_config_dir("code-merge-system")) / "config.yaml"
+    return Path("~/.config/code-merge-system/config.yaml").expanduser()
+
+
 def ensure_merge_dir(repo_path: str = ".") -> Path:
     """Create <repo>/.merge/ and write .gitignore if missing.  Returns the .merge/ Path."""
     merge_dir = get_project_merge_dir(repo_path)

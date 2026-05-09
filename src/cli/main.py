@@ -4,9 +4,38 @@ import yaml
 import click
 from pathlib import Path
 from rich.console import Console
+
+try:
+    import readline  # noqa: F401
+except ImportError:
+    # Windows lacks stdlib readline; arrow-key editing degrades but CLI still runs.
+    pass
 from src.cli.commands.forks_profile import forks_profile as _forks_profile_group
 from src.cli.env import load_env
+from src.cli.paths import get_project_merge_dir
 from src.models.config import MergeConfig
+
+
+def _load_repo_env(repo_path: str) -> None:
+    """Pull ``<repo>/.merge/.env`` into ``os.environ`` if present.
+
+    ``cli()`` already ran ``load_env()`` once at startup, but that helper
+    points at the code-merge-system install tree's own ``.env`` — not the
+    target repository the user is merging. Forks that ship a project-
+    scoped ``.merge/.env`` (custom OpenAI/Anthropic gateway URL,
+    per-project API keys, etc.) need it loaded *before* any LLM client is
+    constructed; otherwise clients fall back to the public default
+    endpoints and confusing model-name errors surface (see the
+    dify-plugins planner_judge failure 2026-05-08).
+    """
+    env_path = get_project_merge_dir(repo_path) / ".env"
+    if not env_path.exists():
+        return
+    try:
+        from dotenv import load_dotenv
+    except ImportError:  # pragma: no cover — python-dotenv is a hard dep
+        return
+    load_dotenv(env_path, override=False)
 
 
 console = Console()
@@ -76,6 +105,8 @@ def merge_command(
     auto_decisions: str | None,
 ) -> None:
     """Merge TARGET_BRANCH into the current branch (one-stop flow)."""
+    _load_repo_env(".")
+
     from src.cli.commands.setup import detect_or_setup
 
     config = detect_or_setup(
@@ -128,6 +159,7 @@ def resume_command(
     run_id: str | None, checkpoint: str | None, decisions: str | None
 ) -> None:
     """Resume execution from a checkpoint"""
+    _load_repo_env(".")
     from src.cli.commands.resume import resume_command_impl
 
     resume_command_impl(run_id, checkpoint, decisions)

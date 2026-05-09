@@ -129,8 +129,7 @@ class TestDetectOrSetup:
             encoding="utf-8",
         )
 
-        with patch("src.cli.commands.setup.Prompt") as mock_prompt:
-            mock_prompt.ask.return_value = ""
+        with patch("src.cli.commands.setup._ask", return_value=""):
             result = detect_or_setup("new/upstream", repo_path=str(tmp_path))
 
         assert isinstance(result, MergeConfig)
@@ -237,6 +236,49 @@ class TestMergeCommand:
         mock_run.assert_called_once_with(
             fake_config, False, ci=True, auto_decisions=None
         )
+
+    def test_merge_loads_repo_env_before_setup(self, tmp_path) -> None:
+        # Regression: the dify-plugins planner_judge silently failed
+        # because <repo>/.merge/.env was never loaded before LLM clients
+        # were constructed. ``merge_command`` must load it ahead of
+        # detect_or_setup so OPENAI_BASE_URL et al. land in os.environ.
+        #
+        # We use a unique sentinel key (not OPENAI_BASE_URL) so the
+        # assertion isn't shadowed by an install-tree .env or a developer
+        # shell that already exports the production keys.
+        import os as _os
+
+        from src.cli.main import cli
+
+        sentinel_key = "MERGE_TEST_REPO_ENV_SENTINEL"
+        sentinel_val = "loaded_from_repo_env"
+
+        merge_dir = tmp_path / ".merge"
+        merge_dir.mkdir()
+        env_file = merge_dir / ".env"
+        env_file.write_text(f'{sentinel_key}="{sentinel_val}"\n', encoding="utf-8")
+
+        fake_config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/x")
+        runner = CliRunner()
+        _os.environ.pop(sentinel_key, None)
+
+        try:
+            with (
+                patch(
+                    "src.cli.commands.setup.detect_or_setup", return_value=fake_config
+                ),
+                patch("src.cli.commands.run.run_command_impl"),
+                patch(
+                    "src.cli.main.get_project_merge_dir",
+                    return_value=tmp_path / ".merge",
+                ),
+            ):
+                result = runner.invoke(cli, ["merge", "upstream/main", "--no-tui"])
+
+            assert result.exit_code == 0, result.output
+            assert _os.environ.get(sentinel_key) == sentinel_val
+        finally:
+            _os.environ.pop(sentinel_key, None)
 
 
 class TestDefaultGroup:

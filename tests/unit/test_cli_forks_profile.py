@@ -241,6 +241,10 @@ class TestInit:
                 "1",
                 "--migration-glob",
                 "**/migrations/*.sql",
+                # Explicit stdout sentinel — without it the command now
+                # writes to <repo>/.merge/forks-profile.yaml by default.
+                "-o",
+                "-",
             ],
         )
         assert result.exit_code == 0, result.output
@@ -290,6 +294,130 @@ class TestInit:
         )
         assert result.exit_code == 2
         assert out.read_text(encoding="utf-8") == "placeholder\n"
+
+    def test_default_refs_come_from_config_yaml(self, tmp_path: Path):
+        # Init must default --upstream/--fork to MergeConfig.upstream_ref
+        # / fork_ref so the drafter's base computation aligns with what
+        # `merge <target>` actually uses; otherwise (issue surfaced
+        # 2026-05-08) base drift makes upstream-only-added files look
+        # fork-deleted in the rendered yaml.
+        base, upstream, fork = _init_git_repo_with_divergence(tmp_path)
+        merge_dir = tmp_path / ".merge"
+        merge_dir.mkdir()
+        (merge_dir / "config.yaml").write_text(
+            f"upstream_ref: {upstream}\nfork_ref: {fork}\n",
+            encoding="utf-8",
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "forks-profile",
+                "init",
+                "--repo",
+                str(tmp_path),
+                "--merge-base",
+                base,
+                "--cluster-min-files",
+                "3",
+                "--rewrite-min-fork-commits",
+                "1",
+                "--migration-glob",
+                "**/migrations/*.sql",
+                "-o",
+                "-",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        # Header line is `# Inputs: <upstream>..<fork> (merge-base ...)`
+        assert f"# Inputs: {upstream}..{fork}" in result.output
+
+    def test_explicit_flags_override_config(self, tmp_path: Path):
+        base, upstream, fork = _init_git_repo_with_divergence(tmp_path)
+        merge_dir = tmp_path / ".merge"
+        merge_dir.mkdir()
+        (merge_dir / "config.yaml").write_text(
+            "upstream_ref: should-be-ignored\nfork_ref: should-be-ignored\n",
+            encoding="utf-8",
+        )
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "forks-profile",
+                "init",
+                "--repo",
+                str(tmp_path),
+                "--upstream",
+                upstream,
+                "--fork",
+                fork,
+                "--merge-base",
+                base,
+                "-o",
+                "-",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert f"# Inputs: {upstream}..{fork}" in result.output
+
+    def test_default_output_path_writes_to_repo_merge_dir(self, tmp_path: Path):
+        # No -o: the draft must land at <repo>/.merge/forks-profile.yaml
+        # so the runtime loader picks it up without further user action.
+        base, upstream, fork = _init_git_repo_with_divergence(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "forks-profile",
+                "init",
+                "--repo",
+                str(tmp_path),
+                "--upstream",
+                upstream,
+                "--fork",
+                fork,
+                "--merge-base",
+                base,
+                "--cluster-min-files",
+                "3",
+                "--rewrite-min-fork-commits",
+                "1",
+                "--migration-glob",
+                "**/migrations/*.sql",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        out_path = tmp_path / ".merge" / "forks-profile.yaml"
+        assert out_path.exists(), result.output
+        content = out_path.read_text(encoding="utf-8")
+        assert "version: 1" in content
+        assert "removed_domains:" in content
+
+    def test_default_output_path_refuses_when_present(self, tmp_path: Path):
+        base, upstream, fork = _init_git_repo_with_divergence(tmp_path)
+        # Pre-create the canonical path; init must refuse to overwrite.
+        existing = tmp_path / ".merge" / "forks-profile.yaml"
+        existing.parent.mkdir(parents=True)
+        existing.write_text("placeholder\n", encoding="utf-8")
+        runner = CliRunner()
+        result = runner.invoke(
+            cli,
+            [
+                "forks-profile",
+                "init",
+                "--repo",
+                str(tmp_path),
+                "--upstream",
+                upstream,
+                "--fork",
+                fork,
+                "--merge-base",
+                base,
+            ],
+        )
+        assert result.exit_code == 2
+        assert existing.read_text(encoding="utf-8") == "placeholder\n"
 
     def test_output_to_new_file_writes(self, tmp_path: Path):
         base, upstream, fork = _init_git_repo_with_divergence(tmp_path)

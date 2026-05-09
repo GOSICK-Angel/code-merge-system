@@ -8,6 +8,7 @@ from src.models.plan import (
     MergePlan,
     MergePhase,
     PhaseFileBatch,
+    PlanIntegrityError,
     RiskSummary,
     CategorySummary,
     MergeLayer,
@@ -116,13 +117,19 @@ class PlannerAgent(BaseAgent):
         categories = state.file_categories
         diffs_by_path = {fd.file_path: fd for fd in file_diffs}
 
+        decided_paths: set[str] = set(
+            getattr(state, "file_decision_records", None) or {}
+        )
+
         actionable = {
             FileChangeCategory.B,
             FileChangeCategory.C,
             FileChangeCategory.D_MISSING,
         }
         actionable_files = {
-            fp: cat for fp, cat in categories.items() if cat in actionable
+            fp: cat
+            for fp, cat in categories.items()
+            if cat in actionable and fp not in decided_paths
         }
 
         detector = ShadowConflictDetector.from_config(state.config.shadow_rules_extra)
@@ -133,34 +140,69 @@ class PlannerAgent(BaseAgent):
             shadow_paths.add(sc.path_a)
             shadow_paths.add(sc.path_b)
 
-        file_layer_map = self._assign_files_to_layers(
-            list(actionable_files.keys()), layers
-        )
+        layer_assignable = [
+            fp
+            for fp, cat in actionable_files.items()
+            if cat in (FileChangeCategory.B, FileChangeCategory.C)
+        ]
+        file_layer_map = self._assign_files_to_layers(layer_assignable, layers)
+        real_layer_ids = {ly.layer_id for ly in layers}
+        fallback_paths: list[str] = []
+        for lid in list(file_layer_map.keys()):
+            if lid not in real_layer_ids:
+                fallback_paths.extend(file_layer_map.pop(lid))
 
         phases: list[PhaseFileBatch] = []
 
-        # O-D1: D-missing fast-track — pure new files (no shadow conflict)
-        # carry no dependency and can land unconditionally at layer_id=None,
-        # so they never get dropped when a downstream layer's dependencies
-        # fail to complete. Files that overlap a shadow conflict still
-        # follow the per-layer HUMAN_REVIEW path below.
-        d_missing_fast_track = [
+        category_fallback = {
+            FileChangeCategory.B: RiskLevel.AUTO_SAFE,
+            FileChangeCategory.D_MISSING: RiskLevel.AUTO_SAFE,
+            FileChangeCategory.C: RiskLevel.AUTO_RISKY,
+        }
+
+        d_missing_all = [
             fp
             for fp, cat in actionable_files.items()
-            if cat == FileChangeCategory.D_MISSING and fp not in shadow_paths
+            if cat == FileChangeCategory.D_MISSING
         ]
-        if d_missing_fast_track:
-            phases.append(
-                PhaseFileBatch(
-                    batch_id=str(uuid4()),
-                    phase=MergePhase.AUTO_MERGE,
-                    file_paths=sorted(d_missing_fast_track),
-                    risk_level=RiskLevel.AUTO_SAFE,
-                    layer_id=None,
-                    change_category=FileChangeCategory.D_MISSING,
-                    can_parallelize=True,
-                )
+        if d_missing_all:
+            d_safe, d_risky, d_human = self._split_by_risk_level(
+                d_missing_all,
+                diffs_by_path,
+                shadow_paths,
+                fallback_risk=category_fallback[FileChangeCategory.D_MISSING],
             )
+            self._emit_risk_split_batches(
+                phases,
+                d_safe,
+                d_risky,
+                d_human,
+                layer_id=None,
+                change_category=FileChangeCategory.D_MISSING,
+            )
+
+        if fallback_paths:
+            fb_by_cat: dict[FileChangeCategory, list[str]] = {}
+            for fp in fallback_paths:
+                fb_by_cat.setdefault(actionable_files[fp], []).append(fp)
+            for cat in (FileChangeCategory.B, FileChangeCategory.C):
+                paths = fb_by_cat.get(cat, [])
+                if not paths:
+                    continue
+                safe, risky, human = self._split_by_risk_level(
+                    paths,
+                    diffs_by_path,
+                    shadow_paths,
+                    fallback_risk=category_fallback[cat],
+                )
+                self._emit_risk_split_batches(
+                    phases,
+                    safe,
+                    risky,
+                    human,
+                    layer_id=None,
+                    change_category=cat,
+                )
 
         for layer in layers:
             layer_files = file_layer_map.get(layer.layer_id, [])
@@ -172,111 +214,29 @@ class PlannerAgent(BaseAgent):
                 cat = actionable_files[fp]
                 by_category.setdefault(cat, []).append(fp)
 
-            b_files_all = by_category.get(FileChangeCategory.B, [])
-            b_files = [fp for fp in b_files_all if fp not in shadow_paths]
-            b_shadow_files = [fp for fp in b_files_all if fp in shadow_paths]
-            if b_files:
-                phases.append(
-                    PhaseFileBatch(
-                        batch_id=str(uuid4()),
-                        phase=MergePhase.AUTO_MERGE,
-                        file_paths=sorted(b_files),
-                        risk_level=RiskLevel.AUTO_SAFE,
-                        layer_id=layer.layer_id,
-                        change_category=FileChangeCategory.B,
-                        can_parallelize=True,
-                    )
+            for change_cat in (FileChangeCategory.B, FileChangeCategory.C):
+                cat_paths = by_category.get(change_cat, [])
+                if not cat_paths:
+                    continue
+                safe, risky, human = self._split_by_risk_level(
+                    cat_paths,
+                    diffs_by_path,
+                    shadow_paths,
+                    fallback_risk=category_fallback[change_cat],
                 )
-            if b_shadow_files:
-                phases.append(
-                    PhaseFileBatch(
-                        batch_id=str(uuid4()),
-                        phase=MergePhase.HUMAN_REVIEW,
-                        file_paths=sorted(b_shadow_files),
-                        risk_level=RiskLevel.HUMAN_REQUIRED,
-                        layer_id=layer.layer_id,
-                        change_category=FileChangeCategory.B,
-                        can_parallelize=False,
-                    )
+                self._emit_risk_split_batches(
+                    phases,
+                    safe,
+                    risky,
+                    human,
+                    layer_id=layer.layer_id,
+                    change_category=change_cat,
                 )
-
-            d_files_all = by_category.get(FileChangeCategory.D_MISSING, [])
-            # O-D1: non-shadow D-missing files were already emitted into the
-            # fast-track batch above; only shadow-conflict ones need per-layer
-            # human review here.
-            d_shadow_files = [fp for fp in d_files_all if fp in shadow_paths]
-            if d_shadow_files:
-                phases.append(
-                    PhaseFileBatch(
-                        batch_id=str(uuid4()),
-                        phase=MergePhase.HUMAN_REVIEW,
-                        file_paths=sorted(d_shadow_files),
-                        risk_level=RiskLevel.HUMAN_REQUIRED,
-                        layer_id=layer.layer_id,
-                        change_category=FileChangeCategory.D_MISSING,
-                        can_parallelize=False,
-                    )
-                )
-
-            c_files = by_category.get(FileChangeCategory.C, [])
-            if c_files:
-                c_safe = []
-                c_risky = []
-                c_human = []
-                for fp in c_files:
-                    if fp in shadow_paths:
-                        c_human.append(fp)
-                        continue
-                    fd = diffs_by_path.get(fp)
-                    if fd is None:
-                        c_risky.append(fp)
-                        continue
-                    if fd.risk_level == RiskLevel.HUMAN_REQUIRED:
-                        c_human.append(fp)
-                    elif fd.risk_level == RiskLevel.AUTO_RISKY:
-                        c_risky.append(fp)
-                    else:
-                        c_safe.append(fp)
-
-                if c_safe:
-                    phases.append(
-                        PhaseFileBatch(
-                            batch_id=str(uuid4()),
-                            phase=MergePhase.AUTO_MERGE,
-                            file_paths=sorted(c_safe),
-                            risk_level=RiskLevel.AUTO_SAFE,
-                            layer_id=layer.layer_id,
-                            change_category=FileChangeCategory.C,
-                            can_parallelize=True,
-                        )
-                    )
-                if c_risky:
-                    phases.append(
-                        PhaseFileBatch(
-                            batch_id=str(uuid4()),
-                            phase=MergePhase.CONFLICT_ANALYSIS,
-                            file_paths=sorted(c_risky),
-                            risk_level=RiskLevel.AUTO_RISKY,
-                            layer_id=layer.layer_id,
-                            change_category=FileChangeCategory.C,
-                            can_parallelize=True,
-                        )
-                    )
-                if c_human:
-                    phases.append(
-                        PhaseFileBatch(
-                            batch_id=str(uuid4()),
-                            phase=MergePhase.HUMAN_REVIEW,
-                            file_paths=sorted(c_human),
-                            risk_level=RiskLevel.HUMAN_REQUIRED,
-                            layer_id=layer.layer_id,
-                            change_category=FileChangeCategory.C,
-                            can_parallelize=False,
-                        )
-                    )
 
         cat_summary = self._build_category_summary(categories)
         risk_summary = self._build_risk_summary(file_diffs, actionable_files)
+
+        self._assert_plan_integrity(phases, actionable_files, decided_paths)
 
         merge_base = state.merge_base_commit
         if not merge_base and hasattr(state, "_merge_base"):
@@ -344,7 +304,9 @@ class PlannerAgent(BaseAgent):
         result: dict[int, list[str]] = {}
         assigned: set[str] = set()
 
-        for layer in layers:
+        ordered = sorted(layers, key=self._layer_specificity_key)
+
+        for layer in ordered:
             for fp in file_paths:
                 if fp in assigned:
                     continue
@@ -360,6 +322,11 @@ class PlannerAgent(BaseAgent):
 
         return result
 
+    @staticmethod
+    def _layer_specificity_key(layer: MergeLayer) -> tuple[int, int]:
+        has_catchall = any(p == "**" or p == "*" for p in layer.path_patterns)
+        return (1 if has_catchall else 0, layer.layer_id)
+
     def _matches_layer(self, file_path: str, patterns: list[str]) -> bool:
         for pattern in patterns:
             if fnmatch.fnmatch(file_path, pattern):
@@ -372,6 +339,130 @@ class PlannerAgent(BaseAgent):
                 if fnmatch.fnmatch(partial + "/", pattern.rstrip("*")):
                     return True
         return False
+
+    @staticmethod
+    def _split_by_risk_level(
+        paths: list[str],
+        diffs_by_path: dict[str, FileDiff],
+        shadow_paths: set[str],
+        *,
+        fallback_risk: RiskLevel = RiskLevel.AUTO_SAFE,
+    ) -> tuple[list[str], list[str], list[str]]:
+        safe: list[str] = []
+        risky: list[str] = []
+        human: list[str] = []
+        bucket = {
+            RiskLevel.AUTO_SAFE: safe,
+            RiskLevel.AUTO_RISKY: risky,
+            RiskLevel.HUMAN_REQUIRED: human,
+        }
+        for fp in paths:
+            if fp in shadow_paths:
+                human.append(fp)
+                continue
+            fd = diffs_by_path.get(fp)
+            if fd is None:
+                bucket.get(fallback_risk, safe).append(fp)
+                continue
+            rl = fd.risk_level
+            if rl == RiskLevel.HUMAN_REQUIRED:
+                human.append(fp)
+            elif rl == RiskLevel.AUTO_RISKY:
+                risky.append(fp)
+            else:
+                safe.append(fp)
+        return safe, risky, human
+
+    @staticmethod
+    def _assert_plan_integrity(
+        phases: list[PhaseFileBatch],
+        actionable_files: dict[str, FileChangeCategory],
+        decided_paths: set[str],
+    ) -> None:
+        expected = set(actionable_files.keys())
+        got: set[str] = set()
+        duplicates: list[str] = []
+        for batch in phases:
+            for fp in batch.file_paths:
+                if fp in got:
+                    duplicates.append(fp)
+                got.add(fp)
+
+        missing = expected - got
+        ghosts = got - expected
+        decided_in_plan = got & decided_paths
+
+        if missing or ghosts or duplicates or decided_in_plan:
+            problems: list[str] = []
+            if missing:
+                sample = sorted(missing)[:10]
+                problems.append(
+                    f"missing {len(missing)} actionable files (sample: {sample})"
+                )
+            if ghosts:
+                sample = sorted(ghosts)[:10]
+                problems.append(
+                    f"ghost {len(ghosts)} non-actionable files in plan (sample: {sample})"
+                )
+            if duplicates:
+                sample = sorted(set(duplicates))[:10]
+                problems.append(
+                    f"duplicate {len(duplicates)} file batchings (sample: {sample})"
+                )
+            if decided_in_plan:
+                sample = sorted(decided_in_plan)[:10]
+                problems.append(
+                    f"already-decided {len(decided_in_plan)} files re-entered plan "
+                    f"(sample: {sample})"
+                )
+            raise PlanIntegrityError("; ".join(problems))
+
+    @staticmethod
+    def _emit_risk_split_batches(
+        phases: list[PhaseFileBatch],
+        safe: list[str],
+        risky: list[str],
+        human: list[str],
+        *,
+        layer_id: int | None,
+        change_category: FileChangeCategory,
+    ) -> None:
+        if safe:
+            phases.append(
+                PhaseFileBatch(
+                    batch_id=str(uuid4()),
+                    phase=MergePhase.AUTO_MERGE,
+                    file_paths=sorted(safe),
+                    risk_level=RiskLevel.AUTO_SAFE,
+                    layer_id=layer_id,
+                    change_category=change_category,
+                    can_parallelize=True,
+                )
+            )
+        if risky:
+            phases.append(
+                PhaseFileBatch(
+                    batch_id=str(uuid4()),
+                    phase=MergePhase.CONFLICT_ANALYSIS,
+                    file_paths=sorted(risky),
+                    risk_level=RiskLevel.AUTO_RISKY,
+                    layer_id=layer_id,
+                    change_category=change_category,
+                    can_parallelize=True,
+                )
+            )
+        if human:
+            phases.append(
+                PhaseFileBatch(
+                    batch_id=str(uuid4()),
+                    phase=MergePhase.HUMAN_REVIEW,
+                    file_paths=sorted(human),
+                    risk_level=RiskLevel.HUMAN_REQUIRED,
+                    layer_id=layer_id,
+                    change_category=change_category,
+                    can_parallelize=False,
+                )
+            )
 
     def _build_category_summary(
         self, categories: dict[str, FileChangeCategory]
@@ -407,12 +498,12 @@ class PlannerAgent(BaseAgent):
         diffs_map = {fd.file_path: fd for fd in file_diffs}
 
         for fp, cat in actionable.items():
-            if cat == FileChangeCategory.B or cat == FileChangeCategory.D_MISSING:
-                auto_safe += 1
-                continue
             fd = diffs_map.get(fp)
             if fd is None:
-                auto_risky += 1
+                if cat == FileChangeCategory.C:
+                    auto_risky += 1
+                else:
+                    auto_safe += 1
                 continue
             rl = fd.risk_level
             if rl == RiskLevel.AUTO_SAFE:

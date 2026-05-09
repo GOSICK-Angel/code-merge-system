@@ -45,6 +45,11 @@ class AgentLLMConfig(BaseModel):
         "Files above this threshold are skipped to avoid context-window blowups "
         "and escalated to human review instead.",
     )
+    reasoning_effort: str | None = Field(
+        default=None,
+        description="OpenAI reasoning-model effort hint ('low', 'medium', 'high'). "
+        "Only sent when explicitly set — leave None for proxies that do not support it.",
+    )
     fallback: Optional[AgentLLMConfig] = Field(
         default=None,
         description="O-1/O-5: Optional fallback provider config activated when the "
@@ -74,15 +79,16 @@ class AgentsLLMConfig(BaseModel):
     planner_judge: AgentLLMConfig = Field(
         default_factory=lambda: AgentLLMConfig(
             provider="openai",
-            model="gpt-4o",
-            max_tokens=2048,
+            model="gpt-5.4",
+            max_tokens=32768,
+            reasoning_effort="medium",
             api_key_env="OPENAI_API_KEY",
         )
     )
     conflict_analyst: AgentLLMConfig = Field(
         default_factory=lambda: AgentLLMConfig(
             provider="anthropic",
-            model="claude-sonnet-4-6",
+            model="claude-opus-4-6",
             max_tokens=4096,
             api_key_env="ANTHROPIC_API_KEY",
         )
@@ -90,9 +96,10 @@ class AgentsLLMConfig(BaseModel):
     executor: AgentLLMConfig = Field(
         default_factory=lambda: AgentLLMConfig(
             provider="openai",
-            model="gpt-4o",
+            model="gpt-5.4",
             temperature=0.1,
-            max_tokens=4096,
+            max_tokens=32768,
+            reasoning_effort="medium",
             api_key_env="OPENAI_API_KEY",
         )
     )
@@ -140,18 +147,54 @@ class ThresholdConfig(BaseModel):
 
 
 class SecuritySensitiveConfig(BaseModel):
+    # Strong-signal paths: matching one of these floors the risk_score
+    # to 0.8 and, with ``always_require_human``, forces the file into
+    # the human-review bucket. Keep this list narrow — only patterns
+    # where the *file itself* is almost certainly sensitive material
+    # (env files, key/cert files, exact-named credential modules).
+    # Wildcard "this filename mentions secrets" globs belong in
+    # ``risk_hint_patterns`` instead so test fixtures and pure-logic
+    # helpers don't get bricked into manual review.
     patterns: list[str] = Field(
+        default_factory=lambda: [
+            "**/.env",
+            "**/.env.*",
+            "**/*.pem",
+            "**/*.key",
+            "**/credentials.py",
+            "**/credentials.ts",
+            "**/credentials.go",
+            "**/credentials.rb",
+            "**/credentials.java",
+            "**/secrets.py",
+            "**/secrets.ts",
+            "**/secrets.go",
+            "**/secrets.rb",
+            "**/secrets.java",
+            "**/auth/credentials/**",
+            "**/auth/secrets/**",
+        ]
+    )
+    always_require_human: bool = True
+
+    # Weak-signal paths: matching one of these does NOT floor the score
+    # or force human review — the path *might* be sensitive, but it
+    # might just be a test, a doc, or a logically-named helper. Hits
+    # add ``risk_hint_bump`` to the rule risk score, which usually nudges
+    # the file from AUTO_SAFE into AUTO_RISKY so ConflictAnalyst LLM
+    # examines the diff. The LLM's blended score (compute_llm_risk_score)
+    # then has the final word.
+    risk_hint_patterns: list[str] = Field(
         default_factory=lambda: [
             "**/auth/**",
             "**/security/**",
             "**/*secret*",
             "**/*credential*",
             "**/*password*",
-            "**/*.pem",
-            "**/*.key",
+            "**/*token*",
         ]
     )
-    always_require_human: bool = True
+    risk_hint_bump: float = Field(default=0.15, ge=0.0, le=0.5)
 
 
 class FileClassifierConfig(BaseModel):

@@ -40,15 +40,16 @@ DEFAULT_LAYERS: list[dict[str, Any]] = [
     {
         "layer_id": 0,
         "name": "infrastructure",
-        "description": "Docker, CI/CD, dev scripts, root config files",
+        "description": "CI / container / repo-level config files",
         "path_patterns": [
-            "docker/**",
-            "dev/**",
-            "ci/**",
             ".github/**",
+            ".gitlab/**",
+            "ci/**",
+            "docker/**",
             "Makefile",
             ".gitignore",
             ".dockerignore",
+            ".editorconfig",
         ],
         "depends_on": [],
         "gate_commands": [],
@@ -60,9 +61,12 @@ DEFAULT_LAYERS: list[dict[str, Any]] = [
         "path_patterns": [
             "**/pyproject.toml",
             "**/package.json",
-            "**/uv.lock",
-            "**/pnpm-lock.yaml",
-            "**/poetry.lock",
+            "**/Cargo.toml",
+            "**/go.mod",
+            "**/pom.xml",
+            "**/build.gradle",
+            "**/build.gradle.kts",
+            "**/*.lock",
             "**/requirements*.txt",
         ],
         "depends_on": [0],
@@ -70,119 +74,10 @@ DEFAULT_LAYERS: list[dict[str, Any]] = [
     },
     {
         "layer_id": 2,
-        "name": "types_configs",
-        "description": "Type definitions, enums, constants, configuration schemas",
-        "path_patterns": [
-            "**/types/**",
-            "**/configs/**",
-            "**/constants/**",
-            "**/enums/**",
-            "**/*.d.ts",
-        ],
+        "name": "everything_else",
+        "description": "Catch-all bucket for project sources unmatched by infra/deps",
+        "path_patterns": ["**"],
         "depends_on": [1],
-        "gate_commands": [
-            _gate("lint", "ruff check ."),
-        ],
-    },
-    {
-        "layer_id": 3,
-        "name": "models_extensions",
-        "description": "Data models, ORM, extensions, base libraries, migrations",
-        "path_patterns": [
-            "**/models/**",
-            "**/extensions/**",
-            "**/libs/**",
-            "**/migrations/**",
-        ],
-        "depends_on": [2],
-        "gate_commands": [
-            _gate("lint", "ruff check ."),
-            _gate("test", "pytest tests/ -x -q --tb=no", timeout_seconds=600),
-        ],
-    },
-    {
-        "layer_id": 4,
-        "name": "core_engine",
-        "description": "Core business logic and engine modules",
-        "path_patterns": ["**/core/**"],
-        "depends_on": [3],
-        "gate_commands": [
-            _gate("lint", "ruff check ."),
-            _gate("test", "pytest tests/ -x -q --tb=no", timeout_seconds=600),
-        ],
-    },
-    {
-        "layer_id": 5,
-        "name": "services_controllers",
-        "description": "Service layer, task queues, API controllers",
-        "path_patterns": [
-            "**/services/**",
-            "**/tasks/**",
-            "**/controllers/**",
-        ],
-        "depends_on": [4],
-        "gate_commands": [
-            _gate("lint", "ruff check ."),
-            _gate(
-                "test",
-                "pytest tests/ -x -q --tb=no",
-                timeout_seconds=600,
-                pass_criteria="not_worse_than_baseline",
-            ),
-        ],
-    },
-    {
-        "layer_id": 6,
-        "name": "frontend",
-        "description": "Frontend components and routes",
-        "path_patterns": [
-            "web/app/**",
-            "web/service/**",
-            "web/components/**",
-            "web/hooks/**",
-            "web/context/**",
-            "web/utils/**",
-            "src/app/**",
-            "src/components/**",
-        ],
-        "depends_on": [2],
-        "gate_commands": [],
-    },
-    {
-        "layer_id": 7,
-        "name": "i18n",
-        "description": "Internationalization files",
-        "path_patterns": ["**/i18n/**", "**/locales/**"],
-        "depends_on": [6],
-        "gate_commands": [],
-    },
-    {
-        "layer_id": 8,
-        "name": "tests",
-        "description": "Test files",
-        "path_patterns": [
-            "**/tests/**",
-            "**/__tests__/**",
-            "**/e2e/**",
-            "**/*.test.*",
-            "**/*.spec.*",
-        ],
-        "depends_on": [4, 5, 6],
-        "gate_commands": [
-            _gate(
-                "test_full",
-                "pytest tests/ -q --tb=no",
-                timeout_seconds=900,
-                pass_criteria="not_worse_than_baseline",
-            ),
-        ],
-    },
-    {
-        "layer_id": 9,
-        "name": "sdk_plugins",
-        "description": "SDKs, plugins, and auxiliary packages",
-        "path_patterns": ["sdks/**", "plugins/**"],
-        "depends_on": [5],
         "gate_commands": [],
     },
 ]
@@ -197,6 +92,13 @@ class PlanValidationError(ValueError):
     references or dependency cycles) that would cause downstream phases
     to silently skip files. Caller should surface the failure to the
     user instead of letting the bad plan flow into auto_merge."""
+
+
+class PlanIntegrityError(ValueError):
+    """Raised when a generated MergePlan does not cover the expected
+    actionable file set — either dropped files (silent data loss) or
+    inserted ghost files (already-decided paths re-entering the queue).
+    """
 
 
 def topological_sort_layers(layers: list[MergeLayer]) -> list[MergeLayer]:

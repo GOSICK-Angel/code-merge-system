@@ -35,9 +35,10 @@ import sys
 from pathlib import Path
 
 import click
+import yaml
 from rich.console import Console
 
-from src.cli.paths import get_forks_profile_path
+from src.cli.paths import get_config_path, get_forks_profile_path
 from src.models.forks_profile import ForksProfile, ForksProfileYaml
 from src.tools.forks_profile_differ import (
     diff_profile_vs_heuristic,
@@ -209,18 +210,88 @@ def _resolve_merge_base(
     return git_tool.get_merge_base(upstream, fork)
 
 
+_DEFAULT_UPSTREAM_FALLBACK = "upstream/main"
+_DEFAULT_FORK_FALLBACK = "HEAD"
+
+
+def _resolve_init_refs(
+    repo: str, upstream: str | None, fork: str | None
+) -> tuple[str, str, str]:
+    """Resolve the (upstream, fork, source) triple for `init`.
+
+    Source identifies *where* the values came from so the CLI can tell
+    the user; that matters because picking the wrong base is the single
+    most common cause of false-positive removed_domains entries (the
+    drafter compares ``base..fork`` and any path absent from fork looks
+    like a deletion, even when it was just upstream-added in a base
+    range the user didn't intend).
+
+    Resolution order, per ref:
+      1. explicit CLI flag (passed value is non-None)
+      2. ``<repo>/.merge/config.yaml`` (MergeConfig.upstream_ref /
+         fork_ref) — keeps `forks-profile init` aligned with what the
+         actual `merge <target>` flow uses
+      3. hard-coded fallback (``upstream/main`` / ``HEAD``)
+    """
+    config_upstream: str | None = None
+    config_fork: str | None = None
+    config_path = get_config_path(repo)
+    if upstream is None or fork is None:
+        if config_path.exists():
+            try:
+                from src.models.config import MergeConfig
+
+                raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+                cfg = MergeConfig.model_validate(raw)
+                config_upstream = cfg.upstream_ref or None
+                config_fork = cfg.fork_ref or None
+            except Exception as exc:  # noqa: BLE001 — best-effort config read
+                _console.print(
+                    f"[yellow]Could not read {config_path} "
+                    f"({type(exc).__name__}); falling back to defaults.[/yellow]"
+                )
+
+    if upstream is not None:
+        resolved_up, source_up = upstream, "flag"
+    elif config_upstream:
+        resolved_up, source_up = config_upstream, "config"
+    else:
+        resolved_up, source_up = _DEFAULT_UPSTREAM_FALLBACK, "fallback"
+
+    if fork is not None:
+        resolved_fork, source_fork = fork, "flag"
+    elif config_fork:
+        resolved_fork, source_fork = config_fork, "config"
+    else:
+        resolved_fork, source_fork = _DEFAULT_FORK_FALLBACK, "fallback"
+
+    if source_up == "config" or source_fork == "config":
+        source = f"config.yaml (upstream={source_up}, fork={source_fork})"
+    elif source_up == "flag" or source_fork == "flag":
+        source = "cli flag"
+    else:
+        source = "fallback default"
+    return resolved_up, resolved_fork, source
+
+
 @forks_profile.command("init")
 @click.option(
     "--upstream",
-    default="upstream/main",
-    show_default=True,
-    help="Upstream ref to compare against.",
+    default=None,
+    help=(
+        "Upstream ref to compare against. Defaults to MergeConfig."
+        "upstream_ref from <repo>/.merge/config.yaml when present, "
+        f"otherwise '{_DEFAULT_UPSTREAM_FALLBACK}'."
+    ),
 )
 @click.option(
     "--fork",
-    default="HEAD",
-    show_default=True,
-    help="Fork ref to draft from.",
+    default=None,
+    help=(
+        "Fork ref to draft from. Defaults to MergeConfig.fork_ref from "
+        f"<repo>/.merge/config.yaml when present, otherwise "
+        f"'{_DEFAULT_FORK_FALLBACK}'."
+    ),
 )
 @click.option(
     "--merge-base",
@@ -240,9 +311,11 @@ def _resolve_merge_base(
     type=click.Path(),
     default=None,
     help=(
-        "Write draft to this file. If the file already exists the command "
-        "exits 2 without overwriting; remove it manually to re-draft. "
-        "Without this flag the draft is printed to stdout."
+        "Write draft to this file. Defaults to "
+        "`<repo>/.merge/forks-profile.yaml` so the runtime loader picks "
+        "it up automatically. Pass `-o -` to print to stdout instead. "
+        "If the target file already exists the command exits 2 without "
+        "overwriting; remove it manually to re-draft."
     ),
 )
 @click.option(
@@ -281,8 +354,8 @@ def _resolve_merge_base(
     help="Override adaptive clustering threshold (default: max(3, n/20)).",
 )
 def init_command(
-    upstream: str,
-    fork: str,
+    upstream: str | None,
+    fork: str | None,
     merge_base: str | None,
     repo: str,
     output: str | None,
@@ -293,15 +366,35 @@ def init_command(
     cluster_min_files: int | None,
 ) -> None:
     """Auto-draft a forks-profile.yaml from observable git divergence."""
-    if output:
+    upstream, fork, ref_source = _resolve_init_refs(repo, upstream, fork)
+    if ref_source.startswith("config"):
+        _console.print(
+            f"[dim]Using upstream={upstream!r} fork={fork!r} from {ref_source}.[/dim]"
+        )
+
+    # Resolve where the draft will land.
+    #
+    #   -o <path>   → write there (legacy behaviour)
+    #   -o -        → print to stdout (the explicit "no file" sentinel)
+    #   (omitted)   → write to <repo>/.merge/forks-profile.yaml so the
+    #                 runtime loader picks it up automatically — this is
+    #                 what users actually want from a `forks-profile init`
+    #                 command and matches the `git init` ergonomic.
+    write_to_stdout = output == "-"
+    if write_to_stdout:
+        out_path: Path | None = None
+    elif output:
         out_path = Path(output)
-        if out_path.exists():
-            _console.print(
-                f"[red]Refusing to overwrite existing file:[/red] {out_path}\n"
-                "Remove or rename it before re-running `init` "
-                "(no `--force` by design — see doc/forks-profile-init.md §4.1)."
-            )
-            sys.exit(2)
+    else:
+        out_path = get_forks_profile_path(repo)
+
+    if out_path is not None and out_path.exists():
+        _console.print(
+            f"[red]Refusing to overwrite existing file:[/red] {out_path}\n"
+            "Remove or rename it before re-running `init` "
+            "(no `--force` by design — see doc/forks-profile-init.md §4.1)."
+        )
+        sys.exit(2)
 
     try:
         git_tool = GitTool(repo)
@@ -334,18 +427,18 @@ def init_command(
     today = _dt.date.today().isoformat()
     text = render_profile_yaml(drafted, today=today)
 
-    if output:
-        out_path = Path(output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(text, encoding="utf-8")
-        _console.print(f"[green]Wrote draft to {out_path}.[/green]")
-        _console.print(
-            "  "
-            + ", ".join(f"{k}={v}" for k, v in drafted.stats.items())
-            + ". Review every TODO before committing."
-        )
-    else:
+    if out_path is None:
         click.echo(text, nl=False)
+        return
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(text, encoding="utf-8")
+    _console.print(f"[green]Wrote draft to {out_path}.[/green]")
+    _console.print(
+        "  "
+        + ", ".join(f"{k}={v}" for k, v in drafted.stats.items())
+        + ". Review every TODO before committing."
+    )
 
 
 @forks_profile.command("diff")

@@ -108,6 +108,19 @@ def compute_risk_score(file_diff: FileDiff, config: FileClassifierConfig) -> flo
         "security": 0.10,
     }
 
+    # Upstream-new files (D_MISSING) by definition have lines_changed ==
+    # estimate_total_lines, so ``change_ratio`` always pegs at the cap
+    # and contributes a full 0.20 to the score — pushing harmless brand-
+    # new files into AUTO_RISKY for no reason. Drop that dimension and
+    # redistribute its weight so the remaining four still sum to 1.0,
+    # mirroring the conflict_density==0 reality of these files.
+    is_upstream_new = file_diff.change_category == FileChangeCategory.D_MISSING
+    if is_upstream_new:
+        dropped = weights.pop("change_ratio")
+        scale = 1.0 / (1.0 - dropped)
+        for k in weights:
+            weights[k] *= scale
+
     size_score = min(1.0, (file_diff.lines_changed / 500) ** 0.5)
 
     total_lines = max(1, file_diff.lines_added + file_diff.lines_deleted)
@@ -118,8 +131,11 @@ def compute_risk_score(file_diff: FileDiff, config: FileClassifierConfig) -> flo
     )
     conflict_density_score = min(1.0, conflict_lines / total_lines)
 
-    change_ratio = file_diff.lines_changed / estimate_total_lines(file_diff)
-    change_ratio_score = min(1.0, change_ratio * 2)
+    if is_upstream_new:
+        change_ratio_score = 0.0
+    else:
+        change_ratio = file_diff.lines_changed / estimate_total_lines(file_diff)
+        change_ratio_score = min(1.0, change_ratio * 2)
 
     type_score_map = {
         ".py": 0.7,
@@ -144,7 +160,7 @@ def compute_risk_score(file_diff: FileDiff, config: FileClassifierConfig) -> flo
     raw_score = (
         weights["size"] * size_score
         + weights["conflict_density"] * conflict_density_score
-        + weights["change_ratio"] * change_ratio_score
+        + weights.get("change_ratio", 0.0) * change_ratio_score
         + weights["file_type"] * type_score
         + weights["security"] * security_score
     )
@@ -153,10 +169,24 @@ def compute_risk_score(file_diff: FileDiff, config: FileClassifierConfig) -> flo
         return 0.1
 
     no_content_change = file_diff.lines_added == 0 and file_diff.lines_deleted == 0
+    # Strong security signal — file path matches the strict patterns
+    # (cert/key files, .env, exact-named credentials.<ext>, etc.). Floor
+    # the score so ``always_require_human`` reliably picks it up.
     if not no_content_change and matches_any_pattern(
         file_diff.file_path, config.security_sensitive.patterns
     ):
         return float(max(raw_score, 0.8))
+
+    # Weak security signal — filename merely *mentions* secret/credential/
+    # auth/etc. Add a hint bump so the file usually clears AUTO_SAFE and
+    # gets a ConflictAnalyst look, but don't escalate it all the way to
+    # HUMAN_REQUIRED on path heuristics alone (the test_validate_credentials
+    # false-positive class). LLM blending downstream has final word.
+    if not no_content_change and matches_any_pattern(
+        file_diff.file_path, config.security_sensitive.risk_hint_patterns
+    ):
+        bumped = raw_score + config.security_sensitive.risk_hint_bump
+        return float(round(min(1.0, bumped), 3))
 
     return float(round(raw_score, 3))
 

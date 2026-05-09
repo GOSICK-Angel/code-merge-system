@@ -1060,6 +1060,14 @@ class InitializePhase(Phase):
         repo_root = Path(state.config.repo_path).resolve()
         parts: list[str] = []
 
+        # Capture the user-authored snippet *before* we merge in CLAUDE.md /
+        # README.md, so plan reports can render the original intent rather
+        # than the LLM-context blob (which contains README markup like
+        # ``![bar](.assets/...)`` and ``<p align>`` HTML that mangles the
+        # report layout).
+        if state.config.project_context:
+            state.user_project_context = state.config.project_context.strip()
+
         claude_md = repo_root / "CLAUDE.md"
         if claude_md.exists():
             content = claude_md.read_text(encoding="utf-8").strip()

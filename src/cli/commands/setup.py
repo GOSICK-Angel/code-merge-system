@@ -18,13 +18,13 @@ from typing import Any
 import yaml
 from rich.console import Console
 from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
 
 from src.cli.env import read_env_file, write_env_file
 from src.cli.paths import (
     ensure_merge_dir,
     get_config_path,
     get_forks_profile_path,
+    get_global_config_path,
     get_global_env_path,
     get_project_merge_dir,
 )
@@ -150,7 +150,7 @@ def _repeat_run_flow(
         return config
 
     console.print("\nPress Enter to start, or [bold]c[/bold] to reconfigure...")
-    choice = Prompt.ask("", default="", show_default=False)
+    choice = _ask("", default="", show_default=False)
     if choice.lower() == "c":
         return _interactive_setup(target_branch, repo_path)
 
@@ -172,7 +172,7 @@ def _interactive_setup(target_branch: str, repo_path: str) -> MergeConfig:
         )
     )
 
-    project_context = Prompt.ask(
+    project_context = _ask(
         "\nProject description (helps AI understand context)",
         default="",
     )
@@ -190,16 +190,17 @@ def _interactive_setup(target_branch: str, repo_path: str) -> MergeConfig:
             collected_keys[name] = val
 
     console.print("\n[bold yellow]Thresholds[/bold yellow]")
-    use_defaults = Confirm.ask(
+    use_defaults = _confirm(
         "Use defaults? (auto_merge=0.85, risk_low=0.3, risk_high=0.6)",
         default=True,
     )
-    if use_defaults:
-        auto_merge, risk_low, risk_high = 0.85, 0.30, 0.60
-    else:
-        auto_merge = _prompt_float("auto_merge_confidence", 0.85)
-        risk_low = _prompt_float("risk_score_low", 0.30)
-        risk_high = _prompt_float("risk_score_high", 0.60)
+    explicit_thresholds: dict[str, float] = {}
+    if not use_defaults:
+        explicit_thresholds["auto_merge_confidence"] = _prompt_float(
+            "auto_merge_confidence", 0.85
+        )
+        explicit_thresholds["risk_score_low"] = _prompt_float("risk_score_low", 0.30)
+        explicit_thresholds["risk_score_high"] = _prompt_float("risk_score_high", 0.60)
 
     ensure_merge_dir(repo_path)
 
@@ -227,17 +228,17 @@ def _interactive_setup(target_branch: str, repo_path: str) -> MergeConfig:
             },
             "planner_judge": {
                 "provider": "openai",
-                "model": "gpt-4o",
+                "model": "gpt-5.4",
                 "api_key_env": "OPENAI_API_KEY",
             },
             "conflict_analyst": {
                 "provider": "anthropic",
-                "model": "claude-sonnet-4-6",
+                "model": "claude-opus-4-6",
                 "api_key_env": "ANTHROPIC_API_KEY",
             },
             "executor": {
                 "provider": "openai",
-                "model": "gpt-4o",
+                "model": "gpt-5.4",
                 "temperature": 0.1,
                 "api_key_env": "OPENAI_API_KEY",
             },
@@ -254,16 +255,24 @@ def _interactive_setup(target_branch: str, repo_path: str) -> MergeConfig:
             },
         },
         "thresholds": {
-            "auto_merge_confidence": auto_merge,
+            "auto_merge_confidence": 0.85,
             "human_escalation": 0.60,
-            "risk_score_low": risk_low,
-            "risk_score_high": risk_high,
+            "risk_score_low": 0.30,
+            "risk_score_high": 0.60,
         },
         "output": {
             "directory": "./outputs",
             "formats": ["json", "markdown"],
         },
     }
+
+    global_defaults = _load_global_defaults()
+    if global_defaults:
+        config_data = _deep_merge_dicts(config_data, global_defaults)
+
+    if explicit_thresholds:
+        thresholds_block = config_data.setdefault("thresholds", {})
+        thresholds_block.update(explicit_thresholds)
 
     if "GITHUB_TOKEN" in collected_keys:
         config_data["github"] = {"enabled": True, "token_env": "GITHUB_TOKEN"}
@@ -295,9 +304,53 @@ def _interactive_setup(target_branch: str, repo_path: str) -> MergeConfig:
             border_style="green",
         )
     )
-    Prompt.ask("", default="", show_default=False)
+    _ask("", default="", show_default=False)
 
     return merge_config
+
+
+def _ask(prompt: str, default: str = "", show_default: bool = True) -> str:
+    """Read a line via stdlib ``input()`` so readline tracks prompt width.
+
+    Why not Rich's ``Prompt.ask``: Rich pre-prints the prompt with
+    ``console.print(end="")`` and then calls ``input("")``; readline does
+    not know the prompt's width, so Ctrl+U / Ctrl+W / cursor redraw
+    miscompute "column 0" and erase the visible prompt characters.
+    Passing the rendered prompt directly to ``input()`` gives readline
+    the width it needs and confines line-editing to the user buffer.
+
+    Visual format mirrors Rich: ``"X (default): "`` when ``show_default``
+    is true and ``default`` is non-empty, otherwise ``"X: "``.
+    """
+    suffix = f" ({default})" if show_default and default else ""
+    rendered = f"{prompt}{suffix}: "
+    try:
+        value = input(rendered)
+    except EOFError:
+        return default
+    return value or default
+
+
+def _confirm(prompt: str, default: bool = True) -> bool:
+    """Yes/no confirmation via stdlib ``input()`` (readline-safe).
+
+    Rendered as ``"X [Y/n]: "`` (default=True) or ``"X [y/N]: "``
+    (default=False). Empty input picks the default; a leading ``y``/``Y``
+    is true and ``n``/``N`` is false; anything else re-prompts.
+    """
+    yn = "[Y/n]" if default else "[y/N]"
+    rendered = f"{prompt} {yn}: "
+    while True:
+        try:
+            raw = input(rendered).strip().lower()
+        except EOFError:
+            return default
+        if not raw:
+            return default
+        if raw[0] == "y":
+            return True
+        if raw[0] == "n":
+            return False
 
 
 def _prompt_api_key(name: str, existing: str, required: bool) -> str:
@@ -308,7 +361,7 @@ def _prompt_api_key(name: str, existing: str, required: bool) -> str:
     if not required:
         label += " [optional, Enter to skip]"
 
-    value = Prompt.ask(label, default="", show_default=False)
+    value = _ask(label, default="", show_default=False)
     if not value and existing:
         return existing
     if not value and required and not existing:
@@ -326,7 +379,7 @@ def _mask_key(key: str) -> str:
 
 def _prompt_float(label: str, default: float) -> float:
     while True:
-        raw = Prompt.ask(f"  {label}", default=str(default))
+        raw = _ask(f"  {label}", default=str(default))
         try:
             val = float(raw)
             if 0.0 <= val <= 1.0:
@@ -334,6 +387,75 @@ def _prompt_float(label: str, default: float) -> float:
             console.print("    [red]Must be between 0.0 and 1.0[/red]")
         except ValueError:
             console.print("    [red]Please enter a valid number[/red]")
+
+
+_GLOBAL_CONFIG_WHITELIST = frozenset(
+    {
+        "llm",
+        "agents",
+        "thresholds",
+        "max_files_per_run",
+        "max_plan_revision_rounds",
+        "output",
+    }
+)
+
+
+def _load_global_defaults() -> dict[str, Any]:
+    """Load whitelisted defaults from ``~/.config/code-merge-system/config.yaml``.
+
+    Returns ``{}`` when the file is missing, malformed, or contains no
+    whitelisted keys. Unknown top-level keys are dropped with a warning so
+    the wizard never silently honors a typo (e.g. a stray ``fork_ref``)
+    that the user expected to take effect.
+    """
+    path = get_global_config_path()
+    if not path.exists():
+        return {}
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        console.print(
+            f"  [yellow]Warning: global config {path} unreadable ({e}); "
+            f"skipping.[/yellow]"
+        )
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+
+    filtered: dict[str, Any] = {}
+    dropped: list[str] = []
+    for key, value in raw.items():
+        if key in _GLOBAL_CONFIG_WHITELIST:
+            filtered[key] = value
+        else:
+            dropped.append(key)
+    if dropped:
+        console.print(
+            f"  [yellow]Global config: ignoring non-whitelisted keys "
+            f"{sorted(dropped)} (allowed: {sorted(_GLOBAL_CONFIG_WHITELIST)}).[/yellow]"
+        )
+    if filtered:
+        console.print(
+            f"  [green]Loaded global defaults from:[/green] {path} "
+            f"(keys: {sorted(filtered)})"
+        )
+    return filtered
+
+
+def _deep_merge_dicts(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    """Recursive dict merge — overlay wins, nested dicts are merged not replaced.
+
+    Non-dict values (lists, scalars) at a given key are replaced wholesale
+    by the overlay value. New keys from the overlay are added.
+    """
+    result = dict(base)
+    for key, value in overlay.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge_dicts(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 
 FORKS_PROFILE_INIT_THRESHOLD = 30
@@ -409,7 +531,7 @@ def _offer_forks_profile_draft(
         "skip false-positive 'missing file' alerts and keep your "
         "deliberate removals/rewrites out of the AI flow."
     )
-    if not Confirm.ask("  Draft forks-profile.yaml now?", default=True):
+    if not _confirm("  Draft forks-profile.yaml now?", default=True):
         return
 
     try:

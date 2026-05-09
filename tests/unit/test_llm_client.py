@@ -276,6 +276,20 @@ class TestOpenAIClientInit:
         client = _make_openai_client()
         assert client.max_tokens == 1024
 
+    def test_disables_sdk_internal_retry(self):
+        with patch("openai.AsyncOpenAI") as mock:
+            OpenAIClient(
+                model="gpt-4o",
+                api_key="test-key",
+                temperature=0.2,
+                max_tokens=1024,
+                max_retries=3,
+            )
+            kwargs = mock.call_args.kwargs
+            assert kwargs.get("max_retries") == 0, (
+                "SDK retry must be disabled — BaseAgent owns retry policy"
+            )
+
 
 class TestOpenAIClientComplete:
     async def test_returns_message_content(self):
@@ -398,9 +412,35 @@ class TestOpenAIClientComplete:
 
         call_kwargs = client._client.chat.completions.create.call_args.kwargs
         assert call_kwargs["max_completion_tokens"] == 32768
-        assert call_kwargs["reasoning_effort"] == "low"
+        assert "reasoning_effort" not in call_kwargs, (
+            "reasoning_effort must not be sent by default — proxies may not support it"
+        )
         assert "max_tokens" not in call_kwargs
         assert "temperature" not in call_kwargs
+
+    async def test_reasoning_model_with_explicit_reasoning_effort(self):
+        with patch("openai.AsyncOpenAI"):
+            client = OpenAIClient(
+                model="gpt-5.4",
+                api_key="test-key",
+                temperature=0.2,
+                max_tokens=32768,
+                max_retries=3,
+                reasoning_effort="low",
+            )
+        mock_message = MagicMock()
+        mock_message.content = "ok"
+        mock_choice = MagicMock()
+        mock_choice.message = mock_message
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+        client._client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        await client.complete([{"role": "user", "content": "Hi"}])
+
+        call_kwargs = client._client.chat.completions.create.call_args.kwargs
+        assert call_kwargs["reasoning_effort"] == "low"
+        assert call_kwargs["max_completion_tokens"] == 32768
 
     async def test_non_reasoning_model_keeps_legacy_params(self):
         client = _make_openai_client()  # gpt-4o
@@ -561,6 +601,48 @@ class TestLLMClientFactory:
             with patch("openai.AsyncOpenAI"):
                 client = LLMClientFactory.create(config)
         assert client.max_tokens == 2048
+
+    def test_factory_auto_bumps_reasoning_model_max_tokens(self):
+        config = AgentLLMConfig(
+            provider="openai",
+            model="gpt-5.4",
+            max_tokens=8192,
+            reasoning_effort=None,
+            api_key_env="OPENAI_API_KEY",
+        )
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "key"}):
+            with patch("openai.AsyncOpenAI"):
+                client = LLMClientFactory.create(config)
+        assert isinstance(client, OpenAIClient)
+        assert client.max_tokens == 32768
+        assert client.reasoning_effort == "medium"
+
+    def test_factory_respects_explicit_reasoning_overrides(self):
+        config = AgentLLMConfig(
+            provider="openai",
+            model="gpt-5.4",
+            max_tokens=65536,
+            reasoning_effort="low",
+            api_key_env="OPENAI_API_KEY",
+        )
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "key"}):
+            with patch("openai.AsyncOpenAI"):
+                client = LLMClientFactory.create(config)
+        assert client.max_tokens == 65536
+        assert client.reasoning_effort == "low"
+
+    def test_factory_does_not_bump_non_reasoning_openai_model(self):
+        config = AgentLLMConfig(
+            provider="openai",
+            model="gpt-4o",
+            max_tokens=4096,
+            api_key_env="OPENAI_API_KEY",
+        )
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "key"}):
+            with patch("openai.AsyncOpenAI"):
+                client = LLMClientFactory.create(config)
+        assert client.max_tokens == 4096
+        assert client.reasoning_effort is None
 
     def test_raises_value_error_for_unsupported_provider(self):
         config = AgentLLMConfig(

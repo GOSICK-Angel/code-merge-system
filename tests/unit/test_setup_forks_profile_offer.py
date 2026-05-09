@@ -68,7 +68,7 @@ class TestThresholdGate:
         upstream, fork = _init_repo_with_n_deletions(
             tmp_path, FORKS_PROFILE_INIT_THRESHOLD - 5
         )
-        with patch("src.cli.commands.setup.Confirm.ask") as mock_confirm:
+        with patch("src.cli.commands.setup._confirm") as mock_confirm:
             _offer_forks_profile_draft(upstream, fork, str(tmp_path))
         mock_confirm.assert_not_called()
         assert not (tmp_path / ".merge" / "forks-profile.yaml").exists()
@@ -78,7 +78,7 @@ class TestThresholdGate:
             tmp_path, FORKS_PROFILE_INIT_THRESHOLD + 2
         )
         with patch(
-            "src.cli.commands.setup.Confirm.ask", return_value=False
+            "src.cli.commands.setup._confirm", return_value=False
         ) as mock_confirm:
             _offer_forks_profile_draft(upstream, fork, str(tmp_path))
         mock_confirm.assert_called_once()
@@ -92,7 +92,7 @@ class TestExistingProfileShortCircuits:
         merge_dir = tmp_path / ".merge"
         merge_dir.mkdir()
         (merge_dir / "forks-profile.yaml").write_text("version: 1\n", encoding="utf-8")
-        with patch("src.cli.commands.setup.Confirm.ask") as mock_confirm:
+        with patch("src.cli.commands.setup._confirm") as mock_confirm:
             _offer_forks_profile_draft(upstream, fork, str(tmp_path))
         mock_confirm.assert_not_called()
 
@@ -102,7 +102,7 @@ class TestUserDeclines:
         upstream, fork = _init_repo_with_n_deletions(
             tmp_path, FORKS_PROFILE_INIT_THRESHOLD + 5
         )
-        with patch("src.cli.commands.setup.Confirm.ask", return_value=False):
+        with patch("src.cli.commands.setup._confirm", return_value=False):
             _offer_forks_profile_draft(upstream, fork, str(tmp_path))
         assert not (tmp_path / ".merge" / "forks-profile.yaml").exists()
 
@@ -113,7 +113,7 @@ class TestUserAccepts:
             tmp_path, FORKS_PROFILE_INIT_THRESHOLD + 5
         )
         with (
-            patch("src.cli.commands.setup.Confirm.ask", return_value=True),
+            patch("src.cli.commands.setup._confirm", return_value=True),
             patch("click.edit") as mock_edit,
         ):
             _offer_forks_profile_draft(upstream, fork, str(tmp_path))
@@ -133,7 +133,7 @@ class TestUserAccepts:
             tmp_path, FORKS_PROFILE_INIT_THRESHOLD + 5
         )
         with (
-            patch("src.cli.commands.setup.Confirm.ask", return_value=True),
+            patch("src.cli.commands.setup._confirm", return_value=True),
             patch("click.edit", side_effect=RuntimeError("no editor")),
         ):
             _offer_forks_profile_draft(upstream, fork, str(tmp_path))
@@ -144,6 +144,6 @@ class TestUserAccepts:
 class TestGitFailureSilentlySkips:
     def test_non_git_repo_does_not_raise(self, tmp_path: Path):
         # No `git init` — `git merge-base` will fail.
-        with patch("src.cli.commands.setup.Confirm.ask") as mock_confirm:
+        with patch("src.cli.commands.setup._confirm") as mock_confirm:
             _offer_forks_profile_draft("upstream/main", "HEAD", str(tmp_path))
         mock_confirm.assert_not_called()

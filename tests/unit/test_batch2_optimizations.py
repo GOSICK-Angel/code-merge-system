@@ -39,7 +39,8 @@ class TestOC1MaxTokensDefaults:
 
     def test_executor_default_max_tokens(self):
         cfg = AgentsLLMConfig()
-        assert cfg.executor.max_tokens == 4096
+        assert cfg.executor.max_tokens == 32768
+        assert cfg.executor.reasoning_effort == "medium"
 
     def test_conflict_analyst_default_max_tokens(self):
         cfg = AgentsLLMConfig()

@@ -168,6 +168,19 @@ class TestClassifyByStatusCode:
         assert result.category == ErrorCategory.OVERLOAD
         assert result.retryable is True
 
+    def test_524_cloudflare_origin_timeout_uses_30s_cooldown(self):
+        result = classify_error(
+            _make_api_error(524, "origin response timeout"), "openai"
+        )
+        assert result.category == ErrorCategory.OVERLOAD
+        assert result.retryable is True
+        assert result.cooldown_seconds == 30
+
+    def test_500_keeps_short_cooldown(self):
+        result = classify_error(_make_api_error(500, "internal error"), "openai")
+        assert result.category == ErrorCategory.OVERLOAD
+        assert result.cooldown_seconds == 2
+
 
 class TestClassifyByExceptionType:
     def test_connection_error(self):

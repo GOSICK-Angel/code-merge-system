@@ -71,6 +71,8 @@ class _ModelOverrideContext:
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
 _OPENAI_REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+_OPENAI_REASONING_MIN_MAX_TOKENS = 32768
+_OPENAI_REASONING_DEFAULT_EFFORT = "medium"
 
 
 def _is_openai_reasoning_model(model: str) -> bool:
@@ -225,18 +227,28 @@ class OpenAIClient(LLMClient):
         max_retries: int,
         base_url: str | None = None,
         timeout: float = 60.0,
+        reasoning_effort: str | None = None,
     ):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_retries = max_retries
-        kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout}
+        self.reasoning_effort = reasoning_effort
+        # SDK-level retry is disabled: BaseAgent._call_llm_with_retry owns retry
+        # policy with category-aware cooldowns. Default SDK max_retries=2 used
+        # to compound (3×3 attempts × ~120s) into ~18min cascades on Cloudflare
+        # 524 origin-timeouts.
+        kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "timeout": timeout,
+            "max_retries": 0,
+        }
         if base_url:
             kwargs["base_url"] = base_url
         self._client = openai.AsyncOpenAI(**kwargs)
 
     def update_api_key(self, new_key: str) -> None:
-        self._client = openai.AsyncOpenAI(api_key=new_key)
+        self._client = openai.AsyncOpenAI(api_key=new_key, max_retries=0)
 
     async def complete(
         self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
@@ -250,11 +262,14 @@ class OpenAIClient(LLMClient):
             all_messages.append({"role": msg["role"], "content": msg["content"]})
 
         if _is_openai_reasoning_model(self.model):
+            reasoning_kwargs: dict[str, Any] = {}
+            if self.reasoning_effort is not None:
+                reasoning_kwargs["reasoning_effort"] = self.reasoning_effort
             response = await self._client.chat.completions.create(
                 model=self.model,
                 max_completion_tokens=self.max_tokens,
-                reasoning_effort="low",
                 messages=all_messages,
+                **reasoning_kwargs,
                 **kwargs,
             )
         else:
@@ -366,13 +381,33 @@ class LLMClientFactory:
         elif config.provider == "openai":
             if base_url and not base_url.rstrip("/").endswith("/v1"):
                 base_url = base_url.rstrip("/") + "/v1"
+            effective_max_tokens = config.max_tokens
+            effective_reasoning_effort = config.reasoning_effort
+            if _is_openai_reasoning_model(config.model):
+                if effective_reasoning_effort is None:
+                    effective_reasoning_effort = _OPENAI_REASONING_DEFAULT_EFFORT
+                if effective_max_tokens < _OPENAI_REASONING_MIN_MAX_TOKENS:
+                    import logging as _logging
+
+                    _logging.getLogger("llm.factory").warning(
+                        "OpenAI reasoning model %r needs max_tokens >= %d "
+                        "(shared between hidden reasoning and visible output); "
+                        "auto-bumping from %d to %d. Set max_tokens explicitly "
+                        "in config to silence this.",
+                        config.model,
+                        _OPENAI_REASONING_MIN_MAX_TOKENS,
+                        effective_max_tokens,
+                        _OPENAI_REASONING_MIN_MAX_TOKENS,
+                    )
+                    effective_max_tokens = _OPENAI_REASONING_MIN_MAX_TOKENS
             return OpenAIClient(
                 model=config.model,
                 api_key=api_key,
                 temperature=config.temperature,
-                max_tokens=config.max_tokens,
+                max_tokens=effective_max_tokens,
                 max_retries=config.max_retries,
                 base_url=base_url,
                 timeout=float(config.request_timeout_seconds),
+                reasoning_effort=effective_reasoning_effort,
             )
         raise ValueError(f"Unknown provider: {config.provider}")

@@ -26,6 +26,7 @@ divergence maps to exercise every branch without touching disk.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,23 @@ DEFAULT_MIGRATION_GLOBS: tuple[str, ...] = (
     "**/db/migrate/*.rb",
     "**/alembic/versions/*.py",
 )
+
+
+# Retention bands for rewritten_modules policy selection.
+#
+#  - retention < REWRITE_RETENTION_HARD            → escalate_human
+#  - REWRITE_RETENTION_HARD..REWRITE_RETENTION_LIGHT → semantic_merge_with_alert
+#  - >= REWRITE_RETENTION_LIGHT (commit-churn only) → take_current_with_diff_note
+REWRITE_RETENTION_HARD: float = 0.30
+REWRITE_RETENTION_LIGHT: float = 0.80
+
+
+# Default minimum prefix depth for auto-clustering. Top-level directories
+# (``tools/``, ``models/``, ``tests/``) are almost never wholesale dropped
+# or rewritten — clustering at depth=1 produces over-broad globs that
+# mass-rewrite the merge plan. Callers that *do* want a single ``foo/**``
+# rollup pass ``min_depth=1`` explicitly.
+DEFAULT_CLUSTER_MIN_DEPTH: int = 2
 
 
 @dataclass(frozen=True)
@@ -107,6 +125,18 @@ class DraftedProfile:
     rewritten_modules: tuple[DraftedRewrittenModule, ...]
     migration_policy: DraftedMigrationPolicy | None
     stats: dict[str, int]
+    # Best-effort ``owner/repo`` derived from the fork's git remotes
+    # (``upstream`` preferred, then ``origin``). Empty string when no
+    # remote is configured or the URL doesn't match the standard pattern;
+    # the renderer falls back to a TODO marker in that case.
+    fork_upstream: str = ""
+    # Cluster globs that **looked** fork-deleted by tree-diff but had
+    # no findable deletion commit in the fork-only range — almost always
+    # the result of base drift (a prior upstream merge advanced
+    # merge-base past additions that fork HEAD never had). Surfaced as
+    # a yaml header comment so the maintainer can audit without being
+    # forced to author entries for them.
+    removed_filtered: tuple[str, ...] = ()
 
 
 def _auto_min_files(total: int) -> int:
@@ -115,7 +145,10 @@ def _auto_min_files(total: int) -> int:
 
 
 def cluster_paths(
-    paths: Sequence[str], min_files: int | None = None
+    paths: Sequence[str],
+    min_files: int | None = None,
+    *,
+    min_depth: int = DEFAULT_CLUSTER_MIN_DEPTH,
 ) -> tuple[ClusterEntry, ...]:
     """Fold a path list into deepest-prefix clusters.
 
@@ -123,11 +156,17 @@ def cluster_paths(
       1. For every ancestor directory of every input path, count the
          paths beneath it.
       2. Visit candidates deepest-first, picking any whose remaining
-         file count is ``>= min_files``; emit ``<prefix>/**``.
+         file count is ``>= min_files`` and prefix depth is
+         ``>= min_depth``; emit ``<prefix>/**``.
       3. Files not consumed by any cluster pass through as orphans
          with ``glob == path``.
 
     With ``min_files=None`` the threshold is ``max(3, len/20)``.
+
+    ``min_depth=2`` (the default) suppresses single-segment rollups like
+    ``tools/**`` / ``models/**`` that almost always over-classify a fork's
+    intent. Pass ``min_depth=1`` to keep the legacy "any depth" behaviour
+    (used by tests and by callers that want a flat top-level rollup).
     """
     if not paths:
         return ()
@@ -148,6 +187,10 @@ def cluster_paths(
     remaining = set(paths)
     clusters: list[ClusterEntry] = []
     for prefix, members in candidates:
+        # Depth = number of path segments. ``prefix.count("/") + 1`` is
+        # the segment count; require >= ``min_depth``.
+        if prefix.count("/") + 1 < min_depth:
+            continue
         eligible = members & remaining
         if len(eligible) >= min_files:
             clusters.append(
@@ -185,10 +228,138 @@ def _glob_to_domain_name(glob: str) -> str:
     return stem or "domain"
 
 
+def _glob_segments(glob: str) -> list[str]:
+    """Return the directory segments of a cluster glob (``**`` stripped)."""
+    base = glob
+    if base.endswith("/**"):
+        base = base[:-3]
+    base = base.rstrip("/")
+    if not base:
+        return []
+    return [s for s in base.split("/") if s]
+
+
+def _uniquify_domain_names(
+    items: tuple[DraftedRemovedDomain, ...],
+) -> tuple[DraftedRemovedDomain, ...]:
+    """Disambiguate duplicate ``name`` values across cluster outputs.
+
+    Two ``tools/**``-derived clusters both name themselves ``tools``;
+    walk up the path to ``tools-comfyui``, ``tools-comfyui-tools`` and
+    so on until the name is unique. Final fallback is a numeric suffix
+    so the function is total even on pathological inputs.
+    """
+    if not items:
+        return items
+    used: set[str] = set()
+    out: list[DraftedRemovedDomain] = []
+    for entry in items:
+        first_path = entry.paths[0] if entry.paths else ""
+        segments = _glob_segments(first_path) or [entry.name]
+        candidate = segments[-1] or "domain"
+        i = 2
+        while candidate in used and i <= len(segments):
+            candidate = "-".join(segments[-i:])
+            i += 1
+        suffix = 2
+        base = candidate
+        while candidate in used:
+            candidate = f"{base}-{suffix}"
+            suffix += 1
+        used.add(candidate)
+        out.append(
+            DraftedRemovedDomain(
+                name=candidate,
+                paths=entry.paths,
+                reason=entry.reason,
+                removed_in=entry.removed_in,
+            )
+        )
+    return tuple(out)
+
+
+def _glob_prefix(glob: str) -> str:
+    """Return the directory body of ``foo/bar/**`` (= ``foo/bar``).
+
+    For an orphan path (``a/b.py``) returns the path unchanged so the
+    overlap check still works on file-level entries.
+    """
+    if glob.endswith("/**"):
+        return glob[:-3]
+    return glob
+
+
+def _globs_overlap(a: str, b: str) -> bool:
+    """True when two cluster globs target overlapping path subtrees.
+
+    ``models/**`` overlaps ``models/azure_openai/**``; ``a/b.py``
+    overlaps ``a/**``. Used to suppress the ``removed_domains`` entry
+    when a stricter ``rewritten_modules`` rule already covers the area.
+    """
+    pa = _glob_prefix(a)
+    pb = _glob_prefix(b)
+    if not pa or not pb:
+        return False
+    if pa == pb:
+        return True
+    return pa.startswith(pb + "/") or pb.startswith(pa + "/")
+
+
+_REMOTE_OWNER_REPO_RE = re.compile(r"[/:]([^/:\s]+)/([^/\s]+?)(?:\.git)?/?$")
+
+
+def extract_owner_repo(url: str) -> str | None:
+    """Return ``owner/repo`` from a git remote URL, or ``None`` on no match.
+
+    Accepts both forms commonly produced by ``git remote -v``::
+
+        git@github.com:cvte/dify-official-plugins.git → cvte/dify-official-plugins
+        https://github.com/cvte/dify-plugins.git     → cvte/dify-plugins
+        https://gitlab.example.com/group/proj         → group/proj
+    """
+    if not url:
+        return None
+    m = _REMOTE_OWNER_REPO_RE.search(url.strip())
+    if not m:
+        return None
+    owner, repo = m.group(1), m.group(2)
+    if not owner or not repo:
+        return None
+    return f"{owner}/{repo}"
+
+
+def _detect_upstream_url(git_tool: GitTool) -> str | None:
+    """Best-effort lookup of the fork's upstream-or-origin remote URL.
+
+    Tries ``upstream`` first (the conventional name for "where this fork
+    pulls from") then ``origin``. Any remote-resolution failure returns
+    ``None`` so the drafter never raises on detached worktrees or repos
+    without remotes.
+    """
+    try:
+        repo = git_tool.repo
+    except Exception:
+        return None
+    for name in ("upstream", "origin"):
+        try:
+            remote = repo.remotes[name]
+        except Exception:
+            continue
+        try:
+            urls = list(remote.urls)
+        except Exception:
+            urls = []
+        for url in urls:
+            if url:
+                return str(url)
+    return None
+
+
 def draft_fork_only_features(
     divergence_map: dict[str, ForkDivergence],
     *,
     cluster_min_files: int | None = None,
+    cluster_min_depth: int = DEFAULT_CLUSTER_MIN_DEPTH,
 ) -> tuple[DraftedForkOnlyFeature, ...]:
     """FORK_ONLY paths, clustered. ``note`` left as TODO."""
     paths = sorted(
@@ -196,7 +367,7 @@ def draft_fork_only_features(
     )
     return tuple(
         DraftedForkOnlyFeature(path=c.glob, note="")
-        for c in cluster_paths(paths, cluster_min_files)
+        for c in cluster_paths(paths, cluster_min_files, min_depth=cluster_min_depth)
     )
 
 
@@ -205,29 +376,58 @@ def draft_removed_domains(
     *,
     delete_commit_lookup: Callable[[str], tuple[str, str] | None] | None = None,
     cluster_min_files: int | None = None,
-) -> tuple[DraftedRemovedDomain, ...]:
+    cluster_min_depth: int = DEFAULT_CLUSTER_MIN_DEPTH,
+    require_commit_evidence: bool = True,
+) -> tuple[tuple[DraftedRemovedDomain, ...], tuple[str, ...]]:
     """FORK_DELETED paths, clustered with ``removed_in`` evidence.
+
+    Returns ``(kept_domains, filtered_globs)`` so the orchestrator can
+    surface the filtered list in the rendered yaml header without
+    silently swallowing it.
 
     ``delete_commit_lookup(path)`` returns ``(sha, subject)`` for the
     earliest commit that removed ``path`` in the fork-only range, or
     ``None`` if not findable. ``None`` callable disables the lookup.
+
+    Evidence-based filtering (the *real* fix for the dify-plugins-style
+    yaml bloat): when ``require_commit_evidence`` is True (default) and
+    a lookup callable is provided, clusters where **no** member has a
+    findable delete-commit are dropped from ``kept_domains`` and reported
+    via ``filtered_globs``. The motivating case is base drift — a fork
+    that historically merged a newer upstream picks up a merge-base ahead
+    of where the maintainer reasons about ``base``; files added by
+    upstream after that drift point but absent from fork HEAD look like
+    "fork deleted them" purely by tree-diff, even though there is no
+    deletion commit anywhere in the fork's own history. Without evidence
+    these are almost always false positives and shouldn't bloat the
+    yaml.
+
+    When ``require_commit_evidence`` is False **or** no lookup is given,
+    every cluster is kept (legacy behaviour) and ``filtered_globs`` is
+    empty.
     """
     paths = sorted(
         p for p, d in divergence_map.items() if d == ForkDivergence.FORK_DELETED
     )
-    out: list[DraftedRemovedDomain] = []
-    for cluster in cluster_paths(paths, cluster_min_files):
+    kept: list[DraftedRemovedDomain] = []
+    filtered: list[str] = []
+    for cluster in cluster_paths(paths, cluster_min_files, min_depth=cluster_min_depth):
         evidence: tuple[str, str] | None = None
         if delete_commit_lookup is not None:
             for member in cluster.paths:
                 evidence = delete_commit_lookup(member)
                 if evidence is not None:
                     break
+        if (
+            require_commit_evidence
+            and delete_commit_lookup is not None
+            and evidence is None
+        ):
+            filtered.append(cluster.glob)
+            continue
         sha, subject = evidence if evidence else ("", "")
-        reason = "TODO: why was this dropped?"
-        if subject:
-            reason += f" (auto-detected from commit {sha[:7]}: '{subject}')"
-        out.append(
+        reason = f"auto-detected from commit {sha[:7]}: '{subject}'" if subject else ""
+        kept.append(
             DraftedRemovedDomain(
                 name=_glob_to_domain_name(cluster.glob),
                 paths=(cluster.glob,),
@@ -235,25 +435,57 @@ def draft_removed_domains(
                 removed_in=sha,
             )
         )
-    return tuple(out)
+    return _uniquify_domain_names(tuple(kept)), tuple(filtered)
+
+
+def _policy_for_retention(avg_retention: float) -> RewriteMergePolicy:
+    """Map an aggregate retention ratio to a rewrite-merge policy.
+
+    True rewrites (low retention) escalate to human; mixed-modification
+    clusters get a semantic-merge alert so the analyst LLM stays in the
+    loop without forcing manual intervention; near-pristine clusters
+    that only qualify by commit-churn drop to ``take_current_with_diff_note``
+    so the fork side is preserved with the upstream delta stashed for
+    later integration.
+    """
+    if avg_retention < REWRITE_RETENTION_HARD:
+        return RewriteMergePolicy.ESCALATE_HUMAN
+    if avg_retention < REWRITE_RETENTION_LIGHT:
+        return RewriteMergePolicy.SEMANTIC_MERGE_WITH_ALERT
+    return RewriteMergePolicy.TAKE_CURRENT_WITH_DIFF_NOTE
 
 
 def draft_rewritten_modules(
     retention: Sequence[RetentionInfo],
     *,
-    retention_threshold: float = 0.30,
+    retention_threshold: float = REWRITE_RETENTION_HARD,
     min_lines: int = 50,
     min_fork_commits: int = 5,
     cluster_min_files: int | None = None,
+    cluster_min_depth: int = DEFAULT_CLUSTER_MIN_DEPTH,
 ) -> tuple[DraftedRewrittenModule, ...]:
     """Filter FORK_MODIFIED files by the §3.3 heuristic, then cluster.
 
     A file qualifies when EITHER:
       - retention < threshold AND lines_changed >= min_lines, OR
-      - fork_only_commits >= min_fork_commits
+      - fork_only_commits >= min_fork_commits AND lines_changed > 0
+
+    The ``lines_changed > 0`` clause on the commit-churn branch keeps
+    files that fork commits *touched* but never actually modified
+    (retention == 100%, e.g. ``.gitignore`` re-saved without diff) out
+    of ``rewritten_modules`` — there is nothing to "rewrite" if no line
+    moved, even when many commits brushed past the path.
+
+    Policy is selected per-cluster based on the **average** retention of
+    its members (see :func:`_policy_for_retention`):
+
+      - retention <  ``REWRITE_RETENTION_HARD``  → ``escalate_human``
+      - retention <  ``REWRITE_RETENTION_LIGHT`` → ``semantic_merge_with_alert``
+      - retention >= ``REWRITE_RETENTION_LIGHT`` → ``take_current_with_diff_note``
 
     Conservative on purpose — false positives are cheaper than false
-    negatives because the policy defaults to ``escalate_human``.
+    negatives because the lightest policy still stashes the upstream
+    diff for human review.
     """
     candidates: dict[str, RetentionInfo] = {}
     for r in retention:
@@ -262,7 +494,7 @@ def draft_rewritten_modules(
             and r.retention < retention_threshold
             and r.lines_changed >= min_lines
         )
-        many_commits = r.fork_only_commits >= min_fork_commits
+        many_commits = r.fork_only_commits >= min_fork_commits and r.lines_changed > 0
         if below_threshold or many_commits:
             candidates[r.path] = r
 
@@ -270,23 +502,20 @@ def draft_rewritten_modules(
         return ()
 
     out: list[DraftedRewrittenModule] = []
-    for cluster in cluster_paths(sorted(candidates), cluster_min_files):
+    for cluster in cluster_paths(
+        sorted(candidates), cluster_min_files, min_depth=cluster_min_depth
+    ):
         members = [candidates[p] for p in cluster.paths if p in candidates]
         avg_retention = (
             sum(m.retention for m in members) / len(members) if members else 0.0
         )
+        policy = _policy_for_retention(avg_retention)
         note = (
             f"fork retains {avg_retention * 100:.0f}% of merge-base lines "
             f"(rewrite threshold {int(retention_threshold * 100)}%, "
             f"{cluster.count} file(s))"
         )
-        out.append(
-            DraftedRewrittenModule(
-                path=cluster.glob,
-                policy=RewriteMergePolicy.ESCALATE_HUMAN,
-                note=note,
-            )
-        )
+        out.append(DraftedRewrittenModule(path=cluster.glob, policy=policy, note=note))
     return tuple(out)
 
 
@@ -428,17 +657,41 @@ def _find_first_delete_commit(
     return None
 
 
+def _suppress_removed_overlapping_rewritten(
+    removed: tuple[DraftedRemovedDomain, ...],
+    rewritten: tuple[DraftedRewrittenModule, ...],
+) -> tuple[DraftedRemovedDomain, ...]:
+    """Drop ``removed_domains`` entries whose globs overlap a rewritten one.
+
+    A path can be either *removed* or *rewritten*, never both. The drafter
+    derives them from independent inputs (FORK_DELETED vs FORK_MODIFIED),
+    but the cluster algorithm can produce overlapping globs (``models/**``
+    in both buckets) when the fork has both deleted and modified files
+    under the same subtree. Rewritten wins because it expresses "still
+    here, just different" — the stricter policy.
+    """
+    if not removed or not rewritten:
+        return removed
+    rewritten_globs = [m.path for m in rewritten]
+    return tuple(
+        entry
+        for entry in removed
+        if not any(_globs_overlap(p, rg) for p in entry.paths for rg in rewritten_globs)
+    )
+
+
 def draft_profile(
     git_tool: GitTool,
     *,
     upstream_ref: str,
     fork_ref: str,
     merge_base: str,
-    rewrite_retention_threshold: float = 0.30,
+    rewrite_retention_threshold: float = REWRITE_RETENTION_HARD,
     rewrite_min_lines: int = 50,
     rewrite_min_fork_commits: int = 5,
     migration_globs: Sequence[str] | None = None,
     cluster_min_files: int | None = None,
+    cluster_min_depth: int = DEFAULT_CLUSTER_MIN_DEPTH,
 ) -> DraftedProfile:
     """End-to-end orchestrator used by ``merge forks-profile init``."""
     divergence = compute_fork_divergence_map(
@@ -449,14 +702,17 @@ def draft_profile(
     )
 
     fork_only_features = draft_fork_only_features(
-        divergence, cluster_min_files=cluster_min_files
+        divergence,
+        cluster_min_files=cluster_min_files,
+        cluster_min_depth=cluster_min_depth,
     )
-    removed_domains = draft_removed_domains(
+    removed_domains, removed_filtered = draft_removed_domains(
         divergence,
         delete_commit_lookup=lambda p: _find_first_delete_commit(
             git_tool, merge_base=merge_base, fork_ref=fork_ref, path=p
         ),
         cluster_min_files=cluster_min_files,
+        cluster_min_depth=cluster_min_depth,
     )
 
     fork_modified_paths = sorted(
@@ -471,6 +727,11 @@ def draft_profile(
         min_lines=rewrite_min_lines,
         min_fork_commits=rewrite_min_fork_commits,
         cluster_min_files=cluster_min_files,
+        cluster_min_depth=cluster_min_depth,
+    )
+
+    removed_domains = _suppress_removed_overlapping_rewritten(
+        removed_domains, rewritten_modules
     )
 
     globs = list(migration_globs) if migration_globs else list(DEFAULT_MIGRATION_GLOBS)
@@ -493,7 +754,11 @@ def draft_profile(
         "D_EXTRA": sum(1 for d in divergence.values() if d == ForkDivergence.FORK_ONLY),
         "B-rewritten": len(rewritten_modules),
         "migration-collisions": 0,
+        "removed-filtered": len(removed_filtered),
     }
+
+    upstream_url = _detect_upstream_url(git_tool)
+    fork_upstream = extract_owner_repo(upstream_url) if upstream_url else None
 
     return DraftedProfile(
         upstream_ref=upstream_ref,
@@ -504,12 +769,28 @@ def draft_profile(
         rewritten_modules=rewritten_modules,
         migration_policy=migration_policy,
         stats=stats,
+        fork_upstream=fork_upstream or "",
+        removed_filtered=removed_filtered,
     )
 
 
 def _yaml_quote(s: str) -> str:
     """Conservative double-quoted scalar suitable for the draft body."""
     return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+_POLICY_HINT: dict[RewriteMergePolicy, str] = {
+    RewriteMergePolicy.ESCALATE_HUMAN: (
+        "# heuristic: low retention → true rewrite, requires human review"
+    ),
+    RewriteMergePolicy.SEMANTIC_MERGE_WITH_ALERT: (
+        "# heuristic: partial rewrite — analyst LLM stays in the loop"
+    ),
+    RewriteMergePolicy.TAKE_CURRENT_WITH_DIFF_NOTE: (
+        "# heuristic: high retention + commit churn — fork side wins, "
+        "upstream diff stashed"
+    ),
+}
 
 
 def render_profile_yaml(drafted: DraftedProfile, *, today: str) -> str:
@@ -522,6 +803,14 @@ def render_profile_yaml(drafted: DraftedProfile, *, today: str) -> str:
     stats_str = ", ".join(f"{k}={v}" for k, v in drafted.stats.items())
     base_short = drafted.merge_base[:7] if drafted.merge_base else "unknown"
 
+    if drafted.fork_upstream:
+        upstream_line = (
+            f"  upstream: {_yaml_quote(drafted.fork_upstream)}  "
+            "# auto-detected from git remote"
+        )
+    else:
+        upstream_line = '  upstream: ""          # TODO: e.g. owner/repo'
+
     lines: list[str] = [
         f"# Auto-drafted by `merge forks-profile init` on {today}",
         f"# Inputs: {drafted.upstream_ref}..{drafted.fork_ref} "
@@ -529,10 +818,13 @@ def render_profile_yaml(drafted: DraftedProfile, *, today: str) -> str:
         f"# Stats: {stats_str}",
         "#",
         "# Review every entry below before committing.",
-        "# - The `removed_domains` are likely close — verify the `reason` text.",
-        "# - The `rewritten_modules` policy is set to escalate_human (safest);",
-        "#   downgrade to take_current_with_diff_note or semantic_merge_with_alert",
-        "#   only after reading the actual diff.",
+        "# - `removed_domains` are likely close — verify each entry and",
+        "#   fill in `reason` (left blank when no delete commit was found).",
+        "# - `rewritten_modules` policies are auto-tiered by retention:",
+        "#     escalate_human            (true rewrite, retention < 30%)",
+        "#     semantic_merge_with_alert (mixed,         30–80%)",
+        "#     take_current_with_diff_note (light edit,  >= 80%)",
+        "#   adjust each policy after reading the actual diff.",
         "# - Delete entries that were over-classified (e.g. an unrelated test",
         '#   cleanup misread as a "removed domain").',
         "#",
@@ -544,7 +836,7 @@ def render_profile_yaml(drafted: DraftedProfile, *, today: str) -> str:
         "",
         "fork:",
         '  name: ""              # TODO: name your fork',
-        '  upstream: ""          # TODO: e.g. owner/repo',
+        upstream_line,
         '  positioning: ""       # TODO: one-line description',
         "",
     ]
@@ -556,7 +848,10 @@ def render_profile_yaml(drafted: DraftedProfile, *, today: str) -> str:
             lines.append("    paths:")
             for p in d.paths:
                 lines.append(f"      - {_yaml_quote(p)}")
-            lines.append(f"    reason: {_yaml_quote(d.reason)}")
+            if d.reason:
+                lines.append(f"    reason: {_yaml_quote(d.reason)}")
+            else:
+                lines.append('    reason: ""           # TODO: why was this dropped?')
             if d.removed_in:
                 lines.append(f"    removed_in: {_yaml_quote(d.removed_in)}")
         lines.append("")
@@ -568,17 +863,38 @@ def render_profile_yaml(drafted: DraftedProfile, *, today: str) -> str:
         lines.append("rewritten_modules:")
         for m in drafted.rewritten_modules:
             lines.append(f"  - path: {_yaml_quote(m.path)}")
-            lines.append(
-                f"    policy: {m.policy.value}   "
-                "# TODO: consider take_current_with_diff_note / "
-                "semantic_merge_with_alert"
-            )
+            hint = _POLICY_HINT.get(m.policy, "")
+            policy_line = f"    policy: {m.policy.value}"
+            if hint:
+                policy_line = f"{policy_line}   {hint}"
+            lines.append(policy_line)
             lines.append(f"    note: {_yaml_quote(m.note)}")
         lines.append("")
     else:
         lines.append("rewritten_modules: []")
         lines.append("")
 
+    if drafted.removed_filtered:
+        # Surface base-drift suspects so the maintainer can audit without
+        # having to write out yaml entries for them. Truncate to the
+        # first ~10 to keep the header skimmable; the full list lives on
+        # ``DraftedProfile.removed_filtered`` if anyone needs it.
+        head = list(drafted.removed_filtered[:10])
+        more = len(drafted.removed_filtered) - len(head)
+        suffix = f" (+{more} more)" if more > 0 else ""
+        lines.append(
+            f"# Skipped {len(drafted.removed_filtered)} fork-deleted "
+            "cluster(s) with no findable delete-commit (likely base drift, "
+            "not a fork policy decision):"
+        )
+        for glob in head:
+            lines.append(f"#   - {glob}")
+        if more > 0:
+            lines.append(f"#   ...{suffix}")
+        lines.append(
+            "# If any of these *are* deliberate fork removals, add them "
+            "to `removed_domains` manually."
+        )
     if drafted.fork_only_features:
         feature_paths = ", ".join(f.path for f in drafted.fork_only_features)
         lines.append(
@@ -605,7 +921,10 @@ __all__ = [
     "DraftedProfile",
     "DraftedRemovedDomain",
     "DraftedRewrittenModule",
+    "DEFAULT_CLUSTER_MIN_DEPTH",
     "DEFAULT_MIGRATION_GLOBS",
+    "REWRITE_RETENTION_HARD",
+    "REWRITE_RETENTION_LIGHT",
     "RetentionInfo",
     "cluster_paths",
     "draft_fork_only_features",
@@ -613,5 +932,6 @@ __all__ = [
     "draft_profile",
     "draft_removed_domains",
     "draft_rewritten_modules",
+    "extract_owner_repo",
     "render_profile_yaml",
 ]

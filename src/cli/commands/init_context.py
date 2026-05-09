@@ -12,7 +12,8 @@ import subprocess
 from pathlib import Path
 
 from rich.console import Console
-from rich.prompt import Confirm
+
+from src.cli.commands.setup import _confirm
 
 console = Console()
 
@@ -39,10 +40,8 @@ def init_command_impl(repo_path: str) -> None:
 
     out_path = root / "CLAUDE.md"
     if out_path.exists():
-        if not Confirm.ask(
-            f"[yellow]CLAUDE.md already exists in {root}. Overwrite?[/yellow]",
-            default=False,
-        ):
+        console.print(f"[yellow]CLAUDE.md already exists in {root}.[/yellow]")
+        if not _confirm("Overwrite?", default=False):
             return
 
     console.print(f"[cyan]Scanning repository: {root}[/cyan]")
