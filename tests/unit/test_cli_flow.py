@@ -27,6 +27,49 @@ def _minimal_config_yaml(
     return yaml.dump({"upstream_ref": upstream, "fork_ref": fork})
 
 
+class TestLoadRepoEnv:
+    """``_load_repo_env`` must override existing os.environ values so that
+    project-scoped ``.merge/.env`` always wins over stale fallbacks loaded
+    by ``load_env()`` (install-tree .env + ``~/.config`` global fallback).
+    """
+
+    def test_project_env_overrides_existing_environ(self, tmp_path: Path) -> None:
+        from src.cli.main import _load_repo_env
+
+        merge_dir = tmp_path / ".merge"
+        merge_dir.mkdir()
+        (merge_dir / ".env").write_text(
+            'OPENAI_BASE_URL="https://project-gateway.example.com/v1"\n'
+            'OPENAI_API_KEY="sk-project"\n'
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "OPENAI_BASE_URL": "https://stale-fallback.example.com",
+                "OPENAI_API_KEY": "sk-stale",
+            },
+            clear=False,
+        ):
+            _load_repo_env(str(tmp_path))
+            assert (
+                os.environ["OPENAI_BASE_URL"]
+                == "https://project-gateway.example.com/v1"
+            )
+            assert os.environ["OPENAI_API_KEY"] == "sk-project"
+
+    def test_no_op_when_env_file_absent(self, tmp_path: Path) -> None:
+        from src.cli.main import _load_repo_env
+
+        # No .merge directory — should silently no-op without raising.
+        with patch.dict(
+            os.environ,
+            {"OPENAI_BASE_URL": "https://shell-only.example.com"},
+            clear=False,
+        ):
+            _load_repo_env(str(tmp_path))
+            assert os.environ["OPENAI_BASE_URL"] == "https://shell-only.example.com"
+
+
 class TestResolveApiKeys:
     def test_env_var_takes_priority(self, tmp_path: Path) -> None:
         from src.cli.commands.setup import _resolve_api_keys

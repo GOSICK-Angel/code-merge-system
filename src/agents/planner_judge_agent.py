@@ -58,7 +58,6 @@ def _aggregate_segment_verdicts(
     flagged = len(all_issues)
     approved = max(0, total_files - flagged)
     completed = len(verdicts)
-    total_segments = max(1, len(verdicts))
     segment_summaries = "; ".join(
         f"seg{i + 1}: {v.result.value}({len(v.issues)} issues)"
         for i, v in enumerate(verdicts)
@@ -67,6 +66,16 @@ def _aggregate_segment_verdicts(
         f"Reviewed {completed} segment(s) covering {total_files} files. "
         f"{flagged} flagged, {approved} approved. [{segment_summaries}]"
     )
+    # Surface the first failing segment's raw error so operators can see WHY
+    # plan-review went LLM_UNAVAILABLE without re-running with debug logging.
+    failure_results = (
+        PlanJudgeResult.LLM_UNAVAILABLE,
+        PlanJudgeResult.CRITICAL_REPLAN,
+    )
+    for i, v in enumerate(verdicts):
+        if v.result in failure_results and v.summary:
+            summary += f" | seg{i + 1} detail: {v.summary[:300]}"
+            break
 
     return PlanJudgeVerdict(
         result=result,

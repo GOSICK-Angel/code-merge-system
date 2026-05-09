@@ -86,6 +86,26 @@ def _is_openai_reasoning_model(model: str) -> bool:
     return model.lower().startswith(_OPENAI_REASONING_MODEL_PREFIXES)
 
 
+def _extract_responses_text(response: Any) -> str:
+    """Extract visible text from an OpenAI Responses API response.
+
+    Prefers the SDK's derived ``output_text`` attribute; falls back to
+    iterating ``output[].content[]`` for blocks with type ``output_text``
+    when proxies don't populate the convenience field.
+    """
+    text = getattr(response, "output_text", None)
+    if isinstance(text, str) and text:
+        return text
+    parts: list[str] = []
+    for item in getattr(response, "output", []) or []:
+        for block in getattr(item, "content", []) or []:
+            if getattr(block, "type", None) == "output_text":
+                t = getattr(block, "text", None)
+                if isinstance(t, str) and t:
+                    parts.append(t)
+    return "".join(parts)
+
+
 def _sanitize_surrogates(value: Any) -> Any:
     """Replace lone UTF-16 surrogate code points that break utf-8 encoding.
 
@@ -228,12 +248,14 @@ class OpenAIClient(LLMClient):
         base_url: str | None = None,
         timeout: float = 60.0,
         reasoning_effort: str | None = None,
+        api_style: str = "chat",
     ):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_retries = max_retries
         self.reasoning_effort = reasoning_effort
+        self.api_style = api_style
         # SDK-level retry is disabled: BaseAgent._call_llm_with_retry owns retry
         # policy with category-aware cooldowns. Default SDK max_retries=2 used
         # to compound (3×3 attempts × ~120s) into ~18min cascades on Cloudflare
@@ -255,6 +277,12 @@ class OpenAIClient(LLMClient):
     ) -> str:
         sanitized_messages = _sanitize_surrogates(messages)
         sanitized_system = _sanitize_surrogates(system)
+
+        if self.api_style == "responses":
+            return await self._complete_responses(
+                sanitized_messages, sanitized_system, **kwargs
+            )
+
         all_messages: list[ChatCompletionMessageParam] = []
         if sanitized_system:
             all_messages.append({"role": "system", "content": sanitized_system})
@@ -287,6 +315,54 @@ class OpenAIClient(LLMClient):
                 f"OpenAI returned empty content (finish_reason={finish_reason!r}, model={self.model!r})"
             )
         return content
+
+    async def _complete_responses(
+        self,
+        sanitized_messages: list[dict[str, Any]],
+        sanitized_system: str | None,
+        **kwargs: Any,
+    ) -> str:
+        if (
+            len(sanitized_messages) == 1
+            and sanitized_messages[0].get("role") == "user"
+            and isinstance(sanitized_messages[0].get("content"), str)
+        ):
+            input_payload: Any = sanitized_messages[0]["content"]
+        else:
+            input_payload = [
+                {"role": msg["role"], "content": msg["content"]}
+                for msg in sanitized_messages
+            ]
+
+        extra: dict[str, Any] = {}
+        if self.reasoning_effort is not None:
+            extra["reasoning"] = {"effort": self.reasoning_effort}
+
+        response_format = kwargs.pop("response_format", None)
+        if (
+            isinstance(response_format, dict)
+            and response_format.get("type") == "json_object"
+        ):
+            extra["text"] = {"format": {"type": "json_object"}}
+
+        if sanitized_system:
+            extra["instructions"] = sanitized_system
+
+        response = await self._client.responses.create(
+            model=self.model,
+            input=input_payload,
+            max_output_tokens=self.max_tokens,
+            **extra,
+            **kwargs,
+        )
+        text = _extract_responses_text(response)
+        if not text:
+            status = getattr(response, "status", None)
+            raise RuntimeError(
+                f"OpenAI Responses API returned empty content "
+                f"(status={status!r}, model={self.model!r})"
+            )
+        return text
 
     async def complete_structured(
         self,
@@ -409,5 +485,6 @@ class LLMClientFactory:
                 base_url=base_url,
                 timeout=float(config.request_timeout_seconds),
                 reasoning_effort=effective_reasoning_effort,
+                api_style=config.api_style,
             )
         raise ValueError(f"Unknown provider: {config.provider}")

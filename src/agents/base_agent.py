@@ -496,7 +496,9 @@ class BaseAgent(ABC):
                     if json_mode and self.llm_config.provider == "openai":
                         from src.llm.client import _is_openai_reasoning_model
 
-                        if not _is_openai_reasoning_model(self.llm_config.model):
+                        if self.llm_config.api_style == "responses":
+                            extra["response_format"] = {"type": "json_object"}
+                        elif not _is_openai_reasoning_model(self.llm_config.model):
                             extra["response_format"] = {"type": "json_object"}
                     llm_result = await self.llm.complete(
                         messages, system=system, **extra

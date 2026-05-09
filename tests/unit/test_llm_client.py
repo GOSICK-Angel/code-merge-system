@@ -457,6 +457,122 @@ class TestOpenAIClientComplete:
         call_kwargs = client._client.chat.completions.create.call_args.kwargs
         assert call_kwargs["max_tokens"] == 1024
         assert call_kwargs["temperature"] == 0.2
+
+
+def _make_openai_responses_client(
+    model: str = "gpt-5.4",
+    reasoning_effort: str | None = None,
+) -> OpenAIClient:
+    with patch("openai.AsyncOpenAI"):
+        return OpenAIClient(
+            model=model,
+            api_key="test-key",
+            temperature=0.2,
+            max_tokens=32768,
+            max_retries=3,
+            reasoning_effort=reasoning_effort,
+            api_style="responses",
+        )
+
+
+def _stub_responses_create(client: OpenAIClient, output_text: str) -> AsyncMock:
+    mock_block = MagicMock()
+    mock_block.type = "output_text"
+    mock_block.text = output_text
+    mock_item = MagicMock()
+    mock_item.content = [mock_block]
+    mock_response = MagicMock()
+    mock_response.output = [mock_item]
+    mock_response.output_text = None
+    mock_response.status = "completed"
+    create_mock = AsyncMock(return_value=mock_response)
+    client._client.responses.create = create_mock
+    return create_mock
+
+
+class TestOpenAIClientResponsesAPI:
+    async def test_responses_style_routes_to_responses_create(self):
+        client = _make_openai_responses_client()
+        create_mock = _stub_responses_create(client, "hello")
+
+        out = await client.complete([{"role": "user", "content": "hi"}])
+
+        assert out == "hello"
+        create_mock.assert_awaited_once()
+        call_kwargs = create_mock.call_args.kwargs
+        assert call_kwargs["model"] == "gpt-5.4"
+        assert call_kwargs["input"] == "hi"
+        assert call_kwargs["max_output_tokens"] == 32768
+        assert "messages" not in call_kwargs
+        assert "max_completion_tokens" not in call_kwargs
+
+    async def test_responses_passes_system_as_instructions(self):
+        client = _make_openai_responses_client()
+        create_mock = _stub_responses_create(client, "ok")
+
+        await client.complete([{"role": "user", "content": "hi"}], system="be terse")
+
+        call_kwargs = create_mock.call_args.kwargs
+        assert call_kwargs["instructions"] == "be terse"
+
+    async def test_responses_translates_response_format_to_text_format(self):
+        client = _make_openai_responses_client()
+        create_mock = _stub_responses_create(client, '{"ok":true}')
+
+        await client.complete(
+            [{"role": "user", "content": "hi"}],
+            response_format={"type": "json_object"},
+        )
+
+        call_kwargs = create_mock.call_args.kwargs
+        assert call_kwargs["text"] == {"format": {"type": "json_object"}}
+        assert "response_format" not in call_kwargs
+
+    async def test_responses_passes_reasoning_effort_via_reasoning_dict(self):
+        client = _make_openai_responses_client(reasoning_effort="medium")
+        create_mock = _stub_responses_create(client, "ok")
+
+        await client.complete([{"role": "user", "content": "hi"}])
+
+        call_kwargs = create_mock.call_args.kwargs
+        assert call_kwargs["reasoning"] == {"effort": "medium"}
+
+    async def test_responses_extracts_text_from_output_blocks(self):
+        client = _make_openai_responses_client()
+        # output_text is null (proxy doesn't populate); must fall back to blocks
+        _stub_responses_create(client, "fallback-text")
+
+        out = await client.complete([{"role": "user", "content": "hi"}])
+
+        assert out == "fallback-text"
+
+    async def test_responses_raises_on_empty_output(self):
+        client = _make_openai_responses_client()
+        mock_response = MagicMock()
+        mock_response.output = []
+        mock_response.output_text = None
+        mock_response.status = "incomplete"
+        client._client.responses.create = AsyncMock(return_value=mock_response)
+
+        with pytest.raises(RuntimeError, match="empty content"):
+            await client.complete([{"role": "user", "content": "hi"}])
+
+    async def test_responses_uses_list_input_for_multi_message(self):
+        client = _make_openai_responses_client()
+        create_mock = _stub_responses_create(client, "ok")
+
+        await client.complete(
+            [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "ack"},
+                {"role": "user", "content": "second"},
+            ]
+        )
+
+        call_kwargs = create_mock.call_args.kwargs
+        assert isinstance(call_kwargs["input"], list)
+        assert len(call_kwargs["input"]) == 3
+        assert call_kwargs["input"][0] == {"role": "user", "content": "first"}
         assert "max_completion_tokens" not in call_kwargs
         assert "reasoning_effort" not in call_kwargs
 

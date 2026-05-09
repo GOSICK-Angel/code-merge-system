@@ -27,6 +27,15 @@ def _load_repo_env(repo_path: str) -> None:
     constructed; otherwise clients fall back to the public default
     endpoints and confusing model-name errors surface (see the
     dify-plugins planner_judge failure 2026-05-08).
+
+    ``override=True`` is intentional: the project ``.merge/.env`` is the
+    authoritative configuration for that repo, and must beat both the
+    install-tree ``.env`` and the global ``~/.config/code-merge-system/.env``
+    fallback (loaded earlier by ``load_env()``). Without override, a stale
+    ``OPENAI_BASE_URL`` from those fallbacks silently routed planner_judge
+    to the wrong gateway (dify-plugins 2026-05-09 — Cloudflare 524 from
+    ``cc2.069809.xyz`` while the project ``.env`` clearly pointed at
+    ``token.cvte.com``).
     """
     env_path = get_project_merge_dir(repo_path) / ".env"
     if not env_path.exists():
@@ -35,7 +44,7 @@ def _load_repo_env(repo_path: str) -> None:
         from dotenv import load_dotenv
     except ImportError:  # pragma: no cover — python-dotenv is a hard dep
         return
-    load_dotenv(env_path, override=False)
+    load_dotenv(env_path, override=True)
 
 
 console = Console()

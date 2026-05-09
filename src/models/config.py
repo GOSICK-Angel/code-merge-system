@@ -50,6 +50,12 @@ class AgentLLMConfig(BaseModel):
         description="OpenAI reasoning-model effort hint ('low', 'medium', 'high'). "
         "Only sent when explicitly set — leave None for proxies that do not support it.",
     )
+    api_style: Literal["chat", "responses"] = Field(
+        default="chat",
+        description="OpenAI API surface: 'chat' (chat.completions, default) or "
+        "'responses' (the Responses API). Some proxies only expose one; pick "
+        "the style your endpoint supports.",
+    )
     fallback: Optional[AgentLLMConfig] = Field(
         default=None,
         description="O-1/O-5: Optional fallback provider config activated when the "

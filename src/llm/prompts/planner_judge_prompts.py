@@ -5,7 +5,7 @@ from src.models.diff import FileDiff, RiskLevel
 from src.models.plan_judge import PlanIssue
 from src.models.plan_review import PlannerIssueResponse, IssueResponseAction
 
-REVIEW_SEGMENT_SIZE = 150
+REVIEW_SEGMENT_SIZE = 80
 
 
 _PLANNER_JUDGE_SYSTEM_BASE = """You are an independent reviewer of code merge plans. Your task is to verify that \
