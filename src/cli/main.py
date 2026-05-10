@@ -25,17 +25,15 @@ def _load_repo_env(repo_path: str) -> None:
     scoped ``.merge/.env`` (custom OpenAI/Anthropic gateway URL,
     per-project API keys, etc.) need it loaded *before* any LLM client is
     constructed; otherwise clients fall back to the public default
-    endpoints and confusing model-name errors surface (see the
-    dify-plugins planner_judge failure 2026-05-08).
+    endpoints and confusing model-name errors surface.
 
     ``override=True`` is intentional: the project ``.merge/.env`` is the
     authoritative configuration for that repo, and must beat both the
     install-tree ``.env`` and the global ``~/.config/code-merge-system/.env``
     fallback (loaded earlier by ``load_env()``). Without override, a stale
-    ``OPENAI_BASE_URL`` from those fallbacks silently routed planner_judge
-    to the wrong gateway (dify-plugins 2026-05-09 — Cloudflare 524 from
-    ``cc2.069809.xyz`` while the project ``.env`` clearly pointed at
-    ``token.cvte.com``).
+    ``OPENAI_BASE_URL`` from those fallbacks silently routes LLM calls to
+    the wrong gateway even when the project ``.env`` explicitly points
+    elsewhere.
     """
     env_path = get_project_merge_dir(repo_path) / ".env"
     if not env_path.exists():
@@ -204,11 +202,13 @@ def init_command(repo_path: str) -> None:
 )
 @click.option(
     "--patterns",
-    default="cvte",
+    default="*",
     show_default=True,
     help=(
         "Comma-separated substrings to count against changed file paths. "
-        "Use '*' to disable filtering and report total file counts only."
+        "Default '*' disables filtering and reports total file counts only. "
+        "Pass fork-specific substrings (e.g. owner or vendor prefix) to "
+        "weight baselines by fork-customised coverage."
     ),
 )
 @click.option(
@@ -224,9 +224,9 @@ def plan_suggest_command(
 
     For each ``~N`` window relative to TARGET, prints commit count, total
     changed-file count, and how many of those files match the substring
-    PATTERNS (default 'cvte'). Helps pick a baseline with enough
-    fork-customised coverage to exercise SEMANTIC_MERGE without blowing
-    up the budget.
+    PATTERNS. Default ``*`` reports raw totals; pass project-specific
+    substrings to weight baselines by fork-customised coverage so the
+    chosen window exercises SEMANTIC_MERGE without blowing up the budget.
     """
     from src.tools.git_tool import GitTool
 

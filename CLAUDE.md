@@ -57,6 +57,41 @@ These are load-bearing design rules enforced by unit tests — do not violate th
 - **Plan revision limit** — when `plan_revision_rounds >= max_plan_revision_rounds`, transition to `AWAITING_HUMAN`, not `FAILED`
 - **Plan human review** — after PlannerJudge approves the plan, the system checks `pending_user_decisions`. If any files are `HUMAN_REQUIRED`, it transitions to `AWAITING_HUMAN` for human sign-off. If no files need human decisions (all files are auto-mergeable), the system skips `AWAITING_HUMAN` and transitions directly to `AUTO_MERGING`. For non-converged plans (MAX_ROUNDS / STALLED / LLM_FAILURE), `AWAITING_HUMAN` is always required. A `plan_review_<run_id>.md` report is generated regardless.
 
+## Project Generality (target-repo agnostic)
+
+This repository is a **generic** code-merge agent. Code under `src/` MUST NOT
+contain target-repo-specific behavior. Anything that varies by target project
+belongs in `<repo>/.merge/config.yaml` (runtime config) or
+`<repo>/.merge/forks-profile.yaml` (fork divergence shape) — never baked into
+source.
+
+Forbidden forms (treat as bugs to fix when found):
+
+- **Hardcoded fork / repo names as default values** — e.g. a CLI option
+  `default="cvte"`, a regex literal `re.compile(r"dify-.*")`, a module
+  constant `FORK_OWNER = "insforge"`. Defaults must be neutral (`"*"`,
+  `None`, or required-explicit) and the fork-specific value supplied via
+  config.
+- **Hardcoded paths or domain names tied to one project** — e.g. branching
+  on `if "dify-plugins" in url:` or special-casing `token.cvte.com`. Route
+  such switches through config flags or the forks-profile schema.
+- **Calibration constants bleeding into production code** — threshold
+  values, pattern lists, or filters derived from one specific target repo
+  must accept overrides from config; the in-source value is at most a
+  conservative default.
+
+Acceptable forms:
+
+- **Historical references in docstrings / commit messages** explaining
+  *why* a heuristic was chosen, provided the runtime behavior is generic
+  (e.g. "calibrated against insforge v2.1.0" next to a configurable
+  threshold is fine; `if repo_name == "insforge"` is not).
+- **Test cases** under `tests/` may reference real fork names as fixtures
+  — production code under `src/` may not.
+
+When in doubt: would another team running this agent against an unrelated
+fork see different behavior because of this line? If yes, move it to config.
+
 ## Forks-profile authoring contract
 
 `<repo>/.merge/forks-profile.yaml` is **optional** and accepts only four

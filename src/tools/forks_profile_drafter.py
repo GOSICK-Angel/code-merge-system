@@ -313,9 +313,9 @@ def extract_owner_repo(url: str) -> str | None:
 
     Accepts both forms commonly produced by ``git remote -v``::
 
-        git@github.com:cvte/dify-official-plugins.git → cvte/dify-official-plugins
-        https://github.com/cvte/dify-plugins.git     → cvte/dify-plugins
-        https://gitlab.example.com/group/proj         → group/proj
+        git@github.com:acme/forked-app.git           → acme/forked-app
+        https://github.com/acme/forked-app.git       → acme/forked-app
+        https://gitlab.example.com/group/proj        → group/proj
     """
     if not url:
         return None
@@ -389,8 +389,8 @@ def draft_removed_domains(
     earliest commit that removed ``path`` in the fork-only range, or
     ``None`` if not findable. ``None`` callable disables the lookup.
 
-    Evidence-based filtering (the *real* fix for the dify-plugins-style
-    yaml bloat): when ``require_commit_evidence`` is True (default) and
+    Evidence-based filtering (the *real* fix for tree-diff-induced yaml
+    bloat): when ``require_commit_evidence`` is True (default) and
     a lookup callable is provided, clusters where **no** member has a
     findable delete-commit are dropped from ``kept_domains`` and reported
     via ``filtered_globs``. The motivating case is base drift — a fork

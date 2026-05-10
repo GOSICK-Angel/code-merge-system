@@ -3,9 +3,8 @@ LLM semantic_merge fails.
 
 The original behavior was to call ``create_escalate_record`` and leave
 the worktree blob equal to the fork version, silently dropping every
-upstream change. That made the 5 escalate_human files in the InsForge
-v2.1.0 run effectively unmergeable without the operator computing the
-diff by hand.
+upstream change. That left escalate_human files effectively unmergeable
+without the operator computing the diff by hand.
 
 The stash captures ``git diff <merge_base>..<upstream_ref> -- <file>``
 into ``<run_dir>/upstream_diff_stashes/<safe_path>.patch`` so the

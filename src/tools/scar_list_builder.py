@@ -153,10 +153,10 @@ class ScarListBuilder:
     ) -> list[Scar]:
         """P2-1: scan ``base_ref..fork_ref`` for feature-add commits.
 
-        ``build()`` only catches restore/revert/compat-fix. Live forks (e.g.
-        cvte's dify plugin daemon) protect customizations through positive
-        commits — ``feat: add Cvte SSO``, ``add custom auth``, ``implement
-        plugin reload``. Those introduce fork-only files that must be
+        ``build()`` only catches restore/revert/compat-fix. Live forks
+        also protect customizations through positive commits —
+        ``feat: add SSO``, ``add custom auth``, ``implement plugin
+        reload``. Those introduce fork-only files that must be
         registered as ``CustomizationEntry`` so the next merge can verify
         they survived.
 

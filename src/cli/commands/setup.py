@@ -461,14 +461,11 @@ def _deep_merge_dicts(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str
 FORKS_PROFILE_INIT_THRESHOLD = 30
 """Minimum count of fork-deleted files required before offering an init.
 
-Calibrated against historical merge reports:
-  - insforge v2.1.0: 30+ fork-deleted files (6 removed_domains in yaml) →
-    a forks-profile.yaml materially reduced judge false positives.
-  - dify-plugin-daemon 0.6.0: 251 D_EXTRA but mostly path reorganization
-    (rename-class, not domain removal) — yaml still helps but not critical.
-
-Below ~30 the auto overlay (PR-A) covers the routing on its own and a
-yaml is just maintenance burden, so the wizard stays silent.
+Calibrated against historical merge reports: forks with ~30+ fork-deleted
+files materially benefited from a forks-profile.yaml (fewer judge false
+positives on removed domains), while forks below that threshold were
+adequately served by the auto overlay (PR-A) alone — a yaml there is
+just maintenance burden, so the wizard stays silent.
 """
 
 
