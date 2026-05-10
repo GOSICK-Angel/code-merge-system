@@ -2,9 +2,18 @@ import React, { useState, useCallback } from "react";
 import { Box, Text, useInput } from "ink";
 import { Badge, riskToBadgeVariant } from "../../ink/Badge.js";
 import { Divider } from "../../ink/Divider.js";
-import { KeyHint } from "../../ink/KeyHint.js";
 import { useConnection } from "../../context/ConnectionContext.js";
 import type { UserDecisionItem } from "../../state/types.js";
+
+function parseChangeZones(diff: string): string[] {
+  return diff
+    .split("\n")
+    .filter((line) => line.startsWith("@@"))
+    .map((line) => {
+      const match = line.match(/@@[^@]+@@\s*(.*)/);
+      return match?.[1]?.trim() ?? "";
+    });
+}
 
 interface Props {
   items: UserDecisionItem[];
@@ -73,6 +82,15 @@ export function PlanDecisionWizard({ items, isActive = true }: Props) {
           }
         } else if (key.leftArrow || (key as Record<string, boolean>).backspace) {
           goBack();
+        } else {
+          const num = parseInt(input, 10);
+          if (num >= 1 && num <= currentItem.options.length) {
+            const opt = currentItem.options[num - 1];
+            if (opt) {
+              setLocalDecisions((prev) => new Map(prev).set(currentItem.item_id, opt.key));
+              advance();
+            }
+          }
         }
       } else if (phase === "review") {
         if (key.return || input === "a") {
@@ -115,14 +133,6 @@ export function PlanDecisionWizard({ items, isActive = true }: Props) {
             );
           })}
         </Box>
-        <Divider />
-        <KeyHint
-          bindings={[
-            { key: "⏎", label: "Submit all" },
-            { key: "A", label: "Submit all" },
-            { key: "←", label: "Back" },
-          ]}
-        />
       </Box>
     );
   }
@@ -153,11 +163,61 @@ export function PlanDecisionWizard({ items, isActive = true }: Props) {
             {currentItem.description}
           </Text>
         )}
-        {currentItem.risk_context && currentItem.risk_context !== currentItem.description && (
-          <Text color="cyan" wrap="wrap">
-            {currentItem.risk_context}
-          </Text>
-        )}
+        {currentItem.risk_context &&
+          !currentItem.description.includes(currentItem.risk_context) && (
+            <Box flexDirection="row" gap={1} marginTop={0}>
+              <Text color="yellow" bold>
+                Risk:
+              </Text>
+              <Box flexDirection="column">
+                {currentItem.risk_context.split("\n").map((line, i) => (
+                  <Text key={i} color="cyan" wrap="wrap">
+                    {line}
+                  </Text>
+                ))}
+              </Box>
+            </Box>
+          )}
+        {currentItem.conflict_preview && (() => {
+          const zones = parseChangeZones(currentItem.conflict_preview);
+          return (
+            <Box
+              flexDirection="column"
+              marginTop={1}
+              borderStyle="single"
+              borderColor="gray"
+              paddingX={1}
+            >
+              <Box gap={2}>
+                <Text bold color="yellow">
+                  ── Divergence ──
+                </Text>
+                {zones.length > 0 && (
+                  <Text color="magenta">
+                    {zones.length} change {zones.length === 1 ? "zone" : "zones"}
+                    {zones.some(Boolean) && ": "}
+                    {zones.filter(Boolean).slice(0, 3).join(" · ")}
+                    {zones.filter(Boolean).length > 3 && " …"}
+                  </Text>
+                )}
+              </Box>
+              {currentItem.conflict_preview.split("\n").map((line, i) => {
+                const color = line.startsWith("+")
+                  ? "green"
+                  : line.startsWith("-")
+                    ? "red"
+                    : line.startsWith("@@")
+                      ? "magenta"
+                      : "gray";
+                return (
+                  <Text key={i} color={color}>
+                    {line}
+                  </Text>
+                );
+              })}
+            </Box>
+          );
+        })()}
       </Box>
       <Divider />
       <Box flexDirection="column" paddingX={1}>
@@ -167,12 +227,13 @@ export function PlanDecisionWizard({ items, isActive = true }: Props) {
             <Box key={opt.key} flexDirection="column">
               <Box gap={1}>
                 <Text color={isHighlighted ? "cyan" : "gray"}>{isHighlighted ? "▸" : " "}</Text>
+                <Text color={isHighlighted ? "cyan" : "gray"}>{i + 1}.</Text>
                 <Text bold color={isHighlighted ? "cyan" : "white"}>
                   {opt.label}
                 </Text>
               </Box>
               {isHighlighted && opt.description && (
-                <Box paddingLeft={4}>
+                <Box paddingLeft={5}>
                   <Text color="gray" wrap="wrap">
                     {opt.description}
                   </Text>
@@ -182,14 +243,6 @@ export function PlanDecisionWizard({ items, isActive = true }: Props) {
           );
         })}
       </Box>
-      <Divider />
-      <KeyHint
-        bindings={[
-          { key: "↑↓", label: "Navigate" },
-          { key: "⏎", label: "Confirm" },
-          { key: "←", label: "Back" },
-        ]}
-      />
     </Box>
   );
 }

@@ -228,6 +228,12 @@ export function PlanReviewScreen() {
     () => status === "awaiting_human" && pendingUserDecisions.length > 0 ? "decisions" : "overview"
   );
 
+  useEffect(() => {
+    if (status === "awaiting_human" && pendingUserDecisions.length > 0) {
+      setViewMode("decisions");
+    }
+  }, [status, pendingUserDecisions.length]);
+
   const canReview = status === "awaiting_human";
   const hasDecisions = pendingUserDecisions.length > 0;
   const allDecided = hasDecisions && pendingUserDecisions.every((d) => d.user_choice);
@@ -307,14 +313,19 @@ export function PlanReviewScreen() {
             { key: "↑↓", label: "Scroll" },
             { key: "Esc", label: "Back" },
           ]
-        : [
-            { key: "o", label: "Overview" },
-            { key: "n", label: "Negotiation" },
-            { key: "↑↓", label: "Navigate" },
-            { key: "1-9", label: "Choose" },
-            { key: "y", label: "Copy" },
-            { key: "Esc", label: "Back" },
-          ];
+        : (() => {
+            const maxOpts =
+              pendingUserDecisions.length > 0
+                ? Math.max(...pendingUserDecisions.map((d) => d.options.length))
+                : 3;
+            return [
+              { key: "↑↓", label: "Select" },
+              { key: `1-${maxOpts}`, label: "Quick pick" },
+              { key: "⏎", label: "Confirm" },
+              { key: "←", label: "Prev" },
+              { key: "o", label: "Overview" },
+            ];
+          })();
 
   return (
     <Box flexDirection="column">
