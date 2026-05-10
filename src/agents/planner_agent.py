@@ -46,8 +46,14 @@ class PlannerAgent(BaseAgent):
         self.restricted_view(
             state
         )  # contract side-effect: asserts inputs whitelist loads
-        plan = await self._generate_plan(state)
+        plan, rescored_diffs = await self._generate_plan(state)
         state.merge_plan = plan
+        # All state writes live in run(); _generate_plan stays pure.
+        # rescored_diffs may be the same list object as state.file_diffs
+        # when LLM rescoring is disabled — the identity check avoids a
+        # redundant assignment in that case.
+        if rescored_diffs is not state.file_diffs:
+            state.file_diffs = rescored_diffs
         state.file_classifications = {
             fp: batch.risk_level for batch in plan.phases for fp in batch.file_paths
         }
@@ -61,16 +67,28 @@ class PlannerAgent(BaseAgent):
             payload={"plan_id": plan.plan_id},
         )
 
-    async def _generate_plan(self, state: MergeState) -> MergePlan:
+    async def _generate_plan(
+        self, state: MergeState
+    ) -> tuple[MergePlan, list[FileDiff]]:
+        """Build the merge plan and return it together with the
+        (possibly rescored) diff list. This method is pure with respect
+        to ``state``: it never executes ``state.<field> = ...``. The
+        caller (``run``) owns persistence so all state writes are
+        collocated and discoverable.
+        """
         all_file_diffs: list[FileDiff] = state.file_diffs
 
-        if state.file_categories:
-            return self._build_layered_plan(all_file_diffs, state)
-
+        # LLM gray-zone rescore is applied in BOTH paths (layered and
+        # legacy). Running it before the layered branch decision means
+        # the updated risk_level flows into _build_layered_plan's
+        # _split_by_risk_level grouping.
         if state.config.llm_risk_scoring.enabled:
             all_file_diffs = await self._enhance_risk_scores(
                 all_file_diffs, state.config
             )
+
+        if state.file_categories:
+            return self._build_layered_plan(all_file_diffs, state), all_file_diffs
 
         batch_size = state.config.max_files_per_run
         batches = [
@@ -106,7 +124,10 @@ class PlannerAgent(BaseAgent):
             all_plan_data.append(plan_data)
 
         merged_data = self._merge_batch_plans(all_plan_data, all_file_diffs)
-        return self._build_merge_plan(merged_data, state, all_file_diffs)
+        return (
+            self._build_merge_plan(merged_data, state, all_file_diffs),
+            all_file_diffs,
+        )
 
     def _build_layered_plan(
         self, file_diffs: list[FileDiff], state: MergeState

@@ -87,6 +87,23 @@ def matches_any_pattern(file_path: str, patterns: list[str]) -> bool:
     return False
 
 
+def matches_any_pattern_ci(file_path: str, patterns: list[str]) -> bool:
+    """Case-insensitive variant of :func:`matches_any_pattern`.
+
+    Use this only when path casing should not affect the verdict —
+    e.g. weak risk-hint heuristics where ``Login.py`` should be treated
+    the same as ``login.py``. Strict patterns (env files, lockfiles,
+    forks-profile globs, excluded patterns) must keep the
+    case-sensitive matcher because their semantics depend on the
+    exact filename agreed by the project.
+    """
+    if not patterns:
+        return False
+    return matches_any_pattern(
+        file_path.lower(), [pattern.lower() for pattern in patterns]
+    )
+
+
 def estimate_total_lines(file_diff: FileDiff) -> int:
     if not file_diff.hunks:
         return max(1, file_diff.lines_added + file_diff.lines_deleted)
@@ -169,21 +186,42 @@ def compute_risk_score(file_diff: FileDiff, config: FileClassifierConfig) -> flo
         return 0.1
 
     no_content_change = file_diff.lines_added == 0 and file_diff.lines_deleted == 0
+    # Env-template files (.env.example / .env.sample / ...) match the
+    # strict ``patterns`` glob (``**/.env.*``) but only hold placeholders.
+    # Demote them to the weak risk_hint floor before the strong-signal
+    # check below, otherwise plugin-style fork merges (one env template
+    # per plugin) needlessly route every template through human review.
+    is_env_template = matches_any_pattern(
+        file_diff.file_path, config.security_sensitive.env_template_patterns
+    )
+
     # Strong security signal — file path matches the strict patterns
     # (cert/key files, .env, exact-named credentials.<ext>, etc.). Floor
     # the score so ``always_require_human`` reliably picks it up.
-    if not no_content_change and matches_any_pattern(
-        file_diff.file_path, config.security_sensitive.patterns
+    if (
+        not no_content_change
+        and not is_env_template
+        and matches_any_pattern(file_diff.file_path, config.security_sensitive.patterns)
     ):
         return float(max(raw_score, 0.8))
 
     # Weak security signal — filename merely *mentions* secret/credential/
-    # auth/etc. Add a hint bump so the file usually clears AUTO_SAFE and
-    # gets a ConflictAnalyst look, but don't escalate it all the way to
-    # HUMAN_REQUIRED on path heuristics alone (the test_validate_credentials
-    # false-positive class). LLM blending downstream has final word.
-    if not no_content_change and matches_any_pattern(
-        file_diff.file_path, config.security_sensitive.risk_hint_patterns
+    # auth/etc., or matches an env-template glob. Add a hint bump so the
+    # file usually clears AUTO_SAFE and gets a ConflictAnalyst look, but
+    # don't escalate it all the way to HUMAN_REQUIRED on path heuristics
+    # alone (the test_validate_credentials false-positive class). LLM
+    # blending downstream has final word.
+    # risk_hint matching is intentionally case-insensitive — these are
+    # weak heuristics meant to catch ``Login.py`` / ``OAuth.ts`` /
+    # ``OTP_handler.go`` style naming as well as their lowercase forms.
+    # Strict ``patterns`` above stay case-sensitive on purpose: a real
+    # ``.env`` file is conventionally lowercase and treating
+    # ``MyConfig.txt`` as a credential file would over-flag.
+    if not no_content_change and (
+        is_env_template
+        or matches_any_pattern_ci(
+            file_diff.file_path, config.security_sensitive.risk_hint_patterns
+        )
     ):
         bumped = raw_score + config.security_sensitive.risk_hint_bump
         return float(round(min(1.0, bumped), 3))
@@ -227,6 +265,12 @@ async def compute_llm_risk_score(
 
 
 def is_security_sensitive(file_path: str, config: FileClassifierConfig) -> bool:
+    # Env-template files match the strict ``**/.env.*`` glob but contain
+    # only placeholders — exclude them from the strong-signal flag so
+    # they fall back to the weak risk_hint path (auto_risky, not
+    # human_required). See SecuritySensitiveConfig.env_template_patterns.
+    if matches_any_pattern(file_path, config.security_sensitive.env_template_patterns):
+        return False
     return matches_any_pattern(file_path, config.security_sensitive.patterns)
 
 

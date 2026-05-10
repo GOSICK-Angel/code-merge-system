@@ -183,6 +183,24 @@ class SecuritySensitiveConfig(BaseModel):
     )
     always_require_human: bool = True
 
+    # Env-template files that match the strict ``patterns`` above (e.g.
+    # ``.env.example``) hold placeholders, not real secrets. Treating them
+    # as ``human_required`` would block batch merges of plugin-style
+    # repositories (where every plugin ships an env template) for no
+    # real safety win. Files matching any of these patterns are
+    # *demoted* from the strict floor to the weak ``risk_hint`` floor —
+    # they still get the bump (so they land in ``auto_risky``), but the
+    # 0.8 floor + ``always_require_human`` no longer applies.
+    env_template_patterns: list[str] = Field(
+        default_factory=lambda: [
+            "**/.env.example",
+            "**/.env.sample",
+            "**/.env.template",
+            "**/.env.dist",
+            "**/.env.defaults",
+        ]
+    )
+
     # Weak-signal paths: matching one of these does NOT floor the score
     # or force human review — the path *might* be sensitive, but it
     # might just be a test, a doc, or a logically-named helper. Hits
@@ -190,17 +208,69 @@ class SecuritySensitiveConfig(BaseModel):
     # the file from AUTO_SAFE into AUTO_RISKY so ConflictAnalyst LLM
     # examines the diff. The LLM's blended score (compute_llm_risk_score)
     # then has the final word.
+    #
+    # The list is intentionally broader than ``patterns``: we want every
+    # auth/login/verify/otp/oauth/sign-related file in the tree to clear
+    # AUTO_SAFE so PlannerJudge does not have to claw them back via an
+    # extra LLM round-trip on every merge. False positives (test fixtures,
+    # doc-only files) are tolerated — they merely get a ConflictAnalyst
+    # look, which is cheap.
     risk_hint_patterns: list[str] = Field(
         default_factory=lambda: [
+            # Directory-style hints
             "**/auth/**",
             "**/security/**",
+            # Single-file auth modules (auth.py, auth.ts, auth.go, ...)
+            "**/auth.py",
+            "**/auth.ts",
+            "**/auth.js",
+            "**/auth.go",
+            "**/auth.java",
+            "**/auth.rs",
+            "**/auth.rb",
+            # Auth flow keywords
+            "**/*oauth*",
+            "**/*signin*",
+            "**/*signup*",
+            "**/*login*",
+            "**/*logout*",
+            "**/*signout*",
+            "**/*authorize*",
+            "**/*authn*",
+            "**/*authz*",
+            # Verification / OTP / 2FA / MFA flows
+            "**/*otp*",
+            "**/*verify*",
+            "**/*verification*",
+            "**/*2fa*",
+            "**/*mfa*",
+            "**/*totp*",
+            # Signatures / permissions / API keys
+            "**/*signature*",
+            "**/*sign_*",
+            "**/*permission*",
+            "**/*acl*",
+            "**/*api_key*",
+            "**/*apikey*",
+            # Existing weak signals
             "**/*secret*",
             "**/*credential*",
             "**/*password*",
-            "**/*token*",
+            # Auth-token variants only — bare ``*token*`` matched far
+            # too many false positives in NLP / ML repositories
+            # (``tokenizer.py``, ``tokens.json``, ``bpe_tokens``, ...)
+            # and combined with ``risk_hint_bump=0.25`` pushed every
+            # tokenizer file out of AUTO_SAFE. Restrict to compound
+            # forms that genuinely imply an authentication token.
+            "**/*auth_token*",
+            "**/*access_token*",
+            "**/*api_token*",
+            "**/*refresh_token*",
+            "**/*bearer_token*",
+            "**/*token_auth*",
         ]
     )
-    risk_hint_bump: float = Field(default=0.15, ge=0.0, le=0.5)
+    risk_hint_bump: float = Field(default=0.25, ge=0.0, le=0.5)
 
 
 class FileClassifierConfig(BaseModel):
@@ -565,6 +635,30 @@ class MemoryExtractionConfig(BaseModel):
     )
 
 
+class PlanReviewConfig(BaseModel):
+    segment_safelist_patterns: list[str] = Field(
+        default_factory=list,
+        description="Project-specific glob patterns appended to the built-in "
+        "Plan-Judge segment safelist. Files matching one of these (in addition "
+        "to lockfiles / LICENSE / .gitignore / etc.) can let an entire "
+        "segment skip the LLM review when no other risk signals fire. "
+        "Use this to teach the agent about per-repo metadata files "
+        "(e.g. plugin manifests, position files, asset directories) "
+        "without hardcoding repo-specific knowledge in the agent.",
+    )
+    safelist_lockfile_max_lines: int = Field(
+        default=1000,
+        ge=100,
+        description="Per-file change-line ceiling for lockfile safelist "
+        "skip. A lockfile with lines_added + lines_deleted at or above "
+        "this value is forced back through the LLM review path even "
+        "when the segment is otherwise trivially safe. Bounds the "
+        "supply-chain risk of silently accepting massive dependency "
+        "rewrites (e.g. malicious package injection via auto-bumped "
+        "package-lock.json).",
+    )
+
+
 class CoordinatorConfig(BaseModel):
     judge_meta_review_threshold: int = Field(
         default=2,
@@ -674,6 +768,11 @@ class MergeConfig(BaseModel):
     )
     memory: MemoryExtractionConfig = Field(default_factory=MemoryExtractionConfig)
     coordinator: CoordinatorConfig = Field(default_factory=CoordinatorConfig)
+    plan_review: PlanReviewConfig = Field(
+        default_factory=PlanReviewConfig,
+        description="Plan-review (PlannerJudge) tuning, including the "
+        "per-repo segment safelist extension list.",
+    )
     max_dispute_rounds: int = Field(default=2, ge=1, le=5)
     max_batch_repair_rounds: int = Field(default=1, ge=1, le=3)
     max_rerun_rounds: int = Field(

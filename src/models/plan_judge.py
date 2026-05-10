@@ -15,7 +15,11 @@ class PlanJudgeResult(str, Enum):
 class PlanIssue(BaseModel):
     issue_id: str = Field(default_factory=lambda: str(uuid4()))
     file_path: str
-    current_classification: RiskLevel
+    # ``None`` indicates NOT-BATCHED: the file is absent from every
+    # batch in the plan, so there is no current classification to cite.
+    # Producers that have a real classification continue to set this
+    # field; consumers that render it must handle the ``None`` branch.
+    current_classification: RiskLevel | None = None
     suggested_classification: RiskLevel
     reason: str
     issue_type: str

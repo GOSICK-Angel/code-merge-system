@@ -85,6 +85,13 @@ Changed files ({len(file_diffs)} total):
 **human_required** — Use ONLY when at least ONE of:
   - conflicts > 0  (actual merge conflict markers present)
   - security_sensitive = true  (auth, crypto, secrets, permissions)
+  - Path obviously implements an authentication / verification / OTP / 2FA / MFA /
+    OAuth / signin / signout / signature / permission / API-key flow — even when
+    `security_sensitive=false`, prefer `human_required` for these. Examples:
+    `auth.py`, `*verify*.py`, `*otp*.py`, `oauth_*`, `signin_*`, `*signature*`,
+    `*permission*`, `*api_key*`. Env-template files (`.env.example`,
+    `.env.sample`, `.env.template`) are placeholders; classify them
+    `auto_risky`, NOT `human_required`.
   - Core business logic with both sides making semantic changes
 
 **deleted_only** — file_status is deleted, no conflicts
@@ -135,9 +142,17 @@ def build_revision_prompt(
     original_plan: MergePlan, judge_issues: list[PlanIssue]
 ) -> str:
     capped_issues = judge_issues[:MAX_REVISION_ISSUES]
+
+    def _curr(issue: PlanIssue) -> str:
+        return (
+            issue.current_classification.value
+            if issue.current_classification is not None
+            else "(not in plan)"
+        )
+
     issues_text = "\n".join(
         f"- File: {issue.file_path}\n"
-        f"  Current: {issue.current_classification.value}\n"
+        f"  Current: {_curr(issue)}\n"
         f"  Suggested: {issue.suggested_classification.value}\n"
         f"  Reason: {issue.reason}\n"
         f"  Type: {issue.issue_type}"
@@ -191,10 +206,17 @@ def build_evaluation_prompt(
 ) -> str:
     capped = judge_issues[:MAX_REVISION_ISSUES]
 
+    def _render_curr(issue: PlanIssue) -> str:
+        return (
+            issue.current_classification.value
+            if issue.current_classification is not None
+            else "(not in plan)"
+        )
+
     issues_text = "\n".join(
         f"- issue_id: {issue.issue_id}\n"
         f"  file_path: {issue.file_path}\n"
-        f"  current_classification: {issue.current_classification.value}\n"
+        f"  current_classification: {_render_curr(issue)}\n"
         f"  suggested_classification: {issue.suggested_classification.value}\n"
         f"  reason: {issue.reason}\n"
         f"  issue_type: {issue.issue_type}"

@@ -22,10 +22,42 @@ from src.models.plan_review import (
     UserDecisionItem,
 )
 from src.models.state import MergeState, PhaseResult, SystemStatus
-from src.llm.prompts.planner_judge_prompts import classify_prior_issues
+from src.agents.planner_judge_agent import SegmentReviewSnapshot
+from src.llm.prompts.planner_judge_prompts import (
+    classify_prior_issues,
+    precheck_plan_integrity,
+)
 from src.tools.report_writer import write_plan_review_report
 
 logger = logging.getLogger(__name__)
+
+
+def _all_issues_applied(
+    issues: list[PlanIssue],
+    plan: Any,
+) -> bool:
+    """True iff every issue's suggested_classification is reflected in
+    the current plan's classification of that file. Used by the
+    deterministic short-circuit in PlanReviewPhase: if Planner accepted
+    every Judge issue and applied each one, R{n+1}'s LLM call can be
+    skipped entirely.
+    """
+    cls_map = {fp: batch.risk_level for batch in plan.phases for fp in batch.file_paths}
+    for iss in issues:
+        if cls_map.get(iss.file_path) != iss.suggested_classification:
+            return False
+    return True
+
+
+# Issue types whose remediation is fully captured by reclassifying the
+# offending file's batch risk_level. The deterministic short-circuit is
+# safe ONLY when every prior-round issue belongs to this set. Other
+# issue types (e.g. batch_ordering / cross_layer_conflict) require an
+# LLM re-check because applying the suggested_classification does not
+# necessarily fix the structural problem.
+SHORTCIRCUIT_SAFE_ISSUE_TYPES: frozenset[str] = frozenset(
+    {"risk_underestimated", "wrong_batch"}
+)
 
 
 class PlanReviewPhase(Phase):
@@ -48,6 +80,11 @@ class PlanReviewPhase(Phase):
 
         all_prior_issues: list[PlanIssue] = []
         last_planner_responses: list[PlannerIssueResponse] | None = None
+        last_verdict_issues: list[PlanIssue] = []
+        # Per-segment cache shared across revision rounds. Segments
+        # whose (file_path, batch_risk) signature is unchanged AND whose
+        # prior verdict was APPROVED are reused without an LLM call.
+        segment_results: dict[int, SegmentReviewSnapshot] = {}
 
         if state.merge_plan is not None:
             try:
@@ -101,20 +138,74 @@ class PlanReviewPhase(Phase):
                     all_prior_issues, current_cls
                 )
 
-            verdict = await planner_judge.review_plan(
-                state.merge_plan,
-                file_diffs,
-                round_num,
-                lang=lang,
-                prior_resolved=prior_resolved if round_num > 0 else None,
-                prior_still_open=prior_still_open if round_num > 0 else None,
-                planner_responses=last_planner_responses,
-            )
+            short_circuit_verdict: PlanJudgeVerdict | None = None
+            if (
+                round_num > 0
+                and last_planner_responses
+                and last_verdict_issues
+                and all(
+                    r.action == IssueResponseAction.ACCEPT
+                    for r in last_planner_responses
+                )
+                and _all_issues_applied(last_verdict_issues, state.merge_plan)
+                and all(
+                    iss.issue_type in SHORTCIRCUIT_SAFE_ISSUE_TYPES
+                    for iss in last_verdict_issues
+                )
+            ):
+                pre = precheck_plan_integrity(state.merge_plan, file_diffs)
+                if not pre:
+                    logger.info(
+                        "R%d short-circuit approved — all R%d issues "
+                        "(%d) accepted+applied and precheck clean; "
+                        "skipping LLM review",
+                        round_num,
+                        round_num - 1,
+                        len(last_verdict_issues),
+                    )
+                    short_circuit_verdict = PlanJudgeVerdict(
+                        result=PlanJudgeResult.APPROVED,
+                        revision_round=round_num,
+                        issues=[],
+                        approved_files_count=len(file_diffs),
+                        flagged_files_count=0,
+                        summary=(
+                            f"Round {round_num} approved deterministically: "
+                            f"all {len(last_verdict_issues)} issues from "
+                            "the previous round were accepted by Planner "
+                            "and applied to the plan; integrity precheck "
+                            "is clean. No LLM call required."
+                        ),
+                        judge_model=ctx.agents["planner_judge"].llm_config.model,
+                        timestamp=datetime.now(),
+                    )
+
+            if short_circuit_verdict is not None:
+                verdict = short_circuit_verdict
+            else:
+                verdict = await planner_judge.review_plan(
+                    state.merge_plan,
+                    file_diffs,
+                    round_num,
+                    lang=lang,
+                    prior_resolved=prior_resolved if round_num > 0 else None,
+                    prior_still_open=prior_still_open if round_num > 0 else None,
+                    planner_responses=last_planner_responses,
+                    prior_segment_results=segment_results if round_num > 0 else None,
+                    out_segment_results=segment_results,
+                    extra_safelist_patterns=(
+                        state.config.plan_review.segment_safelist_patterns
+                    ),
+                    lockfile_max_lines=(
+                        state.config.plan_review.safelist_lockfile_max_lines
+                    ),
+                )
             if verdict.result == PlanJudgeResult.REVISION_NEEDED and not verdict.issues:
                 verdict = verdict.model_copy(
                     update={"result": PlanJudgeResult.APPROVED}
                 )
             state.plan_judge_verdict = verdict
+            last_verdict_issues = list(verdict.issues)
 
             seen_files = {iss.file_path for iss in all_prior_issues}
             for iss in verdict.issues:
@@ -469,9 +560,16 @@ class PlanReviewPhase(Phase):
                 {
                     "file_path": issue.file_path,
                     "reason": issue.reason,
-                    "current": issue.current_classification.value
-                    if hasattr(issue.current_classification, "value")
-                    else str(issue.current_classification),
+                    "current": (
+                        issue.current_classification.value
+                        if issue.current_classification is not None
+                        and hasattr(issue.current_classification, "value")
+                        else (
+                            "(not in plan)"
+                            if issue.current_classification is None
+                            else str(issue.current_classification)
+                        )
+                    ),
                     "suggested": issue.suggested_classification.value
                     if hasattr(issue.suggested_classification, "value")
                     else str(issue.suggested_classification),

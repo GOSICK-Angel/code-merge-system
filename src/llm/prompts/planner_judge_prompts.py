@@ -1,11 +1,216 @@
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 from src.models.plan import MergePlan
 from src.models.diff import FileDiff, RiskLevel
 from src.models.plan_judge import PlanIssue
 from src.models.plan_review import PlannerIssueResponse, IssueResponseAction
+from src.tools.file_classifier import matches_any_pattern
 
 REVIEW_SEGMENT_SIZE = 80
+
+
+# Risk levels for which a classifier-vs-batch divergence is meaningful.
+# Sentinel levels (BINARY, DELETED_ONLY, EXCLUDED) skip MISMATCH /
+# NOT-BATCHED detection because they do not participate in batching at
+# all. Defined up here so the safelist helpers can reference the symbol
+# without relying on Python's late name binding inside function bodies.
+_MISMATCH_TRACKED_LEVELS = frozenset(
+    {RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED}
+)
+
+
+# Subset of SAFELIST_PATTERNS that represents lockfile-style manifests.
+# Lockfiles can balloon to thousands of lines on routine dependency
+# bumps; matching one of these triggers a per-file change-line ceiling
+# (``safelist_lockfile_max_lines``) so a malicious supply-chain
+# rewrite cannot tunnel through the safelist invisibly.
+LOCKFILE_PATTERNS: list[str] = [
+    "**/uv.lock",
+    "**/poetry.lock",
+    "**/pnpm-lock.yaml",
+    "**/yarn.lock",
+    "**/package-lock.json",
+    "**/Pipfile.lock",
+]
+
+
+# Files matching one of these patterns AND with conflict_count=0,
+# is_security_sensitive=False, batch_risk == classifier_risk are
+# considered "obviously safe" — a segment composed entirely of such
+# files can skip the LLM Judge call entirely. Only ecosystem-universal
+# entries belong here; per-repo metadata (plugin position files, asset
+# directories, ignore-rule files specific to one tool) must be added via
+# `MergeConfig.plan_review.segment_safelist_patterns` rather than this
+# list, so the generic agent stays decoupled from any single fork.
+SAFELIST_PATTERNS: list[str] = [
+    # Lock / dependency manifests
+    *LOCKFILE_PATTERNS,
+    "**/pyproject.toml",
+    "**/requirements.txt",
+    "**/requirements-*.txt",
+    # Universal VCS / ignore metadata
+    "**/.gitignore",
+    "**/.gitkeep",
+    "**/.gitattributes",
+    # Routine docs
+    "**/CHANGELOG.md",
+    "**/LICENSE",
+    "**/LICENSE.txt",
+    "**/LICENSE.md",
+]
+
+
+def is_segment_obviously_safe(
+    segment: list[FileDiff],
+    batch_risk_map: dict[str, str],
+    extra_safelist_patterns: list[str] | None = None,
+    lockfile_max_lines: int = 1000,
+) -> bool:
+    """Return True iff EVERY file in the segment is trivially safe.
+
+    A file is trivially safe when:
+      - conflict_count == 0
+      - is_security_sensitive == False
+      - batch_risk == classifier risk_level (no MISMATCH)
+      - file path is in the plan (not NOT-BATCHED)
+      - one of:
+          * path matches a LOCKFILE_PATTERNS glob AND
+            lines_added + lines_deleted < ``lockfile_max_lines``, OR
+          * path matches a non-lockfile SAFELIST_PATTERNS glob, OR
+          * path matches an entry in ``extra_safelist_patterns``
+            (per-repo extension supplied by caller), OR
+          * lines_added + lines_deleted < 50 AND extension in
+            {.yaml, .toml, .json, .md, .txt, .lock} AND file_path
+            does NOT contain any risk-keyword substring (auth, otp,
+            verify, secret, credential, password, token, login,
+            permission, signature)
+    """
+    extra = extra_safelist_patterns or []
+    risk_keywords = (
+        "auth",
+        "otp",
+        "verify",
+        "secret",
+        "credential",
+        "password",
+        "token",
+        "login",
+        "permission",
+        "signature",
+        "oauth",
+        "signin",
+        "signup",
+    )
+    safe_exts = {".yaml", ".yml", ".toml", ".json", ".md", ".txt", ".lock"}
+
+    for fd in segment:
+        if fd.conflict_count > 0:
+            return False
+        if fd.is_security_sensitive:
+            return False
+
+        batch_rl = batch_risk_map.get(fd.file_path)
+        if batch_rl is None:
+            return False
+        if (
+            fd.risk_level in _MISMATCH_TRACKED_LEVELS
+            and batch_rl != fd.risk_level.value
+        ):
+            return False
+
+        if matches_any_pattern(fd.file_path, LOCKFILE_PATTERNS):
+            if fd.lines_added + fd.lines_deleted >= lockfile_max_lines:
+                return False
+            continue
+        if matches_any_pattern(fd.file_path, SAFELIST_PATTERNS):
+            continue
+        if extra and matches_any_pattern(fd.file_path, extra):
+            continue
+
+        ext = Path(fd.file_path).suffix.lower()
+        if ext not in safe_exts:
+            return False
+
+        if fd.lines_added + fd.lines_deleted >= 50:
+            return False
+
+        path_lower = fd.file_path.lower()
+        if any(kw in path_lower for kw in risk_keywords):
+            return False
+
+    return True
+
+
+def compute_segment_signature(
+    segment: list[FileDiff],
+    batch_risk_map: dict[str, str],
+) -> str:
+    """Stable hash of (file_path, batch_risk) tuples for cache lookup."""
+    pairs = sorted(
+        (fd.file_path, batch_risk_map.get(fd.file_path, "")) for fd in segment
+    )
+    blob = "\n".join(f"{p}\t{r}" for p, r in pairs).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def precheck_plan_integrity(
+    plan: MergePlan,
+    file_diffs: list[FileDiff],
+) -> list[PlanIssue]:
+    """Deterministically detect MISMATCH (classifier vs batch risk
+    divergence) and NOT-BATCHED (classifier produced verdict, plan
+    dropped the file) issues. These do not need an LLM round-trip.
+
+    Returns one PlanIssue per offending file; callers merge with LLM
+    issues by file_path.
+    """
+    batch_risk_map: dict[str, RiskLevel] = {}
+    for batch in plan.phases:
+        for fp in batch.file_paths:
+            batch_risk_map[fp] = batch.risk_level
+
+    issues: list[PlanIssue] = []
+    for fd in file_diffs:
+        if fd.risk_level not in _MISMATCH_TRACKED_LEVELS:
+            continue
+        batch_rl = batch_risk_map.get(fd.file_path)
+        if batch_rl is None:
+            issues.append(
+                PlanIssue(
+                    file_path=fd.file_path,
+                    # File is absent from the plan entirely — no
+                    # current classification to cite. ``None`` is
+                    # honest about that vs. the prior AUTO_SAFE
+                    # placeholder.
+                    current_classification=None,
+                    suggested_classification=fd.risk_level,
+                    reason=(
+                        "NOT-BATCHED: classifier produced a verdict "
+                        f"({fd.risk_level.value}) but the plan dropped "
+                        "this file from every batch (data loss)."
+                    ),
+                    issue_type="wrong_batch",
+                )
+            )
+            continue
+        if batch_rl != fd.risk_level:
+            issues.append(
+                PlanIssue(
+                    file_path=fd.file_path,
+                    current_classification=batch_rl,
+                    suggested_classification=fd.risk_level,
+                    reason=(
+                        f"MISMATCH: classifier risk_level={fd.risk_level.value} "
+                        f"but plan placed file in {batch_rl.value} batch — "
+                        "trust the classifier."
+                    ),
+                    issue_type="risk_underestimated",
+                )
+            )
+    return issues
 
 
 _PLANNER_JUDGE_SYSTEM_BASE = """You are an independent reviewer of code merge plans. Your task is to verify that \
@@ -50,11 +255,6 @@ def get_planner_judge_system(lang: str = "en") -> str:
     if lang == "zh":
         return _PLANNER_JUDGE_SYSTEM_BASE + _PLANNER_JUDGE_SYSTEM_ZH_SUFFIX
     return _PLANNER_JUDGE_SYSTEM_BASE
-
-
-_MISMATCH_TRACKED_LEVELS = frozenset(
-    {RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED}
-)
 
 
 def _build_file_manifest(
@@ -139,8 +339,13 @@ def _build_prior_issues_section(
     lines.append(resolved_hdr)
     if resolved:
         for iss in resolved:
+            curr = (
+                iss.current_classification.value
+                if iss.current_classification is not None
+                else "(not in plan)"
+            )
             lines.append(
-                f"  - `{iss.file_path}`: {iss.current_classification.value} → "
+                f"  - `{iss.file_path}`: {curr} → "
                 f"{iss.suggested_classification.value} ✔\n"
             )
     else:
@@ -149,10 +354,15 @@ def _build_prior_issues_section(
     lines.append(open_hdr)
     if still_open:
         for iss in still_open:
+            curr = (
+                iss.current_classification.value
+                if iss.current_classification is not None
+                else "(not in plan)"
+            )
             lines.append(
-                f"  - `{iss.file_path}`: requested {iss.current_classification.value} → "
+                f"  - `{iss.file_path}`: requested {curr} → "
                 f"{iss.suggested_classification.value}, still at "
-                f"{iss.current_classification.value}\n"
+                f"{curr}\n"
             )
     else:
         lines.append(none_str)
@@ -284,9 +494,11 @@ def build_plan_review_prompt(
 3. Files that are obviously security-critical by name/path but classified `auto_safe` → flag
 4. Dangerous batch ordering that would break a dependency → flag (name both files)
 5. Files with `conflict_count=0` and `is_security_sensitive=false` → do NOT flag regardless of diff size
-6. Files marked `MISMATCH` (classifier risk_level disagrees with batch risk_level) → MUST flag with issue_type=`risk_underestimated`; trust the classifier's verdict
-7. Files marked `NOT-BATCHED` (classifier produced a verdict but plan dropped them) → MUST flag with issue_type=`wrong_batch`; this is data loss
-{"8. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
+{"6. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
+
+Note: MISMATCH / NOT-BATCHED divergence between the classifier and the
+batch is verified deterministically before this prompt is built; you
+do not need to re-detect it. Focus on semantic / path-based judgment.
 
 Return JSON with:
 {{
@@ -383,9 +595,11 @@ def build_segment_plan_review_prompt(
 3. Files that are obviously security-critical by name/path but classified `auto_safe` → flag
 4. Dangerous batch ordering that would break a dependency → flag (name both files)
 5. Files with `conflict_count=0` and `is_security_sensitive=false` → do NOT flag regardless of diff size
-6. Files marked `MISMATCH` (classifier risk_level disagrees with batch risk_level) → MUST flag with issue_type=`risk_underestimated`; trust the classifier's verdict
-7. Files marked `NOT-BATCHED` (classifier produced a verdict but plan dropped them) → MUST flag with issue_type=`wrong_batch`; this is data loss
-{"8. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
+{"6. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
+
+Note: MISMATCH / NOT-BATCHED divergence between the classifier and the
+batch is verified deterministically before this prompt is built; you
+do not need to re-detect it. Focus on semantic / path-based judgment.
 
 Only report issues for files listed in this segment. The other segments will cover the remaining files.
 
