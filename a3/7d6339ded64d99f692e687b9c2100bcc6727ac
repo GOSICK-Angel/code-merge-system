@@ -1,0 +1,23 @@
+src/memory/summarizer.py
+  6feaf208bb1bb821 194-195,199,212,222,290,293,301
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.13",
+  "base_commit_sha": "a37d6339ded64d99f692e687b9c2100bcc6727ac",
+  "prompts": {
+    "6feaf208bb1bb821": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6cd6f5d8-7008-42b0-96f1-14f24d4e1733",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "Angel <heanqi@cvte.com>",
+      "messages": [],
+      "total_additions": 8,
+      "total_deletions": 7,
+      "accepted_lines": 8,
+      "overriden_lines": 0
+    }
+  }
+}
