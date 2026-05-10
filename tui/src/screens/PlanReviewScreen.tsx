@@ -1,20 +1,16 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { StatusBar } from "../components/status/StatusBar.js";
 import { PlanSummary } from "../components/plan/PlanSummary.js";
 import { BatchList } from "../components/plan/BatchList.js";
+import { PlanDecisionWizard } from "../components/decisions/PlanDecisionWizard.js";
 import { Divider } from "../ink/Divider.js";
 import { KeyHint } from "../ink/KeyHint.js";
-import { Badge, riskToBadgeVariant } from "../ink/Badge.js";
-import { ScrollBox, ScrollBoxHandle } from "../ink/ScrollBox.js";
+import { ScrollBox } from "../ink/ScrollBox.js";
 import { useAppStore } from "../state/store.js";
 import { useConnection } from "../context/ConnectionContext.js";
 import { useKeybindingContext } from "../context/KeybindingContext.js";
-import type {
-  PlanReviewRound,
-  ReviewConclusion,
-  UserDecisionItem,
-} from "../state/types.js";
+import type { PlanReviewRound, ReviewConclusion } from "../state/types.js";
 
 type ViewMode = "overview" | "negotiation" | "decisions";
 
@@ -220,71 +216,6 @@ function ConclusionBanner({
   );
 }
 
-function DecisionItemRow({
-  item,
-  isSelected,
-  onSelect,
-}: {
-  item: UserDecisionItem;
-  isSelected: boolean;
-  onSelect: (choice: string) => void;
-}) {
-  const bgColor = isSelected ? "blue" : undefined;
-
-  return (
-    <Box flexDirection="column" paddingX={1} marginBottom={0}>
-      <Box gap={1}>
-        <Text backgroundColor={bgColor} color="white" bold>
-          {isSelected ? "▸ " : "  "}
-          {item.file_path}
-        </Text>
-        <Badge
-          label={item.current_classification}
-          variant={riskToBadgeVariant(item.current_classification)}
-        />
-        {item.user_choice && (
-          <Text color="green" bold>
-            ✓ {item.user_choice}
-          </Text>
-        )}
-      </Box>
-      {isSelected && (
-        <Box flexDirection="column" paddingLeft={4}>
-          <Text color="gray" wrap="wrap">
-            {item.description}
-          </Text>
-          {item.risk_context && item.risk_context !== item.description && (
-            <Box paddingLeft={1}>
-              <Text color="cyan" wrap="wrap">
-                Context: {item.risk_context}
-              </Text>
-            </Box>
-          )}
-          <Box flexDirection="column" marginTop={0}>
-            {item.options.map((opt, i) => (
-              <Box key={opt.key} flexDirection="column">
-                <Text>
-                  <Text color="yellow" bold>
-                    [{i + 1}]
-                  </Text>
-                  <Text bold> {opt.label}</Text>
-                </Text>
-                {opt.description && (
-                  <Box paddingLeft={4}>
-                    <Text color="gray" wrap="wrap">
-                      {opt.description}
-                    </Text>
-                  </Box>
-                )}
-              </Box>
-            ))}
-          </Box>
-        </Box>
-      )}
-    </Box>
-  );
-}
-
 export function PlanReviewScreen() {
   const status = useAppStore((s) => s.status);
   const { send } = useConnection();
@@ -293,17 +224,15 @@ export function PlanReviewScreen() {
   const pendingUserDecisions = useAppStore((s) => s.pendingUserDecisions);
   const messages = useAppStore((s) => s.messages);
 
-  const [viewMode, setViewMode] = useState<ViewMode>("overview");
-  const [selectedDecisionIdx, setSelectedDecisionIdx] = useState(0);
-  const [copyFlash, setCopyFlash] = useState("");
-  const decisionsScrollRef = useRef<ScrollBoxHandle>(null);
-  const decisionsHeight = 15;
+  const [viewMode, setViewMode] = useState<ViewMode>(
+    () => status === "awaiting_human" && pendingUserDecisions.length > 0 ? "decisions" : "overview"
+  );
 
   const canReview = status === "awaiting_human";
   const hasDecisions = pendingUserDecisions.length > 0;
   const allDecided = hasDecisions && pendingUserDecisions.every((d) => d.user_choice);
 
-  const viewModeRef = useRef(viewMode);
+  const viewModeRef = useRef<ViewMode>(viewMode);
   viewModeRef.current = viewMode;
 
   const { register, unregister } = useKeybindingContext();
@@ -317,21 +246,6 @@ export function PlanReviewScreen() {
     });
     return () => unregister(handlerId);
   }, [register, unregister]);
-
-  const copyToClipboard = useCallback((text: string, label: string) => {
-    try {
-      const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
-      try {
-        execFileSync("pbcopy", [], { input: text, timeout: 2000 });
-      } catch {
-        execFileSync("xclip", ["-selection", "clipboard"], { input: text, timeout: 2000 });
-      }
-      setCopyFlash(`Copied: ${label}`);
-    } catch {
-      setCopyFlash("Copy failed — clipboard tool not found");
-    }
-    setTimeout(() => setCopyFlash(""), 2000);
-  }, []);
 
   const reportMsg = messages.find(
     (m: { type: string }) => m.type === "plan_report"
@@ -350,56 +264,6 @@ export function PlanReviewScreen() {
     } else if (key.escape) {
       if (viewMode !== "overview") {
         setViewMode("overview");
-      }
-    }
-
-    if (viewMode === "decisions" && hasDecisions) {
-      if (key.upArrow) {
-        setSelectedDecisionIdx((prev) => {
-          const next = Math.max(0, prev - 1);
-          decisionsScrollRef.current?.scrollTo(
-            Math.max(0, next - Math.floor(decisionsHeight / 2))
-          );
-          return next;
-        });
-      } else if (key.downArrow) {
-        setSelectedDecisionIdx((prev) => {
-          const next = Math.min(pendingUserDecisions.length - 1, prev + 1);
-          decisionsScrollRef.current?.scrollTo(
-            Math.max(0, next - Math.floor(decisionsHeight / 2))
-          );
-          return next;
-        });
-      } else if (
-        input >= "1" &&
-        input <= "9" &&
-        pendingUserDecisions[selectedDecisionIdx]
-      ) {
-        const item = pendingUserDecisions[selectedDecisionIdx];
-        const optIdx = parseInt(input) - 1;
-        if (optIdx < item.options.length) {
-          send({
-            type: "submit_user_plan_decisions",
-            payload: {
-              items: [
-                {
-                  item_id: item.item_id,
-                  user_choice: item.options[optIdx].key,
-                },
-              ],
-            },
-          });
-        }
-      } else if (input === "y" && pendingUserDecisions[selectedDecisionIdx]) {
-        const item = pendingUserDecisions[selectedDecisionIdx];
-        const lines = [
-          item.file_path,
-          `Classification: ${item.current_classification}`,
-          item.description,
-          item.risk_context ? `Context: ${item.risk_context}` : "",
-          ...item.options.map((o, i) => `[${i + 1}] ${o.label}: ${o.description}`),
-        ].filter(Boolean);
-        copyToClipboard(lines.join("\n"), item.file_path);
       }
     }
 
@@ -573,36 +437,7 @@ export function PlanReviewScreen() {
       )}
 
       {viewMode === "decisions" && hasDecisions && (
-        <Box flexDirection="column" paddingX={0}>
-          <Box paddingX={1} marginBottom={0} gap={2}>
-            <Text bold>
-              {pendingUserDecisions.filter((d) => d.user_choice).length}/
-              {pendingUserDecisions.length} decided
-            </Text>
-            {copyFlash && (
-              <Text color="green" bold>
-                {copyFlash}
-              </Text>
-            )}
-          </Box>
-          <ScrollBox ref={decisionsScrollRef} height={decisionsHeight} isActive={false}>
-            {pendingUserDecisions.map((item, idx) => (
-              <DecisionItemRow
-                key={item.item_id}
-                item={item}
-                isSelected={idx === selectedDecisionIdx}
-                onSelect={(choice) => {
-                  send({
-                    type: "submit_user_plan_decisions",
-                    payload: {
-                      items: [{ item_id: item.item_id, user_choice: choice }],
-                    },
-                  });
-                }}
-              />
-            ))}
-          </ScrollBox>
-        </Box>
+        <PlanDecisionWizard items={pendingUserDecisions} isActive={true} />
       )}
 
       <Divider />

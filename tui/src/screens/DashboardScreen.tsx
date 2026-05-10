@@ -9,21 +9,59 @@ import { SearchBar } from "../components/SearchBar.js";
 import { Divider } from "../ink/Divider.js";
 import { KeyHint } from "../ink/KeyHint.js";
 import { useAppStore } from "../state/store.js";
+import type { SystemStatus } from "../state/types.js";
 
-const BINDINGS = [
-  { key: "1", label: "Dash" },
-  { key: "2", label: "Plan" },
-  { key: "3", label: "Decide" },
-  { key: "5", label: "Judge" },
-  { key: "6", label: "Report" },
-  { key: "/", label: "Search" },
-  { key: "?", label: "Help" },
-  { key: "q", label: "Quit" },
-];
+const ALL_BINDINGS = [
+  { key: "1", label: "Dash", always: true },
+  { key: "2", label: "Plan", always: false },
+  { key: "3", label: "Decide", always: false },
+  { key: "5", label: "Judge", always: false },
+  { key: "6", label: "Report", always: false },
+  { key: "/", label: "Search", always: true },
+  { key: "?", label: "Help", always: true },
+  { key: "q", label: "Quit", always: true },
+] as const;
+
+function availableKeys(status: SystemStatus): Set<string> {
+  const keys = new Set<string>();
+  switch (status) {
+    case "plan_reviewing":
+    case "plan_revising":
+    case "plan_dispute_pending":
+      keys.add("2");
+      break;
+    case "awaiting_human":
+    case "auto_merging":
+      keys.add("2");
+      keys.add("3");
+      break;
+    case "judge_reviewing":
+      keys.add("2");
+      keys.add("3");
+      keys.add("5");
+      break;
+    case "generating_report":
+    case "completed":
+    case "failed":
+    case "paused":
+      keys.add("2");
+      keys.add("3");
+      keys.add("5");
+      keys.add("6");
+      break;
+    default:
+      break;
+  }
+  return keys;
+}
 
 export function DashboardScreen() {
   const [searching, setSearching] = useState(false);
   const setSearchQuery = useAppStore((s) => s.setSearchQuery);
+  const status = useAppStore((s) => s.status);
+
+  const available = availableKeys(status);
+  const bindings = ALL_BINDINGS.filter((b) => b.always || available.has(b.key));
 
   useInput((input, key) => {
     if (!searching && input === "/") {
@@ -50,7 +88,7 @@ export function DashboardScreen() {
         </Box>
       </Box>
       <Divider />
-      <KeyHint bindings={BINDINGS} />
+      <KeyHint bindings={bindings} />
     </Box>
   );
 }

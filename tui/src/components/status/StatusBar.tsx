@@ -1,17 +1,13 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { useAppStore } from "../../state/store.js";
-import { useElapsed } from "../../hooks/use-elapsed.js";
 import { useConnectionStatus } from "../../hooks/use-connection.js";
-import { formatDuration } from "../../utils/format.js";
 import { Badge } from "../../ink/Badge.js";
 
 export function StatusBar() {
   const status = useAppStore((s) => s.status);
   const runId = useAppStore((s) => s.runId);
-  const createdAt = useAppStore((s) => s.createdAt);
   const connectionStatus = useConnectionStatus();
-  const elapsed = useElapsed(createdAt);
 
   const statusVariant = (() => {
     switch (status) {
@@ -47,8 +43,6 @@ export function StatusBar() {
       </Box>
       <Box gap={1}>
         <Badge label={status.replace(/_/g, " ").toUpperCase()} variant={statusVariant} />
-        <Text color="gray">|</Text>
-        <Text color="white">{formatDuration(elapsed)}</Text>
         <Text color="gray">|</Text>
         <Text color={connColor}>●</Text>
       </Box>
