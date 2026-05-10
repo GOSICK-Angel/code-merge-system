@@ -181,6 +181,486 @@ def test_precheck_ignores_sentinel_levels() -> None:
     assert issues == []
 
 
+def test_precheck_does_not_flag_escalation_safe_to_risky() -> None:
+    """Regression: previously precheck treated ``classifier=auto_safe,
+    batch=auto_risky`` as a MISMATCH and demoted the file back, fighting
+    the LLM Judge's accepted escalation across rounds."""
+    fd = _make_fd("plugin/manifest.yaml", risk_level=RiskLevel.AUTO_SAFE)
+    plan = _make_plan([(RiskLevel.AUTO_RISKY, ["plugin/manifest.yaml"])])
+    issues = precheck_plan_integrity(plan, [fd])
+    assert issues == []
+
+
+def test_precheck_does_not_flag_escalation_risky_to_human() -> None:
+    fd = _make_fd("api/auth.py", risk_level=RiskLevel.AUTO_RISKY)
+    plan = _make_plan([(RiskLevel.HUMAN_REQUIRED, ["api/auth.py"])])
+    issues = precheck_plan_integrity(plan, [fd])
+    assert issues == []
+
+
+def test_precheck_still_flags_silent_demotion_human_to_safe() -> None:
+    """Silent demotion (batch weaker than classifier) remains a bug
+    and must still be caught."""
+    fd = _make_fd("secrets/.env", risk_level=RiskLevel.HUMAN_REQUIRED)
+    plan = _make_plan([(RiskLevel.AUTO_SAFE, ["secrets/.env"])])
+    issues = precheck_plan_integrity(plan, [fd])
+    assert len(issues) == 1
+    assert issues[0].suggested_classification == RiskLevel.HUMAN_REQUIRED
+
+
+def test_precheck_still_flags_silent_demotion_risky_to_safe() -> None:
+    fd = _make_fd("config/db.yaml", risk_level=RiskLevel.AUTO_RISKY)
+    plan = _make_plan([(RiskLevel.AUTO_SAFE, ["config/db.yaml"])])
+    issues = precheck_plan_integrity(plan, [fd])
+    assert len(issues) == 1
+    assert issues[0].suggested_classification == RiskLevel.AUTO_RISKY
+
+
+# =========================================================================
+# P2-7: PlanIssue.source provenance + cross-source conflict detection
+# =========================================================================
+
+
+def test_precheck_issues_carry_source_label() -> None:
+    fd = _make_fd("secrets/.env", risk_level=RiskLevel.HUMAN_REQUIRED)
+    plan = _make_plan([(RiskLevel.AUTO_SAFE, ["secrets/.env"])])
+    issues = precheck_plan_integrity(plan, [fd])
+    assert len(issues) == 1
+    assert issues[0].source == "precheck"
+
+
+def test_planissue_source_default_is_llm() -> None:
+    iss = PlanIssue(
+        file_path="x.py",
+        current_classification=RiskLevel.AUTO_SAFE,
+        suggested_classification=RiskLevel.AUTO_RISKY,
+        reason="LLM thinks this is risky",
+        issue_type="risk_underestimated",
+    )
+    assert iss.source == "llm"
+
+
+def test_detect_cross_source_conflict_fires_on_opposite_directions() -> None:
+    """LLM wants demote (auto_risky → auto_safe), precheck wants
+    escalate (auto_safe → auto_risky) on the same file → conflict."""
+    from src.agents.planner_judge_agent import _detect_cross_source_conflicts
+
+    llm = [
+        PlanIssue(
+            file_path="weird.py",
+            current_classification=RiskLevel.AUTO_RISKY,
+            suggested_classification=RiskLevel.AUTO_SAFE,
+            reason="overclassified",
+            issue_type="risk_underestimated",
+            source="llm",
+        )
+    ]
+    pre = [
+        PlanIssue(
+            file_path="weird.py",
+            current_classification=RiskLevel.AUTO_SAFE,
+            suggested_classification=RiskLevel.AUTO_RISKY,
+            reason="MISMATCH",
+            issue_type="risk_underestimated",
+            source="precheck",
+        )
+    ]
+    assert _detect_cross_source_conflicts(llm, pre) == ["weird.py"]
+
+
+def test_detect_cross_source_conflict_silent_when_same_direction() -> None:
+    """Both want stricter — different targets but same direction → no
+    conflict (the merger can pick the strictest)."""
+    from src.agents.planner_judge_agent import _detect_cross_source_conflicts
+
+    llm = [
+        PlanIssue(
+            file_path="agreed.py",
+            current_classification=RiskLevel.AUTO_SAFE,
+            suggested_classification=RiskLevel.HUMAN_REQUIRED,
+            reason="auth file",
+            issue_type="risk_underestimated",
+            source="llm",
+        )
+    ]
+    pre = [
+        PlanIssue(
+            file_path="agreed.py",
+            current_classification=RiskLevel.AUTO_SAFE,
+            suggested_classification=RiskLevel.AUTO_RISKY,
+            reason="MISMATCH",
+            issue_type="risk_underestimated",
+            source="precheck",
+        )
+    ]
+    assert _detect_cross_source_conflicts(llm, pre) == []
+
+
+def test_detect_cross_source_conflict_skips_disjoint_files() -> None:
+    from src.agents.planner_judge_agent import _detect_cross_source_conflicts
+
+    llm = [
+        PlanIssue(
+            file_path="a.py",
+            current_classification=RiskLevel.AUTO_SAFE,
+            suggested_classification=RiskLevel.AUTO_RISKY,
+            reason="x",
+            issue_type="risk_underestimated",
+            source="llm",
+        )
+    ]
+    pre = [
+        PlanIssue(
+            file_path="b.py",
+            current_classification=RiskLevel.AUTO_SAFE,
+            suggested_classification=RiskLevel.AUTO_RISKY,
+            reason="y",
+            issue_type="risk_underestimated",
+            source="precheck",
+        )
+    ]
+    assert _detect_cross_source_conflicts(llm, pre) == []
+
+
+def test_merge_with_precheck_appends_conflict_marker_to_summary() -> None:
+    """When LLM and precheck disagree on direction, the merged
+    verdict's summary carries the ``CONFLICT:`` marker so the phase
+    can detect it without re-running the analysis."""
+    from datetime import datetime as _dt
+
+    from src.agents.planner_judge_agent import _merge_with_precheck
+    from src.models.plan_judge import PlanJudgeResult, PlanJudgeVerdict
+
+    llm_iss = PlanIssue(
+        file_path="weird.py",
+        current_classification=RiskLevel.AUTO_RISKY,
+        suggested_classification=RiskLevel.AUTO_SAFE,
+        reason="LLM demote",
+        issue_type="risk_underestimated",
+        source="llm",
+    )
+    pre_iss = PlanIssue(
+        file_path="weird.py",
+        current_classification=RiskLevel.AUTO_SAFE,
+        suggested_classification=RiskLevel.AUTO_RISKY,
+        reason="precheck escalate",
+        issue_type="risk_underestimated",
+        source="precheck",
+    )
+    base = PlanJudgeVerdict(
+        result=PlanJudgeResult.REVISION_NEEDED,
+        revision_round=0,
+        issues=[llm_iss],
+        approved_files_count=0,
+        flagged_files_count=1,
+        summary="Reviewed 1 segment(s)",
+        judge_model="test",
+        timestamp=_dt.now(),
+    )
+    merged = _merge_with_precheck(base, [pre_iss], 1, "test", 0)
+    assert "CONFLICT:" in merged.summary
+    assert "weird.py" in merged.summary
+
+
+# =========================================================================
+# P2-8: NegotiationMessage split per source
+# =========================================================================
+
+
+def test_split_verdict_into_negotiation_messages_llm_only() -> None:
+    """Plain LLM verdict (no precheck suffix) → exactly one message."""
+    from datetime import datetime as _dt
+
+    from src.core.phases.plan_review import (
+        _split_verdict_into_negotiation_messages,
+    )
+    from src.models.plan_judge import PlanJudgeResult, PlanJudgeVerdict
+
+    verdict = PlanJudgeVerdict(
+        result=PlanJudgeResult.APPROVED,
+        revision_round=0,
+        issues=[],
+        approved_files_count=10,
+        flagged_files_count=0,
+        summary="Reviewed 1 segment(s) covering 10 files. 0 flagged.",
+        judge_model="test",
+        timestamp=_dt.now(),
+    )
+    msgs = _split_verdict_into_negotiation_messages(verdict, 0)
+    assert len(msgs) == 1
+    assert msgs[0].sender == "planner_judge"
+    assert "Reviewed 1 segment" in msgs[0].content
+
+
+def test_split_verdict_into_negotiation_messages_with_precheck_suffix() -> None:
+    """LLM + precheck → two messages on separate lines."""
+    from datetime import datetime as _dt
+
+    from src.core.phases.plan_review import (
+        _split_verdict_into_negotiation_messages,
+    )
+    from src.models.plan_judge import PlanJudgeResult, PlanJudgeVerdict
+
+    verdict = PlanJudgeVerdict(
+        result=PlanJudgeResult.REVISION_NEEDED,
+        revision_round=1,
+        issues=[],
+        approved_files_count=9,
+        flagged_files_count=1,
+        summary=(
+            "Reviewed 1 segment(s) covering 10 files. 0 flagged."
+            " | precheck added 1 integrity issue(s) "
+            "(MISMATCH/NOT-BATCHED, deterministic)"
+        ),
+        judge_model="test",
+        timestamp=_dt.now(),
+    )
+    msgs = _split_verdict_into_negotiation_messages(verdict, 1)
+    assert len(msgs) == 2
+    assert msgs[0].sender == "planner_judge"
+    assert "precheck added" not in msgs[0].content
+    assert msgs[1].sender == "planner_judge_precheck"
+    assert msgs[1].content.startswith("precheck added")
+
+
+def test_split_verdict_with_conflict_yields_three_messages() -> None:
+    from datetime import datetime as _dt
+
+    from src.core.phases.plan_review import (
+        _split_verdict_into_negotiation_messages,
+    )
+    from src.models.plan_judge import PlanJudgeResult, PlanJudgeVerdict
+
+    verdict = PlanJudgeVerdict(
+        result=PlanJudgeResult.REVISION_NEEDED,
+        revision_round=0,
+        issues=[],
+        approved_files_count=0,
+        flagged_files_count=1,
+        summary=(
+            "Reviewed 1 segment(s)."
+            " | precheck added 1 integrity issue(s) "
+            "(MISMATCH/NOT-BATCHED, deterministic)"
+            " | CONFLICT: 1 file(s) where LLM and precheck disagree on "
+            "direction [weird.py]"
+        ),
+        judge_model="test",
+        timestamp=_dt.now(),
+    )
+    msgs = _split_verdict_into_negotiation_messages(verdict, 0)
+    senders = [m.sender for m in msgs]
+    assert senders == [
+        "planner_judge",
+        "planner_judge_precheck",
+        "planner_judge_conflict",
+    ]
+    assert "weird.py" in msgs[2].content
+
+
+# =========================================================================
+# P2-9: opt-in segment ramp on max_plan_revision_rounds
+# =========================================================================
+
+
+def test_effective_max_rounds_disabled_by_default() -> None:
+    from src.core.phases.plan_review import _effective_max_rounds
+
+    assert (
+        _effective_max_rounds(configured=1, min_when_segmented=0, file_count=10_000)
+        == 1
+    )
+
+
+def test_effective_max_rounds_lifts_when_segmented() -> None:
+    from src.core.phases.plan_review import _effective_max_rounds
+
+    # 1780 files / REVIEW_SEGMENT_SIZE (80) ≈ 23 segments → ramp fires.
+    out = _effective_max_rounds(configured=1, min_when_segmented=3, file_count=1780)
+    assert out == 3
+
+
+def test_effective_max_rounds_never_lowers_explicit_max() -> None:
+    from src.core.phases.plan_review import _effective_max_rounds
+
+    out = _effective_max_rounds(configured=5, min_when_segmented=3, file_count=1780)
+    assert out == 5
+
+
+def test_effective_max_rounds_skips_when_single_segment() -> None:
+    from src.core.phases.plan_review import _effective_max_rounds
+
+    out = _effective_max_rounds(configured=1, min_when_segmented=3, file_count=10)
+    assert out == 1
+
+
+# =========================================================================
+# P3-10: segment-level cost telemetry
+# =========================================================================
+
+
+def _make_snap(
+    idx: int,
+    source: str,
+    *,
+    latency_s: float | None = None,
+    tokens_in: int | None = None,
+    tokens_out: int | None = None,
+):
+    from src.agents.planner_judge_agent import SegmentReviewSnapshot
+    from src.models.plan_judge import PlanJudgeResult, PlanJudgeVerdict
+
+    verdict = PlanJudgeVerdict(
+        result=PlanJudgeResult.APPROVED,
+        revision_round=0,
+        issues=[],
+        approved_files_count=1,
+        flagged_files_count=0,
+        summary="dummy",
+        judge_model="m",
+        timestamp=datetime.now(),
+    )
+    return SegmentReviewSnapshot(
+        segment_idx=idx,
+        signature=f"sig{idx}",
+        verdict=verdict,
+        source=source,
+        latency_s=latency_s,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+    )
+
+
+def test_aggregate_segment_telemetry_counts_by_source() -> None:
+    from src.core.phases.plan_review import _aggregate_segment_telemetry
+
+    seg_results = {
+        0: _make_snap(0, "llm", latency_s=1.5, tokens_in=2000, tokens_out=200),
+        1: _make_snap(1, "cache"),
+        2: _make_snap(2, "safelist"),
+        3: _make_snap(3, "llm", latency_s=0.8, tokens_in=1500, tokens_out=120),
+    }
+    out = _aggregate_segment_telemetry(seg_results)
+    assert out is not None
+    assert out.llm_segments == 2
+    assert out.cache_hit_segments == 1
+    assert out.safelist_segments == 1
+    assert out.total_latency_s == 2.3
+    assert out.total_tokens_in == 3500
+    assert out.total_tokens_out == 320
+
+
+def test_aggregate_segment_telemetry_returns_none_when_no_llm() -> None:
+    """Cache-only / safelist-only round → no LLM cost to report."""
+    from src.core.phases.plan_review import _aggregate_segment_telemetry
+
+    seg_results = {
+        0: _make_snap(0, "cache"),
+        1: _make_snap(1, "safelist"),
+    }
+    assert _aggregate_segment_telemetry(seg_results) is None
+
+
+def test_aggregate_segment_telemetry_returns_none_for_empty_input() -> None:
+    from src.core.phases.plan_review import _aggregate_segment_telemetry
+
+    assert _aggregate_segment_telemetry({}) is None
+
+
+def test_aggregate_segment_telemetry_tolerates_partial_telemetry() -> None:
+    """An LLM segment with missing token counts (failed parse path)
+    still increments the count without exploding the totals."""
+    from src.core.phases.plan_review import _aggregate_segment_telemetry
+
+    seg_results = {
+        0: _make_snap(0, "llm", latency_s=2.0, tokens_in=None, tokens_out=None),
+    }
+    out = _aggregate_segment_telemetry(seg_results)
+    assert out is not None
+    assert out.llm_segments == 1
+    assert out.total_latency_s == 2.0
+    assert out.total_tokens_in == 0
+    assert out.total_tokens_out == 0
+
+
+def test_segment_telemetry_summary_renders_into_report() -> None:
+    """Smoke test: when a PlanReviewRound carries telemetry, the
+    plan-review markdown report includes the cost line."""
+    import tempfile
+    from datetime import datetime as _dt
+    from pathlib import Path
+
+    from src.models.config import MergeConfig
+    from src.models.plan import (
+        MergePhase as MP,
+        MergePlan as MPlan,
+        PhaseFileBatch,
+        RiskSummary,
+    )
+    from src.models.plan_judge import PlanJudgeResult
+    from src.models.plan_review import (
+        PlanReviewRound,
+        SegmentTelemetrySummary,
+    )
+    from src.models.state import MergeState
+    from src.tools.report_writer import write_plan_review_report
+
+    state = MergeState(
+        config=MergeConfig(upstream_ref="upstream/main", fork_ref="origin/main")
+    )
+    state.run_id = "test-p3"
+    state.merge_plan = MPlan(
+        created_at=_dt.now(),
+        upstream_ref="upstream/main",
+        fork_ref="origin/main",
+        merge_base_commit="abc",
+        phases=[
+            PhaseFileBatch(
+                batch_id="b0",
+                phase=MP.AUTO_MERGE,
+                file_paths=["a.py"],
+                risk_level=RiskLevel.AUTO_SAFE,
+            )
+        ],
+        risk_summary=RiskSummary(
+            total_files=1,
+            auto_safe_count=1,
+            auto_risky_count=0,
+            human_required_count=0,
+            deleted_only_count=0,
+            binary_count=0,
+            excluded_count=0,
+            estimated_auto_merge_rate=1.0,
+        ),
+        project_context_summary="",
+    )
+    state.plan_review_log = [
+        PlanReviewRound(
+            round_number=0,
+            verdict_result=PlanJudgeResult.APPROVED,
+            verdict_summary="ok",
+            issues_count=0,
+            segment_telemetry=SegmentTelemetrySummary(
+                llm_segments=2,
+                cache_hit_segments=1,
+                safelist_segments=0,
+                total_latency_s=3.5,
+                total_tokens_in=4000,
+                total_tokens_out=400,
+            ),
+        )
+    ]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = write_plan_review_report(state, tmp)
+        rendered = Path(path).read_text(encoding="utf-8")
+
+    assert "Segment cost (this round, est.)" in rendered
+    assert "2 LLM segment(s)" in rendered
+    assert "1 cache" in rendered
+    assert "~4000 tokens-in" in rendered
+    assert "3.5s total" in rendered
+
+
 # =========================================================================
 # Optimization 6: segment safelist pre-filter
 # =========================================================================
@@ -743,7 +1223,12 @@ def test_single_segment_cache_miss_invokes_llm() -> None:
         judge_model="mock-model",
         timestamp=datetime.now(),
     )
-    review_single_mock = AsyncMock(return_value=fresh_verdict)
+    review_single_mock = AsyncMock(
+        return_value=(
+            fresh_verdict,
+            {"latency_s": 0.1, "tokens_in": 100, "tokens_out": 50},
+        )
+    )
     agent._review_single = review_single_mock
 
     out: dict[int, SegmentReviewSnapshot] = {}
@@ -759,6 +1244,11 @@ def test_single_segment_cache_miss_invokes_llm() -> None:
 
     review_single_mock.assert_called_once()
     assert out[0].source == "llm"
+    # P3-10: telemetry flows from the (verdict, telemetry) tuple into
+    # the snapshot, not just the cache hit/miss boolean.
+    assert out[0].latency_s == 0.1
+    assert out[0].tokens_in == 100
+    assert out[0].tokens_out == 50
 
 
 # =========================================================================

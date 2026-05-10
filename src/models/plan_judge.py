@@ -1,5 +1,6 @@
 from datetime import datetime
 from enum import Enum
+from typing import Literal
 from uuid import uuid4
 from pydantic import BaseModel, Field
 from src.models.diff import RiskLevel
@@ -10,6 +11,14 @@ class PlanJudgeResult(str, Enum):
     REVISION_NEEDED = "revision_needed"
     CRITICAL_REPLAN = "critical_replan"
     LLM_UNAVAILABLE = "llm_unavailable"
+
+
+# P2-7: provenance tag — distinguishes deterministic precheck issues
+# from LLM-Judge issues. The Planner-Judge interaction log surfaces
+# this so operators can tell at a glance who flagged what; the conflict
+# detector in plan_review.py uses it to spot cases where the two
+# sources disagree on the same file.
+IssueSource = Literal["llm", "precheck"]
 
 
 class PlanIssue(BaseModel):
@@ -23,6 +32,12 @@ class PlanIssue(BaseModel):
     suggested_classification: RiskLevel
     reason: str
     issue_type: str
+    source: IssueSource = Field(
+        default="llm",
+        description="Where the issue came from. ``llm`` (default for "
+        "back-compat) means the Plan-Judge LLM raised it; ``precheck`` "
+        "means the deterministic integrity check did.",
+    )
 
 
 class PlanJudgeVerdict(BaseModel):

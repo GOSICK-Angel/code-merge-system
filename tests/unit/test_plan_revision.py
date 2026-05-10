@@ -293,6 +293,87 @@ class TestPlannerEvaluateIssues:
         assert responses[0].action == IssueResponseAction.ACCEPT
 
     @pytest.mark.asyncio
+    async def test_revise_plan_syncs_file_diffs_risk_level_on_accept(self):
+        """P0-1 regression: when Planner accepts an LLM escalation, the
+        corresponding ``state.file_diffs[*].risk_level`` must move with
+        it. Otherwise the next round's deterministic precheck reads a
+        stale classifier verdict and oscillates against the LLM."""
+        agent = self._make_agent()
+        plan = _make_plan(
+            [
+                ("auto_merge", ["a.py", "slack/manifest.yaml"], "auto_safe"),
+            ]
+        )
+        original_fd = FileDiff(
+            file_path="slack/manifest.yaml",
+            file_status=FileStatus.MODIFIED,
+            risk_level=RiskLevel.AUTO_SAFE,
+            risk_score=0.19,
+            lines_added=5,
+            lines_deleted=2,
+            lines_changed=7,
+            conflict_count=0,
+            hunks=[],
+            is_security_sensitive=False,
+            change_category=FileChangeCategory.C,
+        )
+        other_fd = FileDiff(
+            file_path="a.py",
+            file_status=FileStatus.MODIFIED,
+            risk_level=RiskLevel.AUTO_SAFE,
+            risk_score=0.05,
+            lines_added=1,
+            lines_deleted=0,
+            lines_changed=1,
+            conflict_count=0,
+            hunks=[],
+            is_security_sensitive=False,
+            change_category=FileChangeCategory.B,
+        )
+        state = MergeState(config=_make_config())
+        state.merge_plan = plan
+        state.file_diffs = [other_fd, original_fd]
+
+        issues = [
+            _make_issue(
+                "slack/manifest.yaml", RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY
+            ),
+        ]
+
+        agent._call_llm_with_retry = AsyncMock(
+            return_value='{"responses": [{"issue_id": "'
+            + issues[0].issue_id
+            + '", "file_path": "slack/manifest.yaml", "action": "accept", '
+            + '"reason": "OAuth scopes — security sensitive", "counter_proposal": null}]}'
+        )
+
+        revised_plan, responses, _diff_entries = await agent.revise_plan(state, issues)
+
+        assert responses[0].action == IssueResponseAction.ACCEPT
+
+        synced = {fd.file_path: fd.risk_level for fd in state.file_diffs}
+        assert synced["slack/manifest.yaml"] == RiskLevel.AUTO_RISKY, (
+            "accepted escalation must propagate into state.file_diffs"
+        )
+        assert synced["a.py"] == RiskLevel.AUTO_SAFE, (
+            "non-issue files must not be touched"
+        )
+
+        assert original_fd.risk_level == RiskLevel.AUTO_SAFE
+        new_fd = next(
+            fd for fd in state.file_diffs if fd.file_path == "slack/manifest.yaml"
+        )
+        assert new_fd is not original_fd
+
+        risky = {
+            fp
+            for batch in revised_plan.phases
+            if batch.risk_level == RiskLevel.AUTO_RISKY
+            for fp in batch.file_paths
+        }
+        assert "slack/manifest.yaml" in risky
+
+    @pytest.mark.asyncio
     async def test_revise_plan_rejected_issues_keep_classification(self):
         agent = self._make_agent()
         plan = _make_plan(
@@ -325,6 +406,62 @@ class TestPlannerEvaluateIssues:
         assert "b.py" in risky_files
 
         assert len(diff_entries) == 0
+
+
+class TestSplitByRiskLevelOrdering:
+    """P1-6: each bucket must come out ordered by (risk_score asc, path asc)
+    so the Executor processes the safest files first within a batch."""
+
+    def _make_diff(self, fp: str, score: float, level: RiskLevel) -> FileDiff:
+        return FileDiff(
+            file_path=fp,
+            file_status=FileStatus.MODIFIED,
+            risk_level=level,
+            risk_score=score,
+            lines_added=1,
+            lines_deleted=0,
+            lines_changed=1,
+            conflict_count=0,
+            hunks=[],
+            is_security_sensitive=False,
+            change_category=FileChangeCategory.B,
+        )
+
+    def test_safe_bucket_sorted_by_score_then_path(self):
+        diffs = {
+            "z.py": self._make_diff("z.py", 0.05, RiskLevel.AUTO_SAFE),
+            "a.py": self._make_diff("a.py", 0.20, RiskLevel.AUTO_SAFE),
+            "m.py": self._make_diff("m.py", 0.10, RiskLevel.AUTO_SAFE),
+            "n.py": self._make_diff("n.py", 0.05, RiskLevel.AUTO_SAFE),
+        }
+        safe, risky, human = PlannerAgent._split_by_risk_level(
+            list(diffs.keys()), diffs, set()
+        )
+        assert safe == ["n.py", "z.py", "m.py", "a.py"]
+        assert risky == []
+        assert human == []
+
+    def test_each_bucket_independently_sorted(self):
+        diffs = {
+            "low_safe.py": self._make_diff("low_safe.py", 0.10, RiskLevel.AUTO_SAFE),
+            "high_safe.py": self._make_diff("high_safe.py", 0.25, RiskLevel.AUTO_SAFE),
+            "low_risky.py": self._make_diff("low_risky.py", 0.40, RiskLevel.AUTO_RISKY),
+            "high_risky.py": self._make_diff(
+                "high_risky.py", 0.55, RiskLevel.AUTO_RISKY
+            ),
+        }
+        safe, risky, _human = PlannerAgent._split_by_risk_level(
+            list(diffs.keys()), diffs, set()
+        )
+        assert safe == ["low_safe.py", "high_safe.py"]
+        assert risky == ["low_risky.py", "high_risky.py"]
+
+    def test_missing_diff_falls_back_to_zero_score(self):
+        diffs = {"present.py": self._make_diff("present.py", 0.30, RiskLevel.AUTO_SAFE)}
+        safe, _r, _h = PlannerAgent._split_by_risk_level(
+            ["present.py", "missing.py"], diffs, set()
+        )
+        assert safe == ["missing.py", "present.py"]
 
 
 class TestPlanReviewConvergence:
@@ -378,6 +515,7 @@ class TestPlanReviewConvergence:
         mock_config.max_plan_revision_rounds = 5
         mock_config.output.directory = "/tmp/test_output"
         mock_config.output.language = "en"
+        mock_config.plan_review.min_rounds_when_segmented = 0
 
         ctx = MagicMock()
         ctx.agents = {"planner": mock_planner, "planner_judge": mock_judge}
@@ -431,6 +569,7 @@ class TestPlanReviewConvergence:
         mock_config.max_plan_revision_rounds = 3
         mock_config.output.directory = "/tmp/test_output"
         mock_config.output.language = "en"
+        mock_config.plan_review.min_rounds_when_segmented = 0
 
         ctx = MagicMock()
         ctx.agents = {"planner": mock_planner, "planner_judge": mock_judge}

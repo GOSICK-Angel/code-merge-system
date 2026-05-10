@@ -392,6 +392,19 @@ class PlannerAgent(BaseAgent):
                 risky.append(fp)
             else:
                 safe.append(fp)
+
+        # P1-6: order each bucket by ascending risk_score so the
+        # Executor processes the safest files first; if a later file
+        # blows up the rollback cost is bounded to the riskier tail.
+        # Path is the secondary key for deterministic ordering.
+        def _score_key(fp: str) -> tuple[float, str]:
+            fd = diffs_by_path.get(fp)
+            score = fd.risk_score if fd is not None else 0.0
+            return (score, fp)
+
+        safe.sort(key=_score_key)
+        risky.sort(key=_score_key)
+        human.sort(key=_score_key)
         return safe, risky, human
 
     @staticmethod
@@ -448,12 +461,16 @@ class PlannerAgent(BaseAgent):
         layer_id: int | None,
         change_category: FileChangeCategory,
     ) -> None:
+        # P1-6: respect the (risk_score asc, path asc) ordering produced
+        # by ``_split_by_risk_level``. Calling ``sorted()`` here would
+        # collapse it back to alphabetical and undo the safest-first
+        # rollout.
         if safe:
             phases.append(
                 PhaseFileBatch(
                     batch_id=str(uuid4()),
                     phase=MergePhase.AUTO_MERGE,
-                    file_paths=sorted(safe),
+                    file_paths=list(safe),
                     risk_level=RiskLevel.AUTO_SAFE,
                     layer_id=layer_id,
                     change_category=change_category,
@@ -465,7 +482,7 @@ class PlannerAgent(BaseAgent):
                 PhaseFileBatch(
                     batch_id=str(uuid4()),
                     phase=MergePhase.CONFLICT_ANALYSIS,
-                    file_paths=sorted(risky),
+                    file_paths=list(risky),
                     risk_level=RiskLevel.AUTO_RISKY,
                     layer_id=layer_id,
                     change_category=change_category,
@@ -477,7 +494,7 @@ class PlannerAgent(BaseAgent):
                 PhaseFileBatch(
                     batch_id=str(uuid4()),
                     phase=MergePhase.HUMAN_REVIEW,
-                    file_paths=sorted(human),
+                    file_paths=list(human),
                     risk_level=RiskLevel.HUMAN_REQUIRED,
                     layer_id=layer_id,
                     change_category=change_category,
@@ -854,6 +871,26 @@ class PlannerAgent(BaseAgent):
             plan_data = self._apply_judge_issues_to_plan(
                 state.merge_plan, accepted_issues
             )
+            # Keep the classifier view in lockstep with the batch
+            # placement. Otherwise the next round's deterministic
+            # integrity precheck reads a stale ``fd.risk_level`` and
+            # treats the just-applied escalation as a silent demotion,
+            # producing an R(N) escalate / R(N+1) demote oscillation
+            # that only stops at ``max_plan_revision_rounds``. Pydantic
+            # ``model_copy`` keeps FileDiff immutable.
+            accepted_map = {
+                issue.file_path: issue.suggested_classification
+                for issue in accepted_issues
+            }
+            state.file_diffs = [
+                fd.model_copy(update={"risk_level": accepted_map[fd.file_path]})
+                if (
+                    fd.file_path in accepted_map
+                    and fd.risk_level != accepted_map[fd.file_path]
+                )
+                else fd
+                for fd in state.file_diffs
+            ]
         else:
             plan_data = self._plan_to_data(state.merge_plan)
 

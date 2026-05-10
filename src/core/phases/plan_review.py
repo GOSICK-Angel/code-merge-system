@@ -19,11 +19,13 @@ from src.models.plan_review import (
     PlanReviewRound,
     ReviewConclusion,
     ReviewConclusionReason,
+    SegmentTelemetrySummary,
     UserDecisionItem,
 )
 from src.models.state import MergeState, PhaseResult, SystemStatus
 from src.agents.planner_judge_agent import SegmentReviewSnapshot
 from src.llm.prompts.planner_judge_prompts import (
+    REVIEW_SEGMENT_SIZE,
     classify_prior_issues,
     precheck_plan_integrity,
 )
@@ -60,6 +62,123 @@ SHORTCIRCUIT_SAFE_ISSUE_TYPES: frozenset[str] = frozenset(
 )
 
 
+_PRECHECK_SUFFIX_MARKER = " | precheck added "
+_CONFLICT_MARKER = " | CONFLICT: "
+
+
+def _effective_max_rounds(
+    *,
+    configured: int,
+    min_when_segmented: int,
+    file_count: int,
+) -> int:
+    """P2-9: lift the configured ``max_plan_revision_rounds`` to at
+    least ``min_when_segmented`` when the plan splits into multiple
+    LLM-review segments. Default-zero of ``min_when_segmented`` means
+    "disabled" — the configured value passes through unchanged.
+
+    The function only ever raises the bound; an already-higher
+    ``configured`` is preserved verbatim so the user's explicit choice
+    wins.
+    """
+    if min_when_segmented <= 0:
+        return configured
+    import math
+
+    n_segments = max(1, math.ceil(file_count / REVIEW_SEGMENT_SIZE))
+    if n_segments <= 1:
+        return configured
+    return max(configured, min_when_segmented)
+
+
+def _split_verdict_into_negotiation_messages(
+    verdict: PlanJudgeVerdict,
+    round_num: int,
+) -> list[NegotiationMessage]:
+    """P2-8: render the verdict's summary as 1–3 separate
+    NegotiationMessages, one per source (LLM, precheck, conflict).
+
+    The summary string built by ``_merge_with_precheck`` concatenates
+    them with ``" | precheck added ..."`` and ``" | CONFLICT: ..."``
+    suffixes; we tear that apart again so the audit log shows each
+    voice on its own line. When no precheck issues fired, the function
+    degrades to a single ``planner_judge`` line — identical to the
+    pre-P2-8 behaviour.
+    """
+    summary = verdict.summary or ""
+    llm_part = summary
+    precheck_part: str | None = None
+    conflict_part: str | None = None
+
+    if _CONFLICT_MARKER in llm_part:
+        llm_part, conflict_tail = llm_part.split(_CONFLICT_MARKER, 1)
+        conflict_part = "CONFLICT: " + conflict_tail
+    if _PRECHECK_SUFFIX_MARKER in llm_part:
+        llm_part, precheck_tail = llm_part.split(_PRECHECK_SUFFIX_MARKER, 1)
+        precheck_part = "precheck added " + precheck_tail
+
+    msgs: list[NegotiationMessage] = [
+        NegotiationMessage(
+            sender="planner_judge",
+            round_number=round_num,
+            content=llm_part,
+        )
+    ]
+    if precheck_part is not None:
+        msgs.append(
+            NegotiationMessage(
+                sender="planner_judge_precheck",
+                round_number=round_num,
+                content=precheck_part,
+            )
+        )
+    if conflict_part is not None:
+        msgs.append(
+            NegotiationMessage(
+                sender="planner_judge_conflict",
+                round_number=round_num,
+                content=conflict_part,
+            )
+        )
+    return msgs
+
+
+def _aggregate_segment_telemetry(
+    segment_results: dict[int, SegmentReviewSnapshot],
+) -> SegmentTelemetrySummary | None:
+    """P3-10: roll up the segment-level telemetry recorded by
+    PlannerJudgeAgent into a per-round summary. Returns None when no
+    LLM segment fired this round (cache-only / safelist-only / empty
+    plan) — the report renderer drops empty rows."""
+    if not segment_results:
+        return None
+    summary = SegmentTelemetrySummary()
+    for snap in segment_results.values():
+        if snap.source == "cache":
+            summary.cache_hit_segments += 1
+        elif snap.source == "safelist":
+            summary.safelist_segments += 1
+        else:
+            summary.llm_segments += 1
+            if snap.latency_s is not None:
+                summary.total_latency_s += snap.latency_s
+            if snap.tokens_in is not None:
+                summary.total_tokens_in += snap.tokens_in
+            if snap.tokens_out is not None:
+                summary.total_tokens_out += snap.tokens_out
+    if summary.llm_segments == 0:
+        return None
+    return summary
+
+
+def _has_cross_source_conflict(verdict: PlanJudgeVerdict) -> bool:
+    """P2-7: returns True when ``_merge_with_precheck`` detected an
+    LLM-vs-precheck disagreement on at least one file. Looking at the
+    summary keeps this side-effect-free and avoids re-running the
+    detector here."""
+    return _CONFLICT_MARKER in (verdict.summary or "")
+
+
 class PlanReviewPhase(Phase):
     name = "plan_review"
 
@@ -75,7 +194,19 @@ class PlanReviewPhase(Phase):
         planner = ctx.agents["planner"]
         planner_judge = ctx.agents["planner_judge"]
         file_diffs: list[FileDiff] = state.file_diffs
-        max_rounds = ctx.config.max_plan_revision_rounds
+        max_rounds = _effective_max_rounds(
+            configured=ctx.config.max_plan_revision_rounds,
+            min_when_segmented=(ctx.config.plan_review.min_rounds_when_segmented),
+            file_count=len(file_diffs),
+        )
+        if max_rounds != ctx.config.max_plan_revision_rounds:
+            logger.info(
+                "P2-9: lifted effective max_plan_revision_rounds from %d to "
+                "%d because plan spans multiple LLM-review segments and "
+                "min_rounds_when_segmented is set.",
+                ctx.config.max_plan_revision_rounds,
+                max_rounds,
+            )
         lang = ctx.config.output.language
 
         all_prior_issues: list[PlanIssue] = []
@@ -213,14 +344,21 @@ class PlanReviewPhase(Phase):
                     all_prior_issues.append(iss)
                     seen_files.add(iss.file_path)
 
-            negotiation_msgs: list[NegotiationMessage] = []
-            negotiation_msgs.append(
-                NegotiationMessage(
-                    sender="planner_judge",
-                    round_number=round_num,
-                    content=verdict.summary or "",
-                )
+            # P2-8: split the verdict summary into independent
+            # NegotiationMessages by source. The Plan-Judge LLM and the
+            # deterministic precheck speak with different authority and
+            # belong on separate lines so operators can tell — and tests
+            # can assert — who said what without parsing a stitched
+            # summary string.
+            negotiation_msgs: list[NegotiationMessage] = list(
+                _split_verdict_into_negotiation_messages(verdict, round_num)
             )
+
+            # P3-10: snapshot per-round segment cost. ``segment_results``
+            # is rewritten in-place by ``review_plan`` for the segments
+            # processed this round, so this aggregation reflects the
+            # current round's mix of cache / safelist / LLM activity.
+            round_telemetry = _aggregate_segment_telemetry(segment_results)
 
             ctx.notify(
                 "planner_judge",
@@ -243,7 +381,12 @@ class PlanReviewPhase(Phase):
                     update={"result": PlanJudgeResult.LLM_UNAVAILABLE}
                 )
                 state.plan_judge_verdict = verdict
-                round_log = self._build_round_log(round_num, verdict, negotiation_msgs)
+                round_log = self._build_round_log(
+                    round_num,
+                    verdict,
+                    negotiation_msgs,
+                    segment_telemetry=round_telemetry,
+                )
                 state.plan_review_log.append(round_log)
                 state.review_conclusion = ReviewConclusion(
                     reason=ReviewConclusionReason.LLM_FAILURE,
@@ -278,6 +421,44 @@ class PlanReviewPhase(Phase):
                     checkpoint_tag="after_phase1_5",
                 )
 
+            if _has_cross_source_conflict(verdict):
+                # P2-7: re-feeding a plan where LLM and precheck point
+                # in opposite directions just oscillates. Surface the
+                # disagreement to the operator and stop spending budget.
+                round_log = self._build_round_log(
+                    round_num,
+                    verdict,
+                    negotiation_msgs,
+                    segment_telemetry=round_telemetry,
+                )
+                state.plan_review_log.append(round_log)
+                user_items = self._build_user_decision_items(state)
+                state.pending_user_decisions = user_items
+                state.review_conclusion = ReviewConclusion(
+                    reason=ReviewConclusionReason.SOURCE_CONFLICT,
+                    final_round=round_num,
+                    total_rounds=round_num + 1,
+                    max_rounds=max_rounds,
+                    summary=(
+                        "Plan-Judge LLM and the deterministic precheck "
+                        "disagreed on direction for one or more files. "
+                        "Re-feeding the plan would oscillate; awaiting "
+                        "human arbitration."
+                    ),
+                    pending_decisions_count=len(user_items),
+                )
+                self._complete_phase(state, phase_result, ctx)
+                ctx.state_machine.transition(
+                    state,
+                    SystemStatus.AWAITING_HUMAN,
+                    "plan review LLM/precheck source conflict",
+                )
+                return PhaseOutcome(
+                    target_status=SystemStatus.AWAITING_HUMAN,
+                    reason="LLM/precheck source conflict",
+                    checkpoint_tag="after_phase1_5",
+                )
+
             if verdict.result == PlanJudgeResult.APPROVED:
                 negotiation_msgs.append(
                     NegotiationMessage(
@@ -286,7 +467,12 @@ class PlanReviewPhase(Phase):
                         content="Plan approved by judge — both agents agree.",
                     )
                 )
-                round_log = self._build_round_log(round_num, verdict, negotiation_msgs)
+                round_log = self._build_round_log(
+                    round_num,
+                    verdict,
+                    negotiation_msgs,
+                    segment_telemetry=round_telemetry,
+                )
                 state.plan_review_log.append(round_log)
 
                 user_items = self._build_user_decision_items(state)
@@ -331,7 +517,12 @@ class PlanReviewPhase(Phase):
                 )
 
             elif verdict.result == PlanJudgeResult.CRITICAL_REPLAN:
-                round_log = self._build_round_log(round_num, verdict, negotiation_msgs)
+                round_log = self._build_round_log(
+                    round_num,
+                    verdict,
+                    negotiation_msgs,
+                    segment_telemetry=round_telemetry,
+                )
                 state.plan_review_log.append(round_log)
                 state.review_conclusion = ReviewConclusion(
                     reason=ReviewConclusionReason.CRITICAL_REPLAN,
@@ -437,6 +628,7 @@ class PlanReviewPhase(Phase):
                         f"Plan unchanged — all {len(rejected)} rejections "
                         f"kept current classifications"
                     ),
+                    segment_telemetry=round_telemetry,
                 )
                 state.plan_review_log.append(round_log)
 
@@ -503,7 +695,12 @@ class PlanReviewPhase(Phase):
                 )
                 state.current_phase = MergePhase.PLAN_REVIEW
             else:
-                round_log = self._build_round_log(round_num, verdict, negotiation_msgs)
+                round_log = self._build_round_log(
+                    round_num,
+                    verdict,
+                    negotiation_msgs,
+                    segment_telemetry=round_telemetry,
+                )
                 state.plan_review_log.append(round_log)
 
                 user_items = self._build_user_decision_items(state)
@@ -550,6 +747,7 @@ class PlanReviewPhase(Phase):
         planner_responses: list[PlannerIssueResponse] | None = None,
         plan_diff: list[PlanDiffEntry] | None = None,
         revision_summary: str | None = None,
+        segment_telemetry: SegmentTelemetrySummary | None = None,
     ) -> PlanReviewRound:
         return PlanReviewRound(
             round_number=round_num,
@@ -580,6 +778,7 @@ class PlanReviewPhase(Phase):
             planner_responses=planner_responses or [],
             plan_diff=plan_diff or [],
             negotiation_messages=negotiation_msgs,
+            segment_telemetry=segment_telemetry,
         )
 
     def _complete_phase(

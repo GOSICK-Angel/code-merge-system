@@ -21,7 +21,6 @@ _MISMATCH_TRACKED_LEVELS = frozenset(
     {RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY, RiskLevel.HUMAN_REQUIRED}
 )
 
-
 # Subset of SAFELIST_PATTERNS that represents lockfile-style manifests.
 # Lockfiles can balloon to thousands of lines on routine dependency
 # bumps; matching one of these triggers a per-file change-line ceiling
@@ -193,10 +192,23 @@ def precheck_plan_integrity(
                         "this file from every batch (data loss)."
                     ),
                     issue_type="wrong_batch",
+                    source="precheck",
                 )
             )
             continue
         if batch_rl != fd.risk_level:
+            classifier_order = fd.risk_level.severity()
+            batch_order = batch_rl.severity()
+            if (
+                classifier_order is None
+                or batch_order is None
+                or batch_order >= classifier_order
+            ):
+                # Escalation (batch stricter than classifier) is allowed —
+                # it is the result of a previous round's accepted Judge
+                # suggestion, and reverting it would re-open the silent
+                # demotion the LLM just closed. Only flag the inverse.
+                continue
             issues.append(
                 PlanIssue(
                     file_path=fd.file_path,
@@ -208,6 +220,7 @@ def precheck_plan_integrity(
                         "trust the classifier."
                     ),
                     issue_type="risk_underestimated",
+                    source="precheck",
                 )
             )
     return issues

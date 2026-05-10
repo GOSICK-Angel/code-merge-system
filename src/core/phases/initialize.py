@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import logging
+import os
 from pathlib import Path
 
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
@@ -27,6 +29,8 @@ from src.tools.file_classifier import (
     is_security_sensitive,
     matches_any_pattern,
 )
+from src.models.config import FieldSensitivityRule, RenameDetectionConfig
+from src.tools import field_sensitivity
 from src.tools.git_tool import GitTool
 from src.tools.pollution_auditor import PollutionAuditor
 from src.tools.scar_list_builder import ScarListBuilder
@@ -186,6 +190,90 @@ def _build_added_file_diff(git_tool: GitTool, ref: str, file_path: str) -> str:
             f"\\ ... ({len(lines) - _D_MISSING_PREVIEW_LINES} more lines not shown)"
         )
     return "\n".join(diff_lines)
+
+
+def _apply_field_sensitivity(
+    file_diffs: list[FileDiff],
+    rules: list[FieldSensitivityRule],
+    ctx: PhaseContext,
+    base_ref: str,
+    target_ref: str,
+) -> list[FileDiff]:
+    """Per-file structured-config rule evaluation. Only escalates —
+    never demotes. Reads base/target blobs through ``ctx.git_tool`` so
+    the same path that produced the diff is the one we parse."""
+    rule_globs = {r.path_glob for r in rules}
+
+    def _path_matches_any_rule(fp: str) -> bool:
+        return any(fnmatch.fnmatchcase(fp, g) for g in rule_globs)
+
+    out: list[FileDiff] = []
+    escalated = 0
+    for fd in file_diffs:
+        if not _path_matches_any_rule(fd.file_path):
+            out.append(fd)
+            continue
+
+        base_text = ctx.git_tool.get_file_content(base_ref, fd.file_path)
+        target_text = ctx.git_tool.get_file_content(target_ref, fd.file_path)
+        new_level = field_sensitivity.evaluate(
+            fd.file_path, base_text, target_text, rules
+        )
+        if new_level is None:
+            out.append(fd)
+            continue
+
+        if (new_level.severity() or 0) > (fd.risk_level.severity() or 0):
+            out.append(fd.model_copy(update={"risk_level": new_level}))
+            escalated += 1
+        else:
+            out.append(fd)
+
+    if escalated:
+        ctx.notify(
+            "orchestrator",
+            f"Field-sensitivity rules escalated risk_level on {escalated} file(s)",
+        )
+    return out
+
+
+def _apply_rename_guards(
+    pairs: list[tuple[str, str]],
+    config: RenameDetectionConfig,
+) -> tuple[list[tuple[str, str]], int]:
+    """Filter rename pairs against optional same-namespace guards.
+
+    Returns ``(kept, dropped_count)``. When both guards are disabled
+    (the default), the input list passes through untouched and
+    ``dropped_count`` is zero — preserving prior behaviour.
+    """
+    if (
+        not config.require_same_parent_dir
+        and config.require_same_prefix_segments is None
+    ):
+        return list(pairs), 0
+
+    n = config.require_same_prefix_segments
+    kept: list[tuple[str, str]] = []
+    dropped = 0
+    for old, new in pairs:
+        if config.require_same_parent_dir and os.path.dirname(old) != os.path.dirname(
+            new
+        ):
+            dropped += 1
+            continue
+        if n is not None:
+            old_segs = old.split("/")[:n]
+            new_segs = new.split("/")[:n]
+            if (
+                old_segs != new_segs
+                or len(old.split("/")) < n
+                or len(new.split("/")) < n
+            ):
+                dropped += 1
+                continue
+        kept.append((old, new))
+    return kept, dropped
 
 
 class InitializePhase(Phase):
@@ -402,6 +490,20 @@ class InitializePhase(Phase):
             fd = fd.model_copy(update={"risk_level": risk_level})
             file_diffs.append(fd)
 
+        # P1-4: optional structured-config field-sensitivity escalation.
+        # Runs only when at least one rule is configured AND the file
+        # path matches a rule's path_glob — bounded IO, default-zero
+        # cost on repos that opt out.
+        rules = state.config.file_classifier.field_sensitivity_rules
+        if rules:
+            file_diffs = _apply_field_sensitivity(
+                file_diffs,
+                rules,
+                ctx,
+                merge_base,
+                state.config.upstream_ref,
+            )
+
         state.file_diffs = file_diffs
 
         upstream_renames = ctx.git_tool.detect_renames(
@@ -414,11 +516,27 @@ class InitializePhase(Phase):
             if pair not in seen:
                 seen.add(pair)
                 rename_pairs.append(pair)
-        state.rename_pairs = rename_pairs
-        if rename_pairs:
+
+        # P1-5: optional same-namespace guard. Git's -M scores renames
+        # purely on content similarity (default 50%); on large forks
+        # this routinely produces cross-namespace pairs (e.g. one
+        # vendor's file mapped to a totally unrelated vendor's slot)
+        # that pollute the planner's special_instructions. The two
+        # guards are off by default and opt-in per repo.
+        rd = state.config.rename_detection
+        filtered_pairs, dropped = _apply_rename_guards(rename_pairs, rd)
+        if dropped:
             ctx.notify(
                 "orchestrator",
-                f"Rename detection: {len(rename_pairs)} rename pair(s) found "
+                f"Rename guard dropped {dropped} cross-namespace pair(s) "
+                f"(require_same_parent_dir={rd.require_same_parent_dir}, "
+                f"require_same_prefix_segments={rd.require_same_prefix_segments})",
+            )
+        state.rename_pairs = filtered_pairs
+        if filtered_pairs:
+            ctx.notify(
+                "orchestrator",
+                f"Rename detection: {len(filtered_pairs)} rename pair(s) found "
                 f"(upstream={len(upstream_renames)}, fork={len(fork_renames)})",
             )
 

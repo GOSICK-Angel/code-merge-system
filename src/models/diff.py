@@ -41,6 +41,12 @@ class RiskLevel(str, Enum):
     BINARY = "binary"
     EXCLUDED = "excluded"
 
+    def severity(self) -> int | None:
+        """Strict ordering for the three actionable levels (0/1/2).
+        Sentinel levels (DELETED_ONLY, BINARY, EXCLUDED) return None."""
+        _order = {"auto_safe": 0, "auto_risky": 1, "human_required": 2}
+        return _order.get(self.value)
+
 
 class DiffHunk(BaseModel):
     hunk_id: str

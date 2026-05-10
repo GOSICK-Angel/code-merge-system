@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
 from datetime import datetime
+from typing import cast
 
 from src.agents.base_agent import BaseAgent
 from src.models.config import AgentLLMConfig
@@ -21,6 +23,7 @@ from src.llm.prompts.planner_judge_prompts import (
     REVIEW_SEGMENT_SIZE,
 )
 from src.models.plan_review import PlannerIssueResponse
+from src.llm.context import estimate_tokens
 from src.llm.response_parser import parse_plan_judge_verdict
 
 
@@ -28,12 +31,23 @@ from src.llm.response_parser import parse_plan_judge_verdict
 class SegmentReviewSnapshot:
     """Per-segment cache entry: lets revision rounds skip re-running the
     LLM on segments whose (file_path, batch_risk) tuples have not
-    changed since the prior round."""
+    changed since the prior round.
+
+    P3-10: ``latency_s`` / ``tokens_in`` / ``tokens_out`` are populated
+    only when ``source == "llm"`` (real LLM call). Cache / safelist hits
+    have None — they paid no LLM cost. Token counts are *estimated*
+    (heuristic via ``estimate_tokens``); they are good enough to tune
+    ``REVIEW_SEGMENT_SIZE`` against measured cost but should not be
+    treated as billing-grade.
+    """
 
     segment_idx: int
     signature: str
     verdict: PlanJudgeVerdict
     source: str = "llm"  # "llm" | "safelist" | "cache" — for telemetry
+    latency_s: float | None = None
+    tokens_in: int | None = None
+    tokens_out: int | None = None
 
 
 def _aggregate_segment_verdicts(
@@ -105,6 +119,45 @@ def _aggregate_segment_verdicts(
     )
 
 
+def _detect_cross_source_conflicts(
+    llm_issues: list[PlanIssue],
+    precheck_issues: list[PlanIssue],
+) -> list[str]:
+    """P2-7: return the file paths where LLM and precheck disagree on
+    direction.
+
+    ``llm wants demote`` AND ``precheck wants escalate`` (or vice-versa)
+    on the same file is a real disagreement — both sources independently
+    looked at the file and arrived at opposite conclusions.
+
+    Same-direction disagreements (both want stricter, just at different
+    levels) are NOT conflicts; the merger picks the strictest target.
+    """
+    pre_by_path: dict[str, PlanIssue] = {iss.file_path: iss for iss in precheck_issues}
+    conflicts: list[str] = []
+    for llm_iss in llm_issues:
+        pre_iss = pre_by_path.get(llm_iss.file_path)
+        if pre_iss is None:
+            continue
+        if (
+            llm_iss.current_classification is None
+            or pre_iss.current_classification is None
+        ):
+            continue
+        llm_cur = llm_iss.current_classification.severity()
+        llm_sug = llm_iss.suggested_classification.severity()
+        pre_cur = pre_iss.current_classification.severity()
+        pre_sug = pre_iss.suggested_classification.severity()
+        if None in (llm_cur, llm_sug, pre_cur, pre_sug):
+            continue
+        # Direction sign: positive = escalate, negative = demote.
+        llm_dir = (llm_sug or 0) - (llm_cur or 0)
+        pre_dir = (pre_sug or 0) - (pre_cur or 0)
+        if llm_dir * pre_dir < 0:
+            conflicts.append(llm_iss.file_path)
+    return conflicts
+
+
 def _merge_with_precheck(
     base: PlanJudgeVerdict,
     precheck_issues: list[PlanIssue],
@@ -118,9 +171,16 @@ def _merge_with_precheck(
     aggregate must be REVISION_NEEDED (not APPROVED). LLM-side issues
     are kept; precheck issues are appended unless the same file_path is
     already covered.
+
+    P2-7: surface cross-source conflicts (same file, opposite directions)
+    in the summary so operators can spot the case quickly. We do NOT
+    forcibly transition to AWAITING_HUMAN here — that decision belongs
+    to the phase orchestrator, which has the round-budget context.
     """
     if not precheck_issues:
         return base
+
+    conflicts = _detect_cross_source_conflicts(list(base.issues), precheck_issues)
 
     seen = {iss.file_path for iss in base.issues}
     merged_issues = list(base.issues)
@@ -140,6 +200,13 @@ def _merge_with_precheck(
         f" | precheck added {len(precheck_issues)} integrity issue(s) "
         "(MISMATCH/NOT-BATCHED, deterministic)"
     )
+    if conflicts:
+        sample = ", ".join(conflicts[:3])
+        more = f" (+{len(conflicts) - 3} more)" if len(conflicts) > 3 else ""
+        suffix += (
+            f" | CONFLICT: {len(conflicts)} file(s) where LLM and precheck "
+            f"disagree on direction [{sample}{more}]"
+        )
     new_summary = (base.summary or "") + suffix
 
     return PlanJudgeVerdict(
@@ -251,7 +318,7 @@ class PlannerJudgeAgent(BaseAgent):
                     revision_round,
                 )
 
-            llm_verdict = await self._review_single(
+            llm_verdict, single_telemetry = await self._review_single(
                 plan,
                 file_diffs,
                 revision_round,
@@ -267,6 +334,9 @@ class PlannerJudgeAgent(BaseAgent):
                     signature=sig,
                     verdict=llm_verdict,
                     source="llm",
+                    latency_s=cast("float | None", single_telemetry.get("latency_s")),
+                    tokens_in=cast("int | None", single_telemetry.get("tokens_in")),
+                    tokens_out=cast("int | None", single_telemetry.get("tokens_out")),
                 )
             return _merge_with_precheck(
                 llm_verdict,
@@ -355,7 +425,7 @@ class PlannerJudgeAgent(BaseAgent):
                 i for i in (prior_still_open or []) if i.file_path in seg_fps
             ]
 
-            verdict = await self._review_segment(
+            verdict, seg_telemetry = await self._review_segment(
                 plan,
                 segment,
                 idx,
@@ -375,6 +445,9 @@ class PlannerJudgeAgent(BaseAgent):
                     signature=sig,
                     verdict=verdict,
                     source="llm",
+                    latency_s=cast("float | None", seg_telemetry.get("latency_s")),
+                    tokens_in=cast("int | None", seg_telemetry.get("tokens_in")),
+                    tokens_out=cast("int | None", seg_telemetry.get("tokens_out")),
                 )
             n_llm += 1
 
@@ -417,7 +490,7 @@ class PlannerJudgeAgent(BaseAgent):
         prior_resolved: list[PlanIssue] | None,
         prior_still_open: list[PlanIssue] | None,
         planner_responses: list[PlannerIssueResponse] | None,
-    ) -> PlanJudgeVerdict:
+    ) -> tuple[PlanJudgeVerdict, dict[str, float | int | None]]:
         prompt = build_plan_review_prompt(
             plan,
             file_diffs,
@@ -443,7 +516,7 @@ class PlannerJudgeAgent(BaseAgent):
         prior_resolved: list[PlanIssue],
         prior_still_open: list[PlanIssue],
         planner_responses: list[PlannerIssueResponse] | None,
-    ) -> PlanJudgeVerdict:
+    ) -> tuple[PlanJudgeVerdict, dict[str, float | int | None]]:
         prompt = build_segment_plan_review_prompt(
             plan,
             file_segment,
@@ -460,14 +533,30 @@ class PlannerJudgeAgent(BaseAgent):
 
     async def _call_judge_llm(
         self, prompt: str, system: str, revision_round: int
-    ) -> PlanJudgeVerdict:
+    ) -> tuple[PlanJudgeVerdict, dict[str, float | int | None]]:
+        """P3-10: in addition to the verdict, return per-call telemetry
+        (latency in seconds + heuristic input/output token estimates).
+        Token counts are estimated, not billing-grade — the goal is to
+        let operators tune ``REVIEW_SEGMENT_SIZE`` against real-world
+        cost without wiring an API-specific usage hook."""
         messages = [{"role": "user", "content": prompt}]
+        tokens_in = estimate_tokens(prompt) + (estimate_tokens(system) if system else 0)
+        t0 = time.monotonic()
         try:
             raw = await self._call_llm_with_retry(
                 messages, system=system, json_mode=True
             )
-            return parse_plan_judge_verdict(
-                str(raw), self.llm_config.model, revision_round
+            elapsed = time.monotonic() - t0
+            telemetry: dict[str, float | int | None] = {
+                "latency_s": elapsed,
+                "tokens_in": tokens_in,
+                "tokens_out": estimate_tokens(str(raw)),
+            }
+            return (
+                parse_plan_judge_verdict(
+                    str(raw), self.llm_config.model, revision_round
+                ),
+                telemetry,
             )
         except Exception as e:
             self.logger.error("Plan review failed: %s", e)
@@ -489,15 +578,23 @@ class PlannerJudgeAgent(BaseAgent):
                 if is_llm_unavailable
                 else f"Review parse failed ({error_type})"
             )
-            return PlanJudgeVerdict(
-                result=result,
-                revision_round=revision_round,
-                issues=[],
-                approved_files_count=0,
-                flagged_files_count=0,
-                summary=f"{summary_prefix}: {str(e)[:200]}",
-                judge_model=self.llm_config.model,
-                timestamp=datetime.now(),
+            failed_telemetry: dict[str, float | int | None] = {
+                "latency_s": time.monotonic() - t0,
+                "tokens_in": tokens_in,
+                "tokens_out": None,
+            }
+            return (
+                PlanJudgeVerdict(
+                    result=result,
+                    revision_round=revision_round,
+                    issues=[],
+                    approved_files_count=0,
+                    flagged_files_count=0,
+                    summary=f"{summary_prefix}: {str(e)[:200]}",
+                    judge_model=self.llm_config.model,
+                    timestamp=datetime.now(),
+                ),
+                failed_telemetry,
             )
 
     def can_handle(self, state: MergeState) -> bool:

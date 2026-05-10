@@ -714,6 +714,28 @@ def write_plan_review_report(state: MergeState, output_dir: str) -> Path:
                 lines.append(
                     f"- **{t('planner_revision')}**: {rnd.planner_revision_summary}"
                 )
+
+            # P3-10: per-round segment cost telemetry. Token counts are
+            # heuristic estimates (see ``src/llm/context.py``); the
+            # row label makes that explicit so operators don't
+            # mistake them for billing-grade numbers.
+            tele = rnd.segment_telemetry
+            if tele is not None and tele.llm_segments > 0:
+                avg_tokens = (
+                    tele.total_tokens_in + tele.total_tokens_out
+                ) // tele.llm_segments
+                avg_latency = tele.total_latency_s / tele.llm_segments
+                lines.append(
+                    "- **Segment cost (this round, est.)**: "
+                    f"{tele.llm_segments} LLM segment(s), "
+                    f"{tele.cache_hit_segments} cache, "
+                    f"{tele.safelist_segments} safelist | "
+                    f"~{tele.total_tokens_in} tokens-in, "
+                    f"~{tele.total_tokens_out} tokens-out, "
+                    f"{tele.total_latency_s:.1f}s total "
+                    f"(avg {avg_tokens} tokens / "
+                    f"{avg_latency:.2f}s per LLM segment)"
+                )
             lines.append("")
 
     lines += [

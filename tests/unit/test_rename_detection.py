@@ -21,6 +21,7 @@ from src.tools.git_tool import GitTool
 # GitTool.detect_renames
 # ---------------------------------------------------------------------------
 
+
 class TestDetectRenames:
     def _make_git_tool(self, diff_output: str) -> GitTool:
         tool = object.__new__(GitTool)
@@ -82,6 +83,7 @@ class TestDetectRenames:
 # MergeState.rename_pairs
 # ---------------------------------------------------------------------------
 
+
 class TestMergeStateRenamePairs:
     def _make_config(self, tmp_path) -> MergeConfig:
         return MergeConfig(
@@ -118,6 +120,7 @@ class TestMergeStateRenamePairs:
 # build_classification_prompt rename injection
 # ---------------------------------------------------------------------------
 
+
 class TestBuildClassificationPromptRenameInjection:
     def test_no_rename_pairs_no_section(self):
         prompt = build_classification_prompt([], "ctx", 0, 1, rename_pairs=None)
@@ -139,6 +142,7 @@ class TestBuildClassificationPromptRenameInjection:
 # ---------------------------------------------------------------------------
 # InitializePhase stores rename_pairs on state
 # ---------------------------------------------------------------------------
+
 
 class TestInitializePhaseStoresRenamePairs:
     def test_rename_pairs_written_to_state(self, tmp_path):
@@ -184,25 +188,109 @@ class TestInitializePhaseStoresRenamePairs:
         phase = InitializePhase()
         with (
             patch("src.core.phases.initialize.classify_all_files", return_value={}),
-            patch("src.core.phases.initialize.category_summary", return_value={
-                "unchanged": 0, "upstream_new": 0, "current_only": 0,
-                "both_changed": 0, "upstream_only": 0, "current_only_change": 0,
-            }),
+            patch(
+                "src.core.phases.initialize.category_summary",
+                return_value={
+                    "unchanged": 0,
+                    "upstream_new": 0,
+                    "current_only": 0,
+                    "both_changed": 0,
+                    "upstream_only": 0,
+                    "current_only_change": 0,
+                },
+            ),
             patch("src.core.phases.initialize.PollutionAuditor"),
-            patch("src.core.phases.initialize.ConfigDriftDetector",
-                  return_value=MagicMock(
-                      find_env_files=MagicMock(return_value=([], [])),
-                      detect_config_drift=MagicMock(return_value=MagicMock(drifts=[])),
-                  )),
+            patch(
+                "src.core.phases.initialize.ConfigDriftDetector",
+                return_value=MagicMock(
+                    find_env_files=MagicMock(return_value=([], [])),
+                    detect_config_drift=MagicMock(return_value=MagicMock(drifts=[])),
+                ),
+            ),
             patch("src.core.phases.initialize.InterfaceChangeExtractor"),
             patch("src.core.phases.initialize.ReverseImpactScanner"),
             patch("src.core.phases.initialize.SyncPointDetector"),
-            patch("src.core.phases.initialize.CommitReplayer",
-                  return_value=MagicMock(
-                      classify_commits_with_partial=MagicMock(return_value=([], [], []))
-                  )),
+            patch(
+                "src.core.phases.initialize.CommitReplayer",
+                return_value=MagicMock(
+                    classify_commits_with_partial=MagicMock(return_value=([], [], []))
+                ),
+            ),
             patch("src.core.state_machine.StateMachine.transition"),
         ):
             phase._run_sync(state, ctx)
 
         assert state.rename_pairs == [("old/foo.go", "new/foo.go")]
+
+
+# ---------------------------------------------------------------------------
+# P1-5: same-namespace guards on top of git's similarity-based detection
+# ---------------------------------------------------------------------------
+
+
+class TestApplyRenameGuards:
+    def _import(self):
+        from src.core.phases.initialize import _apply_rename_guards
+        from src.models.config import RenameDetectionConfig
+
+        return _apply_rename_guards, RenameDetectionConfig
+
+    def test_default_off_passes_through_unchanged(self):
+        apply, RDC = self._import()
+        pairs = [
+            ("vendor_a/x.py", "vendor_b/y.py"),
+            ("vendor_a/x.py", "vendor_a/y.py"),
+        ]
+        kept, dropped = apply(pairs, RDC())
+        assert kept == pairs
+        assert dropped == 0
+
+    def test_require_same_parent_dir_drops_cross_namespace(self):
+        apply, RDC = self._import()
+        pairs = [
+            ("models/novita/llm/foo.yaml", "models/aihubmix/llm/bar.yaml"),
+            ("models/x/llm/a.yaml", "models/x/llm/b.yaml"),
+        ]
+        kept, dropped = apply(pairs, RDC(require_same_parent_dir=True))
+        assert kept == [("models/x/llm/a.yaml", "models/x/llm/b.yaml")]
+        assert dropped == 1
+
+    def test_require_same_prefix_segments_two(self):
+        apply, RDC = self._import()
+        pairs = [
+            ("models/novita/x.yaml", "models/aihubmix/x.yaml"),
+            ("models/x/llm/a.yaml", "models/x/llm/b.yaml"),
+            ("tools/foo/a.py", "tools/foo/b.py"),
+        ]
+        kept, dropped = apply(pairs, RDC(require_same_prefix_segments=2))
+        assert kept == [
+            ("models/x/llm/a.yaml", "models/x/llm/b.yaml"),
+            ("tools/foo/a.py", "tools/foo/b.py"),
+        ]
+        assert dropped == 1
+
+    def test_require_same_prefix_segments_drops_short_paths(self):
+        """A path shorter than N segments cannot satisfy a prefix-of-N
+        guard — drop, don't false-accept."""
+        apply, RDC = self._import()
+        pairs = [
+            ("a/b/c.py", "a/b/d.py"),
+            ("a.py", "a/b/c.py"),
+        ]
+        kept, dropped = apply(pairs, RDC(require_same_prefix_segments=2))
+        assert ("a/b/c.py", "a/b/d.py") in kept
+        assert ("a.py", "a/b/c.py") not in kept
+        assert dropped == 1
+
+    def test_both_guards_combine(self):
+        apply, RDC = self._import()
+        pairs = [
+            ("models/x/a.py", "models/x/b.py"),
+            ("models/x/a.py", "models/y/a.py"),
+        ]
+        kept, dropped = apply(
+            pairs,
+            RDC(require_same_parent_dir=True, require_same_prefix_segments=2),
+        )
+        assert kept == [("models/x/a.py", "models/x/b.py")]
+        assert dropped == 1

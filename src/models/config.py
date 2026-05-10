@@ -273,6 +273,42 @@ class SecuritySensitiveConfig(BaseModel):
     risk_hint_bump: float = Field(default=0.25, ge=0.0, le=0.5)
 
 
+class FieldSensitivityRule(BaseModel):
+    """P1-4: declarative rule that escalates a structured-config file's
+    risk level when specific *fields* (not just path) are touched.
+
+    Example yaml:
+
+        field_sensitivity_rules:
+          - path_glob: "**/manifest.yaml"
+            sensitive_fields: ["oauth.scopes", "permissions.*", "endpoints.*.url"]
+            escalate_to: auto_risky
+
+    The rule is generic — paths and field names are pure config. Use
+    fnmatch-style globs in both ``path_glob`` and each entry of
+    ``sensitive_fields``. Array indices in the file are normalised to
+    ``*`` before matching (so ``endpoints[3].url`` is reported as
+    ``endpoints.*.url``).
+    """
+
+    path_glob: str = Field(
+        ..., min_length=1, description="fnmatch glob applied to file path."
+    )
+    sensitive_fields: list[str] = Field(
+        ...,
+        min_length=1,
+        description="Dot-path field globs (e.g. ``oauth.scopes``, "
+        "``permissions.*``). At least one such field must change "
+        "between base and target for the rule to fire.",
+    )
+    escalate_to: Literal["auto_risky", "human_required"] = Field(
+        ...,
+        description="Risk level the matched file is bumped to. Only "
+        "upward escalation is allowed — the rule never weakens an "
+        "already-stricter classification.",
+    )
+
+
 class FileClassifierConfig(BaseModel):
     excluded_patterns: list[str] = Field(
         default_factory=lambda: [
@@ -327,6 +363,14 @@ class FileClassifierConfig(BaseModel):
     )
     security_sensitive: SecuritySensitiveConfig = Field(
         default_factory=SecuritySensitiveConfig
+    )
+    field_sensitivity_rules: list[FieldSensitivityRule] = Field(
+        default_factory=list,
+        description="P1-4: declarative rules that escalate risk_level "
+        "when specific yaml/json fields (not just file paths) change. "
+        "Empty by default — opt in per repo to teach the agent about "
+        "structured-config files whose individual keys carry risk "
+        "(e.g. plugin manifests with OAuth scopes / permissions).",
     )
 
 
@@ -635,6 +679,29 @@ class MemoryExtractionConfig(BaseModel):
     )
 
 
+class RenameDetectionConfig(BaseModel):
+    """P1-5: extra guards on top of git's default similarity-based rename
+    detection. Defaults are off so behaviour is unchanged for existing
+    deployments — opt in via ``<repo>/.merge/config.yaml``."""
+
+    require_same_parent_dir: bool = Field(
+        default=False,
+        description="When true, drop rename pairs whose old/new paths "
+        "live in different parent directories (``os.path.dirname``). "
+        "Useful for forks where files in distinct namespaces happen to "
+        "score above git's content-similarity threshold and produce "
+        "spurious cross-namespace renames.",
+    )
+    require_same_prefix_segments: int | None = Field(
+        default=None,
+        ge=1,
+        description="When set to N, drop rename pairs whose old/new "
+        "paths do not share the first N path segments. Stricter than "
+        "``require_same_parent_dir`` and generalises the same-namespace "
+        "intuition without baking specific directory names into source.",
+    )
+
+
 class PlanReviewConfig(BaseModel):
     segment_safelist_patterns: list[str] = Field(
         default_factory=list,
@@ -656,6 +723,19 @@ class PlanReviewConfig(BaseModel):
         "supply-chain risk of silently accepting massive dependency "
         "rewrites (e.g. malicious package injection via auto-bumped "
         "package-lock.json).",
+    )
+    min_rounds_when_segmented: int = Field(
+        default=0,
+        ge=0,
+        le=10,
+        description="P2-9: opt-in floor on the effective "
+        "``max_plan_revision_rounds`` whenever the plan splits into "
+        "more than one LLM-review segment. Default 0 = disabled "
+        "(use ``max_plan_revision_rounds`` verbatim). On large forks "
+        "the LLM often needs ≥2 rounds to converge per-segment; set "
+        "this to 2 or 3 to give the loop room without raising the "
+        "cap for everyone. Only ever raises the bound — never "
+        "lowers a higher ``max_plan_revision_rounds``.",
     )
 
 
@@ -772,6 +852,12 @@ class MergeConfig(BaseModel):
         default_factory=PlanReviewConfig,
         description="Plan-review (PlannerJudge) tuning, including the "
         "per-repo segment safelist extension list.",
+    )
+    rename_detection: RenameDetectionConfig = Field(
+        default_factory=RenameDetectionConfig,
+        description="P1-5: optional guards on top of git's similarity-based "
+        "rename detection (same-parent-dir / shared-prefix-depth). "
+        "Defaults are off; opt in per repo.",
     )
     max_dispute_rounds: int = Field(default=2, ge=1, le=5)
     max_batch_repair_rounds: int = Field(default=1, ge=1, le=3)

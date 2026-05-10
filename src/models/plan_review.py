@@ -54,6 +54,23 @@ class UserDecisionItem(BaseModel):
     user_input: str | None = None
 
 
+class SegmentTelemetrySummary(BaseModel):
+    """P3-10: per-round aggregate of segment-level review cost.
+
+    All counts are *estimates* — token figures come from the heuristic
+    in ``src/llm/context.py``, not from a billing-grade API hook. They
+    are accurate enough to tune ``REVIEW_SEGMENT_SIZE`` against
+    measured cost.
+    """
+
+    llm_segments: int = 0
+    cache_hit_segments: int = 0
+    safelist_segments: int = 0
+    total_latency_s: float = 0.0
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+
+
 class PlanReviewRound(BaseModel):
     round_number: int
     verdict_result: PlanJudgeResult
@@ -65,6 +82,12 @@ class PlanReviewRound(BaseModel):
     plan_diff: list[PlanDiffEntry] = Field(default_factory=list)
     negotiation_messages: list[NegotiationMessage] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=datetime.now)
+    segment_telemetry: SegmentTelemetrySummary | None = Field(
+        default=None,
+        description="P3-10: aggregated segment-level cost for this "
+        "round. None for legacy rounds and for short-circuit / "
+        "cache-only rounds where no LLM call fired.",
+    )
 
 
 class ReviewConclusionReason(str, Enum):
@@ -73,6 +96,12 @@ class ReviewConclusionReason(str, Enum):
     STALLED = "stalled"
     LLM_FAILURE = "llm_failure"
     CRITICAL_REPLAN = "critical_replan"
+    # P2-7: LLM judge and the deterministic precheck disagreed on the
+    # *direction* for the same file (one wants escalate, the other
+    # wants demote). Re-feeding the plan would just oscillate, so the
+    # phase transitions to AWAITING_HUMAN and asks the operator to
+    # arbitrate.
+    SOURCE_CONFLICT = "source_conflict"
 
 
 class ReviewConclusion(BaseModel):
