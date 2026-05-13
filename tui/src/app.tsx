@@ -13,6 +13,7 @@ import type { ScreenId } from "./state/types.js";
 
 const STATUS_SCREEN_MAP: Record<string, ScreenId> = {
   plan_reviewing: "plan_review",
+  plan_revising: "plan_review",
   completed: "report",
   failed: "report",
 };
@@ -38,10 +39,8 @@ export function App({ wsUrl }: AppProps) {
       if (status === "awaiting_human") {
         setActiveScreen(hasDecisionRequests ? "decisions" : "plan_review");
       } else {
-        const target = STATUS_SCREEN_MAP[status];
-        if (target) {
-          setActiveScreen(target);
-        }
+        const target = STATUS_SCREEN_MAP[status] ?? "dashboard";
+        setActiveScreen(target);
       }
     }
   }, [status, hasDecisionRequests, setActiveScreen]);

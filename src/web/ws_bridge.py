@@ -164,6 +164,7 @@ class MergeWSBridge:
                     "file_path": item.file_path,
                     "description": item.description,
                     "risk_context": item.risk_context,
+                    "conflict_preview": item.conflict_preview,
                     "current_classification": item.current_classification,
                     "options": [
                         {
@@ -234,6 +235,45 @@ class MergeWSBridge:
             )
         return result
 
+    _PROJECT_SUMMARY_MAX_LINES = 4
+    _PROJECT_SUMMARY_MAX_CHARS = 600
+    _INSTRUCTION_MAX_LINES = 6
+    _INSTRUCTION_MAX_CHARS = 800
+
+    @classmethod
+    def _truncate_project_summary(cls, raw: str) -> str:
+        if not raw:
+            return raw
+        lines = raw.splitlines()
+        clipped_lines = lines[: cls._PROJECT_SUMMARY_MAX_LINES]
+        joined = "\n".join(clipped_lines)
+        if len(joined) > cls._PROJECT_SUMMARY_MAX_CHARS:
+            joined = joined[: cls._PROJECT_SUMMARY_MAX_CHARS].rstrip() + "…"
+        elif len(lines) > cls._PROJECT_SUMMARY_MAX_LINES:
+            joined += "\n…"
+        return joined
+
+    @classmethod
+    def _truncate_instructions(cls, items: list[str]) -> list[str]:
+        """Defensive per-item cap; user-authored guidance is preserved in full
+        when within bounds. Items that exceed the cap are tail-marked so the
+        reviewer is alerted to consult the plan report for the full text."""
+        out: list[str] = []
+        for instr in items:
+            lines = instr.splitlines()
+            clipped = lines[: cls._INSTRUCTION_MAX_LINES]
+            joined = "\n".join(clipped)
+            overflow = False
+            if len(joined) > cls._INSTRUCTION_MAX_CHARS:
+                joined = joined[: cls._INSTRUCTION_MAX_CHARS].rstrip()
+                overflow = True
+            elif len(lines) > cls._INSTRUCTION_MAX_LINES:
+                overflow = True
+            if overflow:
+                joined += "\n… (truncated — see plan report)"
+            out.append(joined)
+        return out
+
     def _serialize_plan(self) -> dict[str, Any] | None:
         plan = self._state.merge_plan
         if plan is None:
@@ -274,8 +314,12 @@ class MergeWSBridge:
                 }
                 for ly in plan.layers
             ],
-            "project_context_summary": plan.project_context_summary,
-            "special_instructions": plan.special_instructions,
+            "project_context_summary": self._truncate_project_summary(
+                plan.project_context_summary
+            ),
+            "special_instructions": self._truncate_instructions(
+                plan.special_instructions
+            ),
         }
 
     def _serialize_human_request(self, req: Any) -> dict[str, Any]:
@@ -509,6 +553,16 @@ class MergeWSBridge:
             )
             self._state.pending_user_decisions[idx] = updated
         logger.info("TUI user plan decisions received: %d items", len(items))
+
+        self._state.plan_human_review = PlanHumanReview(
+            decision=PlanHumanDecision.APPROVE,
+            reviewer_name="tui_user",
+            reviewer_notes=None,
+            item_decisions=list(self._state.pending_user_decisions),
+            decided_at=datetime.now(),
+        )
+        self._plan_review_received.set()
+        logger.info("User plan decisions applied — signalling orchestrator")
 
     async def broadcast_state_patch(self) -> None:
         """Send full state to all connected clients, skipping if unchanged."""

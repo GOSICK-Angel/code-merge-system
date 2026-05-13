@@ -541,7 +541,7 @@ class AutoMergePhase(Phase):
         # actualize the choice here, overwrite file_decision_records, and
         # remove the file from future batches.
         _l5_take_target_keys = {"take_target"}
-        _l5_take_current_keys = {"take_current"}
+        _l5_take_current_keys = {"take_current", "keep_head"}
         _l5_applied: set[str] = set()
         for item in state.pending_user_decisions:
             if item.user_choice not in _l5_take_target_keys | _l5_take_current_keys:
@@ -645,7 +645,7 @@ class AutoMergePhase(Phase):
         }
         if user_choice_by_path:
             new_phases: list[PhaseFileBatch] = []
-            _risky_keys = {"downgrade_risky", "confirm_risky"}
+            _risky_keys = {"downgrade_risky", "confirm_risky", "llm_auto_merge"}
             _safe_keys = {"downgrade_safe"}
             _human_keys = {"approve_human", "upgrade_human", "approve_merge"}
             for batch in state.merge_plan.phases:

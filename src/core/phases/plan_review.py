@@ -864,6 +864,8 @@ class PlanReviewPhase(Phase):
             )
         return items
 
+    _CONFLICT_PREVIEW_MAX_LINES = 50
+
     def _build_user_decision_items(self, state: MergeState) -> list[UserDecisionItem]:
         if state.merge_plan is None:
             return []
@@ -882,6 +884,7 @@ class PlanReviewPhase(Phase):
                 )
                 options = self._build_decision_options(fp, batch.risk_level, context)
                 description = self._build_description(fp, batch.risk_level, context)
+                conflict_preview = self._build_conflict_preview(fp, diff_map)
 
                 items.append(
                     UserDecisionItem(
@@ -889,6 +892,7 @@ class PlanReviewPhase(Phase):
                         file_path=fp,
                         description=description,
                         risk_context=context,
+                        conflict_preview=conflict_preview,
                         current_classification=batch.risk_level.value,
                         options=options,
                     )
@@ -922,8 +926,30 @@ class PlanReviewPhase(Phase):
                 "lines_deleted": fd.lines_deleted,
                 "is_security_sensitive": fd.is_security_sensitive,
                 "language": fd.language,
+                "raw_diff": fd.raw_diff,
+                "risk_factors": fd.risk_factors,
             }
         return result
+
+    def _build_conflict_preview(
+        self,
+        file_path: str,
+        diff_map: dict[str, dict[str, Any]],
+    ) -> str:
+        diff_info = diff_map.get(file_path)
+        if not diff_info:
+            return ""
+        raw = diff_info.get("raw_diff") or ""
+        if not raw:
+            return ""
+        lines = raw.splitlines()
+        if len(lines) <= self._CONFLICT_PREVIEW_MAX_LINES:
+            return raw
+        truncated = lines[: self._CONFLICT_PREVIEW_MAX_LINES]
+        truncated.append(
+            f"... ({len(lines) - self._CONFLICT_PREVIEW_MAX_LINES} more lines)"
+        )
+        return "\n".join(truncated)
 
     def _build_risk_context(
         self,
@@ -941,11 +967,14 @@ class PlanReviewPhase(Phase):
                 f"risk_score={diff_info['risk_score']:.2f}"
             )
             if diff_info.get("is_security_sensitive"):
-                parts.append("security-sensitive file")
+                parts.append("⚠ security-sensitive file")
+            for factor in diff_info.get("risk_factors") or []:
+                parts.append(f"risk: {factor}")
 
         reasons = issue_reasons.get(file_path)
         if reasons:
-            parts.append(f"Judge: {reasons[0]}")
+            for r in reasons:
+                parts.append(f"Judge: {r}")
 
         if not parts:
             if risk_level == RiskLevel.HUMAN_REQUIRED:
@@ -959,7 +988,7 @@ class PlanReviewPhase(Phase):
                     "automated merge possible but may need verification"
                 )
 
-        return "; ".join(parts)
+        return "\n".join(parts)
 
     def _build_description(
         self,
@@ -978,55 +1007,49 @@ class PlanReviewPhase(Phase):
         context: str,
     ) -> list[DecisionOption]:
         is_security = "security-sensitive" in context
+        security_warning = (
+            " (⚠ security-sensitive — review carefully)" if is_security else ""
+        )
 
         if risk_level == RiskLevel.HUMAN_REQUIRED:
             return [
                 DecisionOption(
-                    key="approve_human",
-                    label="Manual review",
-                    description="You will review and resolve conflicts by hand "
-                    "before this file is merged",
+                    key="keep_head",
+                    label="Keep current branch (HEAD)",
+                    description="Use the fork branch file as-is; all upstream changes are discarded",
                 ),
                 DecisionOption(
-                    key="downgrade_risky",
-                    label="Auto-merge with verification",
-                    description="System will attempt automated merge, then run "
-                    "quality gates to verify correctness"
+                    key="take_target",
+                    label="Use target branch version",
+                    description="Use the upstream branch file as-is; all fork changes are discarded"
+                    + security_warning,
+                ),
+                DecisionOption(
+                    key="llm_auto_merge",
+                    label="LLM auto-merge with verification",
+                    description="LLM merges both sides intelligently, then quality gates verify the result"
                     + (
                         " (not recommended: security-sensitive file)"
                         if is_security
                         else ""
                     ),
                 ),
-                DecisionOption(
-                    key="downgrade_safe",
-                    label="Auto-merge (trust system)",
-                    description="System will merge automatically without extra "
-                    "verification — use only if you are confident the changes "
-                    "are trivial"
-                    + (" (WARNING: security-sensitive file)" if is_security else ""),
-                ),
             ]
 
         return [
             DecisionOption(
-                key="confirm_risky",
-                label="Auto-merge with verification",
-                description="System will attempt automated merge, then run "
-                "quality gates to verify correctness",
+                key="keep_head",
+                label="Keep current branch (HEAD)",
+                description="Use the fork branch file as-is; all upstream changes are discarded",
             ),
             DecisionOption(
-                key="upgrade_human",
-                label="Escalate to manual review",
-                description="You will review and resolve conflicts by hand — "
-                "recommended if the changes look complex or risky"
-                + (" (recommended: security-sensitive file)" if is_security else ""),
+                key="take_target",
+                label="Use target branch version",
+                description="Use the upstream branch file as-is; all fork changes are discarded",
             ),
             DecisionOption(
-                key="downgrade_safe",
-                label="Auto-merge (trust system)",
-                description="System will merge automatically without extra "
-                "verification — use only if you are confident the changes "
-                "are trivial",
+                key="llm_auto_merge",
+                label="LLM auto-merge with verification",
+                description="LLM merges both sides intelligently, then quality gates verify the result",
             ),
         ]

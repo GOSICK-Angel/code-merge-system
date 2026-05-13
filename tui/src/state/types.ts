@@ -282,6 +282,7 @@ export interface UserDecisionItem {
   file_path: string;
   description: string;
   risk_context: string;
+  conflict_preview: string;
   current_classification: string;
   options: DecisionOption[];
   user_choice: string | null;

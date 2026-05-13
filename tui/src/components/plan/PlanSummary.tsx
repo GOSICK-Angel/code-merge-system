@@ -33,15 +33,55 @@ export function PlanSummary() {
           ({Math.round(rs.estimated_auto_merge_rate * 100)}% auto)
         </Text>
       </Box>
-      {plan.special_instructions.length > 0 && (
-        <Box flexDirection="column">
-          <Text bold>Special Instructions:</Text>
-          {plan.special_instructions.map((instr, i) => (
-            <Text key={i} color="yellow">  • {instr}</Text>
-          ))}
-        </Box>
-      )}
-      <Text color="gray">{plan.project_context_summary}</Text>
+      {plan.special_instructions.length > 0 && (() => {
+        const MAX_TOTAL_LINES = 14;
+        const rendered: React.ReactElement[] = [];
+        let usedLines = 0;
+        let truncated = false;
+        outer: for (let idx = 0; idx < plan.special_instructions.length; idx++) {
+          const instr = plan.special_instructions[idx]!;
+          const lines = instr.split("\n");
+          for (let li = 0; li < lines.length; li++) {
+            if (usedLines >= MAX_TOTAL_LINES) {
+              truncated = true;
+              break outer;
+            }
+            const raw = lines[li] ?? "";
+            const display = raw.length > 200 ? raw.slice(0, 200) + "…" : raw;
+            rendered.push(
+              <Text key={`${idx}-${li}`} color="yellow">
+                {li === 0 ? "  • " : "    "}
+                {display}
+              </Text>,
+            );
+            usedLines++;
+          }
+        }
+        return (
+          <Box flexDirection="column">
+            <Text bold>Special Instructions:</Text>
+            {rendered}
+            {truncated && (
+              <Text color="gray">  … more in plan report</Text>
+            )}
+          </Box>
+        );
+      })()}
+      {plan.project_context_summary && (() => {
+        const lines = plan.project_context_summary.split("\n").slice(0, 3);
+        return (
+          <Box flexDirection="column">
+            {lines.map((line, i) => {
+              const display = line.length > 160 ? line.slice(0, 160) + "…" : line;
+              return (
+                <Text key={i} color="gray">
+                  {display}
+                </Text>
+              );
+            })}
+          </Box>
+        );
+      })()}
     </Box>
   );
 }

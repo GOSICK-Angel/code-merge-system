@@ -48,6 +48,7 @@ class UserDecisionItem(BaseModel):
     file_path: str
     description: str
     risk_context: str = ""
+    conflict_preview: str = ""
     current_classification: str
     options: list[DecisionOption] = Field(default_factory=list)
     user_choice: str | None = None

@@ -585,6 +585,8 @@ class TestPlanReviewConvergence:
         assert len(state.pending_user_decisions) == 1
         assert state.pending_user_decisions[0].file_path == "b.py"
         assert len(state.pending_user_decisions[0].options) == 3
+        option_keys = {o.key for o in state.pending_user_decisions[0].options}
+        assert option_keys == {"keep_head", "take_target", "llm_auto_merge"}
 
 
 class TestClassifyPriorIssues:

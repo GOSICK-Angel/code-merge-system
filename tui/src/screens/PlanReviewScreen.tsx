@@ -2,8 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import { StatusBar } from "../components/status/StatusBar.js";
 import { PlanSummary } from "../components/plan/PlanSummary.js";
-import { BatchList } from "../components/plan/BatchList.js";
-import { PlanDecisionWizard } from "../components/decisions/PlanDecisionWizard.js";
+import { PlanDecisionWizard, type WizardPhase } from "../components/decisions/PlanDecisionWizard.js";
 import { Divider } from "../ink/Divider.js";
 import { KeyHint } from "../ink/KeyHint.js";
 import { ScrollBox } from "../ink/ScrollBox.js";
@@ -227,6 +226,7 @@ export function PlanReviewScreen() {
   const [viewMode, setViewMode] = useState<ViewMode>(
     () => status === "awaiting_human" && pendingUserDecisions.length > 0 ? "decisions" : "overview"
   );
+  const [wizardPhase, setWizardPhase] = useState<WizardPhase>("deciding");
 
   useEffect(() => {
     if (status === "awaiting_human" && pendingUserDecisions.length > 0) {
@@ -314,6 +314,19 @@ export function PlanReviewScreen() {
             { key: "Esc", label: "Back" },
           ]
         : (() => {
+            if (wizardPhase === "submitting") {
+              return [
+                { key: "o", label: "Overview" },
+                { key: "?", label: "Help" },
+              ];
+            }
+            if (wizardPhase === "review") {
+              return [
+                { key: "⏎", label: "Submit" },
+                { key: "←", label: "Revise" },
+                { key: "o", label: "Overview" },
+              ];
+            }
             const maxOpts =
               pendingUserDecisions.length > 0
                 ? Math.max(...pendingUserDecisions.map((d) => d.options.length))
@@ -377,8 +390,6 @@ export function PlanReviewScreen() {
           <Box flexDirection="row">
           <Box flexDirection="column" flexGrow={1}>
             <PlanSummary />
-            <Divider />
-            <BatchList />
           </Box>
           <Box flexDirection="column" width={35}>
             {planReviewLog.length > 0 && (
@@ -448,7 +459,11 @@ export function PlanReviewScreen() {
       )}
 
       {viewMode === "decisions" && hasDecisions && (
-        <PlanDecisionWizard items={pendingUserDecisions} isActive={true} />
+        <PlanDecisionWizard
+          items={pendingUserDecisions}
+          isActive={true}
+          onPhaseChange={setWizardPhase}
+        />
       )}
 
       <Divider />
