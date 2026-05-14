@@ -1,0 +1,35 @@
+import type { AgentActivityEvent, MergeStateSnapshot } from "../types/state";
+
+export type InboundMessage =
+  | { type: "state_snapshot"; payload: MergeStateSnapshot }
+  | { type: "state_patch"; payload: MergeStateSnapshot }
+  | { type: "agent_activity"; payload: AgentActivityEvent }
+  | { type: "agent_activity_replay"; payload: { events: AgentActivityEvent[] } }
+  | {
+      type: "cancel_error";
+      payload: { reason: string; current_status: string };
+    };
+
+export type OutboundMessage =
+  | { type: "submit_decision"; payload: { filePath: string; decision: string } }
+  | {
+      type: "submit_conflict_decisions_batch";
+      payload: { items: Array<{ file_path: string; decision: string }> };
+    }
+  | {
+      type: "submit_plan_review";
+      payload: { decision: "approve" | "reject" | "modify"; notes?: string };
+    }
+  | {
+      type: "submit_user_plan_decisions";
+      payload: {
+        items: Array<{
+          item_id: string;
+          user_choice: string;
+          user_input?: string;
+        }>;
+      };
+    }
+  | { type: "cancel_run"; payload: Record<string, never> }
+  | { type: "pause"; payload: Record<string, never> }
+  | { type: "resume"; payload: Record<string, never> };
