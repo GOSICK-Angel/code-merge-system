@@ -363,6 +363,14 @@ class MergeWSBridge:
         client that connects mid-run receives the recent history via
         ``agent_activity_replay`` on handshake — without this, refreshing
         the browser would wipe the rolling stream.
+
+        Thread-safety: when an event loop is bound, ``_activity_buffer``
+        mutation **and** the broadcast are both marshalled to the loop
+        thread via ``call_soon_threadsafe`` so they observe the same
+        single-writer invariant as ``_send_snapshot`` (which reads the
+        buffer on the loop thread). When no loop is bound (unit tests
+        / single-threaded driver) we apply the buffer mutation in-line
+        because there is no other reader/writer to race with.
         """
         payload: dict[str, Any] = {
             "agent": event.agent,
@@ -371,15 +379,27 @@ class MergeWSBridge:
             "event_type": event.event_type,
             "elapsed": event.elapsed,
         }
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            self._append_to_activity_buffer(payload)
+            return
+        loop.call_soon_threadsafe(self._on_activity_event, payload)
+
+    def _on_activity_event(self, payload: dict[str, Any]) -> None:
+        """Runs on the event-loop thread — exclusive access to the
+        activity buffer + client set."""
+        self._append_to_activity_buffer(payload)
+        data = json.dumps({"type": "agent_activity", "payload": payload})
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            loop.create_task(self._broadcast_raw(data))
+
+    def _append_to_activity_buffer(self, payload: dict[str, Any]) -> None:
+        """Bounded ring buffer append. Single-writer guarantee from the
+        caller — see ``notify_agent_activity`` for the threading model."""
         self._activity_buffer.append(payload)
         if len(self._activity_buffer) > self.ACTIVITY_BUFFER_MAX:
             self._activity_buffer = self._activity_buffer[-self.ACTIVITY_BUFFER_MAX :]
-
-        loop = self._loop
-        if loop is None or loop.is_closed():
-            return
-        data = json.dumps({"type": "agent_activity", "payload": payload})
-        loop.call_soon_threadsafe(loop.create_task, self._broadcast_raw(data))
 
     async def _broadcast_raw(self, data: str) -> None:
         await asyncio.gather(
