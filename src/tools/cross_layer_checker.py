@@ -24,6 +24,7 @@ from typing import Iterable
 from pydantic import BaseModel, Field
 
 from src.models.config import CrossLayerAssertion
+from src.tools.conflict_markers import safe_read_text
 
 
 class CrossLayerAssertionResult(BaseModel):
@@ -73,7 +74,14 @@ class CrossLayerChecker:
                 error=f"Invalid regex: {e}",
             )
 
-        source_content = source_path.read_text(encoding="utf-8")
+        source_content = safe_read_text(source_path)
+        if source_content is None:
+            return CrossLayerAssertionResult(
+                assertion_name=assertion.name,
+                source_file=src_file,
+                target_files=list(assertion.keys_in),
+                error=(f"Source file is binary or unreadable: {src_file}"),
+            )
         captured: set[str] = set()
         for m in compiled.finditer(source_content):
             if not m.groups():
@@ -93,7 +101,10 @@ class CrossLayerChecker:
             if not tgt_path.exists():
                 missing.update(keys_to_check)
                 continue
-            tgt_content = tgt_path.read_text(encoding="utf-8")
+            tgt_content = safe_read_text(tgt_path)
+            if tgt_content is None:
+                missing.update(keys_to_check)
+                continue
             for key in keys_to_check:
                 if key not in tgt_content:
                     missing.add(key)

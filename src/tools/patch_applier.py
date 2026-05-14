@@ -28,7 +28,13 @@ async def apply_with_snapshot(
 
     original: str | None = None
     if abs_path.exists():
-        original = abs_path.read_text(encoding="utf-8")
+        try:
+            original = abs_path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, ValueError):
+            # Binary file in the working tree — snapshot skipped.
+            # Binary files should be routed through apply_bytes_with_snapshot
+            # instead; this guard prevents a hard crash if one slips through.
+            pass
 
     if has_conflict_markers(new_content):
         return FileDecisionRecord(

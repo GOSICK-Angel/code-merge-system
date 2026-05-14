@@ -483,6 +483,51 @@ class TestCrossLayerChecker:
         )
         assert "not found" in results[0].error
 
+    def test_binary_source_does_not_crash(self, tmp_path):
+        # PNG magic bytes — non-UTF-8. A naked read_text would raise
+        # UnicodeDecodeError and abort the whole Judge pass; the checker
+        # must surface the error on the result object instead.
+        png_payload = b"\x89PNG\r\n\x1a\n\x00\x00\x00rest-of-binary"
+        (tmp_path / "asset.png").write_bytes(png_payload)
+        (tmp_path / "registry.ts").write_text("nothing to see here\n")
+
+        checker = CrossLayerChecker(tmp_path)
+        results = checker.check(
+            [
+                CrossLayerAssertion(
+                    name="png-as-source",
+                    keys_from=r"asset.png::(\w+)",
+                    keys_in=["registry.ts"],
+                )
+            ]
+        )
+        assert results[0].error != ""
+        assert (
+            "binary" in results[0].error.lower()
+            or "unreadable" in results[0].error.lower()
+        )
+        assert results[0].missing_keys == []
+
+    def test_binary_target_treated_as_missing(self, tmp_path):
+        (tmp_path / "types.ts").write_text(
+            "export enum Kind {\n  A = 'A',\n  B = 'B',\n}\n"
+        )
+        (tmp_path / "registry.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00binary")
+
+        checker = CrossLayerChecker(tmp_path)
+        results = checker.check(
+            [
+                CrossLayerAssertion(
+                    name="png-as-target",
+                    keys_from=r"types.ts::^\s+(\w+)\s*=\s*'",
+                    keys_in=["registry.png"],
+                )
+            ]
+        )
+        # Should not raise; binary target treated like a missing target —
+        # all captured keys reported as missing.
+        assert set(results[0].missing_keys) == {"A", "B"}
+
 
 # ─── Judge deterministic pipeline: new VETOs ──────────────────────────────────
 

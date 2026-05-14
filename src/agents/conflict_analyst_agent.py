@@ -257,7 +257,6 @@ class ConflictAnalystAgent(BaseAgent):
             raw = await self._call_llm_with_retry(
                 [{"role": "user", "content": prompt}], system=ANALYST_SYSTEM
             )
-            return parse_commit_round_analyses(str(raw), file_paths)
         except Exception as e:
             self.logger.error(
                 "Commit-round analysis failed (%d files, %d commits): %s",
@@ -266,6 +265,31 @@ class ConflictAnalystAgent(BaseAgent):
                 e,
             )
             return {}
+
+        analyses = parse_commit_round_analyses(str(raw), file_paths)
+        parsed_count = len(analyses)
+        requested_count = len(file_paths)
+
+        if requested_count > 0 and parsed_count == 0:
+            self._consecutive_failures += 1
+            self._sliding_window.append(False)
+            self.logger.warning(
+                "Commit-round parsed 0/%d analyses (likely truncated JSON or "
+                "schema break); response_chars=%d, consecutive_failures=%d",
+                requested_count,
+                len(str(raw)),
+                self._consecutive_failures,
+            )
+        elif parsed_count < requested_count:
+            missing = [fp for fp in file_paths if fp not in analyses][:5]
+            self.logger.warning(
+                "Commit-round partial parse: %d/%d files; missing sample=%s",
+                parsed_count,
+                requested_count,
+                missing,
+            )
+
+        return analyses
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus

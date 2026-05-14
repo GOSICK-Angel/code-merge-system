@@ -4,12 +4,26 @@ import os
 import re
 from abc import ABC, abstractmethod
 from typing import Any
+
 import anthropic
+import httpx
 import openai
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
-from src.models.config import AgentLLMConfig
+
 from src.llm.prompt_caching import CacheStrategy, apply_cache_markers
+from src.models.config import AgentLLMConfig
+
+
+def _build_httpx_timeout(total_seconds: float) -> httpx.Timeout:
+    """Explicit per-phase timeout so the client surfaces upstream stalls
+    before Cloudflare's 120s proxy_read_timeout returns a 524. read is
+    capped at min(total, 90) so we re-enter the agent retry layer ~30s
+    earlier than the proxy; connect/write/pool are short on purpose so
+    a dead pool entry doesn't hang the request.
+    """
+    read = min(float(total_seconds), 90.0)
+    return httpx.Timeout(connect=10.0, read=read, write=30.0, pool=10.0)
 
 
 class ParseError(Exception):
@@ -164,13 +178,17 @@ class AnthropicClient(LLMClient):
         self.max_tokens = max_tokens
         self.max_retries = max_retries
         self.cache_strategy = cache_strategy
-        kwargs: dict[str, Any] = {"api_key": api_key, "timeout": timeout}
+        self._timeout = _build_httpx_timeout(timeout)
+        kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "timeout": self._timeout,
+        }
         if base_url:
             kwargs["base_url"] = base_url
         self._client = anthropic.AsyncAnthropic(**kwargs)
 
     def update_api_key(self, new_key: str) -> None:
-        self._client = anthropic.AsyncAnthropic(api_key=new_key)
+        self._client = anthropic.AsyncAnthropic(api_key=new_key, timeout=self._timeout)
 
     async def complete(
         self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
@@ -260,9 +278,10 @@ class OpenAIClient(LLMClient):
         # policy with category-aware cooldowns. Default SDK max_retries=2 used
         # to compound (3×3 attempts × ~120s) into ~18min cascades on Cloudflare
         # 524 origin-timeouts.
+        self._timeout = _build_httpx_timeout(timeout)
         kwargs: dict[str, Any] = {
             "api_key": api_key,
-            "timeout": timeout,
+            "timeout": self._timeout,
             "max_retries": 0,
         }
         if base_url:
@@ -270,7 +289,9 @@ class OpenAIClient(LLMClient):
         self._client = openai.AsyncOpenAI(**kwargs)
 
     def update_api_key(self, new_key: str) -> None:
-        self._client = openai.AsyncOpenAI(api_key=new_key, max_retries=0)
+        self._client = openai.AsyncOpenAI(
+            api_key=new_key, max_retries=0, timeout=self._timeout
+        )
 
     async def complete(
         self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any

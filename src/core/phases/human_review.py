@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from src.cli.paths import get_report_dir
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
-from src.models.diff import RiskLevel
+from src.models.decision import DecisionSource, FileDecisionRecord, MergeDecision
+from src.models.diff import FileStatus, RiskLevel
 from src.models.plan import MergePhase
 from src.models.plan_review import PlanHumanDecision
 from src.models.state import MergeState, SystemStatus
@@ -533,6 +535,14 @@ def _unanalyzed_conflict_files(state: MergeState) -> list[str]:
 
     A file is considered 'unanalyzed' when it has no entry in
     state.file_decision_records yet.
+
+    C-fix (deadlock guard): if a file is already in ``state.conflict_analyses``
+    but still missing from ``state.file_decision_records`` after a full
+    conflict_analysis pass, it means the strategy executor was unable to
+    produce a decision (e.g. synthesized FileDiff path failed). Routing it
+    back to ANALYZING_CONFLICTS will hit the same wall — instead we mark
+    it as ESCALATE_HUMAN in-place so the loop breaks and the file shows up
+    in the next AWAITING_HUMAN screen.
     """
     decided: set[str] = set(state.file_decision_records)
     pending: list[str] = []
@@ -550,5 +560,34 @@ def _unanalyzed_conflict_files(state: MergeState) -> list[str]:
         if fp not in decided and fp not in seen:
             pending.append(fp)
             seen.add(fp)
+
+    analyzed = set(state.conflict_analyses or {})
+    stuck = [fp for fp in pending if fp in analyzed]
+    if stuck:
+        logger.error(
+            "C-fix: %d file(s) analyzed but never produced a decision record "
+            "— breaking AWAITING_HUMAN ⇄ ANALYZING_CONFLICTS deadlock by "
+            "marking ESCALATE_HUMAN. First 5: %s",
+            len(stuck),
+            stuck[:5],
+        )
+        for fp in stuck:
+            state.file_decision_records[fp] = FileDecisionRecord(
+                file_path=fp,
+                file_status=FileStatus.MODIFIED,
+                decision=MergeDecision.ESCALATE_HUMAN,
+                decision_source=DecisionSource.AUTO_EXECUTOR,
+                confidence=0.0,
+                rationale=(
+                    "C-fix: conflict_analysis produced no decision record "
+                    "across retries; auto-escalating to human to break the "
+                    "AWAITING_HUMAN ⇄ ANALYZING_CONFLICTS loop."
+                ),
+                phase="human_review",
+                agent="deadlock_guard",
+                timestamp=datetime.now(),
+            )
+        stuck_set = set(stuck)
+        pending = [fp for fp in pending if fp not in stuck_set]
 
     return pending

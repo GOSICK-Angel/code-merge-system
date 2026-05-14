@@ -21,7 +21,13 @@ from src.core.phases._gate_helpers import (
 )
 from src.core.read_only_state_view import ReadOnlyStateView
 from src.models.decision import DecisionSource, FileDecisionRecord, MergeDecision
-from src.models.diff import FileDiff, FileChangeCategory, FileStatus, RiskLevel
+from src.models.diff import (
+    FileChangeCategory,
+    FileDiff,
+    FileStatus,
+    ForkDivergence,
+    RiskLevel,
+)
 from src.models.dispute import PlanDisputeRequest
 from src.models.human import DecisionOption as HumanDecisionOption
 from src.models.human import HumanDecisionRequest
@@ -1084,12 +1090,31 @@ class AutoMergePhase(Phase):
                     seen.add(loss.file_path)
 
         if unhandled_conflict_files:
-            logger.info(
-                "Routing %d unhandled files (skipped layers + non-replayable "
-                "commits + B-class drift) to conflict analysis",
-                len(unhandled_conflict_files),
-            )
-            state.pending_conflict_files = unhandled_conflict_files
+            fork_only_stripped: list[str] = []
+            filtered_conflict_files: list[str] = []
+            for fp in unhandled_conflict_files:
+                if state.fork_divergence_map.get(fp) == ForkDivergence.FORK_ONLY.value:
+                    fork_only_stripped.append(fp)
+                else:
+                    filtered_conflict_files.append(fp)
+
+            if fork_only_stripped:
+                logger.info(
+                    "Stripped %d FORK_ONLY paths from conflict analysis routing "
+                    "(fork-side files have no upstream counterpart — keeping "
+                    "fork state without LLM analysis; sample=%s)",
+                    len(fork_only_stripped),
+                    fork_only_stripped[:3],
+                )
+
+            if filtered_conflict_files:
+                logger.info(
+                    "Routing %d unhandled files (skipped layers + non-replayable "
+                    "commits + B-class drift) to conflict analysis",
+                    len(filtered_conflict_files),
+                )
+                state.pending_conflict_files = filtered_conflict_files
+            unhandled_conflict_files = filtered_conflict_files
 
         phase_result = phase_result.model_copy(
             update={"status": "completed", "completed_at": datetime.now()}

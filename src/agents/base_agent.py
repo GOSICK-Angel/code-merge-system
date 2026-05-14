@@ -1,10 +1,11 @@
+import asyncio
 import logging
+import re
 import time
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
-import asyncio
 from pydantic import BaseModel
 from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage
@@ -54,6 +55,25 @@ _CIRCUIT_BREAKER_CATEGORIES: frozenset[ErrorCategory] = frozenset(
 )
 
 MAX_RATE_LIMIT_WAITS = 5
+
+_FORMAT_ERROR_BODY_MAX_CHARS = 2048
+_REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"sk-ant-[A-Za-z0-9_\-]{6,}"), "sk-ant-<redacted>"),
+    (re.compile(r"sk-[A-Za-z0-9_\-]{20,}"), "sk-<redacted>"),
+    (re.compile(r"(?i)bearer\s+[A-Za-z0-9_\-.~+/=]{12,}"), "Bearer <redacted>"),
+    (
+        re.compile(
+            r"(?i)(api[_-]?key|authorization)\s*[=:]\s*['\"]?[A-Za-z0-9_\-]{12,}"
+        ),
+        r"\1=<redacted>",
+    ),
+)
+
+
+def _redact_secrets(text: str) -> str:
+    for pattern, replacement in _REDACT_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 class CircuitBreakerOpen(RuntimeError):
@@ -571,6 +591,18 @@ class BaseAgent(ABC):
                     classified.category.value,
                     classified.message,
                 )
+                if classified.category == ErrorCategory.FORMAT:
+                    body = _redact_secrets(str(e))[:_FORMAT_ERROR_BODY_MAX_CHARS]
+                    response_body = getattr(getattr(e, "response", None), "text", None)
+                    if response_body:
+                        body = _redact_secrets(str(response_body))[
+                            :_FORMAT_ERROR_BODY_MAX_CHARS
+                        ]
+                    self.logger.warning(
+                        "FORMAT error body (redacted, first %d chars): %s",
+                        _FORMAT_ERROR_BODY_MAX_CHARS,
+                        body,
+                    )
                 if self._trace_logger:
                     self._trace_logger.record(
                         agent=self.agent_type.value,
