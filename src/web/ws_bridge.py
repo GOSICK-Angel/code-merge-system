@@ -468,6 +468,10 @@ class MergeWSBridge:
             )
             await self.broadcast_state_patch()
 
+        elif cmd_type == "submit_conflict_decisions_batch":
+            self._apply_conflict_decisions_batch(payload.get("items", []))
+            await self.broadcast_state_patch()
+
         elif cmd_type == "submit_plan_review":
             self._apply_plan_review(payload)
             await self.broadcast_state_patch()
@@ -504,6 +508,40 @@ class MergeWSBridge:
             self._human_decisions_received.set()
             logger.info(
                 "All human conflict decisions received — signalling orchestrator"
+            )
+
+    def _apply_conflict_decisions_batch(self, items: list[dict[str, Any]]) -> None:
+        applied = 0
+        for entry in items:
+            file_path = entry.get("file_path", "")
+            decision = entry.get("decision", "")
+            if not file_path or not decision:
+                continue
+            req = self._state.human_decision_requests.get(file_path)
+            if req is None:
+                continue
+            try:
+                merge_decision = MergeDecision(decision)
+            except ValueError:
+                logger.warning(
+                    "Skipping invalid decision %r for %s", decision, file_path
+                )
+                continue
+            updated = req.model_copy(update={"human_decision": merge_decision})
+            self._state.human_decision_requests[file_path] = updated
+            self._state.human_decisions[file_path] = merge_decision
+            applied += 1
+
+        logger.info("TUI batch conflict decisions: %d/%d applied", applied, len(items))
+
+        all_decided = bool(self._state.human_decision_requests) and all(
+            r.human_decision is not None
+            for r in self._state.human_decision_requests.values()
+        )
+        if all_decided:
+            self._human_decisions_received.set()
+            logger.info(
+                "All human conflict decisions received (batch) — signalling orchestrator"
             )
 
     def _apply_plan_review(self, payload: Any) -> None:

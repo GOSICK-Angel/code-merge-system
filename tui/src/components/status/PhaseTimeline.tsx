@@ -18,9 +18,11 @@ export function PhaseTimeline() {
   const phaseResults = useAppStore((s) => s.phaseResults);
   const status = useAppStore((s) => s.status);
 
+  const currentIdx = PHASES.findIndex((p) => p.key === currentPhase);
+
   return (
     <Box flexDirection="row" gap={1} paddingX={1}>
-      {PHASES.map((p) => {
+      {PHASES.map((p, idx) => {
         const result = phaseResults[p.key];
         let icon: string;
         let color: string;
@@ -31,12 +33,22 @@ export function PhaseTimeline() {
         } else if (result?.status === "failed") {
           icon = "✗";
           color = "red";
-        } else if (p.key === currentPhase && status !== "completed" && status !== "failed") {
+        } else if (result?.status === "skipped") {
+          icon = "⊘";
+          color = "gray";
+        } else if (
+          p.key === currentPhase &&
+          status !== "completed" &&
+          status !== "failed"
+        ) {
           icon = "▸";
           color = "cyan";
         } else if (result?.status === "running") {
           icon = "▸";
           color = "cyan";
+        } else if (currentIdx >= 0 && idx < currentIdx) {
+          icon = "⊘";
+          color = "gray";
         } else {
           icon = "○";
           color = "gray";
