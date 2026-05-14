@@ -1,0 +1,67 @@
+web/dev/mock-bridge.py
+  0a6af8d7c4f024dd 1-127
+web/src/components/AgentActivityStream.tsx
+  0a6af8d7c4f024dd 1-65
+tests/unit/test_ws_bridge_extensions.py
+  0a6af8d7c4f024dd 1-156
+web/src/lib/format.ts
+  0a6af8d7c4f024dd 1-27
+web/src/views/RunDashboard.tsx
+  0a6af8d7c4f024dd 1-101
+web/src/ws/client.test.ts
+  0a6af8d7c4f024dd 1-39
+web/src/store/runStore.test.ts
+  0a6af8d7c4f024dd 1-94
+web/dev/README.md
+  0a6af8d7c4f024dd 1-54
+src/web/ws_bridge.py
+  0a6af8d7c4f024dd 1,19,28,43-44,79-84,112-119,122-123,148-150,152,155-187,360-377,381
+web/src/components/StatusBanner.tsx
+  0a6af8d7c4f024dd 1-85
+web/vitest.config.ts
+  0a6af8d7c4f024dd 1-11
+web/src/components/DecisionCountsCard.tsx
+  0a6af8d7c4f024dd 1-46
+tests/unit/test_serializers.py
+  0a6af8d7c4f024dd 1-445
+web/src/components/RiskBadge.tsx
+  0a6af8d7c4f024dd 1-53
+web/src/components/PhaseTimeline.tsx
+  0a6af8d7c4f024dd 1-66
+web/src/types/state.ts
+  0a6af8d7c4f024dd 1-135
+web/src/store/runStore.ts
+  0a6af8d7c4f024dd 1-42
+web/src/ws/client.ts
+  0a6af8d7c4f024dd 1-2,8-81
+web/src/ws/messages.ts
+  0a6af8d7c4f024dd 1-35
+src/web/serializers.py
+  0a6af8d7c4f024dd 1-415
+web/src/App.tsx
+  0a6af8d7c4f024dd 1,4
+web/src/components/CostCard.tsx
+  0a6af8d7c4f024dd 1-25
+web/package.json
+  0a6af8d7c4f024dd 23-24,29
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.14",
+  "base_commit_sha": "bbee60d0b5c43faf48825f45bca44b406139d559",
+  "prompts": {
+    "0a6af8d7c4f024dd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "2a8486f6-c500-4c7e-a9a1-fd76477c375d",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Angel <heanqi@cvte.com>",
+      "messages": [],
+      "total_additions": 2180,
+      "total_deletions": 441,
+      "accepted_lines": 2180,
+      "overriden_lines": 0
+    }
+  }
+}
