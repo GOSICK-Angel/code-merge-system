@@ -43,6 +43,17 @@ def tui_command_impl(
     asyncio.run(_run_tui(state, merge_config, ws_port))
 
 
+def tui_resume_impl(state: MergeState, ws_port: int) -> None:
+    """Launch the TUI against an already-loaded checkpoint state.
+
+    The bridge takes a snapshot of ``state`` on first broadcast, so the TUI
+    opens directly on the checkpoint's current_phase / status instead of
+    the fresh-run initialize screen. AWAITING_HUMAN cycles inside the run
+    loop are handled identically to ``tui_command_impl``.
+    """
+    asyncio.run(_run_tui(state, state.config, ws_port))
+
+
 async def _run_tui(
     state: MergeState,
     config: MergeConfig,

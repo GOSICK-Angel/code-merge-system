@@ -787,10 +787,23 @@ class PlanReviewPhase(Phase):
         phase_result: PhaseResult,
         ctx: PhaseContext,
     ) -> None:
+        now = datetime.now()
         phase_result = phase_result.model_copy(
-            update={"status": "completed", "completed_at": datetime.now()}
+            update={"status": "completed", "completed_at": now}
         )
         state.phase_results[MergePhase.PLAN_REVIEW.value] = phase_result
+
+        if MergePhase.PLAN_REVISING.value not in state.phase_results:
+            revising_status = (
+                "completed" if state.plan_revision_rounds > 0 else "skipped"
+            )
+            state.phase_results[MergePhase.PLAN_REVISING.value] = PhaseResult(
+                phase=MergePhase.PLAN_REVISING,
+                status=revising_status,
+                started_at=now,
+                completed_at=now,
+            )
+
         write_plan_review_report(
             state,
             str(

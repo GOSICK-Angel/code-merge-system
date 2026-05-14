@@ -1,20 +1,96 @@
 import asyncio
 import sys
 from pathlib import Path
+
+import yaml
 from rich.console import Console
-from src.cli.paths import get_run_dir, is_dev_mode
-from src.models.state import MergeState, SystemStatus
+
+from src.cli.paths import get_config_path, get_run_dir, is_dev_mode
 from src.core.checkpoint import Checkpoint
 from src.core.orchestrator import Orchestrator
-
+from src.models.config import MergeConfig
+from src.models.state import MergeState, SystemStatus
 
 console = Console()
+
+# Runtime-safe fields that may be overlaid by --reload-config without
+# breaking the frozen plan. Anything plan-shaping (provider/model,
+# auto_merge_confidence, max_files_per_run, project_context, refs) is
+# intentionally excluded: changing those mid-run would create a mismatch
+# between the plan already on disk and the agents that resume executes.
+_RUNTIME_SAFE_TOP_LEVEL: tuple[str, ...] = (
+    "commit_round_size",
+    "commit_round_max_files",
+    "commit_round_max_est_tokens",
+)
+
+_RUNTIME_SAFE_PER_AGENT: tuple[str, ...] = (
+    "cache_strategy",
+    "request_timeout_seconds",
+    "max_retries",
+    "max_tokens",
+    "reasoning_effort",
+)
+
+
+def _reload_runtime_safe_fields(state: MergeState, repo_path: str = ".") -> list[str]:
+    """Re-read <repo>/.merge/config.yaml and overlay whitelisted fields onto
+    state.config. Returns a list of dotted paths that were actually changed.
+    Raises FileNotFoundError if the yaml is missing.
+    """
+    config_path = get_config_path(repo_path)
+    if not config_path.exists():
+        raise FileNotFoundError(f"config.yaml not found at {config_path}")
+
+    with config_path.open("r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    # Validate to catch shape errors and coerce types, but read field
+    # presence from the raw dict so pydantic defaults from absent fields
+    # never silently overwrite checkpoint values.
+    fresh = MergeConfig.model_validate(raw)
+
+    changes: list[str] = []
+    for field in _RUNTIME_SAFE_TOP_LEVEL:
+        if field not in raw:
+            continue
+        new_val = getattr(fresh, field)
+        old_val = getattr(state.config, field, None)
+        if new_val != old_val:
+            setattr(state.config, field, new_val)
+            changes.append(f"{field}: {old_val!r} → {new_val!r}")
+
+    raw_agents = raw.get("agents") or {}
+    if not isinstance(raw_agents, dict):
+        return changes
+    state_agents = state.config.agents
+    for agent_name, raw_agent_cfg in raw_agents.items():
+        if not isinstance(raw_agent_cfg, dict):
+            continue
+        state_agent = getattr(state_agents, agent_name, None)
+        fresh_agent = getattr(fresh.agents, agent_name, None)
+        if state_agent is None or fresh_agent is None:
+            continue
+        for field in _RUNTIME_SAFE_PER_AGENT:
+            if field not in raw_agent_cfg:
+                continue
+            new_val = getattr(fresh_agent, field)
+            old_val = getattr(state_agent, field, None)
+            if new_val != old_val:
+                setattr(state_agent, field, new_val)
+                changes.append(
+                    f"agents.{agent_name}.{field}: {old_val!r} → {new_val!r}"
+                )
+
+    return changes
 
 
 def resume_command_impl(
     run_id: str | None,
     checkpoint_path: str | None,
     decisions: str | None = None,
+    reload_config: bool = False,
+    tui: bool = False,
+    ws_port: int = 8765,
 ) -> None:
     if checkpoint_path:
         cp_path = Path(checkpoint_path)
@@ -52,6 +128,28 @@ def resume_command_impl(
             f"[yellow]Run is already in terminal state: {status_val}[/yellow]"
         )
         return
+
+    if reload_config:
+        try:
+            changes = _reload_runtime_safe_fields(state)
+        except FileNotFoundError as exc:
+            console.print(f"[red]{exc}[/red]")
+            sys.exit(1)
+        except Exception as exc:
+            console.print(f"[red]Failed to reload config.yaml: {exc}[/red]")
+            sys.exit(1)
+        if changes:
+            console.print(
+                f"[green]Reloaded {len(changes)} runtime-safe field(s) from "
+                "config.yaml:[/green]"
+            )
+            for line in changes:
+                console.print(f"  {line}")
+        else:
+            console.print(
+                "[yellow]--reload-config: no whitelisted fields differ; "
+                "checkpoint config unchanged.[/yellow]"
+            )
 
     if decisions and state.status == SystemStatus.AWAITING_HUMAN:
         from src.cli.decisions_loader import (
@@ -109,6 +207,12 @@ def resume_command_impl(
             "resuming as a full run (dry_run cleared).[/yellow]"
         )
         state.dry_run = False
+
+    if tui:
+        from src.cli.commands.tui import tui_resume_impl
+
+        tui_resume_impl(state, ws_port)
+        return
 
     orchestrator = Orchestrator(state.config)
 

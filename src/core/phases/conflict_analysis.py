@@ -8,22 +8,34 @@ from src.agents.base_agent import CIRCUIT_BREAKER_THRESHOLD
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.models.conflict import ConflictAnalysis, ConflictType
 from src.models.config import ThresholdConfig
-from src.models.decision import MergeDecision
-from src.models.diff import FileDiff, FileChangeCategory
+from src.models.decision import MergeDecision, DecisionSource
+from src.models.diff import FileChangeCategory, FileDiff, FileStatus, RiskLevel
 from src.models.human import HumanDecisionRequest, DecisionOption
 from src.models.plan import MergePhase
 from src.models.state import MergeState, PhaseResult, SystemStatus
+from src.tools.binary_assets import is_binary_asset
 from src.tools.commit_replayer import CommitReplayer
 from src.tools.git_committer import GitCommitter
 from src.tools.git_tool import GitTool
+from src.tools.patch_applier import apply_bytes_with_snapshot, create_escalate_record
 from src.tools.rule_resolver import RuleBasedResolver
 
 logger = logging.getLogger(__name__)
 
 
+_FILE_TOKEN_ESTIMATE = 1000
+_COMMIT_TOKEN_ESTIMATE = 200
+
+
+def _estimate_round_tokens(file_count: int, commit_count: int) -> int:
+    return file_count * _FILE_TOKEN_ESTIMATE + commit_count * _COMMIT_TOKEN_ESTIMATE
+
+
 def build_commit_rounds(
     commits: list[dict[str, Any]],
     round_size: int,
+    max_files_per_round: int | None = None,
+    max_est_tokens_per_round: int | None = None,
 ) -> list[list[dict[str, Any]]]:
     rounds: list[list[dict[str, Any]]] = []
     current_round: list[dict[str, Any]] = []
@@ -31,8 +43,28 @@ def build_commit_rounds(
 
     for commit in commits:
         commit_files = set(commit.get("files", []))
-        if (commit_files & current_files and current_round) or (
-            len(current_round) >= round_size
+        projected_files = current_files | commit_files
+        projected_count = len(current_round) + 1
+
+        overflow_by_count = len(current_round) >= round_size
+        overflow_by_files = (
+            max_files_per_round is not None
+            and current_round
+            and len(projected_files) > max_files_per_round
+        )
+        overflow_by_tokens = (
+            max_est_tokens_per_round is not None
+            and current_round
+            and _estimate_round_tokens(len(projected_files), projected_count)
+            > max_est_tokens_per_round
+        )
+        overlaps_current = bool(commit_files & current_files) and bool(current_round)
+
+        if (
+            overlaps_current
+            or overflow_by_count
+            or overflow_by_files
+            or overflow_by_tokens
         ):
             rounds.append(current_round)
             current_round = []
@@ -43,6 +75,65 @@ def build_commit_rounds(
     if current_round:
         rounds.append(current_round)
     return rounds
+
+
+async def _analyze_round_with_bisect(
+    conflict_analyst: Any,
+    round_commits: list[dict[str, Any]],
+    round_llm_files: dict[str, tuple[str | None, str | None, str | None]],
+    file_languages: dict[str, str],
+    project_context: str,
+    *,
+    max_depth: int = 2,
+    _depth: int = 0,
+) -> dict[str, ConflictAnalysis]:
+    """Run analyze_commit_round; if it returns 0 analyses for a multi-commit
+    round, recursively bisect the commit list and merge results. Bounded by
+    max_depth so worst-case extra LLM calls per failed round = 2**max_depth - 1.
+    """
+    analyses: dict[str, ConflictAnalysis] = await conflict_analyst.analyze_commit_round(
+        round_commits,
+        round_llm_files,
+        file_languages,
+        project_context=project_context,
+    )
+
+    can_bisect = _depth < max_depth and len(round_commits) >= 2
+    if analyses or not can_bisect:
+        return analyses
+
+    mid = len(round_commits) // 2
+    halves = [round_commits[:mid], round_commits[mid:]]
+    logger.info(
+        "Bisect retry (depth=%d): splitting %d-commit round into %d+%d",
+        _depth + 1,
+        len(round_commits),
+        len(halves[0]),
+        len(halves[1]),
+    )
+
+    merged: dict[str, ConflictAnalysis] = {}
+    for half in halves:
+        half_files = {
+            fp
+            for fp in round_llm_files
+            if any(fp in (c.get("files") or []) for c in half)
+        }
+        sub_files = {fp: round_llm_files[fp] for fp in half_files}
+        sub_languages = {fp: file_languages.get(fp, "") for fp in sub_files}
+        if not sub_files:
+            continue
+        sub_analyses = await _analyze_round_with_bisect(
+            conflict_analyst,
+            half,
+            sub_files,
+            sub_languages,
+            project_context,
+            max_depth=max_depth,
+            _depth=_depth + 1,
+        )
+        merged.update(sub_analyses)
+    return merged
 
 
 async def _get_round_three_way(
@@ -66,6 +157,44 @@ async def _get_round_three_way(
                 )
             result[fp] = (base_c, current_c, target_c)
     return result
+
+
+def _synthesize_minimal_filediff(
+    file_path: str,
+    git_tool: "GitTool | None",
+    upstream_ref: str,
+    fork_ref: str,
+) -> FileDiff:
+    """Build a minimal FileDiff for a file surfaced by auto_merge that lacks
+    an entry in ``state.file_diffs`` (e.g. O-B5 B-class drift or fork
+    preservation losses). The synthesized record carries only what
+    downstream execution needs — file_path + a best-effort file_status —
+    so TAKE_TARGET / TAKE_CURRENT / SKIP can complete without skipping.
+
+    Hunks, line counts and risk fields are left at conservative defaults;
+    semantic_merge requires hunks and is downgraded by the caller.
+    """
+    file_status = FileStatus.MODIFIED
+    if git_tool is not None:
+        try:
+            upstream_exists = (
+                git_tool.get_file_content(upstream_ref, file_path) is not None
+            )
+            fork_exists = git_tool.get_file_content(fork_ref, file_path) is not None
+        except Exception:
+            upstream_exists = fork_exists = True
+        if upstream_exists and not fork_exists:
+            file_status = FileStatus.ADDED
+        elif fork_exists and not upstream_exists:
+            file_status = FileStatus.DELETED
+
+    return FileDiff(
+        file_path=file_path,
+        file_status=file_status,
+        risk_level=RiskLevel.AUTO_RISKY,
+        risk_score=0.5,
+        risk_factors=["synthesized_from_pending_conflict_files"],
+    )
 
 
 def _select_merge_strategy(
@@ -202,13 +331,45 @@ def _build_human_decision_request(
         ),
     ]
 
+    conf_pct = int(round(analysis.confidence * 100))
+    rec_label = rec_val.value if hasattr(rec_val, "value") else str(rec_val)
+
+    context_summary = (
+        f"Analyst attempted auto-resolution and escalated to human "
+        f"(confidence {conf_pct}%, recommended={rec_label}). "
+        f"Change shape: +{fd.lines_added}/-{fd.lines_deleted} lines."
+    )
+    if analysis.rationale:
+        context_summary = f"{context_summary} Rationale: {analysis.rationale}"
+
+    upstream_intents = [
+        cp.upstream_intent.description
+        for cp in analysis.conflict_points
+        if cp.upstream_intent and cp.upstream_intent.description
+    ]
+    fork_intents = [
+        cp.fork_intent.description
+        for cp in analysis.conflict_points
+        if cp.fork_intent and cp.fork_intent.description
+    ]
+    upstream_change_summary = (
+        " · ".join(upstream_intents[:2])
+        if upstream_intents
+        else f"Upstream changed (+{fd.lines_added}/-{fd.lines_deleted})"
+    )
+    fork_change_summary = (
+        " · ".join(fork_intents[:2])
+        if fork_intents
+        else f"Fork changed (+{fd.lines_added}/-{fd.lines_deleted})"
+    )
+
     return HumanDecisionRequest(
         file_path=fd.file_path,
         priority=1 if fd.is_security_sensitive else 5,
         conflict_points=analysis.conflict_points,
-        context_summary=f"File {fd.file_path} has conflicts requiring human review",
-        upstream_change_summary=f"Upstream added {fd.lines_added} lines",
-        fork_change_summary=f"Fork deleted {fd.lines_deleted} lines",
+        context_summary=context_summary,
+        upstream_change_summary=upstream_change_summary,
+        fork_change_summary=fork_change_summary,
         analyst_recommendation=rec_val,
         analyst_confidence=analysis.confidence,
         analyst_rationale=analysis.rationale,
@@ -317,10 +478,101 @@ class ConflictAnalysisPhase(Phase):
                     f"Rule-resolved {file_path} ({pattern_name})",
                 )
 
+        # --- O-B3 (conflict_analysis): route binary assets away from the LLM
+        # pipeline before building llm_files.  Mirrors auto_merge's O-B3:
+        #   * C (both sides modified) → escalate to human
+        #   * anything else           → TAKE_TARGET via apply_bytes_with_snapshot
+        binary_resolved: set[str] = set()
+        for file_path in high_risk_files:
+            if file_path in d_missing_resolved or file_path in rule_resolved_files:
+                continue
+            if file_path in state.file_decision_records:
+                continue
+            if not is_binary_asset(file_path):
+                continue
+            binary_resolved.add(file_path)
+            fd_bin = file_diffs_map.get(file_path)
+            if fd_bin is None or fd_bin.change_category == FileChangeCategory.C:
+                state.conflict_analyses[file_path] = ConflictAnalysis(
+                    file_path=file_path,
+                    conflict_points=[],
+                    overall_confidence=0.0,
+                    recommended_strategy=MergeDecision.ESCALATE_HUMAN,
+                    conflict_type=ConflictType.UNKNOWN,
+                    rationale=(
+                        "Binary asset (both sides modified) — cannot be "
+                        "text-merged by LLM; escalating to human (O-B3)."
+                    ),
+                    confidence=0.0,
+                )
+                ctx.notify(
+                    "conflict_analyst",
+                    f"Binary {file_path} → escalate_human (O-B3, both-sides)",
+                )
+            else:
+                try:
+                    if ctx.git_tool is None:
+                        raise RuntimeError("no git tool")
+                    content_bytes = ctx.git_tool.get_file_bytes(
+                        state.config.upstream_ref, file_path
+                    )
+                    if content_bytes is None:
+                        raise RuntimeError("upstream bytes not found")
+                    record = await apply_bytes_with_snapshot(
+                        file_path,
+                        content_bytes,
+                        ctx.git_tool,
+                        state,
+                        phase="conflict_analysis",
+                        agent="binary_asset_router",
+                        decision=MergeDecision.TAKE_TARGET,
+                        rationale=(
+                            "O-B3 binary asset in conflict_analysis — taking "
+                            "upstream bytes (O-B4 binary-safe writer)."
+                        ),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "O-B3/O-B4 in conflict_analysis: binary copy failed "
+                        "for %s: %s",
+                        file_path,
+                        exc,
+                    )
+                    record = create_escalate_record(
+                        file_path,
+                        f"Binary asset TAKE_TARGET failed ({exc!r}); escalating (O-B3 fallback).",
+                        phase="conflict_analysis",
+                        agent="binary_asset_router",
+                    )
+                state.file_decision_records[file_path] = record
+                ctx.notify(
+                    "conflict_analyst",
+                    f"Binary {file_path} → take_target bytes (O-B3)",
+                )
+
+        if binary_resolved:
+            logger.info(
+                "O-B3 in conflict_analysis: routed %d binary asset(s) "
+                "(%d take_target, %d escalate) — skipping LLM",
+                len(binary_resolved),
+                sum(
+                    1
+                    for fp in binary_resolved
+                    if fp in state.file_decision_records
+                ),
+                sum(
+                    1
+                    for fp in binary_resolved
+                    if fp not in state.file_decision_records
+                ),
+            )
+
         llm_files = [
             fp
             for fp in high_risk_files
-            if fp not in rule_resolved_files and fp not in d_missing_resolved
+            if fp not in rule_resolved_files
+            and fp not in d_missing_resolved
+            and fp not in binary_resolved
         ]
         if rule_resolved_files:
             logger.info(
@@ -358,7 +610,12 @@ class ConflictAnalysisPhase(Phase):
         # --- Stream A: commit-round analysis ---
         if stream_a_commits:
             round_size = ctx.config.commit_round_size
-            rounds = build_commit_rounds(stream_a_commits, round_size)
+            rounds = build_commit_rounds(
+                stream_a_commits,
+                round_size,
+                max_files_per_round=ctx.config.commit_round_max_files,
+                max_est_tokens_per_round=ctx.config.commit_round_max_est_tokens,
+            )
             logger.info(
                 "Commit-stream: %d commits → %d rounds (%d files)",
                 len(stream_a_commits),
@@ -407,36 +664,72 @@ class ConflictAnalysisPhase(Phase):
                     )
                     for fp in round_llm_files
                 }
-                analyses = await conflict_analyst.analyze_commit_round(
+                analyses = await _analyze_round_with_bisect(
+                    conflict_analyst,
                     round_commits,
                     round_llm_files,
                     file_languages,
                     project_context=state.config.project_context,
                 )
+                parsed_count = len(analyses)
+                requested_count = len(round_llm_files)
+                missing_files = [fp for fp in round_llm_files if fp not in analyses]
 
-                for fp in round_llm_files:
-                    if fp not in analyses:
-                        analyses[fp] = ConflictAnalysis(
-                            file_path=fp,
-                            conflict_points=[],
-                            overall_confidence=0.3,
-                            recommended_strategy=MergeDecision.ESCALATE_HUMAN,
-                            conflict_type=ConflictType.UNKNOWN,
-                            rationale="Commit-round LLM did not return analysis for file",
-                            confidence=0.3,
-                        )
+                for fp in missing_files:
+                    analyses[fp] = ConflictAnalysis(
+                        file_path=fp,
+                        conflict_points=[],
+                        overall_confidence=0.3,
+                        recommended_strategy=MergeDecision.ESCALATE_HUMAN,
+                        conflict_type=ConflictType.UNKNOWN,
+                        rationale="Commit-round LLM did not return analysis for file",
+                        confidence=0.3,
+                    )
+
+                if missing_files:
+                    sample = missing_files[:3]
+                    ctx.notify(
+                        "conflict_analyst",
+                        f"Round {round_idx}/{len(rounds)}: "
+                        f"{len(missing_files)}/{requested_count} files missing "
+                        f"LLM analysis → escalate_human (sample={sample})",
+                    )
+                    logger.warning(
+                        "Round %d/%d: only %d/%d analyses parsed; "
+                        "%d files fell back to ESCALATE_HUMAN (sample=%s)",
+                        round_idx,
+                        len(rounds),
+                        parsed_count,
+                        requested_count,
+                        len(missing_files),
+                        sample,
+                    )
 
                 state.conflict_analyses.update(analyses)
                 ctx.checkpoint.save(state, f"phase3_round_{round_idx}")
 
                 if conflict_analyst.consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
                     circuit_breaker_open = True
+                    logger.error(
+                        "Circuit breaker tripped after round %d/%d "
+                        "(consecutive_failures=%d) — remaining rounds will "
+                        "be skipped",
+                        round_idx,
+                        len(rounds),
+                        conflict_analyst.consecutive_failures,
+                    )
+                    ctx.notify(
+                        "conflict_analyst",
+                        f"Circuit breaker open after round {round_idx}/{len(rounds)} "
+                        "— skipping remaining commit-rounds",
+                    )
 
                 logger.info(
-                    "Round %d/%d done: %d files analyzed",
+                    "Round %d/%d done: %d/%d analyses parsed",
                     round_idx,
                     len(rounds),
-                    len(round_llm_files),
+                    parsed_count,
+                    requested_count,
                 )
 
         # --- Stream B: per-file LLM (plan HUMAN_REQUIRED/AUTO_RISKY, no commit context) ---
@@ -500,11 +793,32 @@ class ConflictAnalysisPhase(Phase):
         decided = 0
         total_analyses = len(state.conflict_analyses)
         for file_path, analysis in state.conflict_analyses.items():
-            fd = file_diffs_map.get(file_path)  # type: ignore[assignment]
-            if fd is None:
+            if file_path in state.file_decision_records:
                 continue
 
+            fd = file_diffs_map.get(file_path)  # type: ignore[assignment]
+            synthesized = False
+            if fd is None:
+                # A-fix: files surfaced by auto_merge (B-class drift / fork
+                # preservation losses) carry an analysis but have no FileDiff
+                # entry. Synthesize a minimal one so the strategy executes
+                # rather than being silently dropped, which would leave the
+                # file undecided and trigger an AWAITING_HUMAN ⇄ ANALYZING
+                # ping-pong via _unanalyzed_conflict_files.
+                fd = _synthesize_minimal_filediff(
+                    file_path,
+                    ctx.git_tool,
+                    state.config.upstream_ref,
+                    state.config.fork_ref,
+                )
+                file_diffs_map[file_path] = fd
+                synthesized = True
+
             strategy = _select_merge_strategy(analysis, state.config.thresholds)
+            # SEMANTIC_MERGE needs hunks/diff context that a synthesized
+            # FileDiff cannot provide — downgrade to ESCALATE_HUMAN.
+            if synthesized and strategy == MergeDecision.SEMANTIC_MERGE:
+                strategy = MergeDecision.ESCALATE_HUMAN
             decided += 1
 
             if strategy == MergeDecision.ESCALATE_HUMAN:
@@ -527,7 +841,8 @@ class ConflictAnalysisPhase(Phase):
 
             ctx.notify(
                 "conflict_analyst",
-                f"Strategy decided ({decided}/{total_analyses}): {file_path} → {strategy.value}",
+                f"Strategy decided ({decided}/{total_analyses}): {file_path} → {strategy.value}"
+                + (" [synthesized fd]" if synthesized else ""),
             )
 
         if ctx.config.history.enabled and ctx.config.history.commit_after_phase:

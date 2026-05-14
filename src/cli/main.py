@@ -162,14 +162,50 @@ def merge_command(
     type=click.Path(exists=True),
     help="YAML file with human decisions",
 )
+@click.option(
+    "--reload-config",
+    is_flag=True,
+    default=False,
+    help="Re-read .merge/config.yaml and overlay runtime-safe fields "
+    "(timeouts, retry budgets, cache_strategy, commit_round_* caps) onto "
+    "the checkpoint config. Plan-shaping fields (provider/model, "
+    "thresholds, max_files_per_run, project_context, refs) are NOT "
+    "overridden to keep resume consistent with the frozen plan.",
+)
+@click.option(
+    "--tui",
+    is_flag=True,
+    default=False,
+    help="Resume inside the interactive TUI (same React Ink dashboard as "
+    "`merge <branch>`) instead of plain-text output. Initial frame reflects "
+    "the checkpoint's current_phase / status.",
+)
+@click.option(
+    "--ws-port",
+    default=8765,
+    type=int,
+    help="WebSocket port for the TUI bridge (only used with --tui).",
+)
 def resume_command(
-    run_id: str | None, checkpoint: str | None, decisions: str | None
+    run_id: str | None,
+    checkpoint: str | None,
+    decisions: str | None,
+    reload_config: bool,
+    tui: bool,
+    ws_port: int,
 ) -> None:
     """Resume execution from a checkpoint"""
     _load_repo_env(".")
     from src.cli.commands.resume import resume_command_impl
 
-    resume_command_impl(run_id, checkpoint, decisions)
+    resume_command_impl(
+        run_id,
+        checkpoint,
+        decisions,
+        reload_config=reload_config,
+        tui=tui,
+        ws_port=ws_port,
+    )
 
 
 @cli.command("init")

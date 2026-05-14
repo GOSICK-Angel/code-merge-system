@@ -802,6 +802,27 @@ class MergeConfig(BaseModel):
         le=20,
         description="Max commits per round in commit-stream conflict analysis.",
     )
+    commit_round_max_files: int = Field(
+        default=60,
+        ge=1,
+        le=500,
+        description=(
+            "Max files per commit-stream round. When a round's accumulated "
+            "file set hits this cap, the round is closed early even if the "
+            "commit count has not reached commit_round_size. Prevents "
+            "fork-only migration commits from producing 400+ file mega-rounds "
+            "that exceed the LLM context window."
+        ),
+    )
+    commit_round_max_est_tokens: int = Field(
+        default=120_000,
+        ge=10_000,
+        description=(
+            "Max estimated prompt tokens per commit-stream round. Estimated "
+            "as files * 1000 + commits * 200 (conservative). Closes a round "
+            "early when accumulated estimate would exceed this cap."
+        ),
+    )
     llm: LLMConfig = Field(default_factory=LLMConfig)
     agents: AgentsLLMConfig = Field(default_factory=AgentsLLMConfig)
     thresholds: ThresholdConfig = Field(default_factory=ThresholdConfig)
