@@ -77,9 +77,29 @@ def cli() -> None:
 @click.option(
     "--ci", is_flag=True, help="CI mode: no interaction, JSON summary to stdout"
 )
-@click.option("--no-tui", is_flag=True, help="Disable interactive TUI")
+@click.option(
+    "--no-tui",
+    "no_tui",
+    is_flag=True,
+    hidden=True,
+    help="(deprecated) alias of --no-web",
+)
+@click.option("--no-web", is_flag=True, help="Disable Web UI (plain-text output)")
+@click.option(
+    "--no-browser",
+    is_flag=True,
+    help="Skip opening browser, print URL only",
+)
+@click.option(
+    "--web-port",
+    default=5173,
+    type=int,
+    help="HTTP static port for Web UI",
+)
 @click.option("--dry-run", is_flag=True, help="Analyze only, do not merge")
-@click.option("--ws-port", default=8765, type=int, help="WebSocket port for TUI bridge")
+@click.option(
+    "--ws-port", default=8765, type=int, help="WebSocket port for the Web UI bridge"
+)
 @click.option("--reconfigure", "-r", is_flag=True, help="Force reconfiguration wizard")
 @click.option(
     "--workflow",
@@ -105,6 +125,9 @@ def merge_command(
     target_branch: str,
     ci: bool,
     no_tui: bool,
+    no_web: bool,
+    no_browser: bool,
+    web_port: int,
     dry_run: bool,
     ws_port: int,
     reconfigure: bool,
@@ -112,6 +135,21 @@ def merge_command(
     auto_decisions: str | None,
 ) -> None:
     """Merge TARGET_BRANCH into the current branch (one-stop flow)."""
+    import warnings
+
+    if no_tui:
+        warnings.warn(
+            "`--no-tui` is deprecated; use `--no-web` instead. "
+            "This alias will be removed in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        click.echo(
+            "[deprecation] --no-tui is deprecated; use --no-web instead.",
+            err=True,
+        )
+        no_web = no_web or no_tui
+
     _load_repo_env(".")
 
     from src.cli.commands.setup import detect_or_setup
@@ -140,10 +178,16 @@ def merge_command(
             console.print(f"[red]Workflow error: {e}[/red]")
             sys.exit(2)
 
-    if not ci and not no_tui:
-        from src.cli.commands.tui import tui_command_impl
+    if not ci and not no_web:
+        from src.cli.commands.web import web_command_impl
 
-        tui_command_impl(config, ws_port, dry_run)
+        web_command_impl(
+            config,
+            ws_port=ws_port,
+            web_port=web_port,
+            dry_run=dry_run,
+            open_browser=not no_browser,
+        )
         return
 
     from src.cli.commands.run import run_command_impl
@@ -174,17 +218,36 @@ def merge_command(
 )
 @click.option(
     "--tui",
+    "tui",
     is_flag=True,
     default=False,
-    help="Resume inside the interactive TUI (same React Ink dashboard as "
-    "`merge <branch>`) instead of plain-text output. Initial frame reflects "
-    "the checkpoint's current_phase / status.",
+    hidden=True,
+    help="(deprecated) alias of --web",
+)
+@click.option(
+    "--web",
+    is_flag=True,
+    default=False,
+    help="Resume inside the interactive Web UI (browser) instead of "
+    "plain-text output. Initial frame reflects the checkpoint's "
+    "current_phase / status.",
+)
+@click.option(
+    "--no-browser",
+    is_flag=True,
+    help="With --web, skip opening browser and print URL only.",
+)
+@click.option(
+    "--web-port",
+    default=5173,
+    type=int,
+    help="HTTP static port for the Web UI (only used with --web).",
 )
 @click.option(
     "--ws-port",
     default=8765,
     type=int,
-    help="WebSocket port for the TUI bridge (only used with --tui).",
+    help="WebSocket port for the Web UI bridge (only used with --web).",
 )
 def resume_command(
     run_id: str | None,
@@ -192,9 +255,27 @@ def resume_command(
     decisions: str | None,
     reload_config: bool,
     tui: bool,
+    web: bool,
+    no_browser: bool,
+    web_port: int,
     ws_port: int,
 ) -> None:
     """Resume execution from a checkpoint"""
+    import warnings
+
+    if tui:
+        warnings.warn(
+            "`--tui` is deprecated; use `--web` instead. "
+            "This alias will be removed in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        click.echo(
+            "[deprecation] --tui is deprecated; use --web instead.",
+            err=True,
+        )
+        web = web or tui
+
     _load_repo_env(".")
     from src.cli.commands.resume import resume_command_impl
 
@@ -203,8 +284,10 @@ def resume_command(
         checkpoint,
         decisions,
         reload_config=reload_config,
-        tui=tui,
+        web=web,
         ws_port=ws_port,
+        web_port=web_port,
+        open_browser=not no_browser,
     )
 
 

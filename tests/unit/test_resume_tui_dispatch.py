@@ -1,7 +1,7 @@
-"""resume --tui dispatch tests: ensure resume_command_impl routes to TUI
-when tui=True, and continues using the plain Orchestrator path otherwise.
-The TUI implementation itself (websocket bridge, ink subprocess) is covered
-by its own integration tests — here we only verify the wiring."""
+"""resume --web dispatch tests: ensure resume_command_impl routes to the Web
+UI when ``web=True``, and continues using the plain Orchestrator path
+otherwise. The Web implementation itself (websocket bridge, static server)
+is covered by its own integration tests — here we only verify the wiring."""
 
 from pathlib import Path
 
@@ -61,40 +61,50 @@ def stub_orch(monkeypatch):
     return captured
 
 
-def test_tui_flag_dispatches_to_tui_resume(tmp_path, monkeypatch, stub_orch):
+def test_web_flag_dispatches_to_web_resume(tmp_path, monkeypatch, stub_orch):
     state = _make_state(tmp_path)
     saved = _save(tmp_path, state)
     monkeypatch.chdir(tmp_path)
 
-    captured_tui = {"called": False, "ws_port": None, "state": None}
+    captured_web = {
+        "called": False,
+        "ws_port": None,
+        "web_port": None,
+        "state": None,
+        "open_browser": None,
+    }
 
-    def _stub_tui_resume(s, ws_port):
-        captured_tui["called"] = True
-        captured_tui["state"] = s
-        captured_tui["ws_port"] = ws_port
+    def _stub_web_resume(s, ws_port, web_port, open_browser=True):
+        captured_web["called"] = True
+        captured_web["state"] = s
+        captured_web["ws_port"] = ws_port
+        captured_web["web_port"] = web_port
+        captured_web["open_browser"] = open_browser
 
-    # Patch where it's imported (inside resume_command_impl)
-    import src.cli.commands.tui as tui_mod
+    import src.cli.commands.web as web_mod
 
-    monkeypatch.setattr(tui_mod, "tui_resume_impl", _stub_tui_resume)
+    monkeypatch.setattr(web_mod, "web_resume_impl", _stub_web_resume)
 
     resume_mod.resume_command_impl(
         run_id=None,
         checkpoint_path=str(saved),
         decisions=None,
         reload_config=False,
-        tui=True,
+        web=True,
         ws_port=9000,
+        web_port=5173,
+        open_browser=False,
     )
 
-    assert captured_tui["called"] is True
-    assert captured_tui["ws_port"] == 9000
-    assert captured_tui["state"].run_id == state.run_id
-    # Orchestrator path must NOT run when tui=True
+    assert captured_web["called"] is True
+    assert captured_web["ws_port"] == 9000
+    assert captured_web["web_port"] == 5173
+    assert captured_web["open_browser"] is False
+    assert captured_web["state"].run_id == state.run_id
     assert stub_orch["calls"] == 0
 
 
-def test_no_tui_flag_uses_orchestrator_path(tmp_path, monkeypatch, stub_orch):
+def test_no_web_flag_uses_orchestrator_path(tmp_path, monkeypatch, stub_orch):
     state = _make_state(tmp_path)
     saved = _save(tmp_path, state)
     monkeypatch.chdir(tmp_path)
@@ -104,12 +114,12 @@ def test_no_tui_flag_uses_orchestrator_path(tmp_path, monkeypatch, stub_orch):
         checkpoint_path=str(saved),
         decisions=None,
         reload_config=False,
-        tui=False,
+        web=False,
     )
     assert stub_orch["calls"] == 1
 
 
-def test_tui_with_reload_config_applies_overlay_then_launches(
+def test_web_with_reload_config_applies_overlay_then_launches(
     tmp_path, monkeypatch, stub_orch
 ):
     state = _make_state(tmp_path)
@@ -131,24 +141,24 @@ def test_tui_with_reload_config_applies_overlay_then_launches(
         },
     )
 
-    captured_tui = {"state": None}
-    import src.cli.commands.tui as tui_mod
+    captured_web = {"state": None}
+    import src.cli.commands.web as web_mod
 
-    def _stub_tui_resume(s, ws_port):
-        captured_tui["state"] = s
+    def _stub_web_resume(s, ws_port, web_port, open_browser=True):
+        captured_web["state"] = s
 
-    monkeypatch.setattr(tui_mod, "tui_resume_impl", _stub_tui_resume)
+    monkeypatch.setattr(web_mod, "web_resume_impl", _stub_web_resume)
 
     resume_mod.resume_command_impl(
         run_id=None,
         checkpoint_path=str(saved),
         decisions=None,
         reload_config=True,
-        tui=True,
+        web=True,
         ws_port=8765,
+        web_port=5173,
     )
 
-    assert captured_tui["state"] is not None
-    # reload_config overlay must apply BEFORE tui dispatch
-    assert captured_tui["state"].config.agents.planner_judge.cache_strategy == "none"
+    assert captured_web["state"] is not None
+    assert captured_web["state"].config.agents.planner_judge.cache_strategy == "none"
     assert stub_orch["calls"] == 0

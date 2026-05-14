@@ -89,8 +89,10 @@ def resume_command_impl(
     checkpoint_path: str | None,
     decisions: str | None = None,
     reload_config: bool = False,
-    tui: bool = False,
+    web: bool = False,
     ws_port: int = 8765,
+    web_port: int = 5173,
+    open_browser: bool = True,
 ) -> None:
     if checkpoint_path:
         cp_path = Path(checkpoint_path)
@@ -208,10 +210,15 @@ def resume_command_impl(
         )
         state.dry_run = False
 
-    if tui:
-        from src.cli.commands.tui import tui_resume_impl
+    if web:
+        from src.cli.commands.web import web_resume_impl
 
-        tui_resume_impl(state, ws_port)
+        web_resume_impl(
+            state,
+            ws_port=ws_port,
+            web_port=web_port,
+            open_browser=open_browser,
+        )
         return
 
     orchestrator = Orchestrator(state.config)

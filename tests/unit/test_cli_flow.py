@@ -237,20 +237,26 @@ class TestMergeCommand:
         assert result.exit_code == 0
         assert "TARGET_BRANCH" in result.output
 
-    def test_merge_routes_to_tui_by_default(self) -> None:
+    def test_merge_routes_to_web_by_default(self) -> None:
         from src.cli.main import cli
 
         fake_config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/x")
         runner = CliRunner()
         with (
             patch("src.cli.commands.setup.detect_or_setup", return_value=fake_config),
-            patch("src.cli.commands.tui.tui_command_impl") as mock_tui,
+            patch("src.cli.commands.web.web_command_impl") as mock_web,
         ):
             runner.invoke(cli, ["merge", "upstream/main"])
 
-        mock_tui.assert_called_once_with(fake_config, 8765, False)
+        mock_web.assert_called_once_with(
+            fake_config,
+            ws_port=8765,
+            web_port=5173,
+            dry_run=False,
+            open_browser=True,
+        )
 
-    def test_merge_no_tui_routes_to_run(self) -> None:
+    def test_merge_no_web_routes_to_run(self) -> None:
         from src.cli.main import cli
 
         fake_config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/x")
@@ -259,8 +265,24 @@ class TestMergeCommand:
             patch("src.cli.commands.setup.detect_or_setup", return_value=fake_config),
             patch("src.cli.commands.run.run_command_impl") as mock_run,
         ):
-            runner.invoke(cli, ["merge", "upstream/main", "--no-tui"])
+            runner.invoke(cli, ["merge", "upstream/main", "--no-web"])
 
+        mock_run.assert_called_once_with(
+            fake_config, False, ci=False, auto_decisions=None
+        )
+
+    def test_merge_no_tui_alias_routes_to_run(self) -> None:
+        from src.cli.main import cli
+
+        fake_config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/x")
+        runner = CliRunner()
+        with (
+            patch("src.cli.commands.setup.detect_or_setup", return_value=fake_config),
+            patch("src.cli.commands.run.run_command_impl") as mock_run,
+        ):
+            result = runner.invoke(cli, ["merge", "upstream/main", "--no-tui"])
+
+        assert result.exit_code == 0, result.output
         mock_run.assert_called_once_with(
             fake_config, False, ci=False, auto_decisions=None
         )
@@ -332,7 +354,7 @@ class TestDefaultGroup:
         runner = CliRunner()
         with (
             patch("src.cli.commands.setup.detect_or_setup", return_value=fake_config),
-            patch("src.cli.commands.tui.tui_command_impl"),
+            patch("src.cli.commands.web.web_command_impl"),
         ):
             result = runner.invoke(cli, ["upstream/main"])
 
