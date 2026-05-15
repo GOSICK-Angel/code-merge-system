@@ -1,20 +1,22 @@
-"""Tests for Phase D: CLI one-stop flow.
+"""Tests for CLI one-stop flow.
 
 Covers:
 - detect_or_setup: repeat-run path (config exists)
 - detect_or_setup: first-run path (interactive wizard)
 - _resolve_api_keys: three-tier resolution chain
 - _auto_detect_fork_ref: git branch detection + fallback
-- merge subcommand routing (TUI vs CI vs no-tui)
+- merge subcommand routing (web default / --no-web / --no-tui alias / --ci)
 - _DefaultGroup: unknown command forwarded to 'merge'
 """
 
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 import yaml
 from click.testing import CliRunner
 
@@ -60,7 +62,6 @@ class TestLoadRepoEnv:
     def test_no_op_when_env_file_absent(self, tmp_path: Path) -> None:
         from src.cli.main import _load_repo_env
 
-        # No .merge directory — should silently no-op without raising.
         with patch.dict(
             os.environ,
             {"OPENAI_BASE_URL": "https://shell-only.example.com"},
@@ -228,7 +229,17 @@ class TestDetectOrSetup:
         assert result is wizard_config
 
 
-class TestMergeCommand:
+class TestMergeCommandRouting:
+    """Parametrized matrix covering the four CLI routing paths.
+
+    | flags                  | expected target             |
+    | ---------------------- | --------------------------- |
+    | (default, no flags)    | web_command_impl            |
+    | --no-web               | run_command_impl (ci=False) |
+    | --no-tui  (alias)      | run_command_impl (ci=False) |
+    | --ci                   | run_command_impl (ci=True)  |
+    """
+
     def test_merge_subcommand_help(self) -> None:
         from src.cli.main import cli
 
@@ -237,7 +248,23 @@ class TestMergeCommand:
         assert result.exit_code == 0
         assert "TARGET_BRANCH" in result.output
 
-    def test_merge_routes_to_web_by_default(self) -> None:
+    @pytest.mark.parametrize(
+        "extra_args,target,expect_ci,expect_deprecation",
+        [
+            ([], "web", None, False),
+            (["--no-web"], "run", False, False),
+            (["--no-tui"], "run", False, True),
+            (["--ci"], "run", True, False),
+        ],
+        ids=["web-default", "no-web", "no-tui-alias", "ci"],
+    )
+    def test_merge_routes(
+        self,
+        extra_args: list[str],
+        target: str,
+        expect_ci: bool | None,
+        expect_deprecation: bool,
+    ) -> None:
         from src.cli.main import cli
 
         fake_config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/x")
@@ -245,72 +272,46 @@ class TestMergeCommand:
         with (
             patch("src.cli.commands.setup.detect_or_setup", return_value=fake_config),
             patch("src.cli.commands.web.web_command_impl") as mock_web,
-        ):
-            runner.invoke(cli, ["merge", "upstream/main"])
-
-        mock_web.assert_called_once_with(
-            fake_config,
-            ws_port=8765,
-            web_port=5173,
-            dry_run=False,
-            open_browser=True,
-        )
-
-    def test_merge_no_web_routes_to_run(self) -> None:
-        from src.cli.main import cli
-
-        fake_config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/x")
-        runner = CliRunner()
-        with (
-            patch("src.cli.commands.setup.detect_or_setup", return_value=fake_config),
             patch("src.cli.commands.run.run_command_impl") as mock_run,
+            warnings.catch_warnings(record=True) as caught,
         ):
-            runner.invoke(cli, ["merge", "upstream/main", "--no-web"])
-
-        mock_run.assert_called_once_with(
-            fake_config, False, ci=False, auto_decisions=None
-        )
-
-    def test_merge_no_tui_alias_routes_to_run(self) -> None:
-        from src.cli.main import cli
-
-        fake_config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/x")
-        runner = CliRunner()
-        with (
-            patch("src.cli.commands.setup.detect_or_setup", return_value=fake_config),
-            patch("src.cli.commands.run.run_command_impl") as mock_run,
-        ):
-            result = runner.invoke(cli, ["merge", "upstream/main", "--no-tui"])
+            warnings.simplefilter("always")
+            result = runner.invoke(
+                cli, ["merge", "upstream/main", *extra_args], catch_exceptions=False
+            )
 
         assert result.exit_code == 0, result.output
-        mock_run.assert_called_once_with(
-            fake_config, False, ci=False, auto_decisions=None
-        )
 
-    def test_merge_ci_flag_routes_to_run(self) -> None:
-        from src.cli.main import cli
+        if target == "web":
+            mock_web.assert_called_once_with(
+                fake_config,
+                ws_port=8765,
+                web_port=5173,
+                dry_run=False,
+                open_browser=True,
+            )
+            mock_run.assert_not_called()
+        else:
+            mock_web.assert_not_called()
+            mock_run.assert_called_once_with(
+                fake_config, False, ci=expect_ci, auto_decisions=None
+            )
 
-        fake_config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/x")
-        runner = CliRunner()
-        with (
-            patch("src.cli.commands.setup.detect_or_setup", return_value=fake_config),
-            patch("src.cli.commands.run.run_command_impl") as mock_run,
-        ):
-            runner.invoke(cli, ["merge", "upstream/main", "--ci"])
+        if expect_deprecation:
+            assert any(
+                issubclass(w.category, DeprecationWarning)
+                and "--no-tui" in str(w.message)
+                for w in caught
+            ), [str(w.message) for w in caught]
+            assert "deprecation" in result.output.lower() or (
+                result.stderr_bytes and b"deprecation" in result.stderr_bytes.lower()
+            )
 
-        mock_run.assert_called_once_with(
-            fake_config, False, ci=True, auto_decisions=None
-        )
-
-    def test_merge_loads_repo_env_before_setup(self, tmp_path) -> None:
+    def test_merge_loads_repo_env_before_setup(self, tmp_path: Path) -> None:
         # Regression: the dify-plugins planner_judge silently failed
         # because <repo>/.merge/.env was never loaded before LLM clients
         # were constructed. ``merge_command`` must load it ahead of
         # detect_or_setup so OPENAI_BASE_URL et al. land in os.environ.
-        #
-        # We use a unique sentinel key (not OPENAI_BASE_URL) so the
-        # assertion isn't shadowed by an install-tree .env or a developer
-        # shell that already exports the production keys.
         import os as _os
 
         from src.cli.main import cli
@@ -338,7 +339,7 @@ class TestMergeCommand:
                     return_value=tmp_path / ".merge",
                 ),
             ):
-                result = runner.invoke(cli, ["merge", "upstream/main", "--no-tui"])
+                result = runner.invoke(cli, ["merge", "upstream/main", "--no-web"])
 
             assert result.exit_code == 0, result.output
             assert _os.environ.get(sentinel_key) == sentinel_val

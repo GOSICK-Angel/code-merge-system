@@ -1,12 +1,18 @@
-"""resume --web dispatch tests: ensure resume_command_impl routes to the Web
-UI when ``web=True``, and continues using the plain Orchestrator path
-otherwise. The Web implementation itself (websocket bridge, static server)
-is covered by its own integration tests — here we only verify the wiring."""
+"""resume routing tests: ensure `resume` CLI dispatches to the Web UI for
+both `--web` (canonical) and the deprecated `--tui` alias, and continues
+using the plain Orchestrator path otherwise. The Web implementation
+itself (websocket bridge, static server) is covered by its own
+integration tests — here we only verify the wiring and alias warning.
+"""
 
+from __future__ import annotations
+
+import warnings
 from pathlib import Path
 
 import pytest
 import yaml
+from click.testing import CliRunner
 
 from src.cli.commands import resume as resume_mod
 from src.core.checkpoint import Checkpoint
@@ -61,12 +67,22 @@ def stub_orch(monkeypatch):
     return captured
 
 
-def test_web_flag_dispatches_to_web_resume(tmp_path, monkeypatch, stub_orch):
+@pytest.mark.parametrize(
+    "flag,expect_deprecation",
+    [("--web", False), ("--tui", True)],
+    ids=["web-canonical", "tui-alias"],
+)
+def test_web_flag_dispatches_to_web_resume(
+    tmp_path: Path, monkeypatch, stub_orch, flag: str, expect_deprecation: bool
+) -> None:
+    """`--web` (canonical) and `--tui` (deprecated alias) must both route
+    resume into ``web_resume_impl``. ``--tui`` must additionally emit a
+    DeprecationWarning + stderr deprecation notice."""
     state = _make_state(tmp_path)
     saved = _save(tmp_path, state)
     monkeypatch.chdir(tmp_path)
 
-    captured_web = {
+    captured_web: dict[str, object] = {
         "called": False,
         "ws_port": None,
         "web_port": None,
@@ -85,17 +101,28 @@ def test_web_flag_dispatches_to_web_resume(tmp_path, monkeypatch, stub_orch):
 
     monkeypatch.setattr(web_mod, "web_resume_impl", _stub_web_resume)
 
-    resume_mod.resume_command_impl(
-        run_id=None,
-        checkpoint_path=str(saved),
-        decisions=None,
-        reload_config=False,
-        web=True,
-        ws_port=9000,
-        web_port=5173,
-        open_browser=False,
-    )
+    from src.cli.main import cli
 
+    runner = CliRunner()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = runner.invoke(
+            cli,
+            [
+                "resume",
+                "--checkpoint",
+                str(saved),
+                flag,
+                "--ws-port",
+                "9000",
+                "--web-port",
+                "5173",
+                "--no-browser",
+            ],
+            catch_exceptions=False,
+        )
+
+    assert result.exit_code == 0, result.output
     assert captured_web["called"] is True
     assert captured_web["ws_port"] == 9000
     assert captured_web["web_port"] == 5173
@@ -103,8 +130,18 @@ def test_web_flag_dispatches_to_web_resume(tmp_path, monkeypatch, stub_orch):
     assert captured_web["state"].run_id == state.run_id
     assert stub_orch["calls"] == 0
 
+    if expect_deprecation:
+        assert any(
+            issubclass(w.category, DeprecationWarning) and "--tui" in str(w.message)
+            for w in caught
+        ), [str(w.message) for w in caught]
 
-def test_no_web_flag_uses_orchestrator_path(tmp_path, monkeypatch, stub_orch):
+
+def test_no_web_flag_uses_orchestrator_path(
+    tmp_path: Path, monkeypatch, stub_orch
+) -> None:
+    """Without `--web` / `--tui`, resume must use the plain Orchestrator
+    path (no Web UI launched)."""
     state = _make_state(tmp_path)
     saved = _save(tmp_path, state)
     monkeypatch.chdir(tmp_path)
@@ -120,8 +157,11 @@ def test_no_web_flag_uses_orchestrator_path(tmp_path, monkeypatch, stub_orch):
 
 
 def test_web_with_reload_config_applies_overlay_then_launches(
-    tmp_path, monkeypatch, stub_orch
-):
+    tmp_path: Path, monkeypatch, stub_orch
+) -> None:
+    """--reload-config + --web: overlay must apply to the checkpoint
+    state *before* web_resume_impl runs (so the served snapshot reflects
+    the overlaid runtime-safe fields)."""
     state = _make_state(tmp_path)
     saved = _save(tmp_path, state)
     monkeypatch.chdir(tmp_path)
@@ -141,7 +181,7 @@ def test_web_with_reload_config_applies_overlay_then_launches(
         },
     )
 
-    captured_web = {"state": None}
+    captured_web: dict[str, object] = {"state": None}
     import src.cli.commands.web as web_mod
 
     def _stub_web_resume(s, ws_port, web_port, open_browser=True):
