@@ -1,0 +1,303 @@
+"""Pydantic v2 schemas for evaluation artifacts.
+
+Mirrors the json shapes documented in
+``doc/evaluation/procedure.md`` §3.2 (``eval_diff_<version>.json``),
+§3.3 (``eval_acceptance_<version>.json``), and the per-run metadata that
+``run.py`` is required to emit alongside each sample.
+
+All models are :class:`pydantic.BaseModel` with ``frozen=True`` —
+evaluation pipeline data is immutable; transformations produce new
+instances rather than mutating in place. This mirrors the convention in
+``src/models/decision.py`` (``FileDecisionRecord``) and matches CLAUDE.md
+"Code Style — Immutable patterns".
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from enum import Enum
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+_FROZEN = ConfigDict(frozen=True, extra="forbid")
+
+
+# ---------------------------------------------------------------------------
+# Per-sample diff entry (procedure.md §3.2)
+# ---------------------------------------------------------------------------
+
+
+class MatchStatus(str, Enum):
+    """Per-sample comparison verdict.
+
+    Mirrors the labels surfaced in ``eval_diff_<version>.json.samples[].match``.
+    """
+
+    EXACT = "EXACT"
+    SEMANTIC = "SEMANTIC"
+    MISMATCH = "MISMATCH"
+
+
+class MismatchLabel(str, Enum):
+    """Sub-category of MISMATCH used by metric formulas (metrics.md §1.2).
+
+    ``MISS_UPSTREAM`` / ``MISS_FORK`` feed into MMR; ``WRONG_MERGE`` feeds
+    into WMR; ``EXTRA_NOISE`` feeds into noise metrics.
+    """
+
+    MISS_UPSTREAM = "MISS_UPSTREAM"
+    MISS_FORK = "MISS_FORK"
+    WRONG_MERGE = "WRONG_MERGE"
+    EXTRA_NOISE = "EXTRA_NOISE"
+
+
+class SystemDecision(BaseModel):
+    """The merge system's per-sample decision read from ``merge_report_<run_id>.json``.
+
+    Matches the nested ``system_decision`` shape in procedure.md §3.2.
+    """
+
+    model_config = _FROZEN
+
+    strategy: str
+    risk: str
+    human: bool
+
+
+_SemanticEngine = Literal["tree-sitter", "fallback-bytes"]
+
+
+class DiffEntry(BaseModel):
+    """One row in :attr:`DiffReport.samples`.
+
+    Per plan decision 1, the schema extends procedure.md §3.2 with three
+    optional fields used by RCR / DCRR / SSER metrics.
+    """
+
+    model_config = _FROZEN
+
+    sample_id: str
+    category: str
+    loss_class: str | None = None
+    expected_human: bool
+    system_decision: SystemDecision
+    match: MatchStatus
+    label: MismatchLabel | None = None
+    missed_lines: int = Field(default=0, ge=0)
+    extra_lines: int = Field(default=0, ge=0)
+
+    rationale_length: int = Field(default=0, ge=0)
+    discarded_content_present: bool = False
+    is_security_sensitive: bool = False
+
+
+class DiffReportMeta(BaseModel):
+    """Metadata block on :class:`DiffReport`.
+
+    ``semantic_engine`` documents whether tree-sitter was used or the byte
+    normalize fallback (plan decision 4). Avoids accidentally counting a
+    fallback equality as a true AST match.
+    """
+
+    model_config = _FROZEN
+
+    semantic_engine: _SemanticEngine
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class DiffReport(BaseModel):
+    """Top-level shape of ``eval_diff_<version>.json``."""
+
+    model_config = _FROZEN
+
+    tier: int = Field(ge=1, le=3)
+    samples: tuple[DiffEntry, ...] = ()
+    meta: DiffReportMeta
+
+
+# ---------------------------------------------------------------------------
+# Acceptance gate (procedure.md §3.3 / acceptance.md §1-§3)
+# ---------------------------------------------------------------------------
+
+
+class GateKind(str, Enum):
+    HARD = "hard"
+    SOFT = "soft"
+
+
+class GateOperator(str, Enum):
+    """Comparison operator for a gate.
+
+    Stored as enum (rather than free-form ``str``) so :class:`GateResult`
+    cannot drift to operators ``gate.py`` does not implement.
+    """
+
+    EQ = "=="
+    GE = ">="
+    LE = "<="
+    LT = "<"
+    GT = ">"
+
+
+class GateVerdict(str, Enum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+
+
+class GateResult(BaseModel):
+    """One row in :attr:`AcceptanceReport.gates`.
+
+    Matches the nested object in procedure.md §3.3 example. The example uses
+    ``"=="``/``">="`` strings indirectly via the threshold/value comparison —
+    we promote the operator into a first-class field so consumers can render
+    or re-evaluate without re-parsing the threshold table.
+    """
+
+    model_config = _FROZEN
+
+    id: str
+    kind: GateKind
+    value: float
+    threshold: float
+    operator: GateOperator
+    passed: bool = Field(alias="pass")
+
+
+class AcceptanceReport(BaseModel):
+    """Top-level shape of ``eval_acceptance_<version>.json``.
+
+    Hard / soft gates are kept as separate tuples (acceptance.md §3) for
+    rendering ergonomics; the flat ``gates`` field in procedure.md §3.3 is
+    redundant with the union of the two and is reconstructable on demand.
+    """
+
+    model_config = _FROZEN
+
+    version: str
+    baseline: str | None = None
+    evaluated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    datasets: dict[str, str] = Field(default_factory=dict)
+    model_matrix: dict[str, str] = Field(default_factory=dict)
+    hard_gates: tuple[GateResult, ...] = ()
+    soft_gates: tuple[GateResult, ...] = ()
+    verdict: GateVerdict
+
+
+# ---------------------------------------------------------------------------
+# Per-run metadata written by ``run.py`` (consumed by summarize / consistency)
+# ---------------------------------------------------------------------------
+
+
+class RunMeta(BaseModel):
+    """Per-run metadata persisted at ``runs/<sample_id>/run_meta.json``.
+
+    ``concurrency`` is required so :mod:`scripts.eval.summarize` can
+    auto-flag wall_time/cost as "not authoritative" when N>1 (plan
+    decision 3 / P1-7).
+    """
+
+    model_config = _FROZEN
+
+    sample_id: str
+    run_id: str
+    seed: int
+    concurrency: Annotated[int, Field(ge=1)]
+    cache_disabled: bool = False
+    wall_time_seconds: Annotated[float, Field(ge=0.0)]
+    cost_usd: Annotated[float, Field(ge=0.0)]
+    git_sha: str
+    model_matrix: dict[str, str] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Dataset manifest (Tier-1/2/3 lock)
+# ---------------------------------------------------------------------------
+
+
+class ManifestEntry(BaseModel):
+    """One sample row inside a ``tier{N}.lock.json`` manifest.
+
+    ``content_sha256`` is the sha256 over the canonical concatenation of the
+    sample's ``base.tar / upstream.patch / fork.patch / golden.tar / meta.yaml``
+    bytes — see ``scripts/eval/lock.py`` (Phase 1) for the exact algorithm.
+    """
+
+    model_config = _FROZEN
+
+    sample_id: str
+    tier: int = Field(ge=1, le=3)
+    relative_path: str
+    content_sha256: str = Field(min_length=64, max_length=64)
+
+
+class TierManifest(BaseModel):
+    """Top-level shape of ``tests/eval/manifests/tier{N}.lock.json``."""
+
+    model_config = _FROZEN
+
+    tier: int = Field(ge=1, le=3)
+    generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    eval_version: str
+    samples: tuple[ManifestEntry, ...] = ()
+
+
+# ---------------------------------------------------------------------------
+# Acceptance thresholds yaml (plan decision 7)
+# ---------------------------------------------------------------------------
+
+
+class AcceptanceThresholdEntry(BaseModel):
+    """One row in ``acceptance_thresholds.yaml.{hard_gates,soft_gates}``."""
+
+    model_config = _FROZEN
+
+    id: str
+    threshold: float
+    operator: GateOperator
+    source: str
+
+    @field_validator("id")
+    @classmethod
+    def _id_non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("gate id must be a non-empty string")
+        return value
+
+
+class AcceptanceThresholds(BaseModel):
+    """Top-level shape of ``tests/eval/manifests/acceptance_thresholds.yaml``.
+
+    ``synced_with_sha`` is the sha256 of ``doc/evaluation/acceptance.md`` at
+    the time the yaml was last synced. ``lock.py --verify`` cross-checks this
+    field — see plan decision 7 / P1-6.
+    """
+
+    model_config = _FROZEN
+
+    synced_with_sha: str = Field(min_length=64, max_length=64)
+    synced_at: datetime
+    hard_gates: tuple[AcceptanceThresholdEntry, ...] = ()
+    soft_gates: tuple[AcceptanceThresholdEntry, ...] = ()
+
+
+__all__ = [
+    "AcceptanceReport",
+    "AcceptanceThresholdEntry",
+    "AcceptanceThresholds",
+    "DiffEntry",
+    "DiffReport",
+    "DiffReportMeta",
+    "GateKind",
+    "GateOperator",
+    "GateResult",
+    "GateVerdict",
+    "ManifestEntry",
+    "MatchStatus",
+    "MismatchLabel",
+    "RunMeta",
+    "SystemDecision",
+    "TierManifest",
+]
