@@ -283,6 +283,51 @@ class AcceptanceThresholds(BaseModel):
     soft_gates: tuple[AcceptanceThresholdEntry, ...] = ()
 
 
+# ---------------------------------------------------------------------------
+# Ground-truth bundle (consumed by prepare.py + diff_against_golden.py)
+# ---------------------------------------------------------------------------
+
+
+class SampleMeta(BaseModel):
+    """Parsed contents of one sample's ``meta.yaml``.
+
+    Mirrors the keys produced by the Phase 1 reference samples
+    (``tests/eval/datasets/.../meta.yaml``). Tier-3 entries additionally
+    set ``loss_class`` to one of M1..M6; Tier-1/2 leave it ``None``.
+    """
+
+    model_config = _FROZEN
+
+    sample_id: str
+    tier: int = Field(ge=1, le=3)
+    category: str
+    loss_class: str | None = None
+    expected_human: bool = False
+    description: str | None = None
+
+
+class GoldenFileEntry(BaseModel):
+    """One entry inside a golden tarball.
+
+    Stored as base64 of the file bytes — pydantic v2 round-trips bytes via
+    base64 by default, so the bundle remains JSON-serialisable for caching.
+    """
+
+    model_config = _FROZEN
+
+    relative_path: str
+    content: bytes
+
+
+class GroundTruthBundle(BaseModel):
+    """All inputs needed to score one sample against ground truth."""
+
+    model_config = _FROZEN
+
+    meta: SampleMeta
+    golden_files: tuple[GoldenFileEntry, ...]
+
+
 __all__ = [
     "AcceptanceReport",
     "AcceptanceThresholdEntry",
@@ -294,10 +339,13 @@ __all__ = [
     "GateOperator",
     "GateResult",
     "GateVerdict",
+    "GoldenFileEntry",
+    "GroundTruthBundle",
     "ManifestEntry",
     "MatchStatus",
     "MismatchLabel",
     "RunMeta",
+    "SampleMeta",
     "SystemDecision",
     "TierManifest",
 ]

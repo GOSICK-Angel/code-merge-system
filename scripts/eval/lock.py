@@ -96,11 +96,6 @@ def _sample_sha256(sample_dir: Path) -> str:
     return h.hexdigest()
 
 
-def _file_sha256_or_empty(path: Path) -> str:
-    """sha256 of a regular file, or empty string when missing."""
-    return _sha256_file(path) if path.is_file() else ""
-
-
 # ---------------------------------------------------------------------------
 # Manifest scanning
 # ---------------------------------------------------------------------------
@@ -173,7 +168,12 @@ def cmd_verify(
             rc = 1
             continue
         recorded = TierManifest.model_validate(read_json(manifest_path))
-        recomputed = _build_manifest(datasets_dir, tier)
+        try:
+            recomputed = _build_manifest(datasets_dir, tier)
+        except FileNotFoundError as exc:
+            _eprint(f"verify: tier{tier} sample missing artifact: {exc}")
+            rc = 1
+            continue
         recorded_map = {e.sample_id: e.content_sha256 for e in recorded.samples}
         recomputed_map = {e.sample_id: e.content_sha256 for e in recomputed.samples}
         for sample_id in sorted(set(recorded_map) | set(recomputed_map)):
