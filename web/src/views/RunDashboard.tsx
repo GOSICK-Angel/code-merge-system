@@ -21,6 +21,9 @@ export function RunDashboard({ clientRef }: Props): JSX.Element {
 
   const cancelDisabled = snapshot?.status !== "awaiting_human";
 
+  // Both deps are stable: `clearCancelError` is a zustand action (stable
+  // identity for the lifetime of the store), and `clientRef` is a React
+  // ref object whose identity never changes (its `.current` may).
   const onCancel = useMemo(
     () => () => {
       clearCancelError();

@@ -8,7 +8,7 @@ from src.agents.base_agent import CIRCUIT_BREAKER_THRESHOLD
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.models.conflict import ConflictAnalysis, ConflictType
 from src.models.config import ThresholdConfig
-from src.models.decision import MergeDecision, DecisionSource
+from src.models.decision import MergeDecision
 from src.models.diff import FileChangeCategory, FileDiff, FileStatus, RiskLevel
 from src.models.human import HumanDecisionRequest, DecisionOption
 from src.models.plan import MergePhase
@@ -533,8 +533,7 @@ class ConflictAnalysisPhase(Phase):
                     )
                 except Exception as exc:
                     logger.warning(
-                        "O-B3/O-B4 in conflict_analysis: binary copy failed "
-                        "for %s: %s",
+                        "O-B3/O-B4 in conflict_analysis: binary copy failed for %s: %s",
                         file_path,
                         exc,
                     )
@@ -555,15 +554,9 @@ class ConflictAnalysisPhase(Phase):
                 "O-B3 in conflict_analysis: routed %d binary asset(s) "
                 "(%d take_target, %d escalate) — skipping LLM",
                 len(binary_resolved),
+                sum(1 for fp in binary_resolved if fp in state.file_decision_records),
                 sum(
-                    1
-                    for fp in binary_resolved
-                    if fp in state.file_decision_records
-                ),
-                sum(
-                    1
-                    for fp in binary_resolved
-                    if fp not in state.file_decision_records
+                    1 for fp in binary_resolved if fp not in state.file_decision_records
                 ),
             )
 

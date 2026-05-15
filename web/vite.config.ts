@@ -8,7 +8,6 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/ws-dev": { target: "ws://localhost:8765", ws: true },
       // L5 Report fetches per-run artifacts via ``/runs/<run_id>/<file>``.
       // In dev mode the Vite SPA owns port 5173, so the artifact tree is
       // served by ``mock-bridge.py`` on 5174 (see web/dev/README.md);

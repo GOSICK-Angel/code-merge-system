@@ -116,7 +116,10 @@ async def _run_web(
     if open_browser:
         try:
             webbrowser.open(url)
-        except Exception as exc:  # pragma: no cover - browser env quirks
+        except (
+            webbrowser.Error,
+            OSError,
+        ) as exc:  # pragma: no cover - browser env quirks
             logger.warning("Failed to open browser: %s", exc)
     console.print(f"[bold green]Web UI:[/bold green] {url}")
 
@@ -139,11 +142,20 @@ async def _run_web(
                 console.print("[yellow]Cancelled by user.[/yellow]")
                 break
 
+            # Three-way dispatch matching the three AWAITING_HUMAN gates:
+            #   1. Judge gate — judge_verdict produced, awaiting accept/abort/rerun
+            #   2. Conflict gate — at least one HumanDecisionRequest still pending
+            #   3. Plan-review gate — fallthrough (pending_user_decisions / overall plan)
+            awaiting_judge = (
+                state.judge_verdict is not None and state.judge_resolution is None
+            )
             has_pending_conflicts = any(
                 req.human_decision is None
                 for req in state.human_decision_requests.values()
             )
-            if has_pending_conflicts:
+            if awaiting_judge:
+                await bridge.wait_for_judge_resolution()
+            elif has_pending_conflicts:
                 await bridge.wait_for_human_decisions()
             else:
                 await bridge.wait_for_plan_review()

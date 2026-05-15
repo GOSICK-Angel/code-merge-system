@@ -89,12 +89,14 @@ class StaticHTTPServer:
         self._thread: Thread | None = None
 
     async def start(self, host: str = "localhost", port: int = 5173) -> None:
-        handler_cls = type(
-            "_BoundSPAHandler",
-            (_SPAHandler,),
-            {"root": self.root, "runs_root": self.runs_root},
-        )
-        self._server = ThreadingHTTPServer((host, port), handler_cls)
+        bound_root = self.root
+        bound_runs_root = self.runs_root
+
+        class _BoundSPAHandler(_SPAHandler):
+            root = bound_root
+            runs_root = bound_runs_root
+
+        self._server = ThreadingHTTPServer((host, port), _BoundSPAHandler)
         self._thread = Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         logger.info(

@@ -68,20 +68,16 @@ def serialize_file_diffs(state: MergeState) -> list[dict[str, Any]]:
         result.append(
             {
                 "file_path": fd.file_path,
-                "risk_level": _enum_value(fd.risk_level)
-                if hasattr(fd.risk_level, "value")
-                else str(fd.risk_level),
+                "risk_level": _enum_value(fd.risk_level),
                 "risk_score": fd.risk_score,
                 "lines_added": fd.lines_added,
                 "lines_deleted": fd.lines_deleted,
                 "language": fd.language,
                 "is_security_sensitive": fd.is_security_sensitive,
                 "change_category": _enum_value(fd.change_category)
-                if fd.change_category and hasattr(fd.change_category, "value")
-                else fd.change_category,
-                "raw_diff": fd.raw_diff[:5000]
-                if hasattr(fd, "raw_diff") and fd.raw_diff
-                else "",
+                if fd.change_category
+                else None,
+                "raw_diff": fd.raw_diff[:5000] if fd.raw_diff else "",
             }
         )
     return result
@@ -100,17 +96,13 @@ def serialize_plan(state: MergeState) -> dict[str, Any] | None:
         "phases": [
             {
                 "batch_id": b.batch_id,
-                "phase": _enum_value(b.phase)
-                if hasattr(b.phase, "value")
-                else str(b.phase),
+                "phase": _enum_value(b.phase),
                 "file_paths": b.file_paths,
-                "risk_level": _enum_value(b.risk_level)
-                if hasattr(b.risk_level, "value")
-                else str(b.risk_level),
+                "risk_level": _enum_value(b.risk_level),
                 "layer_id": b.layer_id,
                 "change_category": _enum_value(b.change_category)
-                if b.change_category and hasattr(b.change_category, "value")
-                else b.change_category,
+                if b.change_category
+                else None,
             }
             for b in plan.phases
         ],

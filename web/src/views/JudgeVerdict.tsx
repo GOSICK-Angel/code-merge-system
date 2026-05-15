@@ -275,7 +275,7 @@ export function JudgeVerdict({ clientRef }: Props): JSX.Element {
           <button
             type="button"
             onClick={() => submit("rerun")}
-            disabled={decided || rerunRound >= maxRerunRounds && maxRerunRounds > 0}
+            disabled={decided || (rerunRound >= maxRerunRounds && maxRerunRounds > 0)}
             title={
               maxRerunRounds > 0 && rerunRound >= maxRerunRounds
                 ? "Rerun budget exhausted"

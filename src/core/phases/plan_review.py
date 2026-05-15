@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from src.cli.paths import get_report_dir
@@ -794,7 +794,7 @@ class PlanReviewPhase(Phase):
         state.phase_results[MergePhase.PLAN_REVIEW.value] = phase_result
 
         if MergePhase.PLAN_REVISING.value not in state.phase_results:
-            revising_status = (
+            revising_status: Literal["completed", "skipped"] = (
                 "completed" if state.plan_revision_rounds > 0 else "skipped"
             )
             state.phase_results[MergePhase.PLAN_REVISING.value] = PhaseResult(

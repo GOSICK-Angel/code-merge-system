@@ -40,6 +40,7 @@ class MergeWSBridge:
         self._client_connected: asyncio.Event = asyncio.Event()
         self._plan_review_received: asyncio.Event = asyncio.Event()
         self._human_decisions_received: asyncio.Event = asyncio.Event()
+        self._judge_resolution_received: asyncio.Event = asyncio.Event()
         self._cancel_event: asyncio.Event = asyncio.Event()
         self._activity_buffer: list[dict[str, Any]] = []
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -75,6 +76,17 @@ class MergeWSBridge:
         """Block until all pending conflict decisions are submitted from the TUI."""
         await self._human_decisions_received.wait()
         self._human_decisions_received.clear()
+
+    async def wait_for_judge_resolution(self) -> None:
+        """Block until an L4 judge resolution arrives from the Web UI.
+
+        Uses a dedicated event so plan-review and judge-resolution
+        signals don't share a waker — the run loop in
+        ``cli/commands/web.py`` picks the right ``wait_for_*`` call
+        based on which gate parked the state (judge_verdict pending vs
+        pending_user_decisions vs human_decision_requests)."""
+        await self._judge_resolution_received.wait()
+        self._judge_resolution_received.clear()
 
     def is_cancelled(self) -> bool:
         """Return True if a ``cancel_run`` command was accepted at an
@@ -190,10 +202,12 @@ class MergeWSBridge:
             return
 
         self._cancel_event.set()
-        # Wake up any waiter parked on plan/human events so the run loop
-        # can re-check ``is_cancelled()`` and break out cleanly.
+        # Wake up any waiter parked on plan / conflict / judge events so
+        # the run loop can re-check ``is_cancelled()`` and break out
+        # cleanly regardless of which gate parked the state.
         self._plan_review_received.set()
         self._human_decisions_received.set()
+        self._judge_resolution_received.set()
         logger.info("cancel_run accepted at AWAITING_HUMAN gate")
 
     def _apply_decision(
@@ -344,19 +358,17 @@ class MergeWSBridge:
         """L4 — write ``state.judge_resolution`` so ``human_review`` phase
         can route to accept / abort / rerun on its next pass.
 
-        Reuses ``_plan_review_received`` as the generic "non-conflict
-        AWAITING_HUMAN resume" signal (the web run loop in
-        ``cli/commands/web.py:135-142`` only branches on whether
-        ``human_decision_requests`` has pending entries; everything else
-        waits on this single event). Adding a dedicated judge event
-        would require teaching the loop another branch and isn't
-        warranted while the wait conditions remain symmetric.
+        Wakes the dedicated ``_judge_resolution_received`` event so the
+        run loop in ``cli/commands/web.py`` can pick this gate
+        independently from plan-review and conflict decisions. Keeping
+        the three signals separate preserves the invariant that each
+        ``wait_for_*`` corresponds to exactly one gate kind.
         """
         if resolution not in {"accept", "abort", "rerun"}:
             logger.warning("Ignoring invalid judge resolution %r", resolution)
             return
         self._state.judge_resolution = resolution  # type: ignore[assignment]
-        self._plan_review_received.set()
+        self._judge_resolution_received.set()
         logger.info("Judge resolution recorded: %s", resolution)
 
     async def broadcast_state_patch(self) -> None:
