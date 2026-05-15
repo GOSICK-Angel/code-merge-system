@@ -206,9 +206,7 @@ def serialize_judge_verdict(state: MergeState) -> dict[str, Any] | None:
     if v is None:
         return None
     return {
-        "verdict": _enum_value(v.verdict)
-        if hasattr(v.verdict, "value")
-        else str(v.verdict),
+        "verdict": _enum_value(v.verdict),
         "summary": v.summary,
         "failed_files": list(getattr(v, "failed_files", []) or []),
         "passed_files": list(getattr(v, "passed_files", []) or []),

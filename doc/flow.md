@@ -279,7 +279,7 @@ git commit -m "merge(auto_merge): resolve N files\n\nUpstream commits:\n..."
 
 - 入口：AWAITING_HUMAN
 - `HumanInterface.run()` 渲染决策模板（Markdown + YAML）
-- 从 CLI/TUI/文件加载 `human_decisions`
+- 从 CLI/Web UI/文件加载 `human_decisions`
 - **永远不填默认值**：未决 item 保持 `ESCALATE_HUMAN`，等下次人工
 - 所有 item 决完 → 转到下一阶段（由 Plan/Analysis 上下文决定）
 
@@ -342,7 +342,7 @@ for round in 0..max_dispute_rounds:
 [Phase 暂停]  AWAITING_HUMAN + checkpoint 落盘
     │
     │ 用户操作（三选一）：
-    │   ① TUI 中点击决策按钮
+    │   ① Web UI 中点击决策按钮
     │   ② merge run --export-decisions decisions.yaml  → 编辑 → 下一次自带文件
     │   ③ merge resume --run-id <id> --decisions decisions.yaml
     ▼
