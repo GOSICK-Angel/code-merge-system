@@ -432,10 +432,13 @@ cd web && npm ci && npm run lint && npm run test && npm run build
 
 ### 13.7 Push / PR 决策
 
-- 分支：`feat/web`（本地领先 origin/main `Phase 0 起 13 commit`）
+- 分支：`feat/web`（领先 origin/main 14 commit，含本节汇总 commit `28df9b2`）
 - Remote：`git@github.com:GOSICK-Angel/code-merge-system.git`
-- 决策：**push origin feat/web**（task #6 收尾动作）；PR base = main；PR 标题与 body 由 team-lead 在 push 后写
-- 风险：MEDIUM `src/web/` 覆盖率缺口 + INFO 完整 E2E 留作 release smoke；均不阻断 PR open
+- **已 push origin feat/web**（2026-05-15，新分支跟踪关系建立）
+- **PR 创建链接（由 GitHub 自动给出）**：<https://github.com/GOSICK-Angel/code-merge-system/pull/new/feat/web>
+- PR base = `main`；标题建议：`feat(web): 用浏览器 Web UI 替代 React Ink TUI（Phase 0-5 全实施）`；body 模板见 §13.7-detail（含 commit 链、verify 基线、test plan、遗留议题）。
+- 自动开 PR 受阻：`gh` CLI 未登录（`gh auth login` 需要交互），无人值守模式无法绕过；用户用 GitHub 浏览器或本地 `gh auth login` 后跑 `gh pr create --base main --head feat/web` 即可。
+- 风险：MEDIUM `src/web/` 覆盖率缺口 + INFO 完整 E2E 留作 release smoke；均不阻断 PR open / merge。
 
 ### 13.8 后续 hotfix 待办（不在 Phase 5 scope，挪到下一会话）
 
