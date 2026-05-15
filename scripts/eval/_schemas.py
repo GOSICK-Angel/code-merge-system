@@ -210,6 +210,9 @@ class RunMeta(BaseModel):
     cost_usd: Annotated[float, Field(ge=0.0)]
     git_sha: str
     model_matrix: dict[str, str] = Field(default_factory=dict)
+    status: Literal["success", "failed"] = "success"
+    memory_clean_check: Literal["passed", "skipped"] = "passed"
+    exit_code: int = 0
 
 
 # ---------------------------------------------------------------------------
