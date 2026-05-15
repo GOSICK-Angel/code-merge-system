@@ -204,4 +204,119 @@ describe("classifyView", () => {
     };
     expect(classifyView(snap)).toBe("dashboard");
   });
+
+  it("returns report when status is completed", () => {
+    expect(classifyView({ ...base, status: "completed" })).toBe("report");
+  });
+
+  it("returns report when status is failed", () => {
+    expect(classifyView({ ...base, status: "failed" })).toBe("report");
+  });
+
+  it("returns judge_verdict when awaiting_human + verdict + no resolution", () => {
+    const snap: MergeStateSnapshot = {
+      ...base,
+      status: "awaiting_human",
+      judgeVerdict: {
+        verdict: "fail",
+        summary: "issues",
+        failed_files: ["a.py"],
+        passed_files: [],
+        conditional_files: [],
+        reviewed_files_count: 1,
+        critical_issues_count: 1,
+        high_issues_count: 0,
+        overall_confidence: 0.8,
+        blocking_issues: [],
+        issues: [],
+        veto_triggered: true,
+        veto_reason: "test",
+        repair_instructions: [],
+      },
+    };
+    expect(classifyView(snap)).toBe("judge_verdict");
+  });
+
+  it("returns dashboard when judge verdict present but resolution recorded", () => {
+    const snap: MergeStateSnapshot = {
+      ...base,
+      status: "awaiting_human",
+      judgeVerdict: {
+        verdict: "fail",
+        summary: "issues",
+        failed_files: ["a.py"],
+        passed_files: [],
+        conditional_files: [],
+        reviewed_files_count: 1,
+        critical_issues_count: 1,
+        high_issues_count: 0,
+        overall_confidence: 0.8,
+        blocking_issues: [],
+        issues: [],
+        veto_triggered: false,
+        veto_reason: null,
+        repair_instructions: [],
+      },
+      judgeResolution: "accept",
+    };
+    expect(classifyView(snap)).toBe("dashboard");
+  });
+
+  it("plan_review takes priority over judge_verdict", () => {
+    const snap: MergeStateSnapshot = {
+      ...base,
+      status: "awaiting_human",
+      pendingUserDecisions: [
+        {
+          item_id: "i1",
+          file_path: "a.py",
+          description: "decide",
+          options: [],
+          user_choice: null,
+          user_input: null,
+        },
+      ],
+      judgeVerdict: {
+        verdict: "fail",
+        summary: "",
+        failed_files: [],
+        passed_files: [],
+        conditional_files: [],
+        reviewed_files_count: 0,
+        critical_issues_count: 0,
+        high_issues_count: 0,
+        overall_confidence: 0.8,
+        blocking_issues: [],
+        issues: [],
+        veto_triggered: false,
+        veto_reason: null,
+        repair_instructions: [],
+      },
+    };
+    expect(classifyView(snap)).toBe("plan_review");
+  });
+
+  it("report wins over judge_verdict when both are present (terminal status)", () => {
+    const snap: MergeStateSnapshot = {
+      ...base,
+      status: "completed",
+      judgeVerdict: {
+        verdict: "fail",
+        summary: "",
+        failed_files: [],
+        passed_files: [],
+        conditional_files: [],
+        reviewed_files_count: 0,
+        critical_issues_count: 0,
+        high_issues_count: 0,
+        overall_confidence: 0.8,
+        blocking_issues: [],
+        issues: [],
+        veto_triggered: false,
+        veto_reason: null,
+        repair_instructions: [],
+      },
+    };
+    expect(classifyView(snap)).toBe("report");
+  });
 });

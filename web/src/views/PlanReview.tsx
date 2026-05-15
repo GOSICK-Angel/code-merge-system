@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { WsClient } from "../ws/client";
+import type { OutboundMessage } from "../ws/messages";
 import { useRunStore } from "../store/runStore";
 import {
   commitApprove,
@@ -52,12 +53,14 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
   );
 
   const serverDecided = useMemo(() => {
-    // ws_bridge._apply_user_plan_decisions sets plan_human_review on
-    // submit. classifyView already routes us out once all items are
-    // user_choice != null, but during the optimistic update window we
-    // keep the panel read-only to avoid double-submit.
-    return pending.length > 0 && pending.every((i) => i.user_choice !== null);
-  }, [pending]);
+    // M13 — read the authoritative ``plan_human_review`` snapshot field
+    // instead of deriving from ``pending``. The previous derived
+    // expression was logically equivalent to ``false`` (items inside
+    // ``pending`` are by definition undecided), which meant the panel
+    // was never read-only during the ~300 ms snapshot debounce window
+    // after Submit — a double-click could send two pairs of frames.
+    return snapshot?.planHumanReview != null;
+  }, [snapshot]);
 
   // Auto-select first pending item.
   useEffect(() => {
@@ -75,7 +78,7 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
     applyRecommendedToAll(pending);
   };
 
-  const send = (msg: Parameters<NonNullable<WsClient["send"]>>[0]) => {
+  const send = (msg: OutboundMessage) => {
     clientRef.current?.send(msg);
   };
 

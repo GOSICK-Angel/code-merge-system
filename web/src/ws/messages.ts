@@ -45,6 +45,10 @@ export type OutboundMessage =
         }>;
       };
     }
+  | {
+      type: "submit_judge_resolution";
+      payload: { resolution: "accept" | "abort" | "rerun" };
+    }
   | { type: "cancel_run"; payload: Record<string, never> }
   | { type: "pause"; payload: Record<string, never> }
   | { type: "resume"; payload: Record<string, never> };

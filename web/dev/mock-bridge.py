@@ -691,6 +691,122 @@ def _make_user_decisions() -> list[UserDecisionItem]:
     ]
 
 
+def _make_judge_verdict() -> Any:
+    """Fabricated JudgeVerdict that exercises the L4 view: veto banner,
+    multi-file issue grouping, severity ladder, repair instructions."""
+    from src.models.judge import (
+        IssueResolvability,
+        IssueSeverity,
+        JudgeIssue,
+        JudgeVerdict,
+        RepairInstruction,
+        VerdictType,
+    )
+
+    return JudgeVerdict(
+        verdict=VerdictType.FAIL,
+        reviewed_files_count=12,
+        passed_files=["README.md", "docs/usage.md", "utils/io.py"],
+        failed_files=["models/user.py", "src/payment.py"],
+        conditional_files=["pyproject.toml"],
+        issues=[
+            JudgeIssue(
+                file_path="models/user.py",
+                issue_level=IssueSeverity.CRITICAL,
+                issue_type="customization_grep_below_baseline",
+                description="cvte_sso_id field annotation lost in merged version",
+                affected_lines=[12, 45, 89],
+                evidence_excerpt="-    cvte_sso_id: str | None = None",
+                suggested_fix="re-add cvte_sso_id column with the same default",
+                must_fix_before_merge=True,
+                resolvability=IssueResolvability.FIXABLE,
+            ),
+            JudgeIssue(
+                file_path="models/user.py",
+                issue_level=IssueSeverity.HIGH,
+                issue_type="top_level_invocation_lost",
+                description="@cvte_audit_log decorator missing on save()",
+                affected_lines=[120],
+                must_fix_before_merge=True,
+                resolvability=IssueResolvability.FIXABLE,
+            ),
+            JudgeIssue(
+                file_path="src/payment.py",
+                issue_level=IssueSeverity.HIGH,
+                issue_type="smoke_test_failed",
+                description="Refund flow regression — test_refund_with_reason failing",
+                must_fix_before_merge=True,
+                resolvability=IssueResolvability.HUMAN_REQUIRED,
+            ),
+        ],
+        critical_issues_count=1,
+        high_issues_count=2,
+        overall_confidence=0.88,
+        summary="2 files failed quality gates; customization preservation breach in models/user.py",
+        blocking_issues=["models/user.py", "src/payment.py"],
+        timestamp=datetime.now(),
+        judge_model="claude-sonnet-4-6",
+        veto_triggered=True,
+        veto_reason="Customization grep count below baseline (models/user.py)",
+        repair_instructions=[
+            RepairInstruction(
+                file_path="models/user.py",
+                instruction="Re-add ``cvte_sso_id`` column and ``@cvte_audit_log`` decorator",
+                severity=IssueSeverity.CRITICAL,
+                is_repairable=True,
+                source_issue_id=None,
+            ),
+            RepairInstruction(
+                file_path="src/payment.py",
+                instruction="Manually reconcile refund flow with upstream gateway signature",
+                severity=IssueSeverity.HIGH,
+                is_repairable=False,
+                source_issue_id=None,
+            ),
+        ],
+    )
+
+
+def _populate_report_artifacts(repo_root: Path, run_id: str) -> None:
+    """Write a fake ``merge_report.md`` + ``checkpoint.json`` under
+    ``<repo_root>/.merge/runs/<run_id>/`` so the L5 view has artifacts
+    to fetch via the static_server ``/runs/`` route."""
+    run_dir = repo_root / ".merge" / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "merge_report.md").write_text(
+        "# Merge Report — run "
+        + run_id[:8]
+        + "\n\n"
+        + "## Summary\n\n"
+        + "Merged upstream/main into feat/web with 4 conflicts resolved by reviewer.\n"
+        + "Judge verdict: ``conditional`` (1 high-severity issue resolved offline).\n\n"
+        + "## Files\n\n"
+        + "- ``api/auth.py`` — TAKE_CURRENT\n"
+        + "- ``config/database.yaml`` — SEMANTIC_MERGE\n"
+        + "- ``utils/retry.py`` — TAKE_TARGET\n"
+        + "- ``docs/CHANGELOG.md`` — MANUAL_PATCH\n\n"
+        + "## Cost\n\n"
+        + "Total: $0.4231 across 18,452 tokens (planner + planner_judge).\n\n"
+        + "```\n"
+        + "completed at "
+        + datetime.now().isoformat()
+        + "\n"
+        + "```\n",
+        encoding="utf-8",
+    )
+    (run_dir / "checkpoint.json").write_text(
+        '{"run_id": "' + run_id + '", "status": "completed"}',
+        encoding="utf-8",
+    )
+    (run_dir / "plan_review.md").write_text(
+        "# Plan Review — run "
+        + run_id[:8]
+        + "\n\n"
+        + "2 negotiation rounds → APPROVED.\n",
+        encoding="utf-8",
+    )
+
+
 async def _eventually_park_at_human(bridge: MergeWSBridge, state: MergeState) -> None:
     """After the warm-up, flip to AWAITING_HUMAN.
 
@@ -699,9 +815,31 @@ async def _eventually_park_at_human(bridge: MergeWSBridge, state: MergeState) ->
         ``classifyView`` derives L3
       * ``plan_review`` — populate ``merge_plan`` + ``plan_review_log`` +
         ``pending_user_decisions`` so ``classifyView`` derives L2
+      * ``judge`` — set ``judge_verdict`` (veto_triggered) and leave
+        ``judge_resolution`` None so ``classifyView`` derives L4
+      * ``report`` — set ``status=COMPLETED`` so ``classifyView`` derives L5;
+        also writes fake ``runs/<run_id>/merge_report.md`` for the route
     """
     await asyncio.sleep(10)
     scenario = os.environ.get("MOCK_VIEW", "conflict").lower()
+    if scenario == "judge":
+        from src.models.plan import MergePhase as _MergePhase
+
+        state.judge_verdict = _make_judge_verdict()
+        state.current_phase = _MergePhase.JUDGE_REVIEW
+        state.status = SystemStatus.AWAITING_HUMAN
+        bridge.notify_state_change("parked at AWAITING_HUMAN with judge verdict (mock)")
+        logger.info("State -> AWAITING_HUMAN with judge_verdict (L4 should open)")
+        return
+    if scenario == "report":
+        _populate_report_artifacts(_REPO_ROOT, state.run_id)
+        state.status = SystemStatus.COMPLETED
+        bridge.notify_state_change("parked at COMPLETED (mock report)")
+        logger.info(
+            "State -> COMPLETED with fake report at .merge/runs/%s/ (L5 should open)",
+            state.run_id,
+        )
+        return
     if scenario == "plan_review":
         state.merge_plan = _make_merge_plan()
         state.plan_review_log = _make_plan_review_log()
@@ -730,11 +868,22 @@ async def _eventually_park_at_human(bridge: MergeWSBridge, state: MergeState) ->
 
 
 async def main() -> None:
+    from src.web.static_server import StaticHTTPServer
+
     state = _make_state()
     bridge = MergeWSBridge(state)
     await bridge.start("localhost", 8765)
     logger.info("Mock bridge ready on ws://localhost:8765")
     logger.info("Open http://localhost:5173/?ws=8765 in a browser.")
+
+    # Mount a runs-only static server on 5174 so the Vite dev server's
+    # ``/runs`` proxy has somewhere to route L5 artifact fetches in dev
+    # mode. Production reuses the main 5173 port via web.py.
+    runs_root = _REPO_ROOT / ".merge" / "runs"
+    runs_root.mkdir(parents=True, exist_ok=True)
+    runs_server = StaticHTTPServer(runs_root, runs_root=runs_root)
+    await runs_server.start("localhost", 5174)
+    logger.info("Runs artifact server ready on http://localhost:5174")
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -749,6 +898,7 @@ async def main() -> None:
     finally:
         drip_task.cancel()
         park_task.cancel()
+        await runs_server.stop()
         await bridge.stop()
         logger.info("Mock bridge stopped.")
 

@@ -218,21 +218,64 @@ def serialize_judge_verdict(state: MergeState) -> dict[str, Any] | None:
         if hasattr(v.verdict, "value")
         else str(v.verdict),
         "summary": v.summary,
+        "failed_files": list(getattr(v, "failed_files", []) or []),
+        "passed_files": list(getattr(v, "passed_files", []) or []),
+        "conditional_files": list(getattr(v, "conditional_files", []) or []),
+        "reviewed_files_count": getattr(v, "reviewed_files_count", 0),
+        "critical_issues_count": getattr(v, "critical_issues_count", 0),
+        "high_issues_count": getattr(v, "high_issues_count", 0),
+        "overall_confidence": getattr(v, "overall_confidence", 0.0),
+        "blocking_issues": list(getattr(v, "blocking_issues", []) or []),
         "issues": [
             {
+                "issue_id": getattr(i, "issue_id", None),
                 "file_path": i.file_path,
                 "issue_type": i.issue_type,
-                "severity": getattr(i, "severity", "unknown"),
+                # ``JudgeIssue.issue_level`` is the canonical severity field;
+                # older snapshots may also carry ``severity`` as a string —
+                # fall back so legacy clients keep rendering.
+                "severity": _enum_value(getattr(i, "issue_level", None))
+                or getattr(i, "severity", "unknown"),
                 "description": getattr(i, "description", ""),
+                "suggested_fix": getattr(i, "suggested_fix", None),
+                "must_fix_before_merge": getattr(i, "must_fix_before_merge", False),
+                "resolvability": _enum_value(getattr(i, "resolvability", None)),
+                "affected_lines": list(getattr(i, "affected_lines", []) or []),
             }
             for i in v.issues
         ],
         "veto_triggered": v.veto_triggered,
         "veto_reason": v.veto_reason,
         "repair_instructions": [
-            {"instruction": r.instruction, "is_repairable": r.is_repairable}
+            {
+                "file_path": getattr(r, "file_path", ""),
+                "instruction": r.instruction,
+                "is_repairable": r.is_repairable,
+                "severity": _enum_value(getattr(r, "severity", None)),
+                "source_issue_id": getattr(r, "source_issue_id", None),
+            }
             for r in v.repair_instructions
         ],
+    }
+
+
+def serialize_plan_human_review(state: MergeState) -> dict[str, Any] | None:
+    """L2 view detects 'server already decided' via this payload (M13).
+
+    ``state.plan_human_review`` is set by ``ws_bridge._apply_user_plan_decisions``
+    (and the CLI / decisions-YAML loader). When non-None, the L2 view
+    treats the plan as final and disables Approve/Reject/Modify to
+    prevent a double-submit race during the snapshot-debounce window.
+    """
+    review = state.plan_human_review
+    if review is None:
+        return None
+    return {
+        "decision": _enum_value(review.decision),
+        "reviewer_name": review.reviewer_name,
+        "reviewer_notes": review.reviewer_notes,
+        "decided_at": review.decided_at.isoformat() if review.decided_at else None,
+        "item_decisions_count": len(review.item_decisions),
     }
 
 
@@ -407,6 +450,10 @@ def serialize_state(state: MergeState) -> dict[str, Any]:
         },
         "judgeVerdict": serialize_judge_verdict(state),
         "judgeRepairRounds": state.judge_repair_rounds,
+        "judgeResolution": state.judge_resolution,
+        "rerunRound": state.rerun_round,
+        "maxRerunRounds": state.config.max_rerun_rounds,
+        "planHumanReview": serialize_plan_human_review(state),
         "planReviewLog": [serialize_review_round(r) for r in state.plan_review_log],
         "reviewConclusion": serialize_review_conclusion(state),
         "pendingUserDecisions": [

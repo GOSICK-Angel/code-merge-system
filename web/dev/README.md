@@ -74,8 +74,49 @@ in the bridge and the run loop would advance — in the mock harness the
 state stays at AWAITING_HUMAN (no orchestrator), but the file tree's
 "Decided (4)" section will reflect the submitted decisions.
 
+### L4 judge verdict (`MOCK_VIEW=judge`)
+
+```bash
+MOCK_VIEW=judge python web/dev/mock-bridge.py
+```
+
+Injects a fabricated `JudgeVerdict` with `veto_triggered=true`, 3
+issues across 2 files (critical / high / high), and 2 repair
+instructions. Expected at the 10 s transition:
+
+| L4 widget                | Expected                                                |
+|--------------------------|---------------------------------------------------------|
+| Veto banner              | Red ⛔ "Judge veto triggered" with reason text          |
+| Header                   | `verdict: fail`, summary, 12/2/1/2 counters, conf 0.88  |
+| Failed files             | `models/user.py`, `src/payment.py`                      |
+| Issues (grouped by file) | severity badge + must-fix + affected_lines + suggested_fix |
+| Repair instructions      | per-file with severity + repairable/manual tag          |
+| Footer                   | Abort / Rerun / Accept buttons                          |
+
+Clicking Accept should log `Judge resolution recorded: accept` server-side.
+
+### L5 report (`MOCK_VIEW=report`)
+
+```bash
+MOCK_VIEW=report python web/dev/mock-bridge.py
+```
+
+Writes a fake `merge_report.md` + `plan_review.md` + `checkpoint.json`
+to `<repo>/.merge/runs/<run_id>/` and flips state to `COMPLETED` so
+`classifyView` derives the L5 view. In dev mode the mock bridge also
+boots a small **runs-only** static server on port 5174; `web/vite.config.ts`
+proxies `/runs/...` requests from 5173 to 5174 so the front-end can
+fetch the markdown via the same path it uses in production.
+
+| L5 widget                | Expected                                                |
+|--------------------------|---------------------------------------------------------|
+| Status                   | `COMPLETED` banner + green "Run completed" pill         |
+| Cost                     | `$0.4231` / 18.5k tokens                                |
+| Artifacts                | 3 links: merge_report.md / plan_review.md / checkpoint  |
+| Main report              | Markdown rendered to H1 / H2 / lists / code blocks      |
+
 ## Extending
 
-When implementing L2/L4/L5 views in later phases, add a new sample
-function in `mock-bridge.py` and document the expected widget state in
-the table above.
+When adding new view scenarios, append a new `MOCK_VIEW=<name>` branch
+in `mock-bridge.py:_eventually_park_at_human` and document the
+expected widget state in the table above.

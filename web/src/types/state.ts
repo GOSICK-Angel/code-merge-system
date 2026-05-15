@@ -107,18 +107,59 @@ export interface HumanDecisionRequest {
   related_files: string[];
 }
 
+export type JudgeIssueSeverity =
+  | "critical"
+  | "high"
+  | "medium"
+  | "low"
+  | "info"
+  | "unknown";
+
+export interface JudgeIssuePayload {
+  issue_id: string | null;
+  file_path: string;
+  issue_type: string;
+  severity: JudgeIssueSeverity | string;
+  description: string;
+  suggested_fix: string | null;
+  must_fix_before_merge: boolean;
+  resolvability: string | null;
+  affected_lines: number[];
+}
+
+export interface JudgeRepairInstructionPayload {
+  file_path: string;
+  instruction: string;
+  is_repairable: boolean;
+  severity: string | null;
+  source_issue_id: string | null;
+}
+
 export interface JudgeVerdict {
   verdict: string;
   summary: string;
+  failed_files: string[];
+  passed_files: string[];
+  conditional_files: string[];
+  reviewed_files_count: number;
+  critical_issues_count: number;
+  high_issues_count: number;
+  overall_confidence: number;
+  blocking_issues: string[];
+  issues: JudgeIssuePayload[];
   veto_triggered: boolean;
   veto_reason: string | null;
-  issues: Array<{
-    file_path: string;
-    issue_type: string;
-    severity: string;
-    description: string;
-  }>;
-  repair_instructions: Array<{ instruction: string; is_repairable: boolean }>;
+  repair_instructions: JudgeRepairInstructionPayload[];
+}
+
+export type JudgeResolution = "accept" | "abort" | "rerun";
+
+export interface PlanHumanReviewPayload {
+  decision: string;
+  reviewer_name: string | null;
+  reviewer_notes: string | null;
+  decided_at: string | null;
+  item_decisions_count: number;
 }
 
 export interface PendingUserDecisionOption {
@@ -247,6 +288,11 @@ export interface MergeStateSnapshot {
   costSummary?: CostSummary | null;
   phaseElapsed?: Record<string, number | null>;
   decisionRecordCounts?: Record<string, number>;
+  // Phase 4 additive fields
+  judgeResolution?: JudgeResolution | null;
+  rerunRound?: number;
+  maxRerunRounds?: number;
+  planHumanReview?: PlanHumanReviewPayload | null;
 }
 
 export interface AgentActivityEvent {

@@ -151,6 +151,10 @@ class MergeWSBridge:
             self._apply_user_plan_decisions(payload.get("items", []))
             await self.broadcast_state_patch()
 
+        elif cmd_type == "submit_judge_resolution":
+            self._apply_judge_resolution(payload.get("resolution", ""))
+            await self.broadcast_state_patch()
+
         elif cmd_type == "cancel_run":
             await self._handle_cancel_run(ws)
 
@@ -335,6 +339,25 @@ class MergeWSBridge:
         )
         self._plan_review_received.set()
         logger.info("User plan decisions applied — signalling orchestrator")
+
+    def _apply_judge_resolution(self, resolution: str) -> None:
+        """L4 — write ``state.judge_resolution`` so ``human_review`` phase
+        can route to accept / abort / rerun on its next pass.
+
+        Reuses ``_plan_review_received`` as the generic "non-conflict
+        AWAITING_HUMAN resume" signal (the web run loop in
+        ``cli/commands/web.py:135-142`` only branches on whether
+        ``human_decision_requests`` has pending entries; everything else
+        waits on this single event). Adding a dedicated judge event
+        would require teaching the loop another branch and isn't
+        warranted while the wait conditions remain symmetric.
+        """
+        if resolution not in {"accept", "abort", "rerun"}:
+            logger.warning("Ignoring invalid judge resolution %r", resolution)
+            return
+        self._state.judge_resolution = resolution  # type: ignore[assignment]
+        self._plan_review_received.set()
+        logger.info("Judge resolution recorded: %s", resolution)
 
     async def broadcast_state_patch(self) -> None:
         """Send full state to all connected clients, skipping if unchanged."""

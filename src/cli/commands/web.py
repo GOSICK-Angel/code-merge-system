@@ -89,7 +89,14 @@ async def _run_web(
 
     bridge = MergeWSBridge(state)
     await bridge.start("localhost", ws_port)
-    static_server = StaticHTTPServer(web_dist)
+    # L5 Report fetches markdown / checkpoint from this tree via the
+    # ``/runs/<run_id>/<file>`` URL prefix (see StaticHTTPServer).
+    from src.cli.paths import get_project_merge_dir
+
+    runs_root = get_project_merge_dir(".") / "runs"
+    static_server = StaticHTTPServer(
+        web_dist, runs_root=runs_root if runs_root.exists() else None
+    )
     await static_server.start("localhost", web_port)
 
     orchestrator = Orchestrator(config)

@@ -77,10 +77,15 @@ export const usePlanReviewDraftStore = create<PlanReviewDraftStoreState>(
         const next = { ...state.drafts };
         for (const item of items) {
           if (item.user_choice !== null) continue; // already decided server-side
-          // Heuristic: pick the first option as the "recommended" default
-          // when one exists. Plan-review options don't carry an explicit
-          // analyst recommendation (unlike conflict_analysis), so the
-          // first option is the planner-suggested default.
+          // M15 audit: ``options[0]`` is the CONSERVATIVE DEFAULT, not an
+          // analyst-recommended choice. ``src/core/phases/plan_review.py:1020-1068``
+          // builds the option list with ``keep_head`` first (preserves fork
+          // edits / discards upstream — the safest no-op for the reviewer to
+          // accept) followed by ``take_target`` and ``llm_auto_merge``. Plan
+          // v1.1 §4 L2 calls this UX "Apply recommended" but the semantics
+          // are "apply conservative default everywhere"; future work could
+          // surface a true analyst pick (cf. L3's analyst_recommendation
+          // field on HumanDecisionRequest).
           const recommended = item.options[0]?.key;
           if (!recommended) continue;
           const existing = next[item.item_id] ?? emptyDraft(recommended);

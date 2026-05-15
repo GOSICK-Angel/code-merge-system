@@ -568,3 +568,138 @@ class TestSerializeHumanRequestExtended:
         assert out["reviewer_notes"] is None
         assert out["related_files"] == []
         assert out["analyst_recommendation"] is None
+
+
+class TestSerializeJudgeFieldsExtended:
+    """Phase 4 — L4 widget needs failed_files / per-issue severity (from
+    JudgeIssue.issue_level) / repair_instructions per file / verdict
+    counts. Older test (TestHelperBranches.test_serialize_judge_verdict_full)
+    only checked the v1 shape; this case locks the L4 extensions."""
+
+    def test_judge_verdict_extended_payload(self) -> None:
+        from src.web.serializers import serialize_judge_verdict
+
+        verdict = SimpleNamespace(
+            verdict_id="v-1",
+            verdict=SimpleNamespace(value="fail"),
+            summary="3 critical issues",
+            failed_files=["a.py", "b.py"],
+            passed_files=["c.py"],
+            conditional_files=[],
+            reviewed_files_count=3,
+            critical_issues_count=2,
+            high_issues_count=1,
+            overall_confidence=0.92,
+            blocking_issues=["a.py", "b.py"],
+            veto_triggered=True,
+            veto_reason="Customization grep count below baseline",
+            issues=[
+                SimpleNamespace(
+                    issue_id="iss-1",
+                    file_path="a.py",
+                    issue_type="customization_grep_below_baseline",
+                    issue_level=SimpleNamespace(value="critical"),
+                    description="3 customization markers lost",
+                    suggested_fix="restore @cvte_decorator on lines 12,45,89",
+                    must_fix_before_merge=True,
+                    resolvability=SimpleNamespace(value="fixable"),
+                    affected_lines=[12, 45, 89],
+                ),
+                SimpleNamespace(
+                    issue_id="iss-2",
+                    file_path="b.py",
+                    issue_type="smoke_test_failed",
+                    issue_level=SimpleNamespace(value="high"),
+                    description="auth flow regression",
+                    suggested_fix=None,
+                    must_fix_before_merge=True,
+                    resolvability=SimpleNamespace(value="human_required"),
+                    affected_lines=[],
+                ),
+            ],
+            repair_instructions=[
+                SimpleNamespace(
+                    file_path="a.py",
+                    instruction="re-add @cvte_decorator above lines 12/45/89",
+                    is_repairable=True,
+                    severity=SimpleNamespace(value="critical"),
+                    source_issue_id="iss-1",
+                ),
+            ],
+        )
+        state = SimpleNamespace(judge_verdict=verdict)
+        out = serialize_judge_verdict(state)  # type: ignore[arg-type]
+        assert out is not None
+        assert out["failed_files"] == ["a.py", "b.py"]
+        assert out["passed_files"] == ["c.py"]
+        assert out["critical_issues_count"] == 2
+        assert out["overall_confidence"] == 0.92
+        assert out["veto_triggered"] is True
+        assert out["issues"][0]["severity"] == "critical"
+        assert out["issues"][0]["must_fix_before_merge"] is True
+        assert out["issues"][0]["affected_lines"] == [12, 45, 89]
+        assert out["issues"][1]["resolvability"] == "human_required"
+        assert out["repair_instructions"][0]["severity"] == "critical"
+        assert out["repair_instructions"][0]["source_issue_id"] == "iss-1"
+
+
+class TestSerializePlanHumanReview:
+    """M13 — front-end ``serverDecided`` reads ``planHumanReview``."""
+
+    def test_returns_none_when_not_set(self, minimal_state: MergeState) -> None:
+        from src.web.serializers import serialize_plan_human_review
+
+        assert serialize_plan_human_review(minimal_state) is None
+
+    def test_full_payload(self) -> None:
+        from src.web.serializers import serialize_plan_human_review
+
+        review = SimpleNamespace(
+            decision=SimpleNamespace(value="approve"),
+            reviewer_name="web_user",
+            reviewer_notes="LGTM",
+            decided_at=datetime(2026, 5, 14, 12, 0),
+            item_decisions=[SimpleNamespace(), SimpleNamespace(), SimpleNamespace()],
+        )
+        state = SimpleNamespace(plan_human_review=review)
+        out = serialize_plan_human_review(state)  # type: ignore[arg-type]
+        assert out == {
+            "decision": "approve",
+            "reviewer_name": "web_user",
+            "reviewer_notes": "LGTM",
+            "decided_at": "2026-05-14T12:00:00",
+            "item_decisions_count": 3,
+        }
+
+
+class TestSerializeStatePhase4Fields:
+    """Phase 4 additive fields on the top-level snapshot."""
+
+    def test_judge_resolution_and_rerun_passthrough(
+        self, minimal_state: MergeState
+    ) -> None:
+        minimal_state.judge_resolution = "rerun"
+        minimal_state.rerun_round = 2
+        snap = serialize_state(minimal_state)
+        assert snap["judgeResolution"] == "rerun"
+        assert snap["rerunRound"] == 2
+        assert isinstance(snap["maxRerunRounds"], int)
+
+    def test_plan_human_review_passthrough(self, minimal_state: MergeState) -> None:
+        from src.models.plan_review import PlanHumanDecision, PlanHumanReview
+
+        minimal_state.plan_human_review = PlanHumanReview(
+            decision=PlanHumanDecision.APPROVE,
+            reviewer_name="web_user",
+            reviewer_notes=None,
+            item_decisions=[],
+        )
+        snap = serialize_state(minimal_state)
+        assert snap["planHumanReview"] is not None
+        assert snap["planHumanReview"]["decision"] == "approve"
+
+    def test_plan_human_review_is_none_by_default(
+        self, minimal_state: MergeState
+    ) -> None:
+        snap = serialize_state(minimal_state)
+        assert snap["planHumanReview"] is None
