@@ -89,9 +89,119 @@ describe("classifyView", () => {
     expect(classifyView(snap)).toBe("dashboard");
   });
 
-  it("returns dashboard when awaiting_human but no requests at all (plan-review case)", () => {
+  it("returns dashboard when awaiting_human but no requests at all", () => {
     expect(classifyView({ ...base, status: "awaiting_human" })).toBe(
       "dashboard",
     );
+  });
+
+  it("returns plan_review when awaiting_human + pendingUserDecisions undecided", () => {
+    const snap: MergeStateSnapshot = {
+      ...base,
+      status: "awaiting_human",
+      pendingUserDecisions: [
+        {
+          item_id: "i1",
+          file_path: "a.py",
+          description: "decide",
+          options: [{ key: "k", label: "L", description: "" }],
+          user_choice: null,
+          user_input: null,
+        },
+      ],
+    };
+    expect(classifyView(snap)).toBe("plan_review");
+  });
+
+  it("plan_review takes priority over conflict_resolution when both pending", () => {
+    const snap: MergeStateSnapshot = {
+      ...base,
+      status: "awaiting_human",
+      pendingUserDecisions: [
+        {
+          item_id: "i1",
+          file_path: "a.py",
+          description: "decide",
+          options: [],
+          user_choice: null,
+          user_input: null,
+        },
+      ],
+      humanDecisionRequests: {
+        "b.py": {
+          request_id: "r1",
+          file_path: "b.py",
+          priority: 1,
+          conflict_points: [],
+          context_summary: "",
+          upstream_change_summary: "",
+          fork_change_summary: "",
+          analyst_recommendation: null,
+          analyst_confidence: null,
+          analyst_rationale: "",
+          options: [],
+          human_decision: null,
+          custom_content: null,
+          reviewer_notes: null,
+          related_files: [],
+        },
+      },
+    };
+    expect(classifyView(snap)).toBe("plan_review");
+  });
+
+  it("returns conflict_resolution when all plan items decided but conflicts pending", () => {
+    const snap: MergeStateSnapshot = {
+      ...base,
+      status: "awaiting_human",
+      pendingUserDecisions: [
+        {
+          item_id: "i1",
+          file_path: "a.py",
+          description: "decide",
+          options: [],
+          user_choice: "k1",
+          user_input: null,
+        },
+      ],
+      humanDecisionRequests: {
+        "b.py": {
+          request_id: "r1",
+          file_path: "b.py",
+          priority: 1,
+          conflict_points: [],
+          context_summary: "",
+          upstream_change_summary: "",
+          fork_change_summary: "",
+          analyst_recommendation: null,
+          analyst_confidence: null,
+          analyst_rationale: "",
+          options: [],
+          human_decision: null,
+          custom_content: null,
+          reviewer_notes: null,
+          related_files: [],
+        },
+      },
+    };
+    expect(classifyView(snap)).toBe("conflict_resolution");
+  });
+
+  it("returns dashboard when all plan items decided and no conflict requests", () => {
+    const snap: MergeStateSnapshot = {
+      ...base,
+      status: "awaiting_human",
+      pendingUserDecisions: [
+        {
+          item_id: "i1",
+          file_path: "a.py",
+          description: "decide",
+          options: [],
+          user_choice: "k1",
+          user_input: null,
+        },
+      ],
+    };
+    expect(classifyView(snap)).toBe("dashboard");
   });
 });

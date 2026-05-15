@@ -1,26 +1,40 @@
 import type { MergeStateSnapshot } from "../types/state";
 
-export type ActiveView = "dashboard" | "conflict_resolution";
+export type ActiveView = "dashboard" | "plan_review" | "conflict_resolution";
 
 /**
  * Derive the top-level view from the snapshot.
  *
- * L3 is shown when the run is parked at AWAITING_HUMAN **and** at least
- * one ``HumanDecisionRequest`` is still pending (``human_decision ===
- * null``). All other cases (initial load, planning, plan review,
- * post-cancel, completed, failed) render the L1 Dashboard.
+ * Priority at ``AWAITING_HUMAN``:
+ *   L2 (plan_review) > L3 (conflict_resolution) > L1 (dashboard)
  *
- * Plan v1.1 §4 calls out that plan-review-time AWAITING_HUMAN (no
- * conflicts) belongs to L2 (later phase) — until L2 lands we keep those
- * cases on L1 so the user still sees status + cost + activity.
+ * Why this order: ``pending_user_decisions`` is produced by the
+ * plan_review phase (``src/core/phases/plan_review.py``) while
+ * ``human_decision_requests`` is produced later by conflict_analysis /
+ * auto_merge. Structurally the two lists are populated by different
+ * phases and shouldn't both be non-empty at the same time, but the
+ * ordering here is defensive: if a future code path leaves stale plan
+ * items in state when entering conflict review, the user still gets
+ * routed to the plan review first (the more upstream decision).
+ *
+ * All other cases (initial load, planning, post-cancel, completed,
+ * failed, paused) render the L1 Dashboard.
  */
 export function classifyView(
   snapshot: MergeStateSnapshot | null,
 ): ActiveView {
   if (!snapshot) return "dashboard";
   if (snapshot.status !== "awaiting_human") return "dashboard";
-  const pending = Object.values(snapshot.humanDecisionRequests).some(
+
+  const planPending = snapshot.pendingUserDecisions.some(
+    (item) => item.user_choice === null,
+  );
+  if (planPending) return "plan_review";
+
+  const conflictPending = Object.values(snapshot.humanDecisionRequests).some(
     (r) => r.human_decision === null,
   );
-  return pending ? "conflict_resolution" : "dashboard";
+  if (conflictPending) return "conflict_resolution";
+
+  return "dashboard";
 }

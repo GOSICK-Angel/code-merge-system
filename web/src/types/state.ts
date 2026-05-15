@@ -121,13 +121,83 @@ export interface JudgeVerdict {
   repair_instructions: Array<{ instruction: string; is_repairable: boolean }>;
 }
 
+export interface PendingUserDecisionOption {
+  key: string;
+  label: string;
+  description: string;
+}
+
 export interface PendingUserDecision {
   item_id: string;
   file_path: string;
   description: string;
-  options: Array<{ key: string; label: string; description: string }>;
+  risk_context?: string;
+  conflict_preview?: string;
+  current_classification?: string;
+  options: PendingUserDecisionOption[];
   user_choice: string | null;
   user_input: string | null;
+}
+
+// L2 plan/layer/log payload — mirror of src/web/serializers.py
+// serialize_plan / serialize_review_round output. Optional fields
+// align with snapshots taken before plan_review completes.
+export interface PlanLayer {
+  layer_id: number;
+  name: string;
+  description: string;
+  depends_on: number[];
+}
+
+export interface PlanPhaseBatch {
+  batch_id: string;
+  phase: string;
+  file_paths: string[];
+  risk_level: string;
+  layer_id: number;
+  change_category: string | null;
+}
+
+export interface MergePlanPayload {
+  plan_id: string;
+  created_at: string | null;
+  upstream_ref: string;
+  fork_ref: string;
+  merge_base_commit: string;
+  phases: PlanPhaseBatch[];
+  risk_summary: Record<string, number>;
+  category_summary: Record<string, number> | null;
+  layers: PlanLayer[];
+  project_context_summary: string;
+  special_instructions: string[];
+}
+
+export interface PlanReviewRoundPayload {
+  round_number: number;
+  verdict_result: string;
+  verdict_summary: string;
+  issues_count: number;
+  issues_detail: Array<Record<string, unknown>>;
+  planner_revision_summary: string | null;
+  planner_responses: Array<{
+    issue_id: string;
+    file_path: string;
+    action: string;
+    reason: string;
+    counter_proposal: string | null;
+  }>;
+  plan_diff: Array<{
+    file_path: string;
+    old_risk: string;
+    new_risk: string;
+  }>;
+  negotiation_messages: Array<{
+    sender: string;
+    round_number: number;
+    content: string;
+    timestamp: string;
+  }>;
+  timestamp: string;
 }
 
 export interface CostSummary {
@@ -142,7 +212,7 @@ export interface MergeStateSnapshot {
   status: SystemStatus;
   currentPhase: string;
   phaseResults: Record<string, PhaseResult>;
-  mergePlan: unknown | null;
+  mergePlan: MergePlanPayload | null;
   fileClassifications: Record<string, string>;
   fileDiffs: Array<{
     file_path: string;
@@ -165,7 +235,7 @@ export interface MergeStateSnapshot {
   humanDecisions: Record<string, string>;
   judgeVerdict: JudgeVerdict | null;
   judgeRepairRounds: number;
-  planReviewLog: unknown[];
+  planReviewLog: PlanReviewRoundPayload[];
   reviewConclusion: unknown | null;
   pendingUserDecisions: PendingUserDecision[];
   gateHistory: unknown[];
