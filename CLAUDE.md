@@ -14,17 +14,20 @@ ruff check src/                  # lint
 ruff format src/                 # format
 merge --help                     # CLI entry point
 
-# TUI development (requires Python backend on ws://localhost:8765)
-cd tui && npm run start       # start TUI
-cd tui && npm run dev         # watch mode
-cd tui && npm run build       # TypeScript type check (tsc --noEmit)
+# Web UI development (requires Python backend on ws://localhost:8765)
+cd web && npm install          # install Web UI dev deps (first time only)
+cd web && npm run start        # start dev server (Vite)
+cd web && npm run dev          # watch mode
+cd web && npm run build        # TypeScript check + production build → web/dist/
+cd web && npm test             # vitest
 
 # One-stop flow
-merge <target-branch>            # interactive TUI — auto-setup on first run
-merge <target-branch> --no-tui  # plain text output
-merge <target-branch> --ci      # CI mode (no interaction, JSON summary to stdout)
-merge <target-branch> --dry-run # analysis only, no merge
-merge <target-branch> -r        # force reconfiguration wizard
+merge <target-branch>            # default Web UI in browser — auto-setup on first run
+merge <target-branch> --no-web   # plain-text output (no browser)
+merge <target-branch> --no-tui   # deprecated alias of --no-web
+merge <target-branch> --ci       # CI mode (no interaction, JSON summary to stdout)
+merge <target-branch> --dry-run  # analysis only, no merge
+merge <target-branch> -r         # force reconfiguration wizard
 
 # Utility subcommands
 merge resume --run-id <id>       # resume from checkpoint

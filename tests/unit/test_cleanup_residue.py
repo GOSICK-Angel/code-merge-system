@@ -1,24 +1,15 @@
-"""Phase 5a cleanup-residue tests (P5-3 / P5-4 / P5-5 / P5-6).
+"""Phase 5 cleanup-residue tests (P5-3 / P5-4 / P5-5 / P5-6).
 
 These tests assert that no stale references to the deleted React Ink TUI
 remain in the source tree, the tests tree, or top-level documentation.
 They are intentionally cheap grep-style checks so a future regression
 (accidental re-import, half-finished revert) trips CI immediately.
-
-Note on P5-6: doc cleanup lands in Phase 5c (C3). The test is created in
-C1 to lock in the long-term invariant, but is marked ``xfail(strict=False)``
-in C1 because the user-facing docs still mention ``--no-tui`` outside
-deprecation context. C3 must remove the xfail marker once the docs are
-updated; if the test then passes the xfail decorator can be deleted, and
-if it ever regresses CI will flag it.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
-
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -80,15 +71,6 @@ def test_tui_directory_deleted() -> None:
     )
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Phase 5c (C3) — user-facing doc cleanup not yet applied. C3 will "
-        "remove `--no-tui` mentions outside deprecation context from "
-        "CLAUDE.md / README.md / doc/architecture.md / doc/modules/cli.md "
-        "and remove this xfail marker."
-    ),
-    strict=False,
-)
 def test_docs_no_no_tui_except_deprecation_note() -> None:
     """P5-6: `--no-tui` may appear in user-facing docs only inside
     deprecation context (alias note, deprecation table). Any other mention

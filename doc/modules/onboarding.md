@@ -107,7 +107,7 @@ git checkout -b fork main && echo "hello fork" > a.py && git commit -am fk
 
 # 在 demo 根目录
 cd /path/to/CodeMergeSystem
-merge upstream --no-tui --dry-run
+merge upstream --no-web --dry-run
 ```
 
 看 `outputs/debug/` 或 `.merge/runs/<id>/` 目录下的 checkpoint 与 plan 报告。

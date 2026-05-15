@@ -51,7 +51,7 @@
 
 ### 1.3 状态观察者
 
-`StateMachine.add_observer(cb)` 允许挂接回调，TUI 通过这个机制实时推送状态变更到前端（见 `src/web/ws_bridge.py`）。
+`StateMachine.add_observer(cb)` 允许挂接回调，Web UI 前端通过 `src/web/ws_bridge.py` 把状态变更经 WebSocket 实时推送到浏览器。
 
 ---
 
