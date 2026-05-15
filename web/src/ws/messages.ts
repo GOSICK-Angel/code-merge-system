@@ -11,10 +11,25 @@ export type InboundMessage =
     };
 
 export type OutboundMessage =
-  | { type: "submit_decision"; payload: { filePath: string; decision: string } }
+  | {
+      type: "submit_decision";
+      payload: {
+        filePath: string;
+        decision: string;
+        reviewer_notes?: string | null;
+        custom_content?: string | null;
+      };
+    }
   | {
       type: "submit_conflict_decisions_batch";
-      payload: { items: Array<{ file_path: string; decision: string }> };
+      payload: {
+        items: Array<{
+          file_path: string;
+          decision: string;
+          reviewer_notes?: string | null;
+          custom_content?: string | null;
+        }>;
+      };
     }
   | {
       type: "submit_plan_review";

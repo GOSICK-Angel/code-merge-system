@@ -2,6 +2,7 @@ import { useEffect, useMemo } from "react";
 import type { WsClient } from "../ws/client";
 import { useRunStore } from "../store/runStore";
 import {
+  type ConflictDraft,
   useConflictDraftStore,
   validateDraft,
 } from "../store/conflictDraftStore";
@@ -73,10 +74,15 @@ export function ConflictResolution({ clientRef }: Props): JSX.Element {
   );
   const currentDraft = current ? drafts[current.file_path] : undefined;
 
-  const sendSingle = (filePath: string, decision: MergeDecisionValue) => {
+  const sendSingle = (filePath: string, draft: ConflictDraft) => {
     clientRef.current?.send({
       type: "submit_decision",
-      payload: { filePath, decision },
+      payload: {
+        filePath,
+        decision: draft.decision,
+        reviewer_notes: draft.reviewer_notes || null,
+        custom_content: draft.custom_content || null,
+      },
     });
   };
 
@@ -103,6 +109,8 @@ export function ConflictResolution({ clientRef }: Props): JSX.Element {
     const items = draftedEntries.map(({ request, draft }) => ({
       file_path: request.file_path,
       decision: draft!.decision,
+      reviewer_notes: draft!.reviewer_notes || null,
+      custom_content: draft!.custom_content || null,
     }));
     if (items.length === 0) return;
     clientRef.current?.send({
@@ -123,7 +131,7 @@ export function ConflictResolution({ clientRef }: Props): JSX.Element {
   const submitCurrent = () => {
     if (!current || !currentDraft) return;
     if (validateDraft(currentDraft) !== null) return;
-    sendSingle(current.file_path, currentDraft.decision);
+    sendSingle(current.file_path, currentDraft);
   };
 
   return (

@@ -127,9 +127,15 @@ class MergeWSBridge:
         payload = msg.get("payload", {})
 
         if cmd_type == "submit_decision":
+            # Accept both camelCase ``filePath`` (legacy) and snake_case
+            # ``file_path`` so the wire format aligns with the pydantic
+            # model naming over time. Optional fields stay None when
+            # absent — see _apply_decision for the persistence rules.
             self._apply_decision(
-                file_path=payload.get("filePath", ""),
+                file_path=payload.get("file_path") or payload.get("filePath", ""),
                 decision=payload.get("decision", ""),
+                reviewer_notes=payload.get("reviewer_notes"),
+                custom_content=payload.get("custom_content"),
             )
             await self.broadcast_state_patch()
 
@@ -186,7 +192,23 @@ class MergeWSBridge:
         self._human_decisions_received.set()
         logger.info("cancel_run accepted at AWAITING_HUMAN gate")
 
-    def _apply_decision(self, file_path: str, decision: str) -> None:
+    def _apply_decision(
+        self,
+        file_path: str,
+        decision: str,
+        reviewer_notes: str | None = None,
+        custom_content: str | None = None,
+    ) -> None:
+        """Persist a single conflict decision.
+
+        ``reviewer_notes`` and ``custom_content`` are the L3 free-form
+        fields. They land on ``HumanDecisionRequest`` so downstream
+        consumers (``executor_agent`` reads ``request.custom_content``
+        for the MANUAL_PATCH apply path; ``request.reviewer_notes``
+        feeds ``FileDecisionRecord.rationale``) see the user's input.
+        Missing values stay ``None`` for backwards compatibility with
+        clients that only send ``{file_path, decision}``.
+        """
         req = self._state.human_decision_requests.get(file_path)
         if req is None:
             return
@@ -195,10 +217,15 @@ class MergeWSBridge:
         except ValueError:
             return
 
-        updated = req.model_copy(update={"human_decision": merge_decision})
+        update: dict[str, Any] = {"human_decision": merge_decision}
+        if reviewer_notes is not None:
+            update["reviewer_notes"] = reviewer_notes
+        if custom_content is not None:
+            update["custom_content"] = custom_content
+        updated = req.model_copy(update=update)
         self._state.human_decision_requests[file_path] = updated
         self._state.human_decisions[file_path] = merge_decision
-        logger.info("TUI decision: %s -> %s", file_path, decision)
+        logger.info("Web decision: %s -> %s", file_path, decision)
 
         all_decided = all(
             r.human_decision is not None
@@ -213,7 +240,7 @@ class MergeWSBridge:
     def _apply_conflict_decisions_batch(self, items: list[dict[str, Any]]) -> None:
         applied = 0
         for entry in items:
-            file_path = entry.get("file_path", "")
+            file_path = entry.get("file_path") or entry.get("filePath", "")
             decision = entry.get("decision", "")
             if not file_path or not decision:
                 continue
@@ -227,12 +254,19 @@ class MergeWSBridge:
                     "Skipping invalid decision %r for %s", decision, file_path
                 )
                 continue
-            updated = req.model_copy(update={"human_decision": merge_decision})
+            update: dict[str, Any] = {"human_decision": merge_decision}
+            reviewer_notes = entry.get("reviewer_notes")
+            custom_content = entry.get("custom_content")
+            if reviewer_notes is not None:
+                update["reviewer_notes"] = reviewer_notes
+            if custom_content is not None:
+                update["custom_content"] = custom_content
+            updated = req.model_copy(update=update)
             self._state.human_decision_requests[file_path] = updated
             self._state.human_decisions[file_path] = merge_decision
             applied += 1
 
-        logger.info("TUI batch conflict decisions: %d/%d applied", applied, len(items))
+        logger.info("Web batch conflict decisions: %d/%d applied", applied, len(items))
 
         all_decided = bool(self._state.human_decision_requests) and all(
             r.human_decision is not None
