@@ -31,6 +31,7 @@ from src.web.serializers import (
     _decision_record_counts,
     _phase_elapsed,
     read_memory_snapshot,
+    serialize_conflict_point,
     serialize_human_request,
     serialize_judge_verdict,
     serialize_plan,
@@ -443,3 +444,127 @@ class TestHelperBranches:
             "phase_summaries": {},
             "entries": [],
         }
+
+
+class TestSerializeConflictPoint:
+    """L3 (Phase 2) — ConflictPoint needs the full intent / risk_factors /
+    hunk_id payload so the diff marker overlay can render them on hover."""
+
+    def _intent(
+        self,
+        description: str = "intent text",
+        intent_type: str = "feature",
+        confidence: float = 0.8,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            description=description,
+            intent_type=intent_type,
+            confidence=confidence,
+        )
+
+    def test_full_payload_includes_intents_and_risk_factors(self) -> None:
+        cp = SimpleNamespace(
+            conflict_id="cp-1",
+            hunk_id="h-1",
+            conflict_type=SimpleNamespace(value="logic_contradiction"),
+            upstream_intent=self._intent("upstream adds retries", "feature", 0.9),
+            fork_intent=self._intent("fork removes retries", "refactor", 0.6),
+            can_coexist=False,
+            suggested_decision=SimpleNamespace(value="take_target"),
+            confidence=0.85,
+            rationale="Direct conflict on retry policy",
+            risk_factors=["regression-risk", "behavioral-shift"],
+            line_range="42-58",
+        )
+        out = serialize_conflict_point(cp)
+        assert out["conflict_id"] == "cp-1"
+        assert out["hunk_id"] == "h-1"
+        assert out["conflict_type"] == "logic_contradiction"
+        assert (
+            out["description"] == "logic_contradiction: Direct conflict on retry policy"
+        )
+        assert out["severity"] == "high"
+        assert out["upstream_intent"]["description"] == "upstream adds retries"
+        assert out["upstream_intent"]["confidence"] == 0.9
+        assert out["fork_intent"]["intent_type"] == "refactor"
+        assert out["can_coexist"] is False
+        assert out["suggested_decision"] == "take_target"
+        assert out["risk_factors"] == ["regression-risk", "behavioral-shift"]
+        assert out["line_range"] == "42-58"
+
+    def test_handles_none_intents_and_missing_optional_fields(self) -> None:
+        cp = SimpleNamespace(
+            conflict_type=SimpleNamespace(value="unknown"),
+            upstream_intent=None,
+            fork_intent=None,
+            confidence=0.2,
+            rationale="trivial",
+            risk_factors=None,
+        )
+        out = serialize_conflict_point(cp)
+        assert out["upstream_intent"] is None
+        assert out["fork_intent"] is None
+        assert out["risk_factors"] == []
+        assert out["severity"] == "low"
+        assert out["conflict_id"] is None
+        assert out["hunk_id"] is None
+
+
+class TestSerializeHumanRequestExtended:
+    """Phase 2 — L3 needs request_id, custom_content, reviewer_notes,
+    preview_content per option, and related_files."""
+
+    def test_extended_fields_present(self) -> None:
+        req = SimpleNamespace(
+            request_id="req-1",
+            file_path="a.py",
+            priority=2,
+            conflict_points=[],
+            context_summary="ctx",
+            upstream_change_summary="u",
+            fork_change_summary="f",
+            analyst_recommendation=SimpleNamespace(value="semantic_merge"),
+            analyst_confidence=0.7,
+            analyst_rationale="merge intents are compatible",
+            options=[
+                SimpleNamespace(
+                    option_key="opt-1",
+                    decision=SimpleNamespace(value="take_current"),
+                    description="keep fork edits",
+                    preview_content="--- a/x.py\n+++ b/x.py\n@@ ...",
+                    risk_warning=None,
+                )
+            ],
+            human_decision=None,
+            custom_content="hand-written patch",
+            reviewer_notes="not sure about retries",
+            related_files=["x.py", "y.py"],
+        )
+        out = serialize_human_request(req)
+        assert out["request_id"] == "req-1"
+        assert out["analyst_recommendation"] == "semantic_merge"
+        assert out["options"][0]["preview_content"].startswith("--- a/")
+        assert out["custom_content"] == "hand-written patch"
+        assert out["reviewer_notes"] == "not sure about retries"
+        assert out["related_files"] == ["x.py", "y.py"]
+
+    def test_missing_optional_fields_default_to_none(self) -> None:
+        req = SimpleNamespace(
+            file_path="b.py",
+            priority=1,
+            conflict_points=[],
+            context_summary="",
+            upstream_change_summary="",
+            fork_change_summary="",
+            analyst_recommendation=None,
+            analyst_confidence=None,
+            analyst_rationale="",
+            options=[],
+            human_decision=None,
+        )
+        out = serialize_human_request(req)
+        assert out["request_id"] is None
+        assert out["custom_content"] is None
+        assert out["reviewer_notes"] is None
+        assert out["related_files"] == []
+        assert out["analyst_recommendation"] is None

@@ -134,50 +134,78 @@ def serialize_plan(state: MergeState) -> dict[str, Any] | None:
     }
 
 
-def serialize_human_request(req: Any) -> dict[str, Any]:
-    rec_val = req.analyst_recommendation
-    if hasattr(rec_val, "value"):
-        rec_val = rec_val.value
+def _severity_from_confidence(confidence: float) -> str:
+    if confidence >= 0.7:
+        return "high"
+    if confidence >= 0.4:
+        return "medium"
+    return "low"
 
+
+def _serialize_change_intent(intent: Any) -> dict[str, Any] | None:
+    if intent is None:
+        return None
     return {
+        "description": getattr(intent, "description", ""),
+        "intent_type": getattr(intent, "intent_type", ""),
+        "confidence": getattr(intent, "confidence", 0.0),
+    }
+
+
+def serialize_conflict_point(cp: Any) -> dict[str, Any]:
+    """Full ConflictPoint payload for the L3 diff marker overlay.
+
+    Older snapshots (Phase 1 era) only contained ``description / severity /
+    line_range``; the L3 view needs the upstream/fork intents and risk
+    factors to drive the marker hover panel. New fields are added; legacy
+    ones are preserved so any older client that still binds to them keeps
+    working.
+    """
+    return {
+        "conflict_id": getattr(cp, "conflict_id", None),
+        "hunk_id": getattr(cp, "hunk_id", None),
+        "conflict_type": _enum_value(cp.conflict_type),
+        "description": f"{_enum_value(cp.conflict_type)}: {cp.rationale}",
+        "severity": _severity_from_confidence(cp.confidence),
+        "line_range": getattr(cp, "line_range", ""),
+        "upstream_intent": _serialize_change_intent(
+            getattr(cp, "upstream_intent", None)
+        ),
+        "fork_intent": _serialize_change_intent(getattr(cp, "fork_intent", None)),
+        "can_coexist": getattr(cp, "can_coexist", None),
+        "suggested_decision": _enum_value(getattr(cp, "suggested_decision", None)),
+        "confidence": cp.confidence,
+        "rationale": cp.rationale,
+        "risk_factors": list(getattr(cp, "risk_factors", []) or []),
+    }
+
+
+def serialize_human_request(req: Any) -> dict[str, Any]:
+    return {
+        "request_id": getattr(req, "request_id", None),
         "file_path": req.file_path,
         "priority": req.priority,
-        "conflict_points": [
-            {
-                "description": f"{cp.conflict_type.value}: {cp.rationale}",
-                "severity": (
-                    "high"
-                    if cp.confidence >= 0.7
-                    else "medium"
-                    if cp.confidence >= 0.4
-                    else "low"
-                ),
-                "line_range": getattr(cp, "line_range", ""),
-            }
-            for cp in req.conflict_points
-        ],
+        "conflict_points": [serialize_conflict_point(cp) for cp in req.conflict_points],
         "context_summary": req.context_summary,
         "upstream_change_summary": req.upstream_change_summary,
         "fork_change_summary": req.fork_change_summary,
-        "analyst_recommendation": rec_val,
+        "analyst_recommendation": _enum_value(req.analyst_recommendation),
         "analyst_confidence": req.analyst_confidence,
         "analyst_rationale": req.analyst_rationale,
         "options": [
             {
                 "option_key": o.option_key,
-                "decision": _enum_value(o.decision)
-                if hasattr(o.decision, "value")
-                else str(o.decision),
+                "decision": _enum_value(o.decision),
                 "description": o.description,
+                "preview_content": getattr(o, "preview_content", None),
                 "risk_warning": getattr(o, "risk_warning", None),
             }
             for o in req.options
         ],
-        "human_decision": (
-            req.human_decision.value
-            if req.human_decision and hasattr(req.human_decision, "value")
-            else req.human_decision
-        ),
+        "human_decision": _enum_value(req.human_decision),
+        "custom_content": getattr(req, "custom_content", None),
+        "reviewer_notes": getattr(req, "reviewer_notes", None),
+        "related_files": list(getattr(req, "related_files", []) or []),
     }
 
 

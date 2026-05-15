@@ -40,18 +40,71 @@ export interface PhaseResult {
   error: string | null;
 }
 
+// Mirror of src.models.decision.MergeDecision — ESCALATE_HUMAN is hidden
+// from L3 selectable options per plan v1.1 §4 (analyst already escalated by
+// landing the request here; users pick among the 5 actionable outcomes).
+export type MergeDecisionValue =
+  | "take_current"
+  | "take_target"
+  | "semantic_merge"
+  | "manual_patch"
+  | "escalate_human"
+  | "skip";
+
+export const SELECTABLE_DECISIONS: MergeDecisionValue[] = [
+  "take_current",
+  "take_target",
+  "semantic_merge",
+  "manual_patch",
+  "skip",
+];
+
+export interface ChangeIntent {
+  description: string;
+  intent_type: string;
+  confidence: number;
+}
+
+export interface ConflictPoint {
+  conflict_id: string | null;
+  hunk_id: string | null;
+  conflict_type: string;
+  description: string;
+  severity: "high" | "medium" | "low";
+  line_range: string;
+  upstream_intent: ChangeIntent | null;
+  fork_intent: ChangeIntent | null;
+  can_coexist: boolean | null;
+  suggested_decision: string | null;
+  confidence: number;
+  rationale: string;
+  risk_factors: string[];
+}
+
+export interface DecisionOption {
+  option_key: string;
+  decision: MergeDecisionValue;
+  description: string;
+  preview_content: string | null;
+  risk_warning: string | null;
+}
+
 export interface HumanDecisionRequest {
+  request_id: string | null;
   file_path: string;
   priority: number;
-  human_decision: string | null;
-  analyst_recommendation: string | null;
+  conflict_points: ConflictPoint[];
+  context_summary: string;
+  upstream_change_summary: string;
+  fork_change_summary: string;
+  analyst_recommendation: MergeDecisionValue | null;
   analyst_confidence: number | null;
-  options: Array<{
-    option_key: string;
-    decision: string;
-    description: string;
-    risk_warning: string | null;
-  }>;
+  analyst_rationale: string;
+  options: DecisionOption[];
+  human_decision: MergeDecisionValue | null;
+  custom_content: string | null;
+  reviewer_notes: string | null;
+  related_files: string[];
 }
 
 export interface JudgeVerdict {
