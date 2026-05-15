@@ -7,6 +7,30 @@ on:
     branches: [main]
 
 jobs:
+  web-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Web UI dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: TypeScript build
+        run: npm run build
+        working-directory: web
+
+      - name: Vitest
+        run: npm test
+        working-directory: web
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -15,6 +39,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web dist
+        run: npm ci && npm run build
+        working-directory: web
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -36,23 +71,3 @@ jobs:
 
       - name: Unit tests
         run: pytest tests/unit/ -v --cov=src --cov-report=term-missing --cov-fail-under=80
-
-  tui-typecheck:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-          cache-dependency-path: tui/package-lock.json
-
-      - name: Install TUI dependencies
-        run: npm ci
-        working-directory: tui
-
-      - name: TypeScript type check
-        run: npm run build
-        working-directory: tui
