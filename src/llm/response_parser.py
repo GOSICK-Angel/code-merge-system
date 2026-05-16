@@ -295,6 +295,7 @@ _GROUNDING_REQUIRED_LEVELS: frozenset[IssueSeverity] = frozenset(
     {IssueSeverity.CRITICAL, IssueSeverity.HIGH}
 )
 _DOWNGRADE_SUFFIX = " [downgraded: ungrounded]"
+_HALLUCINATED_SUFFIX = " [downgraded: hallucinated evidence]"
 
 
 def _apply_grounding_rule(
@@ -318,8 +319,36 @@ def _apply_grounding_rule(
     return IssueSeverity.MEDIUM, description + _DOWNGRADE_SUFFIX
 
 
+def _validate_evidence_grounded(
+    level: IssueSeverity,
+    evidence_excerpt: str | None,
+    merged_content: str | None,
+    description: str,
+) -> tuple[IssueSeverity, str]:
+    """P-γ-4 F-judge-source-of-truth: when merged_content is supplied and the
+    LLM's evidence_excerpt does not appear in it, the issue is hallucinated.
+    Downgrade CRITICAL/HIGH to MEDIUM and annotate the description so the
+    trail is visible in reports. Skipped when merged_content is None or the
+    stripped excerpt is empty (legacy grounding rule already handles those).
+    """
+    if merged_content is None:
+        return level, description
+    if level not in _GROUNDING_REQUIRED_LEVELS:
+        return level, description
+    if evidence_excerpt is None:
+        return level, description
+    stripped = evidence_excerpt.strip()
+    if not stripped:
+        return level, description
+    if stripped in merged_content:
+        return level, description
+    return IssueSeverity.MEDIUM, description + _HALLUCINATED_SUFFIX
+
+
 def parse_file_review_issues(
-    raw: str | dict[str, Any], default_file_path: str
+    raw: str | dict[str, Any],
+    default_file_path: str,
+    merged_content: str | None = None,
 ) -> list[JudgeIssue]:
     data = _extract_json(raw)
     issues: list[JudgeIssue] = []
@@ -337,6 +366,9 @@ def parse_file_review_issues(
         description = item.get("description", "")
         level, description = _apply_grounding_rule(
             level, affected_lines, evidence_excerpt, description
+        )
+        level, description = _validate_evidence_grounded(
+            level, evidence_excerpt, merged_content, description
         )
 
         issues.append(
@@ -429,8 +461,16 @@ def parse_commit_round_analyses(
 
 
 def parse_batch_file_review_issues(
-    raw: str | dict[str, Any], file_paths: list[str]
+    raw: str | dict[str, Any],
+    file_paths: list[str],
+    merged_contents: dict[str, str] | None = None,
 ) -> dict[str, list[JudgeIssue]]:
+    if merged_contents is not None and not isinstance(merged_contents, dict):
+        raise TypeError(
+            "merged_contents must be a dict[str, str] or None; "
+            f"got {type(merged_contents).__name__}"
+        )
+
     result: dict[str, list[JudgeIssue]] = {fp: [] for fp in file_paths}
     try:
         data = _extract_json(raw)
@@ -441,6 +481,9 @@ def parse_batch_file_review_issues(
         fp = file_entry.get("file_path", "")
         if fp not in result:
             continue
+        per_file_content = (
+            merged_contents.get(fp) if merged_contents is not None else None
+        )
         for item in file_entry.get("issues", []):
             level_raw = item.get("issue_level", "medium")
             try:
@@ -453,6 +496,9 @@ def parse_batch_file_review_issues(
             description = item.get("description", "")
             level, description = _apply_grounding_rule(
                 level, affected_lines, evidence_excerpt, description
+            )
+            level, description = _validate_evidence_grounded(
+                level, evidence_excerpt, per_file_content, description
             )
             result[fp].append(
                 JudgeIssue(

@@ -289,7 +289,9 @@ class JudgeAgent(BaseAgent):
 
         try:
             raw = await self._call_llm_with_retry(messages, system=JUDGE_SYSTEM)
-            llm_issues = parse_file_review_issues(str(raw), file_path)
+            llm_issues = parse_file_review_issues(
+                str(raw), file_path, merged_content=merged_content
+            )
             issues.extend(llm_issues)
         except Exception as e:
             self.logger.error(f"File review failed for {file_path}: {e}")
@@ -1411,7 +1413,10 @@ class JudgeAgent(BaseAgent):
             raw = await self._call_llm_with_retry(
                 [{"role": "user", "content": prompt}], system=JUDGE_SYSTEM
             )
-            per_file = parse_batch_file_review_issues(str(raw), file_paths)
+            merged_contents = {fp: content for fp, content, _, _ in chunk}
+            per_file = parse_batch_file_review_issues(
+                str(raw), file_paths, merged_contents=merged_contents
+            )
             for issues_list in per_file.values():
                 all_issues.extend(issues_list)
         except Exception as e:
