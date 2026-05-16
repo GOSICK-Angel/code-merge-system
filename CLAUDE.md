@@ -16,22 +16,26 @@ merge --help                     # CLI entry point
 
 # Web UI development (requires Python backend on ws://localhost:8765)
 cd web && npm install          # install Web UI dev deps (first time only)
-cd web && npm run start        # start dev server (Vite)
-cd web && npm run dev          # watch mode
-cd web && npm run build        # TypeScript check + production build → web/dist/
+cd web && npm run dev          # start Vite dev server
+cd web && npm run build        # tsc --noEmit + production build → web/dist/
+cd web && npm run lint         # tsc --noEmit only
 cd web && npm test             # vitest
 
 # One-stop flow
 merge <target-branch>            # default Web UI in browser — auto-setup on first run
 merge <target-branch> --no-web   # plain-text output (no browser)
-merge <target-branch> --no-tui   # deprecated alias of --no-web
+merge <target-branch> --no-tui   # deprecated alias of --no-web (emits warning, will be removed)
 merge <target-branch> --ci       # CI mode (no interaction, JSON summary to stdout)
 merge <target-branch> --dry-run  # analysis only, no merge
 merge <target-branch> -r         # force reconfiguration wizard
+merge <target-branch> --web-port 5173 --ws-port 8765   # override default ports
 
 # Utility subcommands
 merge resume --run-id <id>       # resume from checkpoint
 merge validate --config <path>   # validate config + env vars
+merge init [--repo-path .]       # generate per-target CLAUDE.md for merge decisions
+merge plan-suggest [--target ... --candidates ...]   # enumerate baseline commit-windows
+merge forks-profile init         # scaffold .merge/forks-profile.yaml (recommended ≥30 fork-deleted files)
 ```
 
 ## Required Environment Variables
@@ -157,6 +161,16 @@ When run inside a target project (pip-installed), all artifacts are written unde
 
 API key resolution order: shell env vars → `.merge/.env` → `~/.config/code-merge-system/.env`
 
+## Project Skills
+
+`.claude/skills/` ships project-scoped skills — invoke when the task matches:
+
+- **explain-arch** — state machine, phase sequence, agent responsibilities. Read before non-trivial changes.
+- **add-agent** — step-by-step recipe for new agents (contract yaml + gate registry + BaseAgent subclass + tests).
+- **run-integration** — set up + run `tests/integration/` (real API keys, not in CI).
+- **verify** — full validation suite (tests + mypy + ruff) before committing.
+- **control-cli** — local harness to drive/inspect/profile CLI/TUI (used for Web UI bridge debugging).
+
 ## Git Workflow
 
 Branches: `feature/<name>`, `fix/<name>`, `chore/<name>`. PRs squash-merged into `main`.
@@ -166,6 +180,8 @@ Branches: `feature/<name>`, `fix/<name>`, `chore/<name>`. PRs squash-merged into
 `asyncio_mode = "auto"` is set globally — all async test functions run without explicit `@pytest.mark.asyncio`. Unit tests use `patch_llm_factory` to mock LLM calls; integration tests (`tests/integration/`) make real API calls and require valid `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
 
 80% coverage is enforced in CI (`--cov-fail-under=80`). Run locally with `pytest tests/unit/ --cov=src --cov-report=term-missing`.
+
+Acceptance gates, correctness thresholds and dataset/procedure definitions live in `doc/evaluation/` (`metrics.md`, `acceptance.md`, `dataset.md`, `procedure.md`) — consult before changing risk-score thresholds, judge stall criteria, or any user-visible decision boundary.
 
 ## Code Style
 

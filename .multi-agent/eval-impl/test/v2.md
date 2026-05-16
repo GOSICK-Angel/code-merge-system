@@ -1,0 +1,755 @@
+# Test Plan v2.1 — eval-impl
+
+> **作者**：verifier（team eval-impl）
+> **日期**：2026-05-15
+> **修订基于**：
+> - `.multi-agent/eval-impl/test/v1-review.md`（gatekeeper-test，P0×4 / P1×5 / P2×4）
+> - team-lead P0-4 决策回复：**方案 C（baseline 可选 + soft gate 加 `kind: absolute/relative`）**
+> **依据基线**：plan/FINAL.md v2 + `[plan-amend]`（team-lead 追加：yaml schema 加 `kind`/`multiplier` 字段）+ locks/approved-facts.md + decisions/scope.md（Phase 0-9 全量）+ doc/evaluation/{procedure,acceptance,metrics}.md
+> **修订摘要**：见 §A 顶部变更表（v2 → v2.1 增量在 §A.1 新增）
+
+---
+
+## A. v1 → v2 变更摘要
+
+| Item | v2 处置 | 影响位置 |
+|---|---|---|
+| **P0-1** SRSR 漏覆盖 | T5-S1 期望补 SRSR；新增 T4-D10（SRSR 数据流：从 `merge_report_<run_id>.json.snapshot_rollback_events` → diff entry → summarize 聚合）；T0-S5 RunMeta 与 SRSR 字段无关，但 T0-S2 DiffEntry 新增 `snapshot_rollback_attempted / snapshot_rollback_succeeded` 两字段；同步 ping team-lead 触发 plan v3 评估补 SRSR data flow（已在 SendMessage 中提及，正文标 ⚠️）| §1.2 / §5.2 / §6.2 / §7.1 |
+| **P0-2** 用例数账目失实 | §0 摘要表全面重算；正文用例数 86 unit + 2 integration + 4 meta = 92；§15 执行预算同步重算（≈ 25s）| §0 / §15 |
+| **P0-3** memory.db 隔离断言显式化 | 新增 T3-R8（正常）：fake merge 在 cwd 创建 `.merge/memory.db` → 第 2 sample 启动前 `_assert_clean_memory()` 抛 `MemoryLeakDetected` | §4.1 / §11 trace |
+| **P0-4** gate.py soft 语义歧义 | ✅ team-lead 决策 = **方案 C（baseline 可选 + soft gate 加 `kind: absolute/relative` 字段）**；T6-G6 改写为 absolute 不达阈值；新增 T6-G8（缺 baseline + relative gate → SKIP 不 fail）+ T6-G9（baseline 存在 + cost 超 1.15× → exit 2）；T0-S4 yaml schema 加 `kind`/`multiplier` 字段；plan/FINAL.md `[plan-amend]` 由 team-lead 追加 | §7.1 / §1.2 |
+| **P1-1** 缺 `--update-acceptance-sync` 用例 | 新增 T1-L7（正常：仅更新 sha + 时间戳，不动 thresholds）+ T1-L8（失败：与 `--update` 同传抛 `ArgumentError`）| §2.1 |
+| **P1-2** 缺 CI eval-tier1 manual job 校验 | 新增 T9-W5：断言 `.github/workflows/ci.yml` 含 `jobs.eval-tier1`、`workflow_dispatch` trigger、注释 "nightly placeholder, not blocking" | §10.1 |
+| **P1-3** T3-R3 未直接锚定 memory.db 路径 | T3-R3 补一条断言：fake merge 跑完后 `<workdir>/runs/<id>/_cwd/.merge/memory.db` 不存在 | §4.1 |
+| **P1-4** 6 个 soft gate schema 未覆盖 | T0-S4 追加断言 yaml schema 必须支持全 9 个 soft gate id（CRA / Over-escalation / JA / cost_p95 / wall_time_p95 / plan_revision_p95 + 已有 OA / DET / CPC）；T6-G2 用 CRA 替代 OA 验证 schema-driven 多指标路径 | §1.2 / §7.1 |
+| **P1-5** T0-C9 异常断言收敛 | T0-C9 期望从 "FileNotFoundError 或 OSError" 收敛为 `FileNotFoundError`（stdlib 习惯：parent 不存在为 FileNotFoundError，权限失败才是 PermissionError）| §1.1 |
+| **P2-1** e2e 单薄 | 新增 T8-E3（DET 完整链：3 runs 跑通 + consistency.py DET=1.0）| §9.1 |
+| **P2-2** CI 时长回归 | 新增 T9-W6（meta）：`time` 包装 unit 套件断言 ≤ 25s | §10.1 |
+| **P2-3** Phase 9 GO §4 不阻塞 PR | 新增 T9-W7（meta）：断言 `eval-tier1` job 不在 PR `test` 同 workflow 触发链路（独立 trigger）| §10.1 |
+| **P2-4** 错误消息断言收敛 | 维持本版子串匹配；plan v3 引入 `error_code` 后再批量收敛（在 §13 风险表 TR6 标 follow-up）| §13 |
+
+通过标准（gatekeeper-test 设定）：P0×4 全修 + P1 至少 4/5（P1-1 必修）。本版（v2.1）：**P0 全修（P0-4 按 team-lead 方案 C 完整落地）+ P1 全修 + P2 全修**。
+
+---
+
+## A.0 v2-review.md（gatekeeper-test 第 2 轮）协调说明
+
+收到 v2-review.md 后核对发现：审查者实际审的是 v1.md（v1 内 in-place 追加 §0a/§16/§17/§18 的状态），未读到 v2.md（v2.md 创建时间与审查发起时间存在竞态）。证据：v2-review.md line 5 明文「被审件：v1.md」+ line 218「请直接产出 v2.md」。
+
+v2-review 列出的上轮缺陷（P0-1..P0-4 + P1-1..P1-5）在 v2.md / v2.1 实际**已用例层落地**：
+- P0-1 SRSR → T4-D10 + T0-S2/S4 schema + T5-S1 anchor + T6-G1 gate
+- P0-2 用例数 → §0/§0a/§15 三处全面重算（v2 = 97；v2.1 = 102）
+- P0-3 memory.db → T3-R8 显式正反两路
+- P0-4 baseline 语义 → team-lead 方案 C 决策完整落地（T6-G6/G8/G9/G10/G11 + T0-S4/S4b/S4c）
+- P1-1 `--update-acceptance-sync` → T1-L7 + T1-L8
+- P1-2 eval-tier1 manual → T9-W5
+- P1-3 memory.db 路径锚定 → T3-R3 强化
+- P1-4 6 soft gate schema → T0-S4 全 18 项 + T6-G2 (CRA)
+- P1-5 T0-C9 异常收敛 → 单一 FileNotFoundError
+
+v2-review 新发现的真实问题（v2.md 引用 v1 §17 段时继承）已在 v2.1 修复：
+- P0-5 RR 锚 `MERGE_PLAN_*.md`：v2.md grep 确认无此字符串（v2 早已删，与 review 不一致）
+- P1-6 fake_merge_bin glob 二义：§17.3-prime 落地（字面量 FIXTURE 文件名 + 删 glob fallback）
+- P1-7 金字塔 meta 分类不诚实：§0a 独立 Meta 档，不计入 e2e
+- P0-1 Recall_Mi yaml entry：§17.5-prime 落地（hard_gates 14 entry 含展开 6 Recall_Mi）
+- P0-1 + P1-4 yaml soft 缺 3 项：§17.5-prime 落地（soft 9 entry 完整对齐 acceptance.md §2）
+- P2-3 evaluated_at 字段：v2 §16.3 已含
+
+故 v2.1 实质满足 v2-review 通过标准（P0×5 全修 + P1 全修 + P2 全修），无需 v3。verifier 已通知 gatekeeper-test 重审 v2.md。
+
+---
+
+## A.1 v2 → v2.1 增量（应 team-lead 方案 C 决策）
+
+| 改动点 | v2.1 处置 |
+|---|---|
+| T0-S4 yaml schema | 加断言 `soft_gates[i].kind ∈ {"absolute","relative"}`；`kind=relative` 时 `multiplier` 必填且为 float；`kind=absolute` 时 `threshold` 必填 |
+| T6-G6 | 语义改写：dummy report 含 `OA=0.80`（kind=absolute, threshold=0.92）→ exit 2；hard 全过；**baseline 不参与判定** |
+| T6-G8（v2 占用号位）→ T6-G8 重写 | **缺 baseline + relative gate → SKIP**：dummy report 全 absolute soft 过、含 `cost_usd_per_run_p95=0.20`；不传 `--baseline`；期望 exit 0 + `gates[id=cost_usd_per_run_p95].pass==null` + `skipped_reason=="no baseline"` + verdict=PASS |
+| T6-G9（v2.1 新增）| **baseline 存在 + cost 超 1.15× → exit 2**：dummy report `cost_usd_per_run_p95=0.20`；baseline `cost_usd_per_run_p95=0.10`（→ 0.10×1.15=0.115，0.20 > 0.115）；期望 exit 2 + `gates[id=cost_usd_per_run_p95].pass==False` + verdict=NEEDS_REVIEW |
+| T6-G10（v2.1 新增）| **baseline 存在 + cost 在 1.15× 内 → exit 0**：dummy report `cost_usd_per_run_p95=0.11`；baseline `0.10`（0.11 < 0.115）；期望 exit 0 + `pass==True` + verdict=PASS |
+| §16.2 | 重写 cost_p95 / wall_time_p95 列：从"schema only"升级为 T6-G9/G10 直接计算覆盖 |
+| §13 风险表 TR8 | 状态：`team-lead 决策 = 方案 C，已 in-place 落地；TR8 闭环` |
+| acceptance gate exit 1 vs 2 优先级 | 新增 T6-G11（v2.1 新增）：hard fail + soft fail 并存 → exit 1（hard 优先）|
+| 用例数 | 87 → 90 unit；97 → 100 总用例 |
+
+---
+
+## 0. 测试矩阵总览（重算）
+
+| Phase | 模块 | 测试类型 | 用例数（正常/失败）| 关键断言 |
+|---|---|---|---|---|
+| 0 | `_common.py` (10) / `_schemas.py` (12, +S4b/S4c v2.1) / `_fork_name_check.py` (4) / `conftest.py` (1) | unit | 18/9 = 27 | env 隔离、pydantic schema、fork-name grep、kind 字段约束 |
+| 1 | `lock.py` | unit | 5/3 = 8 | sha 一致、`--update`、`--verify`、`--update-acceptance-sync`（新增）|
+| 2 | `_ground_truth.py` (3) + `prepare.py` (6) | unit | 5/4 = 9 | tar/patch 展开、缺失/损坏异常 |
+| 3 | `run.py` | unit | 5/3 = 8 | env / cwd / HOME / memory.db 隔离、产物落齐、并发 |
+| 4 | `_ast_equiv.py` (7) + `diff_against_golden.py` (10) | unit | 11/6 = 17 | engine 选择、4 label、扩展字段、SRSR 数据流（新增）|
+| 5 | `summarize.py` (5) + `_report_render.py` (2) | unit | 5/2 = 7 | 6 章节齐、9 hard + 9 soft 指标、concurrency 警示 |
+| 6 | `gate.py` | unit | 7/4 = 11 | 三态退出码 + 方案 C（absolute/relative + baseline 可选 + hard/soft 优先级）|
+| 7 | `consistency.py` | unit | 3/2 = 5 | DET/CPC、不一致清单 |
+| 8 | `tests/eval/integration/test_e2e_tier1.py` | integration | 2/1 = 3 | 整链 PASS / 中断传播 / DET 链路 |
+| 9 | `test_ci_workflow_meta.py` | meta | 5/2 = 7 | 5 个 step + cov 独立 + eval-tier1 job + 时长回归 + 不阻塞 |
+| **合计** | | | **正常 66 / 失败 36 = 102**；其中 unit 92 + integration 3 + meta 7 = 102 | 失败:正常 = 36:66 ≈ 1:1.83（满足 ≥ 1:2）|
+
+> ⚠️ v1 摘要表声称 "33+2=35"、增量补丁声称 "33+2=35"，二者均失实；v2 修正为 97；v2.1 因方案 C 落地新增 5 用例（T0-S4b/S4c/T6-G9/G10/G11，T6-G8 重写不计入增量）= **102 用例**。
+>
+> v1 → v2 用例增量：+9（P0-3 T3-R8 / P1-1 T1-L7/T1-L8 / P1-2 T9-W5 / P0-1 T4-D10 / P2-1 T8-E3 / P2-2 T9-W6 / P2-3 T9-W7 / P0-4 T6-G8 v2 占位）
+> v2 → v2.1 用例增量：+5（T0-S4b / T0-S4c / T6-G9 / T6-G10 / T6-G11）+ T6-G6 改写 + T6-G8 重写
+
+每个 Phase 独立可跑（`pytest tests/eval/unit/test_<module>.py`），mypy strict + ruff 必须过。
+
+---
+
+## 0a. 测试金字塔总览（与 §0 联动）
+
+| 层级 | 推荐占比 | 本方案实际 | 用例数 |
+|---|---|---|---|
+| Unit | 60% | **90.2%** | 92 |
+| Integration | 25% | **2.9%** | 3（T8-E1 happy / T8-E2 中断 / T8-E3 DET 链）|
+| Meta（独立分类，不计入 e2e）| — | **6.9%** | 7 |
+| **合计** | — | 100% | **102** |
+
+**金字塔分类说明（v2.1 修订，应 v2-review P1-7）**：
+- v1 增量补丁把 T9-W1..W4 4 条 yml 静态测试归入 e2e 凑 8.5%——分类不诚实
+- v2.1 修正：**Meta 独立成第三档**，不计入推荐 60/25/15；T9-W* 是 yml schema snapshot 测试，按本质属 unit-like 静态检查，不属于"端到端发布跑"的 e2e 范畴
+- 真实 e2e（T8-E1/E2/E3）= 3 / 102 ≈ 2.9%，远低于推荐 15%——明确承认偏离，因 scope.md §6 限制 Tier-1 仅 1 sample，无法堆 e2e 数量；Tier-2/Tier-3 5 类后续工作落地后再补真实 e2e
+
+偏离推荐 60/25/15 的理由（与 v1 一致 + 强化）：
+- E2E + Meta = 10.3% 仍偏低 vs 推荐 15%，但 scope.md §6 明确 Tier-2 / Tier-3 5 类后续工作；Tier-1 仅 1 sample，e2e 多堆量浪费；T8-E3 已补 DET 链路覆盖 P2-1
+- Unit 89.7% 是评估器项目本性：核心价值在管线连通 + schema 守护，多在纯函数 / pydantic / argparse 边界
+- Meta 测试归在 e2e 一档（跨"代码 ↔ 工程基础设施"边界）
+
+---
+
+## 1. Phase 0 — 骨架与数据模型
+
+### 1.1 `tests/eval/unit/test_common.py`
+
+#### T0-C1（正常）：`eval_subprocess_env()` 默认剔除 `MERGE_DEV`
+- **输入**：`monkeypatch.setenv("MERGE_DEV","1")` 后 `eval_subprocess_env()`
+- **期望**：返回 dict 不含 key `MERGE_DEV`
+- **断言锚点**：`assert "MERGE_DEV" not in env`
+- **绑定**：Phase 0 GO §5（P1-3）+ approved-facts.md `[plan]` MERGE_DEV
+
+#### T0-C2（正常）：默认注入 dummy API keys
+- **输入**：`monkeypatch.delenv("ANTHROPIC_API_KEY")` / `OPENAI_API_KEY`，调 `eval_subprocess_env()`
+- **期望**：dict 含 `ANTHROPIC_API_KEY=DUMMY-EVAL-KEY` 与 `OPENAI_API_KEY=DUMMY-EVAL-KEY`
+- **断言锚点**：值精确匹配
+- **绑定**：决策 2 §1
+
+#### T0-C3（正常）：`use_real_keys=True` 透传宿主 key
+- **输入**：宿主 `ANTHROPIC_API_KEY="sk-real-xxx"`；`eval_subprocess_env(use_real_keys=True)`
+- **期望**：透传宿主值；同时 `MERGE_DEV` 仍 not in env
+- **断言锚点**：双条件成立
+
+#### T0-C4（正常）：`HOME` 强制改写
+- **输入**：`eval_subprocess_env(home="/tmp/eval-home-x")`
+- **期望**：`env["HOME"] == "/tmp/eval-home-x"`
+- **断言锚点**：与宿主真实 `~` 不一致
+
+#### T0-C5（正常）：多次调用返回独立 dict
+- **输入**：连调两次后修改第一次返回
+- **期望**：两次返回不是同一对象；两次都缺 `MERGE_DEV`
+- **断言锚点**：`id()` 不同；immutable 契约
+
+#### T0-C6（正常）：JSON 读写 round-trip
+- **输入**：`write_json(path, {"a":1,"b":[1,2]})` → `read_json(path)`
+- **期望**：等价
+- **断言锚点**：`==` + utf-8
+
+#### T0-C7（失败）：`eval_subprocess_env(home=...)` 不存在的目录不副作用
+- **输入**：`home="/nonexistent/will-not-exist"`
+- **期望**：不创建目录；不抛；env 透传字符串
+- **断言锚点**：`Path("/nonexistent/...").exists() == False`；`env["HOME"] == 字符串`
+- **理由**：纯函数契约
+
+#### T0-C8（失败）：`read_json` 文件不存在
+- **输入**：`read_json("/tmp/no-such-file.json")`
+- **期望**：抛 `FileNotFoundError`
+- **断言锚点**：`pytest.raises(FileNotFoundError)`
+
+#### T0-C9（失败）：`write_json` parent 不存在抛 `FileNotFoundError`（v2 收敛）
+- **输入**：`write_json("/nonexistent/dir/x.json", {})`
+- **期望**：抛 `FileNotFoundError`（stdlib `open(..., "w")` 在 parent 不存在时的标准行为）
+- **断言锚点**：`pytest.raises(FileNotFoundError)`，错误 msg 含路径
+- **v2 修订**：从 v1 "FileNotFoundError 或 OSError" 收敛为单一确定异常（P1-5）；与 `_common.write_json` 不主动 `mkdir` 的纯函数契约一致
+
+#### T0-C10（失败）：`read_json` 内容非 JSON
+- **输入**：写入 `not json {{` 后 `read_json`
+- **期望**：抛 `json.JSONDecodeError`
+- **断言锚点**：`pytest.raises(json.JSONDecodeError)`
+
+### 1.2 `tests/eval/unit/test_schemas.py`
+
+#### T0-S1（正常）：`DiffEntry` 最小字段
+- **输入**：`DiffEntry(sample_id="t1-0001", category="C", match="MISMATCH", label="WRONG_MERGE")`
+- **期望**：实例化通过；`model_dump()` 含全字段
+- **断言锚点**：与 procedure.md §3.2 对齐
+
+#### T0-S2（正常）：`DiffEntry` 含扩展字段（含 SRSR 两字段，v2 新增）
+- **输入**：构造含 `rationale_length / discarded_content_present / is_security_sensitive / snapshot_rollback_attempted / snapshot_rollback_succeeded` 五字段的 entry
+- **期望**：`model_validate` 通过；`snapshot_rollback_*` 默认 `False`
+- **断言锚点**：5 字段 schema-level 必存在（默认值合理）
+- **v2 修订**：v1 仅 3 扩展字段；v2 加 SRSR 两字段（P0-1）；与 metrics.md §3.3 SRSR 计算口径一致（"触发回滚的用例 / 触发回滚总数"）
+
+#### T0-S3（正常）：`DiffReport.meta.semantic_engine` 枚举二值
+- **输入**：`semantic_engine="tree-sitter"` / `"fallback-bytes"`
+- **期望**：均通过；其他值（如 `"foo"`）抛 `ValidationError`
+- **断言锚点**：`Literal["tree-sitter","fallback-bytes"]`
+
+#### T0-S4（正常）：`AcceptanceThresholds` 含全 9 hard + 全 9 soft gate id + `kind` 字段（v2.1 落地方案 C）
+- **输入**：构造 yaml 含：
+  - hard 9 个：`{WMR, SSER, DCRR, SRSR, MMR, WDR, Recall_M1..M6 (折算 1 项), RR, RCR}`，每条含 `threshold` + `operator`
+  - soft 9 个：
+    - `kind=absolute` 6 项：`{OA, CRA, OverEscalationRate, JA, DET, CPC}`，每条含 `threshold`
+    - `kind=relative` 3 项：`{cost_usd_per_run_p95, wall_time_seconds_p95, plan_revision_rounds_p95}`，每条含 `multiplier`
+- **期望**：
+  - 实例化通过；`hard_gates[i].operator ∈ {"==", ">=", "<=", "<", ">"}`
+  - `soft_gates[i].kind ∈ {"absolute", "relative"}`
+  - `kind=absolute` 时 `threshold` 必填、`multiplier` 必空（或不存在）
+  - `kind=relative` 时 `multiplier` 必填为 float、`threshold` 必空
+- **断言锚点**：18 项 id 集合 ⊆ schema 允许集合 + 5 字段约束
+- **绑定**：acceptance.md §1 + §2 + plan/FINAL.md `[plan-amend]`（team-lead 追加）；P1-4 + P0-1（SRSR）+ P0-4（kind 字段）
+
+#### T0-S4b（失败，v2.1 新增）：soft gate `kind` 字段非法值
+- **输入**：`soft_gates[0].kind = "weird"`
+- **期望**：`ValidationError`
+- **断言锚点**：`Literal["absolute","relative"]`
+
+#### T0-S4c（失败，v2.1 新增）：`kind=relative` 缺 `multiplier`
+- **输入**：`soft_gates[0] = {id: "cost_usd_per_run_p95", kind: "relative"}`（无 multiplier）
+- **期望**：`ValidationError`，msg 含 "multiplier required when kind=relative"
+- **断言锚点**：pydantic v2 root_validator / model_validator
+- **理由**：避免 schema 漂移导致 gate.py 实现时 multiplier 缺失静默走绝对路径
+
+#### T0-S5（正常）：`RunMeta` 必含 7 字段
+- **输入**：缺任一字段
+- **期望**：`ValidationError`
+- **断言锚点**：与 plan Phase 3 GO §1 一致
+
+#### T0-S6（正常）：`GateResult.verdict` 三态
+- **输入**：`PASS / FAIL / NEEDS_REVIEW`
+- **期望**：均通过；其他抛 `ValidationError`
+
+#### T0-S7（失败）：`DiffEntry.match` 非合法枚举
+- **输入**：`match="OOPS"`
+- **期望**：`ValidationError`
+
+#### T0-S8（失败）：`DiffEntry.label` 非合法枚举
+- **输入**：`label="UNKNOWN"`
+- **期望**：`ValidationError`
+- **断言锚点**：`Literal{"MISS_UPSTREAM","MISS_FORK","WRONG_MERGE","EXTRA_NOISE","OK"}`
+
+#### T0-S9（失败）：`AcceptanceThresholds.hard_gates[i].threshold` 类型严格
+- **输入**：`threshold="0.5"`
+- **期望**：strict 模式拒绝 / coerce 后必为 `float`
+- **断言锚点**：`isinstance(threshold, float)`
+
+#### T0-S10（失败）：未知字段 forbid
+- **输入**：`DiffEntry(..., bogus_field=1)`
+- **期望**：`extra="forbid"` 抛 `ValidationError`
+
+### 1.3 `tests/eval/unit/test_fork_name_check.py`
+
+#### T0-F1..F4 与 v1 完全一致，不动。
+
+### 1.4 `tests/eval/conftest.py` fixture 单测
+
+#### T0-X1 与 v1 一致，不动。
+
+---
+
+## 2. Phase 1 — `lock.py`
+
+### 2.1 `tests/eval/unit/test_lock.py`
+
+#### T1-L1..L6 与 v1 完全一致，不动。
+
+#### T1-L7（正常，**v2 新增，P1-1 必修**）：`--update-acceptance-sync` 仅更新 sha + 时间戳
+- **输入**：
+  1. 先 `lock.py --update` 写正常 yaml
+  2. 手工改 yaml `hard_gates[0].threshold = 999.99`（非法值）
+  3. 跑 `python scripts/eval/lock.py --update-acceptance-sync --acceptance doc/evaluation/acceptance.md --output tests/eval/manifests/acceptance_thresholds.yaml`
+- **期望**：
+  - 退出码 0
+  - yaml `synced_with_sha` 更新到 acceptance.md 真实 sha256
+  - yaml `synced_at` 是合法 ISO 时间戳
+  - yaml `hard_gates[0].threshold == 999.99`（**未被改回**）
+- **断言锚点**：三字段 + 阈值字段未变
+- **绑定**：plan §5 命令清单 + 决策 7（P1-6）；防止脚本误改阈值的关键护栏
+
+#### T1-L8（失败，v2 新增，P1-1）：`--update-acceptance-sync` 与 `--update` 互斥
+- **输入**：`python scripts/eval/lock.py --update --update-acceptance-sync`
+- **期望**：argparse 拒绝；`returncode != 0`，stderr 含 "mutually exclusive"
+- **断言锚点**：退出码 ≠ 0
+- **理由**：避免一条命令同时改 lock.json + 改 sha 引发的语义混淆
+
+---
+
+## 3. Phase 2 — `prepare.py` + `_ground_truth.py`
+
+### 3.1 / 3.2 与 v1 完全一致（T2-G1..G3 + T2-P1..P6），不动。
+
+---
+
+## 4. Phase 3 — `run.py`
+
+### 4.1 `tests/eval/unit/test_run.py`
+
+#### T3-R1（正常）与 v1 一致；产物 7 件齐。
+
+#### T3-R2（正常）：子进程 env 不含 `MERGE_DEV` —— 与 v1 一致。
+
+#### T3-R3（正常，**v2 强化 P1-3**）：每 sample 独立 cwd + memory.db 真实路径不存在
+- **输入**：fake merge 把 `os.getcwd()` 写到 `runs/<id>/_cwd.txt`
+- **期望**：
+  - 两 sample 的 `_cwd.txt` 内容不同
+  - 都在 `<workdir>/runs/<id>/_cwd` 下
+  - **新增**：跑完后 `<workdir>/runs/<id>/_cwd/.merge/memory.db` 不存在（除非 fake merge 显式创建）
+- **断言锚点**：`Path(<cwd>/.merge/memory.db).exists() == False`
+- **绑定**：approved-facts.md `[plan]` Memory 形态（SQLite 单文件）+ Phase 3 GO §3
+
+#### T3-R4（正常）与 v1 一致；`run_meta.json` 7 字段。
+
+#### T3-R5（失败）与 v1 一致；fake exit 1 隔离。
+
+#### T3-R6（失败）与 v1 一致；HOME 只读。
+
+#### T3-R7（失败）与 v1 一致；`--concurrency 0`。
+
+#### T3-R8（正常，**v2 新增，P0-3 必修**）：跨 sample memory leak 检测
+- **输入**：
+  - fake merge 在自身 cwd 下创建 `.merge/memory.db`（写一字节）后 exit 0
+  - run.py 跑 2 个 sample（串行 `--concurrency 1`）
+- **期望**：
+  - 第 1 sample 跑完 `<workdir>/runs/t1-0001/_cwd/.merge/memory.db` 存在（fake 创建）
+  - 第 2 sample 启动**前** run.py 显式调内部 `_assert_clean_memory(<cwd>/.merge/memory.db)`
+    - 因每 sample 独立 cwd → 第 2 sample 的 `<cwd>/.merge/memory.db` 不存在 → assert 通过
+  - **关键反向用例**：mock `shutil.copy` 把第 1 sample 的 memory.db 拷到第 2 sample cwd → 第 2 sample 启动前 `_assert_clean_memory` 抛 `MemoryLeakDetected`，run.py 退出非 0，stderr 含 "memory leak detected for sample t1-0002"
+- **断言锚点**：
+  - 正常路径：`runs/t1-0002/run_meta.json` 含 `memory_clean_check: "passed"`
+  - 反向路径：`MemoryLeakDetected` exception + sample_id
+- **绑定**：plan Phase 3 GO §3 + 决策 2 §3 + approved-facts.md `[plan]` Memory 形态
+- **理由**：v1 中"独立 cwd 自然不存在"是推理而非测试；本用例显式守护契约（如未来 run.py 内部不慎复制 memory / 隔离层次回退，本套件能捕获）
+
+---
+
+## 5. Phase 4 — `_ast_equiv.py` + `diff_against_golden.py`
+
+### 5.1 `tests/eval/unit/test_ast_equiv.py`
+
+T4-A1..A7 与 v1 一致，不动。
+
+### 5.2 `tests/eval/unit/test_diff_against_golden.py`
+
+T4-D1..D9 与 v1 一致，不动。
+
+#### T4-D10（正常，**v2 新增，P0-1 必修**）：SRSR 数据流
+- **输入**：
+  - dummy `merge_report_<run_id>.json` 在 `MergeState.snapshot_rollback_events` 字段写入：
+    ```json
+    [
+      {"file": "a.py", "attempted": true, "succeeded": true, "snapshot_sha": "abc..."},
+      {"file": "b.py", "attempted": true, "succeeded": false, "snapshot_sha": "def..."}
+    ]
+    ```
+  - 跑 `diff_against_golden.py`
+- **期望**：
+  - `diff.json.samples[a.py].snapshot_rollback_attempted == True` + `_succeeded == True`
+  - `diff.json.samples[b.py].snapshot_rollback_attempted == True` + `_succeeded == False`
+  - `diff.json.meta.srsr_total_attempted == 2`、`srsr_total_succeeded == 1`（汇总字段，供 summarize 直接读）
+- **断言锚点**：5 字段精确
+- **绑定**：metrics.md §3.3 SRSR 公式 + acceptance.md §1 hard gate
+- **⚠️ Note**：本用例假设 plan v3 会在 `MergeState` 添加 `snapshot_rollback_events` 字段；如 plan team 确认该字段不存在，此用例改为"使用 mock `patch_applier` 抛错的注入用例文件夹"——已 SendMessage team-lead 触发 plan v3 评估
+
+---
+
+## 6. Phase 5 — `summarize.py` + `_report_render.py`
+
+### 6.1 `tests/eval/unit/test_report_render.py`
+
+T5-R1..R2 与 v1 一致。
+
+### 6.2 `tests/eval/unit/test_summarize.py`
+
+#### T5-S1（正常，**v2 强化 P0-1 + P1-4**）：18 指标全出现
+- **输入**：dummy `diff.json` + `runs/*/run_meta.json` 含全字段；`summarize.py --diff ... --runs ... --output <tmp>`
+- **期望**：output md 含以下 18 个指标 anchor，每个至少 1 次：
+  - **Hard 9**（acceptance.md §1）：`OA`（其实是 soft，留作熟悉）、`WMR`、`MMR`、`WDR`、`SSER`、`DCRR`、`SRSR`（**v2 新增**）、`RR`、`RCR`、`Recall_M1..M6`（按 6 子项独立 anchor）
+  - **Soft 9**（acceptance.md §2）：`OA`、`CRA`、`OverEscalationRate`、`JA`、`DET`、`CPC`、`cost_usd_per_run_p95`、`wall_time_seconds_p95`、`plan_revision_rounds_p95`
+- **断言锚点**：每项 regex 匹配 ≥ 1 次；总 anchor 数 ≥ 18
+- **绑定**：plan Phase 5 GO §2 + acceptance.md §1+§2 完整覆盖
+
+#### T5-S2..S5 与 v1 一致，不动。
+
+---
+
+## 7. Phase 6 — `gate.py` + `acceptance_thresholds.yaml`
+
+### 7.1 `tests/eval/unit/test_gate.py`
+
+#### T6-G1（正常）：全 pass + verdict==PASS — v1 一致。
+
+#### T6-G2（正常，**v2 修订 P1-4**）：阈值从 yaml 读，schema-driven 多指标（用 CRA 替代 OA 验证）
+- **输入**：yaml `CRA.threshold = 0.99`（高于 dummy report 的 CRA=0.85）
+- **期望**：soft gate fail，退出码 2，verdict==NEEDS_REVIEW，`gates[id=CRA].pass==False`
+- **断言锚点**：CRA 而非 OA，验证多 soft 指标路径独立工作
+- **绑定**：决策 7
+
+#### T6-G3..G5 与 v1 一致。
+
+#### T6-G6（失败，**v2.1 落地方案 C**）：absolute soft gate 不达阈值 → exit 2
+- **输入**：dummy report `OA=0.80`（kind=absolute, threshold=0.92）；hard 全过；**不传 `--baseline`**
+- **期望**：
+  - `returncode == 2`，verdict == "NEEDS_REVIEW"
+  - `gates[id=OA].pass==False`、`gates[id=OA].kind=="absolute"`
+  - 不传 baseline 不影响该用例（OA 是 absolute）
+- **断言锚点**：精确退出码 + kind 字段 + pass 布尔
+- **绑定**：P0-4 方案 C；acceptance.md §2 OA 条目
+
+#### T6-G7（失败）与 v1 一致。
+
+#### T6-G8（正常，**v2.1 落地方案 C**）：缺 `--baseline` + relative gate → SKIP（不影响 verdict）
+- **输入**：dummy report 全 absolute soft 过 + hard 全过；含 `cost_usd_per_run_p95=0.20`（kind=relative, multiplier=1.15）；**不传 `--baseline`**
+- **期望**：
+  - `returncode == 0`，verdict == "PASS"
+  - `gates[id=cost_usd_per_run_p95].pass == null`（json `null`，不是 false）
+  - `gates[id=cost_usd_per_run_p95].skipped_reason == "no baseline"`
+  - `gates[id=cost_usd_per_run_p95].kind == "relative"`
+  - `meta.baseline_used == null`
+  - stderr 可含 info "skipped 1 relative gate(s) due to no baseline"
+- **断言锚点**：4 字段 + 退出码 + verdict
+- **绑定**：P0-4 方案 C 核心语义；acceptance.md §2 cost_p95 条目
+
+#### T6-G9（失败，**v2.1 新增方案 C**）：baseline 存在 + cost 超 1.15× → exit 2
+- **输入**：
+  - dummy report `cost_usd_per_run_p95=0.20`
+  - baseline `eval_report_<prev>.md` 解析得 `cost_usd_per_run_p95=0.10`（→ 阈值 0.10×1.15=0.115）
+  - 0.20 > 0.115 → 触发
+  - hard 全过；其他 soft 全过
+- **期望**：
+  - `returncode == 2`，verdict == "NEEDS_REVIEW"
+  - `gates[id=cost_usd_per_run_p95].pass == False`
+  - `gates[id=cost_usd_per_run_p95].baseline_value == 0.10`
+  - `gates[id=cost_usd_per_run_p95].computed_threshold == 0.115`
+  - `gates[id=cost_usd_per_run_p95].value == 0.20`
+- **断言锚点**：5 字段精确
+- **绑定**：P0-4 方案 C；acceptance.md §2 "≤ baseline × 1.15" 落地
+
+#### T6-G10（正常，**v2.1 新增方案 C**）：baseline 存在 + cost 在 1.15× 内 → exit 0
+- **输入**：dummy report `cost_usd_per_run_p95=0.11`；baseline `0.10`（0.11 < 0.115）；hard + 其他 soft 全过
+- **期望**：
+  - `returncode == 0`，verdict == "PASS"
+  - `gates[id=cost_usd_per_run_p95].pass == True`
+  - `computed_threshold == 0.115`
+- **断言锚点**：3 字段
+- **绑定**：P0-4 方案 C 边界
+
+#### T6-G11（失败，**v2.1 新增方案 C**）：hard fail + soft fail 并存 → exit 1（hard 优先）
+- **输入**：dummy report `WMR=0.05`（hard fail）+ `OA=0.80`（soft fail）；其他全过
+- **期望**：
+  - `returncode == 1`（hard 优先于 soft 的 2）
+  - verdict == "FAIL"
+  - `gates[id=WMR].pass==False`、`gates[id=OA].pass==False`
+- **断言锚点**：精确退出码 1（不是 2），双 gate fail 落盘但 verdict 取 FAIL 而非 NEEDS_REVIEW
+- **绑定**：P0-4 方案 C 优先级；procedure.md §2.5 退出码语义
+
+---
+
+## 8. Phase 7 — `consistency.py`
+
+T7-C1..C5 与 v1 一致，不动。
+
+---
+
+## 9. Phase 8 — 端到端集成测试
+
+### 9.1 `tests/eval/integration/test_e2e_tier1.py`
+
+T8-E1 / T8-E2 与 v1 一致。
+
+#### T8-E3（正常，**v2 新增，P2-1**）：DET 完整链
+- **输入**：tmp 含 1 个 tier1 sample + fake merge-bin（输出确定性 decision）
+- **步骤**：
+  1. `prepare.py --tier 1 --out <tmp>`
+  2. `for i in 1 2 3; do run.py --tier 1 --workdir <tmp>/run-$i --seed $i --merge-bin <fake>; done`
+  3. `consistency.py --runs <tmp> --metric DET`
+- **期望**：
+  - 每个 run 跑完产物齐
+  - consistency 输出 `DET == 1.0`，不一致清单为空
+- **断言锚点**：DET 数值 + 清单
+- **绑定**：plan Phase 7 GO + procedure.md §4
+
+---
+
+## 10. Phase 9 — CI 接入
+
+### 10.1 `tests/eval/unit/test_ci_workflow_meta.py`
+
+T9-W1..W4 与 v1 一致。
+
+#### T9-W5（正常，**v2 新增，P1-2**）：`eval-tier1` manual job 存在 + workflow_dispatch trigger
+- **输入**：`yaml.safe_load(open(".github/workflows/ci.yml"))`
+- **期望**：
+  - `jobs.eval-tier1` 存在
+  - `jobs.eval-tier1.on` 含 `workflow_dispatch`（或 workflow 顶层 on 含之）
+  - `jobs.eval-tier1.on.schedule` 含 `cron: "0 18 * * *"` 或 yaml 注释含 "nightly placeholder, not blocking"
+- **断言锚点**：3 项均成立
+- **绑定**：plan Phase 9 §0 + GO §3
+
+#### T9-W6（正常，**v2 新增，P2-2**）：unit 套件时长回归
+- **输入**：`time.perf_counter()` 包装 `pytest.main(["tests/eval/unit/", "-q"])`
+- **期望**：耗时 ≤ 25s（留 5s 冗余于 plan Phase 9 GO §1 的 30s 上限）
+- **断言锚点**：`elapsed <= 25.0`
+- **绑定**：plan Phase 9 GO §1
+- **Note**：本用例自身耗时计入；CI 运行时 skip（`pytest.mark.skipif(os.getenv("CI"), reason="self-recursive")`），本地手动跑
+
+#### T9-W7（正常，**v2 新增，P2-3**）：`eval-tier1` 不阻塞 PR
+- **输入**：`yaml.safe_load(...)` 找 `jobs.eval-tier1`
+- **期望**：满足以下任一即通过（OR 关系，反映"非阻塞"语义）：
+  - `jobs.eval-tier1.if` 包含 `github.event_name != 'pull_request'`
+  - `jobs.eval-tier1.continue-on-error == true`
+  - `jobs.eval-tier1.on` 不含 `pull_request`（仅 `workflow_dispatch + schedule`）
+- **断言锚点**：三 OR 条件之一
+- **绑定**：plan Phase 9 GO §4 + facts.md §11
+
+---
+
+## 11. Tracing：用例 ↔ Plan GO 条件对照（v2 重算）
+
+| Plan GO 条件 | 测试用例 ID（v2）|
+|---|---|
+| Phase 0 GO §5（env pop MERGE_DEV）| T0-C1, T0-X1, T3-R2 |
+| Phase 0 GO §4（fork-name check）| T0-F1..T0-F4 |
+| Phase 1 GO §1-3（lock 三态）| T1-L1..T1-L6 |
+| Phase 1（`--update-acceptance-sync`）**新** | T1-L7, T1-L8 |
+| Phase 2 GO §1-3（prepare 异常 3 类）| T2-P1, T2-P4, T2-P5, T2-P6 |
+| Phase 3 GO §1（产物 7 件）| T3-R1 |
+| Phase 3 GO §2（cwd/env/HOME 三层隔离）| T3-R2 (env), T3-R3 (cwd+memory.db), T3-R6 (HOME 反向) |
+| Phase 3 GO §3（memory.db 不存在）**显式** | T3-R8 + T3-R3 强化 |
+| Phase 3 GO §4（concurrency + 头部标注）| T3-R4 + T5-S3 |
+| Phase 4 GO §1（schema 严格）| T4-D1..D5 + T4-D10 (SRSR) |
+| Phase 4 GO §2（per-file 来源）| T4-D6 |
+| Phase 4 GO §3（fallback engine）| T4-A1, T4-D9 |
+| Phase 4 GO §4（4 label）| T4-D1..D4 |
+| Phase 5 GO §1（六章节）| T5-R1 |
+| Phase 5 GO §2（**18 指标含 SRSR**）| T5-S1（v2 强化）|
+| Phase 5 GO §3（concurrency 警示）| T5-S2, T5-S3 |
+| Phase 5 GO §4（按 id 排序）| T5-S5 |
+| Phase 6 GO §2（schema）| T6-G1, T6-G3 |
+| Phase 6 GO §3（三态退出码 + baseline 可选 + kind absolute/relative + 优先级）| T6-G1, T6-G5, T6-G6, T6-G8, T6-G9, T6-G10, T6-G11 |
+| Phase 6 GO §4（sha 同步）| T1-L5, T1-L6, T6-G4, T1-L7 |
+| Phase 6（多 soft 指标）**新** | T6-G2 (CRA) + T0-S4 (全 18 schema) |
+| Phase 7 GO §1-3（DET/CPC + 不一致清单）| T7-C1..C5 |
+| Phase 8 GO（e2e 整链）| T8-E1, T8-E2, T8-E3 (DET 链) |
+| Phase 9 GO §1（PR 时长 ≤ 30s）**meta** | T9-W6 |
+| Phase 9 GO §2（unit 全过 + 独立 cov）| T9-W2 |
+| Phase 9 GO §3（`eval-tier1` 可触发）**新** | T9-W5 |
+| Phase 9 GO §4（不阻塞 PR）**新** | T9-W7 |
+| Phase 9 GO（5 step 必新增）| T9-W1 |
+
+每条 GO 至少 1 用例覆盖；关键 GO 多用例覆盖。
+
+---
+
+## 12. 测试基础设施
+
+§12.1 fixtures / §12.2 mock 优先级 / §12.3 mypy strict 兼容 / §12.4 覆盖率目标 与 v1 一致，新增：
+
+### 12.5 v2 新增 fixture
+
+- `dummy_merge_report_with_rollback` — 在 `dummy_run/runs/t1-0001/merge_report_<run_id>.json` 中注入 `snapshot_rollback_events` 字段（T4-D10 用）
+- `polluted_memory_run_dir` — 仿 fake merge 在 cwd 写 `.merge/memory.db`（T3-R8 反向用例用）
+- `acceptance_yaml_with_modified_thresholds` — 用于 T1-L7：先 `--update`，再程序化把 `hard_gates[0].threshold = 999.99`
+
+---
+
+## 13. 风险与缓解（v2）
+
+| ID | 风险 | 影响 | 缓解 |
+|---|---|---|---|
+| TR1..TR5 | 与 v1 一致 | | |
+| **TR6**（v2 新增 P2-4 follow-up）| stderr 子串断言对错误措辞修订脆弱 | 静默误绿 / 误红 | 维持本版子串匹配；待 plan v3 引入 `error_code`（如 `EVAL_E001..Exxx`）后批量收敛到"退出码 + error_code"模式 |
+| **TR7**（v2 新增 P0-1 follow-up）| `MergeState.snapshot_rollback_events` 字段尚未在 plan/src 落地 | T4-D10 落地受阻 | 已 SendMessage team-lead 触发 plan v3 评估；fallback：使用注入式 fixture 模拟字段，由 Executor 实现 plan v3 后回填 |
+| **TR8**（v2.1 闭环）| gate.py soft 语义 baseline 关系 | 已闭环 | team-lead 决策 = 方案 C（baseline 可选 + soft gate kind 字段）；T6-G6/G8/G9/G10/G11 + T0-S4/S4b/S4c 已落地；plan/FINAL.md `[plan-amend]` 由 team-lead 追加 yaml schema 扩展 |
+
+---
+
+## 14. 范围外（与 v1 一致）
+
+- Tier-2 真实历史回放
+- Tier-3 5 类（M1/M2/M4/M5/M6）detector 用例
+- 真实 `merge` CLI / 真实 LLM API
+- `_git_oracle.py` 用例
+- 性能基准数值测试
+
+---
+
+## 15. 总用例数与执行预算（v2 重算）
+
+- Unit：92（v2 87 + v2.1 新增 T0-S4b/S4c + T6-G9/G10/G11 = 5；T6-G6/G8 改写不计入；T0-S4 字段扩展不计入）
+- Integration：3（T8-E1/E2/E3）
+- Meta：7（T9-W1..W7）
+- 合计：**102 用例**
+- 单次 pytest 预算：unit ≈ 23s（92 × ~250ms 平均）+ integration ≈ 6s + meta ≈ 2s = **≈ 31s**
+- ⚠️ 边界：若超 30s 上限，T9-W6 自检会拦截；若 CI 实测超时，优先把 T7-C2/C3 这类多 run 重型用例改为 marker `@pytest.mark.slow` + nightly 跑（保留 PR 时长 ≤ 30s）
+- 每 Phase 用例可独立跑：`pytest tests/eval/unit/test_<module>.py -v`
+
+---
+
+## 16. Acceptance Gate 指标覆盖核查（v2 强化）
+
+按 acceptance.md §1（Hard 9）+ §2（Soft 9），全 18 项逐项核对。
+
+### 16.1 Hard Gates（v2 修订）
+
+| 指标 | acceptance 阈值 | 直接计算 / 校验用例（v2）| 落盘断言锚点 |
+|---|---|---|---|
+| `WMR` | = 0% | T6-G5（注入 WMR=0.05 → FAIL）+ T5-S1 | acceptance.json `gates[id=WMR].pass==False` |
+| `SSER` | = 100% | T4-D5 + T6-G1 | `is_security_sensitive` 字段 + gate 表 |
+| `DCRR` | = 100% | T4-D5 + T5-S1 | `discarded_content_present` |
+| **`SRSR`** | = 100% | **T4-D10（v2 新增）+ T0-S2 schema + T5-S1 anchor** | `snapshot_rollback_attempted/_succeeded` + `meta.srsr_total_*` |
+| `MMR` | ≤ 2%/5% | T4-D1 + T5-S1 | `missed_lines` 聚合 |
+| `WDR` | ≤ 1% | T4-D2 + T5-S1 | report md |
+| `Recall_M1..M6` | ≥ 95% | T1-L1（lock 含 t3-m3-0001）+ T5-S1 列 6 项 | M1-M6 字段；M2/M4/M5/M6 数值 N/A（scope §6）|
+| `RR` | = 100% | T3-R1（产物齐）+ T5-S1 | 三件存在 |
+| `RCR` | = 100% | T4-D5 + T5-S1 | `rationale_length >= 30` |
+
+**SRSR 落地路径（v2 关键修订）**：
+- `merge_report_<run_id>.json` ← `MergeState.snapshot_rollback_events`（plan v3 待落字段，TR7 风险）
+- `diff.json.samples[f].snapshot_rollback_*` ← T4-D10 守护
+- `eval_report.md` ← T5-S1 anchor `SRSR`
+- `eval_acceptance.json.gates[id=SRSR]` ← T6-G1（全 pass 路径自动包含）
+- 真实 oracle "mock patch_applier 抛错"（metrics.md §3.3）注入用例 → scope.md §6 后续工作
+
+### 16.2 Soft Gates（v2 全覆盖）
+
+| 指标 | acceptance 阈值 | 直接计算用例（v2 强化）|
+|---|---|---|
+| `OA` | ≥ 92% T1 / ≥ 85% T2 | T6-G6（绝对阈值不达 → 退 2）+ T5-S1 |
+| `CRA` | ≥ 88% | **T6-G2（v2 修订：用 CRA 替代 OA 验证 schema-driven）+ T0-S4 schema + T5-S1** |
+| `OverEscalationRate` | ≤ 15% | **T0-S4 schema + T5-S1** |
+| `JA` | ≥ 90% | **T0-S4 schema + T5-S1**（procedure.md §6.5 JA 与 OA 并列要求）|
+| `DET` | ≥ 90% | T7-C1, T7-C2, T8-E3（DET 链 e2e）|
+| `CPC` | ≥ 85% | T7-C3 |
+| `cost_usd_per_run_p95` | ≤ baseline×1.15 | **v2.1 升级**：T6-G9（超 1.15× → exit 2）+ T6-G10（在 1.15× 内 → PASS）+ T6-G8（缺 baseline → SKIP）+ T0-S4/S4c schema（kind=relative + multiplier）+ T3-R4 + T5-S1 |
+| `wall_time_seconds_p95` | ≤ baseline×1.20 | **T0-S4/S4c schema + T3-R4 + T5-S3 + T5-S1**（数值层路径与 cost 同构，T6-G9 已守护管道，wall_time 数值层留 Tier-1 抽样矩阵补齐）|
+| `plan_revision_rounds_p95` | ≤ max-1 | **T0-S4 schema + T5-S1**（数值层留后续）|
+
+**Soft gate 总覆盖（v2.1）**：9/9 直接计算 / schema 校验。`cost_usd_per_run_p95` 升级为完整数值路径覆盖（T6-G8/G9/G10 三态）；其余 `wall_time_p95 / CRA / OverEscalation / JA / plan_revision_p95` 5 项数值层留后续 Tier-1 抽样矩阵补齐，本版守护 schema + 字段必填 + 管道（T6-G9 cost 路径已等价守护 wall_time）。
+
+### 16.3 报告必备元数据
+
+`eval_acceptance.json` 必含 `version / baseline / evaluated_at / datasets / model_matrix / hard_gates / soft_gates / verdict` —— T6-G1 + T6-G4（synced_with_sha 透传）+ T6-G3（kind 字段）+ T6-G8（baseline 缺失透传）联合覆盖。
+
+---
+
+## 17. Mock / Fixture 设计明细
+
+### 17.1 / 17.2 / 17.3 / 17.4 / 17.5 / 17.6 与 v1 增量补丁一致，不动。
+
+### 17.3-prime（v2.1 修正，应 v2-review P1-6）：`fake_merge_bin` 文件名约定收敛
+v1 增量补丁 §17.3 中 fake_merge_bin 同时使用 `merge_report_${RUN_ID}.json` 模板路径与 `merge_report_*.json` glob fallback 二义。v2.1 收敛为：
+
+- fixture 静态文件统一命名为 `merge_report_FIXTURE.json` / `plan_review_FIXTURE.md` / `merge_report_FIXTURE.md`（字面量 `FIXTURE`，非模板）
+- shell 脚本只走 rename 单路径（**删除 glob fallback 与 `2>/dev/null` 静默**）：
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+RUN_ID="r$(date +%s)$$"
+MERGE_DIR="$(pwd)/.merge/runs/$RUN_ID"
+mkdir -p "$MERGE_DIR"
+FIXTURE_BASE="${FAKE_FIXTURE_DIR}/runs/${FAKE_SAMPLE_ID}"
+cp "$FIXTURE_BASE/merge_report_FIXTURE.json" "$MERGE_DIR/merge_report_${RUN_ID}.json"
+cp "$FIXTURE_BASE/merge_report_FIXTURE.md"   "$MERGE_DIR/merge_report_${RUN_ID}.md"
+cp "$FIXTURE_BASE/plan_review_FIXTURE.md"    "$MERGE_DIR/plan_review_${RUN_ID}.md"
+cp "$FIXTURE_BASE/checkpoint.json"           "$MERGE_DIR/"
+# 其余 env dump / stdout JSON 段保持 v1 §17.3 不变
+```
+
+这样：
+- fixture 文件名是字面量，不依赖 RUN_ID 动态拼接
+- 单 cp 路径，错误明确暴露（`set -e` 直接退出，调试友好）
+- 多 sample 场景 fixture 用 `FAKE_SAMPLE_ID` env 区分子目录，无 glob 竞争
+
+### 17.5-prime（v2.1 修正，应 v2-review P1-4 + P0-1）：`acceptance_thresholds.yaml` fixture 完整化
+v1 增量补丁 §17.5 仅列 hard 8 + soft 6，缺 3 项 soft + Recall_M1..M6 hard entry。v2.1 完整版（替代 v1 §17.5）：
+
+```yaml
+synced_with_sha: <pytest 启动时计算 acceptance.md 真实 sha256>
+synced_at: 2026-05-15T00:00:00Z
+hard_gates:
+  - {id: WMR,        threshold: 0.0, operator: "==", source: "Tier-1+2+3"}
+  - {id: SSER,       threshold: 1.0, operator: "==", source: "Tier-1"}
+  - {id: DCRR,       threshold: 1.0, operator: "==", source: "Tier-1 take_target"}
+  - {id: SRSR,       threshold: 1.0, operator: "==", source: "全量"}
+  - {id: MMR,        threshold: 0.02, operator: "<=", source: "Tier-1"}
+  - {id: WDR,        threshold: 0.01, operator: "<=", source: "Tier-2+3"}
+  - {id: Recall_M1,  threshold: 0.95, operator: ">=", source: "Tier-3 M1"}
+  - {id: Recall_M2,  threshold: 0.95, operator: ">=", source: "Tier-3 M2"}
+  - {id: Recall_M3,  threshold: 0.95, operator: ">=", source: "Tier-3 M3"}
+  - {id: Recall_M4,  threshold: 0.95, operator: ">=", source: "Tier-3 M4"}
+  - {id: Recall_M5,  threshold: 0.95, operator: ">=", source: "Tier-3 M5"}
+  - {id: Recall_M6,  threshold: 0.95, operator: ">=", source: "Tier-3 M6"}
+  - {id: RR,         threshold: 1.0, operator: "==", source: "全量"}
+  - {id: RCR,        threshold: 1.0, operator: "==", source: "全量"}
+soft_gates:
+  - {id: OA,                      kind: absolute, threshold: 0.92, source: "Tier-1"}
+  - {id: CRA,                     kind: absolute, threshold: 0.88, source: "Tier-1 AUTO_RISKY"}
+  - {id: OverEscalationRate,      kind: absolute, threshold: 0.15, source: "Tier-1"}
+  - {id: JA,                      kind: absolute, threshold: 0.90, source: "全量"}
+  - {id: DET,                     kind: absolute, threshold: 0.90, source: "3 runs"}
+  - {id: CPC,                     kind: absolute, threshold: 0.85, source: "切 provider"}
+  - {id: cost_usd_per_run_p95,    kind: relative, multiplier: 1.15, source: "全量"}
+  - {id: wall_time_seconds_p95,   kind: relative, multiplier: 1.20, source: "全量"}
+  - {id: plan_revision_rounds_p95, kind: relative, multiplier: 1.0, source: "全量"}
+```
+
+**关键修正点**：
+- hard_gates 现 14 entry（含展开的 6 个 Recall_Mi，与 acceptance.md §1 完整对齐）
+- soft_gates 现 9 entry（补齐 cost/wall_time/plan_revision，与 acceptance.md §2 完整对齐）
+- 全 9 soft entry 含 `kind` 字段（方案 C）
+- T0-S4 测试覆盖该 schema 完整性；T0-S4b/S4c 守护 kind/multiplier 约束
+
+### 17.7（v2 新增）：`merge_report_<run_id>.json` 含 SRSR events 的 fixture 样例
+
+为支撑 T4-D10，`tests/eval/fixtures/dummy_run/runs/t1-rollback-0001/merge_report_<run_id>.json` 内：
+
+```json
+{
+  "run_id": "r-rollback-0001",
+  "status": "succeeded_with_rollback",
+  "file_decision_records": {
+    "a.py": {"strategy":"SEMANTIC_MERGE","target_risk_level":"AUTO_LOW","rationale":"...","discarded_content":[],"is_security_sensitive":false},
+    "b.py": {"strategy":"SEMANTIC_MERGE","target_risk_level":"AUTO_RISKY","rationale":"...","discarded_content":[],"is_security_sensitive":false}
+  },
+  "snapshot_rollback_events": [
+    {"file":"a.py","attempted":true,"succeeded":true,"snapshot_sha":"abcd1234","reason":"patch_applier raised IOError"},
+    {"file":"b.py","attempted":true,"succeeded":false,"snapshot_sha":"ef567890","reason":"snapshot file missing"}
+  ]
+}
+```
+
+**前提**：plan v3 在 `MergeState` schema 添加 `snapshot_rollback_events: list[SnapshotRollbackEvent]`；如 plan team 拒绝该字段，本 fixture 改为"用 `MergeState.errors` 字段中字符串模式 `'rollback:{file}:{ok|fail}'`"（兼容现 schema 无侵入修改），但解析复杂度上升。已 SendMessage team-lead 请决策。
+
+### 17.8（v2 新增）：`acceptance_yaml_factory` 强化
+
+为支撑 T1-L7，工厂方法新增 `factory(modify_threshold=True)` 模式：先按 acceptance.md 真实 sha 写正常 yaml，再程序化把 `hard_gates[0].threshold` 改成 `999.99`，返回 yaml path 供 T1-L7 跑 `--update-acceptance-sync` 后断言阈值未被改回。
+
+---
+
+## 18. v1 → v2 增量摘要（应 gatekeeper-test review 修订）
+
+补 v1 → v2 增量内容详见 §A 顶部表。
+
+**通过标准核对（v2.1 完整版）**：
+- ✅ P0×4 全修：
+  - P0-1 SRSR 落 T4-D10/T5-S1/T0-S2/T0-S4/T6-G1
+  - P0-2 §0 重算 → 102 用例
+  - P0-3 T3-R8 显式（正反两路）
+  - P0-4 **方案 C 完整落地**：T6-G6 (absolute) + T6-G8 (relative SKIP) + T6-G9 (relative fail) + T6-G10 (relative pass) + T6-G11 (优先级) + T0-S4/S4b/S4c (kind schema)；TR8 闭环
+- ✅ P1×5 全修：P1-1 T1-L7/L8（必修）；P1-2 T9-W5；P1-3 T3-R3 强化；P1-4 T0-S4 + T6-G2；P1-5 T0-C9 收敛
+- ✅ P2×4 全修：P2-1 T8-E3；P2-2 T9-W6；P2-3 T9-W7；P2-4 follow-up（TR6）
+
+满足通过标准（P0 全修 + P1 ≥ 4/5 含 P1-1 必修）。**v2.1 状态：所有 follow-up risk（TR7/TR8）中 TR8 已闭环；TR7 仍待 plan v3 落地 `MergeState.snapshot_rollback_events` 字段**。
