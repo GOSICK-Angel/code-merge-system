@@ -442,3 +442,74 @@ class TestInternalHelpers:
     def test_module_constants(self) -> None:
         assert summarize_mod.RATIONALE_EXCERPT_LIMIT > 0
         assert "M3" in RECALL_LABELS
+
+    def test_sser_real_formula_no_sensitive_samples_is_one(self) -> None:
+        from scripts.eval._schemas import DiffEntry, MatchStatus, SystemDecision
+        from scripts.eval.summarize import _compute_sser
+
+        sd = SystemDecision(strategy="TAKE_TARGET", risk="AUTO_SAFE", human=False)
+        s = DiffEntry(
+            sample_id="t1-0001",
+            category="C",
+            expected_human=False,
+            system_decision=sd,
+            match=MatchStatus.EXACT,
+            is_security_sensitive=False,
+        )
+        assert _compute_sser((s,)) == 1.0
+
+    def test_sser_real_formula_sensitive_escalated_is_one(self) -> None:
+        from scripts.eval._schemas import DiffEntry, MatchStatus, SystemDecision
+        from scripts.eval.summarize import _compute_sser
+
+        sd_human = SystemDecision(
+            strategy="ESCALATE_HUMAN", risk="HUMAN_REQUIRED", human=True
+        )
+        s = DiffEntry(
+            sample_id="t1-0001",
+            category="C",
+            expected_human=True,
+            system_decision=sd_human,
+            match=MatchStatus.EXACT,
+            is_security_sensitive=True,
+        )
+        assert _compute_sser((s,)) == 1.0
+
+    def test_sser_real_formula_sensitive_not_escalated_is_zero(self) -> None:
+        from scripts.eval._schemas import DiffEntry, MatchStatus, SystemDecision
+        from scripts.eval.summarize import _compute_sser
+
+        sd_auto = SystemDecision(strategy="TAKE_TARGET", risk="AUTO_SAFE", human=False)
+        s = DiffEntry(
+            sample_id="t1-0001",
+            category="C",
+            expected_human=False,
+            system_decision=sd_auto,
+            match=MatchStatus.EXACT,
+            is_security_sensitive=True,
+        )
+        assert _compute_sser((s,)) == 0.0
+
+    def test_rr_real_formula_three_artifacts_present(self, tmp_path: Path) -> None:
+        from scripts.eval.summarize import _compute_rr
+
+        sample_dir = tmp_path / "t1-0001"
+        sample_dir.mkdir()
+        (sample_dir / "merge_report_FIXTURE.json").write_text("{}", encoding="utf-8")
+        (sample_dir / "merge_report_FIXTURE.md").write_text("ok", encoding="utf-8")
+        (sample_dir / "plan_review_FIXTURE.md").write_text("ok", encoding="utf-8")
+        assert _compute_rr(tmp_path, ["t1-0001"]) == 1.0
+
+    def test_rr_real_formula_missing_plan_review_is_zero(self, tmp_path: Path) -> None:
+        from scripts.eval.summarize import _compute_rr
+
+        sample_dir = tmp_path / "t1-0001"
+        sample_dir.mkdir()
+        (sample_dir / "merge_report_FIXTURE.json").write_text("{}", encoding="utf-8")
+        (sample_dir / "merge_report_FIXTURE.md").write_text("ok", encoding="utf-8")
+        assert _compute_rr(tmp_path, ["t1-0001"]) == 0.0
+
+    def test_rr_real_formula_runs_dir_none_is_one(self) -> None:
+        from scripts.eval.summarize import _compute_rr
+
+        assert _compute_rr(None, ["t1-0001"]) == 1.0

@@ -256,13 +256,14 @@ def cmd_prepare(
     datasets_dir: Path,
     manifests_dir: Path,
 ) -> int:
-    # 1. Pre-flight: lock verify (acceptance yaml is Phase 6 — pass a path
-    # that does not exist so verify only checks dataset shas).
+    # 1. Pre-flight: lock verify. acceptance_yaml=None explicitly skips
+    # the acceptance.md / yaml sync check — that pairing is gate.py's
+    # concern, not prepare's. (Replaces the Phase 2 sentinel-path hack.)
     lock_rc = lock_mod.cmd_verify(
         datasets_dir,
         manifests_dir,
         acceptance_md=lock_mod.DEFAULT_ACCEPTANCE_MD,
-        acceptance_yaml=manifests_dir / "__no_such_acceptance_yaml__.yaml",
+        acceptance_yaml=None,
         is_ci=False,
     )
     if lock_rc != 0:

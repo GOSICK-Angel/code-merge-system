@@ -111,14 +111,61 @@ def _format_pct(value: float | str, decimals: int = 4) -> str:
     return str(value)
 
 
+def _compute_sser(samples: tuple[DiffEntry, ...]) -> float:
+    """SSER per metrics.md §3.2: of all security-sensitive samples, how
+    many were routed to human review (``system_decision.human == True``).
+
+    Returns ``1.0`` (vacuous pass) when no sample is security-sensitive,
+    matching the "0/0 = no violation" reading from acceptance.md §1.
+    """
+    sensitive = [s for s in samples if s.is_security_sensitive]
+    if not sensitive:
+        return 1.0
+    escalated = sum(1 for s in sensitive if s.system_decision.human)
+    return escalated / len(sensitive)
+
+
+def _compute_rr(runs_dir: Path | None, sample_ids: list[str]) -> float:
+    """RR per metrics.md §5.3: fraction of samples whose run directory
+    contains all three required artifacts non-empty.
+
+    The three artifacts are ``merge_report_*.json``, ``merge_report_*.md``
+    and ``plan_review_*.md`` (lock-clean names produced by Phase 3).
+    Returns ``1.0`` (vacuous) when ``runs_dir`` is ``None`` — the caller
+    used the schema-only path.
+    """
+    if runs_dir is None or not sample_ids:
+        return 1.0
+    intact = 0
+    for sample_id in sample_ids:
+        sample_dir = runs_dir / sample_id
+        has_json = any(
+            p.stat().st_size > 0 for p in sample_dir.glob("merge_report_*.json")
+        )
+        has_md = any(p.stat().st_size > 0 for p in sample_dir.glob("merge_report_*.md"))
+        has_plan = any(
+            p.stat().st_size > 0 for p in sample_dir.glob("plan_review_*.md")
+        )
+        if has_json and has_md and has_plan:
+            intact += 1
+    return intact / len(sample_ids)
+
+
 def _compute_metrics(
-    samples: tuple[DiffEntry, ...], metas: dict[str, RunMeta]
+    samples: tuple[DiffEntry, ...],
+    metas: dict[str, RunMeta],
+    *,
+    runs_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Reduce diff samples + run metas into the metric dict the template needs.
 
     Numbers are best-effort given Tier-1's single sample reality (scope.md
     §6) — most "ratios" degenerate to 0.0 or 1.0; this module only
     guarantees that every required anchor key is present in the output.
+
+    ``runs_dir`` is consulted (a) to compute RR (three-artifact landing
+    per metrics.md §5.3) and (b) to stay accurate when callers want a
+    pure-schema sanity computation without a real disk layout.
     """
     total = len(samples)
     if total == 0:
@@ -132,7 +179,6 @@ def _compute_metrics(
     correct = sum(
         1 for s in samples if s.match in (MatchStatus.EXACT, MatchStatus.SEMANTIC)
     )
-    security_sensitive = [s for s in samples if s.is_security_sensitive]
     rationale_ok = sum(1 for s in samples if s.rationale_length >= 30)
     discarded_ok = sum(
         1 for s in samples if s.discarded_content_present or s.label is None
@@ -147,12 +193,10 @@ def _compute_metrics(
         "WMR": _format_pct(wrong_merges / total),
         "MMR": _format_pct(miss_upstream / total),
         "WDR": _format_pct(miss_fork / total),
-        "SSER": _format_pct(
-            (len(security_sensitive) / total) if security_sensitive else 1.0
-        ),
+        "SSER": _format_pct(_compute_sser(samples)),
         "DCRR": _format_pct(discarded_ok / total),
         "SRSR": "N/A (follow-up)",  # TR7 — plan v3 dependency
-        "RR": _format_pct(1.0),  # Phase 3 GO already proved 3-artifact landing
+        "RR": _format_pct(_compute_rr(runs_dir, [s.sample_id for s in samples])),
         "RCR": _format_pct(rationale_ok / total),
         "Recall": {label: "N/A" for label in RECALL_LABELS},
         # Soft 9 (acceptance.md §2)
@@ -292,7 +336,7 @@ def _build_context(
     baseline_path: Path | None,
     dataset_lock_sha: str,
 ) -> dict[str, Any]:
-    metrics = _compute_metrics(diff.samples, metas)
+    metrics = _compute_metrics(diff.samples, metas, runs_dir=runs_dir)
     max_concurrency = max((m.concurrency for m in metas.values()), default=1)
     not_authoritative = max_concurrency > 1
     failures = _failure_rows(diff.samples)

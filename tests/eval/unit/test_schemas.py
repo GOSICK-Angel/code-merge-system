@@ -133,11 +133,11 @@ class TestGateResult:
     def test_alias_pass_field(self) -> None:
         gate = GateResult(
             id="WMR",
-            kind=GateKind.HARD,
+            kind=GateKind.ABSOLUTE,
             value=0.0,
             threshold=0.0,
             operator=GateOperator.EQ,
-            **{"pass": True},
+            **{"pass": True},  # type: ignore[arg-type]
         )
         assert gate.passed is True
         dumped = gate.model_dump(by_alias=True)
@@ -152,7 +152,7 @@ class TestGateResult:
                 value=0.0,
                 threshold=0.0,
                 operator=GateOperator.EQ,
-                **{"pass": True},
+                **{"pass": True},  # type: ignore[arg-type]
             )
 
 
@@ -281,3 +281,75 @@ class TestAcceptanceThresholds:
                 synced_with_sha="abc123",
                 synced_at=datetime.now(timezone.utc),
             )
+
+    def test_t0_s4_relative_soft_gate_accepts_multiplier(self) -> None:
+        cost = AcceptanceThresholdEntry(
+            id="cost_usd_per_run_p95",
+            kind="relative",
+            multiplier=1.15,
+            source="full",
+        )
+        assert cost.kind == "relative"
+        assert cost.multiplier == 1.15
+        assert cost.threshold is None
+
+    def test_t0_s4_absolute_soft_gate_accepts_threshold(self) -> None:
+        oa = AcceptanceThresholdEntry(
+            id="OA",
+            kind="absolute",
+            threshold=0.92,
+            operator=GateOperator.GE,
+            source="Tier-1",
+        )
+        assert oa.kind == "absolute"
+        assert oa.threshold == 0.92
+        assert oa.multiplier is None
+
+    def test_t0_s4b_kind_must_be_absolute_or_relative(self) -> None:
+        with pytest.raises(ValidationError):
+            AcceptanceThresholdEntry(
+                id="OA",
+                kind="weird",  # type: ignore[arg-type]
+                threshold=0.92,
+                source="Tier-1",
+            )
+
+    def test_t0_s4c_relative_kind_requires_multiplier(self) -> None:
+        with pytest.raises(ValidationError) as exc:
+            AcceptanceThresholdEntry(
+                id="cost_usd_per_run_p95",
+                kind="relative",
+                source="full",
+            )
+        assert "multiplier required when kind=relative" in str(exc.value)
+
+    def test_absolute_kind_rejects_extra_multiplier(self) -> None:
+        with pytest.raises(ValidationError) as exc:
+            AcceptanceThresholdEntry(
+                id="OA",
+                kind="absolute",
+                threshold=0.92,
+                multiplier=1.15,
+                source="Tier-1",
+            )
+        assert "multiplier must be absent when kind=absolute" in str(exc.value)
+
+    def test_relative_kind_rejects_extra_threshold(self) -> None:
+        with pytest.raises(ValidationError) as exc:
+            AcceptanceThresholdEntry(
+                id="cost_usd_per_run_p95",
+                kind="relative",
+                multiplier=1.15,
+                threshold=0.05,
+                source="full",
+            )
+        assert "threshold must be absent when kind=relative" in str(exc.value)
+
+    def test_absolute_kind_requires_threshold(self) -> None:
+        with pytest.raises(ValidationError) as exc:
+            AcceptanceThresholdEntry(
+                id="OA",
+                kind="absolute",
+                source="Tier-1",
+            )
+        assert "threshold required when kind=absolute" in str(exc.value)

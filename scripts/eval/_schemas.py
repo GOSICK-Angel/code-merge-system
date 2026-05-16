@@ -18,7 +18,13 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 _FROZEN = ConfigDict(frozen=True, extra="forbid")
@@ -123,8 +129,16 @@ class DiffReport(BaseModel):
 
 
 class GateKind(str, Enum):
-    HARD = "hard"
-    SOFT = "soft"
+    """Per-gate comparison strategy (acceptance.md §2 + [plan-amend]).
+
+    Reflects whether a gate compares against a fixed numeric threshold
+    or a baseline multiplied by a configured factor. The earlier hard /
+    soft distinction is now expressed structurally — gates land in
+    :attr:`AcceptanceReport.hard_gates` vs ``soft_gates``.
+    """
+
+    ABSOLUTE = "absolute"
+    RELATIVE = "relative"
 
 
 class GateOperator(str, Enum):
@@ -150,20 +164,32 @@ class GateVerdict(str, Enum):
 class GateResult(BaseModel):
     """One row in :attr:`AcceptanceReport.gates`.
 
-    Matches the nested object in procedure.md §3.3 example. The example uses
-    ``"=="``/``">="`` strings indirectly via the threshold/value comparison —
-    we promote the operator into a first-class field so consumers can render
-    or re-evaluate without re-parsing the threshold table.
+    Matches the nested object in procedure.md §3.3 example, extended for
+    [plan-amend] (team-lead decision C):
+
+    * ``kind`` reflects the comparison strategy (absolute vs relative).
+    * ``passed`` is ``None`` when the gate was skipped (e.g. ``kind=relative``
+      without a baseline supplied via ``gate.py --baseline``).
+    * ``value`` is optional so a SKIP row can still serialise.
+    * ``baseline_value`` / ``computed_threshold`` / ``multiplier`` are
+      populated only for ``kind=relative`` gates and surface in
+      ``eval_acceptance.json`` for auditability.
+    * ``skipped_reason`` carries a short tag (e.g. ``"no baseline"``) so
+      consumers can render SKIP rows without re-parsing logs.
     """
 
     model_config = _FROZEN
 
     id: str
     kind: GateKind
-    value: float
-    threshold: float
-    operator: GateOperator
-    passed: bool = Field(alias="pass")
+    value: float | None = None
+    threshold: float | None = None
+    operator: GateOperator | None = None
+    passed: bool | None = Field(default=None, alias="pass")
+    multiplier: float | None = None
+    baseline_value: float | None = None
+    computed_threshold: float | None = None
+    skipped_reason: str | None = None
 
 
 class AcceptanceReport(BaseModel):
@@ -252,14 +278,30 @@ class TierManifest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+ThresholdKind = Literal["absolute", "relative"]
+
+
 class AcceptanceThresholdEntry(BaseModel):
-    """One row in ``acceptance_thresholds.yaml.{hard_gates,soft_gates}``."""
+    """One row in ``acceptance_thresholds.yaml.{hard_gates,soft_gates}``.
+
+    Per [plan-amend] (team-lead decision C) a soft-gate entry may be
+    either ``kind="absolute"`` (compares ``value`` against a fixed
+    ``threshold``) or ``kind="relative"`` (compares ``value`` against
+    ``baseline_value * multiplier``; SKIPped when no baseline is
+    supplied to ``gate.py``). Hard gates are always absolute.
+
+    The model_validator enforces:
+        kind=absolute  ↔  threshold required, multiplier must be absent
+        kind=relative  ↔  multiplier required, threshold must be absent
+    """
 
     model_config = _FROZEN
 
     id: str
-    threshold: float
-    operator: GateOperator
+    kind: ThresholdKind = "absolute"
+    threshold: float | None = None
+    multiplier: float | None = None
+    operator: GateOperator | None = None
     source: str
 
     @field_validator("id")
@@ -268,6 +310,29 @@ class AcceptanceThresholdEntry(BaseModel):
         if not value.strip():
             raise ValueError("gate id must be a non-empty string")
         return value
+
+    @model_validator(mode="after")
+    def _validate_kind_consistency(self) -> AcceptanceThresholdEntry:
+        if self.kind == "absolute":
+            if self.threshold is None:
+                raise ValueError(
+                    f"threshold required when kind=absolute (gate id={self.id!r})"
+                )
+            if self.multiplier is not None:
+                raise ValueError(
+                    "multiplier must be absent when kind=absolute "
+                    f"(gate id={self.id!r})"
+                )
+        else:  # kind == "relative"
+            if self.multiplier is None:
+                raise ValueError(
+                    f"multiplier required when kind=relative (gate id={self.id!r})"
+                )
+            if self.threshold is not None:
+                raise ValueError(
+                    f"threshold must be absent when kind=relative (gate id={self.id!r})"
+                )
+        return self
 
 
 class AcceptanceThresholds(BaseModel):
@@ -350,5 +415,6 @@ __all__ = [
     "RunMeta",
     "SampleMeta",
     "SystemDecision",
+    "ThresholdKind",
     "TierManifest",
 ]

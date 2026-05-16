@@ -154,10 +154,16 @@ def cmd_verify(
     datasets_dir: Path,
     manifests_dir: Path,
     acceptance_md: Path,
-    acceptance_yaml: Path,
+    acceptance_yaml: Path | None,
     *,
     is_ci: bool,
 ) -> int:
+    """Verify on-disk datasets against their lock.json + acceptance sync check.
+
+    ``acceptance_yaml=None`` explicitly skips the sync check; this is the
+    clean Phase 6 replacement for the Phase 2 sentinel-path workaround
+    (``manifests_dir / "__no_such_acceptance_yaml__.yaml"``).
+    """
     rc = 0
     for tier in (1, 2, 3):
         manifest_path = manifests_dir / f"tier{tier}.lock.json"
@@ -196,13 +202,14 @@ def cmd_verify(
                 )
                 rc = 1
 
-    sync_rc = _check_acceptance_sync(
-        acceptance_md=acceptance_md,
-        acceptance_yaml=acceptance_yaml,
-        is_ci=is_ci,
-    )
-    if sync_rc != 0:
-        rc = sync_rc
+    if acceptance_yaml is not None:
+        sync_rc = _check_acceptance_sync(
+            acceptance_md=acceptance_md,
+            acceptance_yaml=acceptance_yaml,
+            is_ci=is_ci,
+        )
+        if sync_rc != 0:
+            rc = sync_rc
     return rc
 
 
