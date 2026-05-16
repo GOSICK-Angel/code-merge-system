@@ -9,6 +9,9 @@
 #   FAKE_BAD_JSON     — when set to "1", emit non-JSON to stdout
 #   FAKE_TOUCH_MEMORY — when set to "1", create .merge/memory.db (1 byte)
 #   FAKE_NO_OUTPUT    — when set to "1", emit empty stdout
+#   FAKE_MERGED_TREE_DIR — when set, overlay every file under that dir into
+#                          $(pwd) so the working tree post-merge matches a
+#                          ground-truth tree (used by e2e to land verdict=PASS)
 #
 # Required positional args from the runner: ignored — the script behaves
 # the same regardless of merge-args. The runner controls behaviour via env.
@@ -37,6 +40,13 @@ fi
 
 if [[ "${FAKE_TOUCH_MEMORY:-}" == "1" ]]; then
   echo "x" > "$(pwd)/.merge/memory.db"
+fi
+
+if [[ -n "${FAKE_MERGED_TREE_DIR:-}" && -d "${FAKE_MERGED_TREE_DIR}" ]]; then
+  # Overlay every file from the merged-tree fixture into cwd. ``cp -R`` of
+  # the directory's *contents* (note the trailing ``/.``) gives a clean
+  # overlay without nesting an extra subdirectory.
+  cp -R "${FAKE_MERGED_TREE_DIR}/." "$(pwd)/"
 fi
 
 if [[ "${FAKE_NO_OUTPUT:-}" == "1" ]]; then
