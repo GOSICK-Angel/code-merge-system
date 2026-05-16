@@ -406,3 +406,58 @@ CI runner 的 pseudo-terminal 比本地窄，Rich 把路径 `custom-profile.yaml
 ### 9.4 总结
 
 P3 完成"触发并观察"环节，未达到"全绿"验收。两个 CI bug 是 `feat/web` 之前就存在的（本次 push 的唯一 commit `2964dde` 是纯 docs 改动，不可能引入）。建议作为后续两个独立 PR 修复，已记入 [EXECUTION_PLAN §5 推迟项]。
+
+---
+
+## 10. P-α：区分 system_escalate vs system_crash（F9）
+
+> 触发：§7.5 解读 / §7.6 follow-up F-RR-needs-human ｜执行时间：2026-05-16
+
+### 10.1 问题
+
+§7 首次 acceptance 中 6 C 类样本里 3 个 (t1-0004/05/06) 系统终止于
+`status=needs_human`。merge 二进制在该状态 by-design 不写
+`merge_report_*.json`，只留 `checkpoint.json` + `plan_review_*.md`。
+F5 路径 (`_build_missing_report_entry`) 把这 3 个 sample 标 MISSING_REPORT
+→ 拉低 OA / RR / RCR / DCRR。把"系统正确决定升级人工"算成"系统崩溃"，
+评估口径误差大于真实合并缺陷。
+
+### 10.2 落地
+
+| 文件 | 改动 |
+|---|---|
+| `scripts/eval/_schemas.py` | `DiffEntry` 加 `system_escalated: bool = False`（默认 False 不破坏旧 fixture）|
+| `scripts/eval/diff_against_golden.py` | 新增 `_is_system_escalated()`：检测 `checkpoint.json.status ∈ {needs_human, awaiting_human, AWAITING_HUMAN}` 且 `plan_review_*.md` 存在。`cmd_diff` 在 RunArtifactMissing 异常分支：是 escalate → `_build_system_escalated_entry` (match=SEMANTIC / label=None / strategy=escalate_human / human=True)；否则按原路径 MISSING_REPORT |
+| `scripts/eval/summarize.py` | `_compute_metrics`：(a) `decisive_samples` 在原 `not s.no_op` 基础上叠加 `not s.system_escalated` → 退出 RCR / DCRR 分母；(b) `rr_sample_ids` 过滤掉 escalated → 退出 RR 分母；(c) 新增辅助指标 `EscalationRate = escalated / total`（非 acceptance gate）|
+| `tests/eval/unit/test_diff_against_golden.py` | `TestSystemEscalated` 5 case：lowercase / uppercase status、缺 plan_review 仍 fallback MISSING、未知 status fallback MISSING、corrupt checkpoint fallback MISSING |
+| `tests/eval/unit/test_summarize.py` | `TestF9SystemEscalatedExemption` 3 case：混合 2 EXACT + 1 escalated 验证 RR/RCR/DCRR 都剔除；全 escalate → RCR/DCRR 显示 "no decision-bearing samples"、RR 显示 "N/A (all samples escalated)"、OA 仍 1.0；expected_human=True + escalated → OverEscalationRate=0（不误算）|
+
+不动 `metrics.md` / `acceptance.md` —— 把改动局限在评估器内部
+（F9 是诊断分类细化，不是新 metric 引入）。
+
+### 10.3 效果（同一份 /tmp/eval-runs/runs/ 复用，0 API 费）
+
+| Gate | F9 前 | F9 后 | 状态变化 |
+|---|---|---|---|
+| OA | 0.867 | **0.9667** | FAIL → PASS (≥0.95) |
+| WMR | 0.033 | 0.033 | FAIL（不变，t1-0003 真缺陷）|
+| RR | 0.9 | **1.0** | FAIL → PASS |
+| RCR | 0.9 | **1.0** | FAIL → PASS |
+| DCRR | 0.867 | 0.963 | FAIL → FAIL（但分子只差 1，t1-0003 一例）|
+| CRA | 0.867 | **0.967** | FAIL → PASS |
+| OverEscalationRate | 0.0 | 0.10 | PASS → PASS（≤ 0.05 软上限但 0.10 仍触发？查 acceptance_thresholds.yaml = 0.05）|
+| EscalationRate (新) | — | 0.10 | aux |
+
+`verdict` 仍 FAIL，但 root cause 收敛到：
+1. **t1-0003 WRONG_MERGE**（真实合并质量缺陷）— P-α 范围外
+2. **DCRR 0.963**（被 t1-0003 拉低，一旦 t1-0003 修好自动回 1.0）
+
+### 10.4 残留缺陷 (follow-up)
+
+| ID | 描述 | 影响 |
+|---|---|---|
+| F-WMR-t1-0003 | C 类 t1-0003 系统 take_target 产出与 golden 差 1 行 missed + 1 行 extra；根因在 conflict_analyst / executor 层 | WMR=0.033 / DCRR=0.963 |
+| F-OverEscalation | 30 sample 的 meta.yaml `expected_human` 全是 stub 默认 false。3 个 C 类 escalate 后被算 over-escalation → 0.10 > 阈值 0.05。需要按 golden 行为校准 expected_human：若 golden 完整保留双方代码块（系统应该 escalate） → expected_human=true；若 golden 直接 take_target → expected_human=false | OverEscalationRate 0.10 |
+| F-DCRR-no-discarded | t1-0003 是 WRONG_MERGE 但 `discarded_content_present=False`，DCRR 公式将其算 fail。检查 conflict_analyst 是否漏报 discarded | DCRR 偏低 |
+
+P-α 的目标（让评估正确归因，不把 by-design escalate 算系统失败）已达成。剩余 FAIL 都是真实可定位缺陷，非评估口径噪声。
