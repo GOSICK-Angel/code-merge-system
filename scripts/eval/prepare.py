@@ -101,17 +101,19 @@ def _apply_patch_to_tree(
     patch_name: str,
     patch_bytes: bytes,
     tree: dict[str, bytes],
-) -> list[str]:
-    """Apply a unified-diff patch to ``tree`` (in-memory ``{path: bytes}``).
+) -> tuple[dict[str, bytes], list[str]]:
+    """Apply a unified-diff patch to ``tree`` and return ``(new_tree, log)``.
 
-    Returns a list of human-readable log lines describing what changed.
-    Empty patches are valid (e.g. ``t3-m3-0001/fork.patch``) and produce
-    a single ``no-op`` log entry.
+    Pure function — the input ``tree`` is not mutated; a new dict is
+    returned. Empty patches are valid (e.g. ``t3-m3-0001/fork.patch``)
+    and produce a single ``no-op`` log entry plus a shallow copy of the
+    input tree.
 
     Raises :class:`PatchApplyError` on parse failure or context mismatch.
     """
+    new_tree: dict[str, bytes] = dict(tree)
     if not patch_bytes.strip():
-        return [f"{patch_name}: no-op (empty patch)"]
+        return new_tree, [f"{patch_name}: no-op (empty patch)"]
     try:
         patch_set = PatchSet(patch_bytes.decode("utf-8"))
     except (UnidiffParseError, UnicodeDecodeError, ValueError) as exc:
@@ -128,11 +130,11 @@ def _apply_patch_to_tree(
     log: list[str] = []
     for patched_file in patch_set:
         rel_path = _patched_file_target_path(patched_file)
-        before = tree.get(rel_path, b"")
+        before = new_tree.get(rel_path, b"")
         after = _apply_patched_file(sample_id, patch_name, before, patched_file)
-        tree[rel_path] = after
+        new_tree[rel_path] = after
         log.append(f"{patch_name}: {rel_path} ({len(before)}B -> {len(after)}B)")
-    return log
+    return new_tree, log
 
 
 def _patched_file_target_path(patched_file: PatchedFile) -> str:
@@ -210,10 +212,10 @@ def _expand_sample(sample_dir: Path, out_dir: Path) -> None:
     fork_patch = sample_dir / "fork.patch"
     if not fork_patch.is_file():
         raise GroundTruthMissing(sample_id, "fork.patch")
-    log_lines = _apply_patch_to_tree(
+    forked_tree, log_lines = _apply_patch_to_tree(
         sample_id, "fork.patch", fork_patch.read_bytes(), base_tree
     )
-    _write_tree_overlay(working_tree, base_tree)
+    _write_tree_overlay(working_tree, forked_tree)
 
     # load_golden_tree raises GroundTruthMissing if golden.tar absent.
     golden = load_golden_tree(sample_dir)

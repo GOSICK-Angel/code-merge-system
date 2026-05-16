@@ -390,17 +390,32 @@ class TestPatchApplyHelpers:
             prepare_mod._safe_extract_tar("t1-0001", bad, tmp_path / "working_tree")
 
     def test_apply_patch_to_tree_handles_empty_input(self) -> None:
-        log = prepare_mod._apply_patch_to_tree(
+        new_tree, log = prepare_mod._apply_patch_to_tree(
             "t1-0001", "fork.patch", b"", {"x.py": b"foo\n"}
         )
         assert log == ["fork.patch: no-op (empty patch)"]
+        assert new_tree == {"x.py": b"foo\n"}
 
     def test_apply_patch_to_tree_parses_real_unified_diff(self) -> None:
-        tree = {"hello.py": b"def greet(): pass\n"}
+        original = {"hello.py": b"def greet(): pass\n"}
         patch = _whole_file_patch("def greet(): pass\n", "def greet(name): pass\n")
-        log = prepare_mod._apply_patch_to_tree("t1-0001", "fork.patch", patch, tree)
-        assert tree["hello.py"] == b"def greet(name): pass\n"
+        new_tree, log = prepare_mod._apply_patch_to_tree(
+            "t1-0001", "fork.patch", patch, original
+        )
+        assert new_tree["hello.py"] == b"def greet(name): pass\n"
+        # Input dict must be untouched (immutable contract).
+        assert original["hello.py"] == b"def greet(): pass\n"
         assert any("hello.py" in line for line in log)
+
+    def test_apply_patch_to_tree_does_not_mutate_input(self) -> None:
+        original = {"hello.py": b"def greet(): pass\n"}
+        snapshot = dict(original)
+        patch = _whole_file_patch("def greet(): pass\n", "def greet(name): pass\n")
+        new_tree, _ = prepare_mod._apply_patch_to_tree(
+            "t1-0001", "fork.patch", patch, original
+        )
+        assert original == snapshot
+        assert new_tree is not original
 
     def test_apply_patch_garbage_raises(self) -> None:
         with pytest.raises(PatchApplyError):
