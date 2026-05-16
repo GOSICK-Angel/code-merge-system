@@ -144,6 +144,27 @@ def _capture_patch(
     return _git(repo, *args)
 
 
+def _detect_noisy_paths(repo: Path, refs: _Refs, paths: tuple[str, ...]) -> list[str]:
+    """Return files touched in base→golden but in neither base→upstream
+    nor base→fork (F8).
+
+    Such files are content the human merger added or modified directly
+    during the merge commit without leaving a trace on either parent —
+    typically a manual `.env.example`, README update, or last-minute
+    fix. The merge system, given only the two patches, cannot
+    reconstruct them, so they show up as ``MISS_UPSTREAM`` /
+    ``MISS_FORK`` in the eval diff and unfairly drag the verdict down.
+
+    sample_import reports the count so annotators can decide whether to
+    drop the sample (``--strict-no-noise`` rejects it outright) or keep
+    it knowing the limitation.
+    """
+    golden_touched = set(_diff_paths(repo, refs.base, refs.golden, paths))
+    upstream_touched = set(_diff_paths(repo, refs.base, refs.upstream, paths))
+    fork_touched = set(_diff_paths(repo, refs.base, refs.fork, paths))
+    return sorted(golden_touched - upstream_touched - fork_touched)
+
+
 def _resolve_file_set(
     repo: Path, refs: _Refs, all_files: bool, paths: tuple[str, ...]
 ) -> list[str]:
@@ -212,6 +233,12 @@ upstream_ref: {upstream}
 fork_ref: {fork}
 golden_ref: {golden}
 paths: {paths}
+# F8: files touched in base→golden but in neither base→upstream nor
+# base→fork — content the human added directly during the merge commit.
+# Reviewers should weigh whether to keep the sample (the merge system
+# cannot reconstruct these files from the two patches alone, so they
+# surface as MISS_UPSTREAM / MISS_FORK in eval diffs).
+noisy_paths: {noisy_paths}
 """
 
 
@@ -223,12 +250,13 @@ def _write_meta_skeleton(
     repo: Path,
     refs: _Refs,
     paths: tuple[str, ...] = (),
+    noisy_paths: list[str] | None = None,
 ) -> None:
     """Write the SampleMeta-compatible ``meta.yaml`` skeleton.
 
-    Provenance fields (commit shas, scope paths) go in a sibling
-    ``provenance.yaml`` to keep ``meta.yaml`` strictly within the
-    ``scripts.eval._schemas.SampleMeta`` shape (``extra="forbid"``).
+    Provenance fields (commit shas, scope paths, noisy_paths) go in a
+    sibling ``provenance.yaml`` to keep ``meta.yaml`` strictly within
+    the ``scripts.eval._schemas.SampleMeta`` shape (``extra="forbid"``).
     """
     body = _META_TEMPLATE.format(sample_id=sample_id, tier=tier)
     atomic_write_text(target, body)
@@ -239,6 +267,7 @@ def _write_meta_skeleton(
         fork=refs.fork,
         golden=refs.golden,
         paths=list(paths) if paths else "[]",
+        noisy_paths=list(noisy_paths) if noisy_paths else "[]",
     )
     atomic_write_text(target.parent / "provenance.yaml", prov)
 
@@ -257,6 +286,7 @@ def cmd_import(
     refs: _Refs,
     all_files: bool,
     paths: tuple[str, ...] = (),
+    strict_no_noise: bool = False,
 ) -> int:
     if not (repo / ".git").exists() and not (repo / "HEAD").exists():
         _eprint(f"sample_import: {repo} is not a git repository")
@@ -265,6 +295,16 @@ def cmd_import(
     if sample_dir.exists() and any(sample_dir.iterdir()):
         _eprint(f"sample_import: refuse to overwrite non-empty {sample_dir}")
         return 1
+
+    noisy = _detect_noisy_paths(repo, refs, paths)
+    if noisy and strict_no_noise:
+        _eprint(
+            f"sample_import: {len(noisy)} noisy path(s) detected in golden but "
+            f"absent from both patches (--strict-no-noise rejects): "
+            f"{noisy[:5]}{' …' if len(noisy) > 5 else ''}"
+        )
+        return 1
+
     sample_dir.mkdir(parents=True, exist_ok=True)
 
     file_set = _resolve_file_set(repo, refs, all_files=all_files, paths=paths)
@@ -292,7 +332,14 @@ def cmd_import(
         repo=repo,
         refs=refs,
         paths=paths,
+        noisy_paths=noisy,
     )
+    if noisy:
+        _eprint(
+            f"sample_import: WARNING — {len(noisy)} noisy path(s) recorded in "
+            f"provenance.yaml.noisy_paths (golden has content unreachable from "
+            f"either patch): {noisy[:5]}{' …' if len(noisy) > 5 else ''}"
+        )
     print(
         f"sample_import: wrote {sample_dir} "
         f"({len(file_set)} files, base={refs.base[:8]}, golden={refs.golden[:8]})"
@@ -348,6 +395,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "subtrees; e.g. --path agent-strategies/cot_agent."
         ),
     )
+    parser.add_argument(
+        "--strict-no-noise",
+        action="store_true",
+        help=(
+            "Reject samples where golden has content unreachable from "
+            "either patch (the human merger added files directly during "
+            "the merge commit). Default: warn but still write."
+        ),
+    )
     return parser
 
 
@@ -400,6 +456,7 @@ def main(argv: list[str] | None = None) -> int:
         refs=refs,
         all_files=args.all_files,
         paths=tuple(args.paths),
+        strict_no_noise=args.strict_no_noise,
     )
 
 

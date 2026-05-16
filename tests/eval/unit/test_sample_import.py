@@ -472,3 +472,158 @@ class TestPathFilter:
         assert "hello.py" not in names
         prov = (out_root / "t1-0099" / "provenance.yaml").read_text(encoding="utf-8")
         assert "paths: ['plugin-a']" in prov
+
+
+class TestF8NoisyDetection:
+    """F8: files in base→golden but in neither base→upstream nor base→fork
+    are human-only merge content that the system cannot reconstruct."""
+
+    def _make_noisy_merge_repo(self, repo: Path) -> tuple[str, str, str, str]:
+        """Build a repo whose merge commit adds a file (`noise.md`) absent
+        from both parents — the t1-0002 .env.example shape.
+        """
+        _write(repo, "shared.txt", "base\n")
+        _git(repo, "init", "-q", "-b", "main")
+        _git(repo, "config", "commit.gpgsign", "false")
+        _git(repo, "add", "shared.txt")
+        _git(repo, "commit", "-q", "-m", "base")
+        base = _git(repo, "rev-parse", "HEAD").strip()
+
+        # upstream side: touch an unrelated file so the merge has a real
+        # second parent (--no-ff won't synthesise one when upstream is an
+        # exact ancestor of fork). The touched file is OUT OF the noisy
+        # path so upstream→base diff for "noise.md" remains empty.
+        _git(repo, "checkout", "-q", "-b", "upstream")
+        _write(repo, "unrelated.txt", "upstream only\n")
+        _git(repo, "add", "unrelated.txt")
+        _git(repo, "commit", "-q", "-m", "upstream unrelated")
+        upstream_sha = _git(repo, "rev-parse", "HEAD").strip()
+
+        # fork side: modify shared.txt only.
+        _git(repo, "checkout", "-q", "-b", "fork", base)
+        _write(repo, "shared.txt", "fork\n")
+        _git(repo, "commit", "-q", "-am", "fork change")
+        fork_sha = _git(repo, "rev-parse", "HEAD").strip()
+
+        # merge commit: human additionally adds noise.md (not on either parent).
+        subprocess.run(
+            ["git", "-C", str(repo), "merge", "--no-ff", "--no-commit", upstream_sha],
+            env={
+                "GIT_AUTHOR_NAME": "Eval",
+                "GIT_AUTHOR_EMAIL": "eval@example.com",
+                "GIT_COMMITTER_NAME": "Eval",
+                "GIT_COMMITTER_EMAIL": "eval@example.com",
+                "GIT_AUTHOR_DATE": "2025-12-31T16:00:00Z",
+                "GIT_COMMITTER_DATE": "2025-12-31T16:00:00Z",
+                "GIT_EDITOR": "true",
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+            },
+            capture_output=True,
+            check=False,
+        )
+        _write(repo, "noise.md", "added during merge\n")
+        _git(repo, "add", "noise.md", "shared.txt")
+        _git(repo, "commit", "-q", "-m", "merge + noise")
+        merge_sha = _git(repo, "rev-parse", "HEAD").strip()
+        return base, upstream_sha, fork_sha, merge_sha
+
+    def test_noisy_paths_recorded_in_provenance(self, tmp_path: Path) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _, _, _, merge_sha = self._make_noisy_merge_repo(repo)
+        out = tmp_path / "out"
+        rc = si.main(
+            [
+                "--repo",
+                str(repo),
+                "--sample-id",
+                "t1-0099",
+                "--tier",
+                "1",
+                "--out",
+                str(out),
+                "--from-merge",
+                merge_sha,
+            ]
+        )
+        assert rc == 0
+        prov = (out / "t1-0099" / "provenance.yaml").read_text(encoding="utf-8")
+        assert "noisy_paths: ['noise.md']" in prov
+
+    def test_strict_no_noise_rejects(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _, _, _, merge_sha = self._make_noisy_merge_repo(repo)
+        out = tmp_path / "out"
+        rc = si.main(
+            [
+                "--repo",
+                str(repo),
+                "--sample-id",
+                "t1-0099",
+                "--tier",
+                "1",
+                "--out",
+                str(out),
+                "--from-merge",
+                merge_sha,
+                "--strict-no-noise",
+            ]
+        )
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "noisy path" in err
+        assert "noise.md" in err
+        # Sample directory must not have been written.
+        assert not (out / "t1-0099").exists()
+
+    def test_clean_sample_records_empty_noisy_list(
+        self, tmp_path: Path, merged_repo: tuple[Path, str]
+    ) -> None:
+        repo, merge_sha = merged_repo
+        out = tmp_path / "out"
+        rc = si.main(
+            [
+                "--repo",
+                str(repo),
+                "--sample-id",
+                "t1-0099",
+                "--tier",
+                "1",
+                "--out",
+                str(out),
+                "--from-merge",
+                merge_sha,
+            ]
+        )
+        assert rc == 0
+        prov = (out / "t1-0099" / "provenance.yaml").read_text(encoding="utf-8")
+        assert "noisy_paths: []" in prov
+
+    def test_warn_emitted_when_noisy(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _, _, _, merge_sha = self._make_noisy_merge_repo(repo)
+        out = tmp_path / "out"
+        rc = si.main(
+            [
+                "--repo",
+                str(repo),
+                "--sample-id",
+                "t1-0099",
+                "--tier",
+                "1",
+                "--out",
+                str(out),
+                "--from-merge",
+                merge_sha,
+            ]
+        )
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "noisy path" in err
