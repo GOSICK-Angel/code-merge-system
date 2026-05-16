@@ -493,3 +493,66 @@ backfill `t1-0005/t1-0006/meta.yaml` 的 `expected_human=true`，并刷 `tier1.l
 | F-meta-backfill-t1-0001..0004 | 数据集 | meta.yaml 还是 stub description；t1-0001/02/03/04 应补 description 字段 + 写明 expected_human 推断依据。低优先级 |
 
 P-α 在评估层能做的部分到此为止。剩余 follow-up 全部出 eval 边界。
+
+---
+
+## 11. P-β：第 2 次 baseline + relative gate 对照
+
+> 执行时间：2026-05-16 ｜目标：跑第 2 次 30-sample baseline 并启用 `--baseline` 对照，让 `cost_usd_per_run_p95` / `wall_time_seconds_p95` / `plan_revision_rounds_p95` 三个 relative soft gate 有数；同时验证 t1-0003 是 deterministic 还是抖动。
+
+### 11.1 执行方式
+
+复用同一份 `/tmp/eval-runs/run_pilot.sh`，把 v1 的 `runs/` 和 `logs/` 重命名为 `runs_v1/` / `logs_v1/`，重跑 30 sample 写入新 `runs/`。`summarize` + `gate` 阶段传 `--baseline /tmp/eval-runs/out/eval_report_v3.md`（P-α 修复后的 v1 报告）。
+
+### 11.2 开销
+
+| 维度 | v1 | v2 | 合计 |
+|---|---|---|---|
+| 真实成本 | $1.16 | $1.16 | $2.32 |
+| 真实 wall-clock | 7 min | 7 min | ~14 min |
+| 预算估算（README P1）| — | — | $6-17 / 60-90 min |
+| **实际占比** | — | — | **~14%** |
+
+### 11.3 结果
+
+| Gate | v1 | v2 | computed threshold | 结果 |
+|---|---|---|---|---|
+| **cost_usd_per_run_p95** | $0.0357 (baseline) | $0.0356 | $0.0411 (1.15× ×baseline) | **PASS** |
+| **wall_time_seconds_p95** | 36.3s (baseline) | 35.55s | 43.56s (1.20× baseline) | **PASS** |
+| plan_revision_rounds_p95 | — | — | — | SKIP（merge_report 未暴露此字段 → summarize 标 N/A）|
+| OA | 0.9667 | 0.9667 | — | PASS（不变）|
+| WMR | 0.033 | 0.033 | == 0 | FAIL（t1-0003 每次重现）|
+| DCRR | 0.963 | 0.963 | == 1 | FAIL（t1-0003 牵连）|
+| OverEscalationRate | 0.0333 | 0.0333 | ≤ 0.05 | PASS |
+| EscalationRate (aux) | 0.10 | 0.10 | — | — |
+| RR / RCR / SSER / MMR / CRA | 全 PASS | 全 PASS | — | — |
+
+### 11.4 关键发现
+
+1. **t1-0003 WRONG_MERGE 在 v2 完全复现**（同样 manifest.yaml version 没升级）→ 进一步证实 §10.5 推断：这是 src/ layered_execution dep + judge no-diff 的 **deterministic structural bug**，不是 LLM 抖动。后续 src/ fix PR 只需要单次 v2 就能验证修复是否生效。
+2. **outcome 100% 一致**：t1-0001..0030 中 27 个 EXACT/SEMANTIC、t1-0003 WRONG_MERGE、t1-0004/05/06 SYSTEM_ESCALATED — 与 v1 同一 sample 同一标签，cost/wall 略降（prompt cache 命中更高）。
+3. **relative gate 阈值都松绰**：v2 在 1.15× / 1.20× 容忍下还有 13% / 22% 余量，下次 fix src/ 后即使引入轻度 latency / cost 也不会立刻 fail。
+4. **plan_revision_rounds_p95 永远 SKIP**：merge_report.json 顶层 `plan_revision_rounds=0` 是单个 int，不是 per-sample 分布。summarize 没采集 per-sample，统一 N/A。要让这个 gate 有数，需要 summarize 增加 `_collect_plan_revision_rounds`（轮询 metas 或 merge_report 顶层）→ 列入后续 follow-up。
+
+### 11.5 累计开销（P1 + P2 + P-α 重跑 + P-β）
+
+| 阶段 | 成本 | wall |
+|---|---|---|
+| P1 (30 sample × 1 run, v1) | $1.16 | 7 min |
+| P2 (5 sample × 3 seed, DET) | $0.32 | 3 min |
+| P-α 重 eval (artifacts 复用) | $0 | <1 min |
+| P-β (30 sample × 1 run, v2) | $1.16 | 7 min |
+| **合计** | **$2.64** | **~18 min** |
+| vs 整体预算估算 ($7-20) | | **13-38%** |
+
+### 11.6 累计 follow-up（更新版）
+
+| ID | 类型 | 状态 |
+|---|---|---|
+| F-WMR-t1-0003 | src/ bug | 待修，v2 已确认 deterministic |
+| F-t1-0004-over-escalation | src/ tune | 待修，judge 7 轮 repair 行为在 v2 复现（wall=114s）|
+| F-DCRR-no-discarded | t1-0003 衍生 | 等 F-WMR 修好自动解 |
+| F-meta-backfill-t1-0001..0004 | 数据集 | 低优 |
+| F-plan-revision-p95 | eval | summarize 没采集 per-sample plan_revision_rounds，让最后一个 relative soft gate 也有数 |
+
+P-β 把"relative gate 有数据"这块短板补齐。评估系统现在能对未来 src/ fix 给出 "before/after" 量化对照（v1=before，v2=after 起步点）。后续 src/ 修完只需要再跑 v3 baseline、对比 v2 → 看 OA / WMR / cost / wall 怎么动。
