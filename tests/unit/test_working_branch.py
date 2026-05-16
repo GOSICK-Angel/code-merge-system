@@ -22,7 +22,11 @@ def _make_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir()
     for cmd in [
-        ["git", "init"],
+        # `--initial-branch=main` is required on CI runners whose global
+        # `init.defaultBranch` is unset (git defaults to `master` there),
+        # otherwise the subsequent `git checkout main` fails with
+        # "pathspec 'main' did not match any file(s) known to git".
+        ["git", "init", "--initial-branch=main"],
         ["git", "config", "user.email", "test@test.com"],
         ["git", "config", "user.name", "Test"],
     ]:
