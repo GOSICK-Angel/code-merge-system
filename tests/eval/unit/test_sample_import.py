@@ -203,13 +203,17 @@ class TestImportFromMerge:
                 merge_sha,
             ]
         )
-        meta = (out_root / "t1-0099" / "meta.yaml").read_text(encoding="utf-8")
+        sample = out_root / "t1-0099"
+        meta = (sample / "meta.yaml").read_text(encoding="utf-8")
+        prov = (sample / "provenance.yaml").read_text(encoding="utf-8")
         assert "sample_id: t1-0099" in meta
         assert "tier: 1" in meta
         assert "category: TBD" in meta
-        assert "expected_risk: TBD" in meta
-        assert "golden_strategy: TBD" in meta
-        assert "notes_provenance:" in meta
+        assert "expected_human: false" in meta
+        # provenance lives in a sibling file (meta.yaml must match
+        # SampleMeta schema which forbids extras).
+        assert "base_ref:" in prov
+        assert "golden_ref:" in prov
 
     def test_tar_byte_stable_across_runs(
         self, merged_repo: tuple[Path, str], tmp_path: Path
@@ -466,5 +470,5 @@ class TestPathFilter:
         assert "plugin-a/readme.md" in names
         assert "sibling.md" not in names
         assert "hello.py" not in names
-        meta = (out_root / "t1-0099" / "meta.yaml").read_text(encoding="utf-8")
-        assert "paths: ['plugin-a']" in meta
+        prov = (out_root / "t1-0099" / "provenance.yaml").read_text(encoding="utf-8")
+        assert "paths: ['plugin-a']" in prov

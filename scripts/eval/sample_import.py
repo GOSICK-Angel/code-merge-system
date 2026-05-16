@@ -196,20 +196,22 @@ def _tar_tree_at_ref(repo: Path, ref: str, file_set: list[str], target: Path) ->
 _META_TEMPLATE = """sample_id: {sample_id}
 tier: {tier}
 category: TBD            # ABCDE (see doc/evaluation/dataset.md §2.2)
-expected_risk: TBD       # AUTO_SAFE / AUTO_RISKY / HUMAN_REQUIRED
 loss_class: null         # null or M1-M6 for Tier-3 / M-injected samples
 expected_human: false    # bool — should the system escalate?
-golden_strategy: TBD     # SEMANTIC_MERGE / FORK_KEEP / UPSTREAM_TAKE / ESCALATE_HUMAN
 description: |
   TBD — one-line summary of base/upstream/fork divergence and the
   golden resolution rationale.
-notes_provenance:
-  repo: {repo}
-  base_ref: {base}
-  upstream_ref: {upstream}
-  fork_ref: {fork}
-  golden_ref: {golden}
-  paths: {paths}
+"""
+
+_PROVENANCE_TEMPLATE = """# Capture provenance — sibling of meta.yaml, not consumed by prepare.
+# Kept for audit trail (dataset.md §2.4 maintenance rules) so reviewers
+# can re-derive the sample from the original git history.
+repo: {repo}
+base_ref: {base}
+upstream_ref: {upstream}
+fork_ref: {fork}
+golden_ref: {golden}
+paths: {paths}
 """
 
 
@@ -222,9 +224,15 @@ def _write_meta_skeleton(
     refs: _Refs,
     paths: tuple[str, ...] = (),
 ) -> None:
-    body = _META_TEMPLATE.format(
-        sample_id=sample_id,
-        tier=tier,
+    """Write the SampleMeta-compatible ``meta.yaml`` skeleton.
+
+    Provenance fields (commit shas, scope paths) go in a sibling
+    ``provenance.yaml`` to keep ``meta.yaml`` strictly within the
+    ``scripts.eval._schemas.SampleMeta`` shape (``extra="forbid"``).
+    """
+    body = _META_TEMPLATE.format(sample_id=sample_id, tier=tier)
+    atomic_write_text(target, body)
+    prov = _PROVENANCE_TEMPLATE.format(
         repo=str(repo),
         base=refs.base,
         upstream=refs.upstream,
@@ -232,7 +240,7 @@ def _write_meta_skeleton(
         golden=refs.golden,
         paths=list(paths) if paths else "[]",
     )
-    atomic_write_text(target, body)
+    atomic_write_text(target.parent / "provenance.yaml", prov)
 
 
 # ---------------------------------------------------------------------------
