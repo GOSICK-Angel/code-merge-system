@@ -15,6 +15,7 @@ import json
 import os
 import tarfile
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -226,7 +227,8 @@ class TestE2eFailurePropagation:
         rc_diff = _run_diff(runs_dir=runs_dir, output=diff_path)
         assert rc_diff == 0, "diff with run-but-no-artifacts should not be fatal"
         payload = _read_json(diff_path)
-        sample_labels = {s["sample_id"]: s["label"] for s in payload["samples"]}
+        samples = cast(list[dict[str, Any]], payload["samples"])
+        sample_labels = {s["sample_id"]: s["label"] for s in samples}
         assert sample_labels.get("t1-0001") == "MISSING_REPORT"
 
 

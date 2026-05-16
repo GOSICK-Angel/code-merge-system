@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:
+    from scripts.eval._schemas import DiffEntry
 
 from scripts.eval import summarize as summarize_mod
 from scripts.eval.summarize import (
@@ -519,7 +522,13 @@ class TestF5MissingReportFlow:
     """F5: MISSING_REPORT entries drag OA / RCR / DCRR / RR down correctly."""
 
     def test_three_pass_two_missing_drags_metrics(self, tmp_path: Path) -> None:
-        from scripts.eval._schemas import DiffEntry, RunMeta, SystemDecision
+        from scripts.eval._schemas import (
+            DiffEntry,
+            MatchStatus,
+            MismatchLabel,
+            RunMeta,
+            SystemDecision,
+        )
 
         samples = []
         # 3 passing
@@ -533,7 +542,7 @@ class TestF5MissingReportFlow:
                     system_decision=SystemDecision(
                         strategy="take_target", risk="UNKNOWN", human=False
                     ),
-                    match="EXACT",
+                    match=MatchStatus.EXACT,
                     label=None,
                     missed_lines=0,
                     extra_lines=0,
@@ -553,8 +562,8 @@ class TestF5MissingReportFlow:
                     system_decision=SystemDecision(
                         strategy="MISSING", risk="UNKNOWN", human=False
                     ),
-                    match="MISMATCH",
-                    label="MISSING_REPORT",
+                    match=MatchStatus.MISMATCH,
+                    label=MismatchLabel.MISSING_REPORT,
                     missed_lines=0,
                     extra_lines=0,
                     rationale_length=0,
@@ -625,8 +634,13 @@ class TestF7NoOpExemption:
         rationale_length: int = 0,
         match: str = "EXACT",
         label: str | None = None,
-    ):
-        from scripts.eval._schemas import DiffEntry, SystemDecision
+    ) -> "DiffEntry":
+        from scripts.eval._schemas import (
+            DiffEntry,
+            MatchStatus,
+            MismatchLabel,
+            SystemDecision,
+        )
 
         return DiffEntry(
             sample_id=sample_id,
@@ -638,8 +652,8 @@ class TestF7NoOpExemption:
                 risk="UNKNOWN",
                 human=False,
             ),
-            match=match,
-            label=label,
+            match=MatchStatus(match),
+            label=MismatchLabel(label) if label is not None else None,
             missed_lines=0,
             extra_lines=0,
             rationale_length=rationale_length,
