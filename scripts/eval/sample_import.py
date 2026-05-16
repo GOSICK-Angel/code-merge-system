@@ -106,37 +106,57 @@ def _derive_refs_from_merge(repo: Path, merge_sha: str) -> _Refs:
 # ---------------------------------------------------------------------------
 
 
-def _diff_paths(repo: Path, base_ref: str, head_ref: str) -> list[str]:
-    """Files touched by ``git diff <base>..<head>`` (added/modified/deleted)."""
-    out = _git(repo, "diff", "--name-only", base_ref, head_ref)
+def _diff_paths(
+    repo: Path, base_ref: str, head_ref: str, paths: tuple[str, ...]
+) -> list[str]:
+    """Files touched by ``git diff <base>..<head>`` (added/modified/deleted).
+
+    When ``paths`` is non-empty the diff is scoped via ``-- <paths>`` so
+    monorepo merges that touch many plugin subtrees can still yield a
+    sample focused on one subdirectory.
+    """
+    args = ["diff", "--name-only", base_ref, head_ref]
+    if paths:
+        args.extend(["--", *paths])
+    out = _git(repo, *args)
     return [line for line in out.splitlines() if line]
 
 
-def _capture_patch(repo: Path, base_ref: str, head_ref: str) -> str:
+def _capture_patch(
+    repo: Path, base_ref: str, head_ref: str, paths: tuple[str, ...]
+) -> str:
     """Capture a binary-safe unified diff for the patch file.
 
     ``--no-color`` and ``--no-ext-diff`` keep the output reproducible
-    across user git configs.
+    across user git configs. ``paths`` scopes the diff to a subtree
+    (typically a plugin directory in a monorepo).
     """
-    return _git(
-        repo,
+    args = [
         "diff",
         "--no-color",
         "--no-ext-diff",
         "--binary",
         base_ref,
         head_ref,
-    )
+    ]
+    if paths:
+        args.extend(["--", *paths])
+    return _git(repo, *args)
 
 
-def _resolve_file_set(repo: Path, refs: _Refs, all_files: bool) -> list[str]:
+def _resolve_file_set(
+    repo: Path, refs: _Refs, all_files: bool, paths: tuple[str, ...]
+) -> list[str]:
     """Return the sorted file paths to capture in the tars."""
     if all_files:
-        out = _git(repo, "ls-tree", "-r", "--name-only", refs.golden)
+        args = ["ls-tree", "-r", "--name-only", refs.golden]
+        if paths:
+            args.extend(["--", *paths])
+        out = _git(repo, *args)
         return sorted(line for line in out.splitlines() if line)
     union: set[str] = set()
     for head in (refs.upstream, refs.fork, refs.golden):
-        union.update(_diff_paths(repo, refs.base, head))
+        union.update(_diff_paths(repo, refs.base, head, paths))
     return sorted(union)
 
 
@@ -189,11 +209,18 @@ notes_provenance:
   upstream_ref: {upstream}
   fork_ref: {fork}
   golden_ref: {golden}
+  paths: {paths}
 """
 
 
 def _write_meta_skeleton(
-    target: Path, *, sample_id: str, tier: int, repo: Path, refs: _Refs
+    target: Path,
+    *,
+    sample_id: str,
+    tier: int,
+    repo: Path,
+    refs: _Refs,
+    paths: tuple[str, ...] = (),
 ) -> None:
     body = _META_TEMPLATE.format(
         sample_id=sample_id,
@@ -203,6 +230,7 @@ def _write_meta_skeleton(
         upstream=refs.upstream,
         fork=refs.fork,
         golden=refs.golden,
+        paths=list(paths) if paths else "[]",
     )
     atomic_write_text(target, body)
 
@@ -220,6 +248,7 @@ def cmd_import(
     out_root: Path,
     refs: _Refs,
     all_files: bool,
+    paths: tuple[str, ...] = (),
 ) -> int:
     if not (repo / ".git").exists() and not (repo / "HEAD").exists():
         _eprint(f"sample_import: {repo} is not a git repository")
@@ -230,7 +259,7 @@ def cmd_import(
         return 1
     sample_dir.mkdir(parents=True, exist_ok=True)
 
-    file_set = _resolve_file_set(repo, refs, all_files=all_files)
+    file_set = _resolve_file_set(repo, refs, all_files=all_files, paths=paths)
     if not file_set:
         _eprint(
             "sample_import: no files touched by base→{upstream,fork,golden} "
@@ -242,11 +271,11 @@ def cmd_import(
     _tar_tree_at_ref(repo, refs.golden, file_set, sample_dir / "golden.tar")
     atomic_write_text(
         sample_dir / "upstream.patch",
-        _capture_patch(repo, refs.base, refs.upstream),
+        _capture_patch(repo, refs.base, refs.upstream, paths),
     )
     atomic_write_text(
         sample_dir / "fork.patch",
-        _capture_patch(repo, refs.base, refs.fork),
+        _capture_patch(repo, refs.base, refs.fork, paths),
     )
     _write_meta_skeleton(
         sample_dir / "meta.yaml",
@@ -254,6 +283,7 @@ def cmd_import(
         tier=tier,
         repo=repo,
         refs=refs,
+        paths=paths,
     )
     print(
         f"sample_import: wrote {sample_dir} "
@@ -297,6 +327,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--all-files",
         action="store_true",
         help="Capture the whole tree, not just the diff-touched union.",
+    )
+    parser.add_argument(
+        "--path",
+        action="append",
+        default=[],
+        dest="paths",
+        metavar="PREFIX",
+        help=(
+            "Scope capture to one or more sub-paths (repeatable). "
+            "Essential for monorepo merges that touch many plugin "
+            "subtrees; e.g. --path agent-strategies/cot_agent."
+        ),
     )
     return parser
 
@@ -349,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
         out_root=Path(args.out).resolve(),
         refs=refs,
         all_files=args.all_files,
+        paths=tuple(args.paths),
     )
 
 

@@ -412,3 +412,59 @@ class TestAllFilesFlag:
         with tarfile.open(out_root / "t1-0099" / "golden.tar") as tf:
             names = {m.name for m in tf.getmembers()}
         assert "untouched.md" in names
+
+
+class TestPathFilter:
+    """--path scopes capture to one or more subtrees (monorepo essential)."""
+
+    def test_path_filter_excludes_files_outside_subtree(
+        self, merged_repo: tuple[Path, str], tmp_path: Path
+    ) -> None:
+        repo, merge_sha = merged_repo
+        # add a sibling file outside the scoped subtree on both sides so
+        # the union would normally pick it up
+        _git(repo, "checkout", "fork")
+        _write(repo, "sibling.md", "fork side\n")
+        _git(repo, "add", "sibling.md")
+        _git(repo, "commit", "-q", "-m", "fork sibling")
+        # nest hello.py under plugin-a/
+        repo_plugin_dir = repo / "plugin-a"
+        repo_plugin_dir.mkdir(exist_ok=True)
+        (repo_plugin_dir / "readme.md").write_text(
+            "plugin-a readme\n", encoding="utf-8"
+        )
+        _git(repo, "add", "plugin-a/readme.md")
+        _git(repo, "commit", "-q", "-m", "plugin-a readme")
+        new_fork = _git(repo, "rev-parse", "HEAD").strip()
+
+        out_root = tmp_path / "samples"
+        rc = si.main(
+            [
+                "--repo",
+                str(repo),
+                "--sample-id",
+                "t1-0099",
+                "--tier",
+                "1",
+                "--out",
+                str(out_root),
+                "--base-ref",
+                merge_sha + "^1",
+                "--upstream-ref",
+                merge_sha + "^2",
+                "--fork-ref",
+                new_fork,
+                "--golden-ref",
+                new_fork,
+                "--path",
+                "plugin-a",
+            ]
+        )
+        assert rc == 0
+        with tarfile.open(out_root / "t1-0099" / "golden.tar") as tf:
+            names = {m.name for m in tf.getmembers()}
+        assert "plugin-a/readme.md" in names
+        assert "sibling.md" not in names
+        assert "hello.py" not in names
+        meta = (out_root / "t1-0099" / "meta.yaml").read_text(encoding="utf-8")
+        assert "paths: ['plugin-a']" in meta
