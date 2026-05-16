@@ -17,6 +17,7 @@ from src.core.phases._gate_helpers import (
     get_layer_gates,
     handle_gate_failure,
     run_gates,
+    vacuously_complete_layers,
     verify_layer_deps,
 )
 from src.core.read_only_state_view import ReadOnlyStateView
@@ -723,6 +724,12 @@ class AutoMergePhase(Phase):
         if None in layer_batches:
             sorted_layer_ids.append(None)
         sorted_layer_ids.extend(sorted(k for k in layer_batches if k is not None))
+
+        # Layers declared in the plan but with no AUTO_SAFE / AUTO_RISKY
+        # batches are vacuously complete; see vacuously_complete_layers.
+        completed_layers |= vacuously_complete_layers(
+            layer_index, set(layer_batches.keys())
+        )
 
         skipped_layer_files: list[str] = []
 
