@@ -93,7 +93,7 @@ class TestBootstrap:
         ).strip()
         assert upstream_head == refs.upstream
 
-    def test_gitignore_blocks_merge_runtime(self, tmp_path: Path) -> None:
+    def test_excludes_merge_runtime(self, tmp_path: Path) -> None:
         sample = tmp_path / "sample"
         _write_sample(
             sample,
@@ -103,8 +103,12 @@ class TestBootstrap:
         )
         target = tmp_path / "repo"
         gb.bootstrap_synthetic_repo(sample, target)
-        gitignore = (target / ".gitignore").read_text(encoding="utf-8")
-        assert ".merge/" in gitignore
+        # `.merge/` is excluded via `.git/info/exclude` (local-only)
+        # rather than `.gitignore` (which would conflict with upstream
+        # patches that touch the real .gitignore — see comment in
+        # `bootstrap_synthetic_repo`).
+        exclude = (target / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        assert ".merge/" in exclude
         # Drop a fake merge artifact and confirm git status ignores it.
         (target / ".merge").mkdir()
         (target / ".merge" / "runs").mkdir()
@@ -112,6 +116,39 @@ class TestBootstrap:
             ["git", "-C", str(target), "status", "--porcelain"], text=True
         )
         assert ".merge" not in status
+
+    def test_preserves_base_gitignore_for_upstream_patch(self, tmp_path: Path) -> None:
+        # Regression: previously the bootstrap overwrote `.gitignore` with a
+        # 2-line stub, which broke samples where `upstream.patch` had
+        # hunks against a longer base .gitignore (e.g. an 18-line .gitignore
+        # with a hunk `@@ -14,4 +14,4 @@` would not apply to a 2-line
+        # file). Verifies the real .gitignore survives.
+        sample = tmp_path / "sample"
+        base_gitignore = "logs/\nbuild/\n.idea/\ndist/\n"
+        upstream_diff = (
+            "diff --git a/.gitignore b/.gitignore\n"
+            "--- a/.gitignore\n"
+            "+++ b/.gitignore\n"
+            "@@ -1,4 +1,5 @@\n"
+            " logs/\n"
+            " build/\n"
+            " .idea/\n"
+            " dist/\n"
+            "+coverage/\n"
+        )
+        _write_sample(
+            sample,
+            base_files={".gitignore": base_gitignore.encode()},
+            upstream_patch=upstream_diff,
+            fork_patch="",
+        )
+        target = tmp_path / "repo"
+        gb.bootstrap_synthetic_repo(sample, target)
+        subprocess.check_output(
+            ["git", "-C", str(target), "checkout", "-q", "upstream"]
+        )
+        upstream_gi = (target / ".gitignore").read_text(encoding="utf-8")
+        assert upstream_gi == base_gitignore + "coverage/\n"
 
     def test_empty_patches_use_allow_empty(self, tmp_path: Path) -> None:
         sample = tmp_path / "sample"

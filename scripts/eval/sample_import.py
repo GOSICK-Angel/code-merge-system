@@ -114,8 +114,17 @@ def _diff_paths(
     When ``paths`` is non-empty the diff is scoped via ``-- <paths>`` so
     monorepo merges that touch many plugin subtrees can still yield a
     sample focused on one subdirectory.
+
+    ``--no-renames`` is critical: with rename detection (git's default)
+    ``--name-only`` returns only the destination for ``R`` entries, so a
+    rename ``X → Y`` shows only ``Y``. The downstream file_set then
+    omits ``X``, base.tar is missing ``X``, and ``git apply`` fails when
+    the patch (which keeps rename detection via ``_capture_patch``)
+    tries to ``rename from X to Y``. Disabling rename detection here
+    surfaces both names (delete X + add Y); the patch still uses
+    rename ops, so semantic clarity is preserved.
     """
-    args = ["diff", "--name-only", base_ref, head_ref]
+    args = ["diff", "--name-only", "--no-renames", base_ref, head_ref]
     if paths:
         args.extend(["--", *paths])
     out = _git(repo, *args)

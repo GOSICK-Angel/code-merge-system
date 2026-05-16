@@ -153,9 +153,16 @@ def bootstrap_synthetic_repo(sample_dir: Path, target_dir: Path) -> RefBundle:
 
     _extract_tar(base_tar, target_dir)
     _git(target_dir, "init", "-q", "-b", "main")
-    # .gitignore keeps the merge CLI's runtime artifacts out of history
-    # so subsequent commits remain reproducible.
-    (target_dir / ".gitignore").write_text(".merge/\noutputs/\n", encoding="utf-8")
+    # Keep the merge CLI's runtime artifacts (.merge/, outputs/) out of
+    # git operations without touching ``.gitignore`` — overwriting the
+    # base tree's .gitignore breaks samples where upstream.patch has
+    # hunks on .gitignore (line numbers shift). ``.git/info/exclude`` is
+    # local-only, not part of the working tree, and applied on top of
+    # any existing .gitignore.
+    exclude_path = target_dir / ".git" / "info" / "exclude"
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+    exclude_path.write_text(existing + ".merge/\noutputs/\n", encoding="utf-8")
     _git(target_dir, "add", "-A")
     _git(target_dir, "commit", "-q", "-m", "base")
     base_sha = _git(target_dir, "rev-parse", "HEAD").strip()
