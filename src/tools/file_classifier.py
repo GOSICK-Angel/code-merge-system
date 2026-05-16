@@ -317,6 +317,60 @@ def classify_file(
     return base_level
 
 
+def _fork_deleted_skip_record(file_path: str) -> Any:
+    """Build a SKIP FileDecisionRecord preserving fork's explicit delete.
+
+    Local import to avoid models/agents → file_classifier circular dep.
+    """
+    from datetime import datetime
+    from src.models.decision import (
+        DecisionSource,
+        FileDecisionRecord,
+        MergeDecision,
+    )
+    from src.models.diff import FileStatus
+
+    return FileDecisionRecord(
+        file_path=file_path,
+        file_status=FileStatus.DELETED,
+        decision=MergeDecision.SKIP,
+        decision_source=DecisionSource.AUTO_EXECUTOR,
+        confidence=1.0,
+        rationale=(
+            "Fork explicitly deleted this file (FORK_DELETED divergence); "
+            "preserving deletion rather than restoring from upstream "
+            "(P-γ-1.5-B regression for R2 helper_test.go)."
+        ),
+        phase="auto_merge",
+        agent="fork_delete_preserver",
+        timestamp=datetime.now(),
+    )
+
+
+def is_fork_deleted(state: Any, file_path: str) -> bool:
+    """Return True if ``file_path`` was explicitly deleted by the fork.
+
+    Reads ``state.fork_divergence_map`` (populated in InitializePhase by
+    :func:`compute_fork_divergence_map`). Distinguishes the FORK_DELETED
+    case (base has file + fork removed it + upstream still has it) from
+    the genuine D_MISSING case (file new in upstream after fork branched
+    off).
+
+    The classifier returns ``D_MISSING`` for both cases because both
+    look "missing from fork". Downstream D_MISSING action sites must
+    consult this helper before restoring from upstream — restoring a
+    fork-deleted file silently re-introduces code the fork meant to
+    drop (calibrated via R2 helper_test.go regression, P-γ-1.5-B).
+    """
+    div_map = getattr(state, "fork_divergence_map", None)
+    if not div_map:
+        return False
+    value = div_map.get(file_path)
+    if value is None:
+        return False
+    return bool(value == ForkDivergence.FORK_DELETED.value)
+
+
 def classify_three_way(
     file_path: str,
     merge_base: str,

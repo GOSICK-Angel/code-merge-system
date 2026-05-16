@@ -39,6 +39,7 @@ from src.models.state import MergeState, PhaseResult, SystemStatus
 from src.tools.binary_assets import is_binary_asset
 from src.tools.commit_replayer import CommitReplayer
 from src.tools.conflict_markers import file_has_conflict_markers
+from src.tools.file_classifier import _fork_deleted_skip_record, is_fork_deleted
 from src.tools.git_committer import GitCommitter
 from src.tools.patch_applier import create_escalate_record
 from src.tools.preservation_auditor import audit_fork_preservation
@@ -839,15 +840,31 @@ class AutoMergePhase(Phase):
                                 and fp not in replayed_set
                                 and fp not in state.file_decision_records
                             ):
-                                record = await executor._copy_from_upstream(fp, state)
-                                state.file_decision_records[fp] = record
-                                phase_changed_files.append(fp)
-                                batch_count += 1
-                                logger.info(
-                                    "D-missing %s copied directly (layer %d deps skipped)",
-                                    fp,
-                                    layer_id,
-                                )
+                                if is_fork_deleted(state, fp):
+                                    state.file_decision_records[fp] = (
+                                        _fork_deleted_skip_record(fp)
+                                    )
+                                    phase_changed_files.append(fp)
+                                    batch_count += 1
+                                    logger.info(
+                                        "FORK_DELETED %s preserved (skip; layer %d "
+                                        "deps skipped path)",
+                                        fp,
+                                        layer_id,
+                                    )
+                                else:
+                                    record = await executor._copy_from_upstream(
+                                        fp, state
+                                    )
+                                    state.file_decision_records[fp] = record
+                                    phase_changed_files.append(fp)
+                                    batch_count += 1
+                                    logger.info(
+                                        "D-missing %s copied directly (layer %d "
+                                        "deps skipped)",
+                                        fp,
+                                        layer_id,
+                                    )
                             else:
                                 skipped_layer_files.append(fp)
                                 if fp not in state.file_decision_records:
@@ -1460,8 +1477,13 @@ class AutoMergePhase(Phase):
                 category = fd_lookup.change_category if fd_lookup else None
 
             if category == FileChangeCategory.D_MISSING:
-                record = await executor._copy_from_upstream(file_path, state)
-                state.file_decision_records[file_path] = record
+                if is_fork_deleted(state, file_path):
+                    state.file_decision_records[file_path] = _fork_deleted_skip_record(
+                        file_path
+                    )
+                else:
+                    record = await executor._copy_from_upstream(file_path, state)
+                    state.file_decision_records[file_path] = record
                 return file_path
 
             fd_item: FileDiff | None = file_diffs_map.get(file_path)

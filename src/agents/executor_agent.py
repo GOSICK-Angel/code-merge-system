@@ -29,6 +29,7 @@ from src.llm.prompts.executor_prompts import (
 )
 from src.llm.response_parser import parse_merge_result
 from src.tools.patch_applier import apply_with_snapshot, create_escalate_record
+from src.tools.file_classifier import _fork_deleted_skip_record, is_fork_deleted
 from src.tools.git_tool import GitTool
 from src.tools.diff_stasher import stash_upstream_diff
 from src.cli.paths import get_diff_stash_dir
@@ -128,8 +129,13 @@ class ExecutorAgent(BaseAgent):
                             continue
 
                 if category == FileChangeCategory.D_MISSING:
-                    record = await self._copy_from_upstream(file_path, state)
-                    state.file_decision_records[file_path] = record
+                    if is_fork_deleted(state, file_path):
+                        state.file_decision_records[file_path] = (
+                            _fork_deleted_skip_record(file_path)
+                        )
+                    else:
+                        record = await self._copy_from_upstream(file_path, state)
+                        state.file_decision_records[file_path] = record
                     processed += 1
                     continue
 
