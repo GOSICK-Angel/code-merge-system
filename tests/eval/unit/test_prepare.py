@@ -430,15 +430,20 @@ class TestPatchApplyHelpers:
 
 
 class TestCommittedSamplesSmoke:
-    def test_real_tier1_round_trip(self, tmp_path: Path) -> None:
+    def test_reference_tier1_round_trip(self, tmp_path: Path) -> None:
+        # Uses the synthetic reference fixture (hello.py-based), not the
+        # real 30-sample evaluation dataset. The fixture lives under
+        # ``tests/eval/fixtures/reference_samples/`` to keep framework
+        # tests independent of real sample content.
         repo_root = Path(__file__).resolve().parents[3]
+        fixture_root = repo_root / "tests" / "eval" / "fixtures" / "reference_samples"
         manifests = tmp_path / "manifests"
         manifests.mkdir()
         rc_lock = lock_mod.main(
             [
                 "--update",
                 "--datasets",
-                str(repo_root / "tests" / "eval" / "datasets"),
+                str(fixture_root),
                 "--manifests",
                 str(manifests),
             ]
@@ -452,7 +457,7 @@ class TestCommittedSamplesSmoke:
                 "--out",
                 str(out),
                 "--datasets",
-                str(repo_root / "tests" / "eval" / "datasets"),
+                str(fixture_root),
                 "--manifests",
                 str(manifests),
             ]

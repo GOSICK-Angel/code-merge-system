@@ -1,0 +1,8 @@
+sample_id: t1-0012
+tier: 1
+category: B
+loss_class: null         # null or M1-M6 for Tier-3 / M-injected samples
+expected_human: false    # bool — should the system escalate?
+description: |
+  TBD — one-line summary of base/upstream/fork divergence and the
+  golden resolution rationale.

@@ -25,13 +25,19 @@ from scripts.eval import (
     run as run_mod,
     summarize as summarize_mod,
 )
-from scripts.eval.lock import DEFAULT_DATASETS_DIR, DEFAULT_MANIFESTS_DIR
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FAKE_MERGE_BIN = REPO_ROOT / "tests/eval/fixtures/fake_merge_bin/fake_merge.sh"
 DUMMY_RUN_FIXTURE = REPO_ROOT / "tests/eval/fixtures/dummy_run"
 ACCEPTANCE_YAML = REPO_ROOT / "tests/eval/manifests/acceptance_thresholds.yaml"
-TIER1_DATASETS = DEFAULT_DATASETS_DIR / "tier1" / "samples"
+# Synthetic reference dataset isolated from the real evaluation samples.
+# The real ``tests/eval/datasets/`` now holds the production tier1 dataset
+# captured from a downstream monorepo; framework tests must not depend on
+# its shape, so we route the e2e chain through a self-contained fixture
+# root that ships with the repository.
+REFERENCE_DATASETS = REPO_ROOT / "tests/eval/fixtures/reference_samples"
+TIER1_DATASETS = REFERENCE_DATASETS / "tier1" / "samples"
+REFERENCE_MANIFESTS = REPO_ROOT / "tests/eval/fixtures/reference_samples/manifests"
 
 
 # ---------------------------------------------------------------------------
@@ -86,9 +92,9 @@ def _run_merge_pipeline(
             "--seed",
             str(seed),
             "--datasets",
-            str(DEFAULT_DATASETS_DIR),
+            str(REFERENCE_DATASETS),
             "--manifests",
-            str(DEFAULT_MANIFESTS_DIR),
+            str(REFERENCE_MANIFESTS),
         ]
     )
 

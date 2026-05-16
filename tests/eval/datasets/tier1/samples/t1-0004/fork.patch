@@ -1,0 +1,440 @@
+diff --git a/tools/gaode/.difyignore b/tools/gaode/.difyignore
+new file mode 100644
+index 00000000..4ea91756
+--- /dev/null
++++ b/tools/gaode/.difyignore
+@@ -0,0 +1,179 @@
++# Byte-compiled / optimized / DLL files
++__pycache__/
++*.py[cod]
++*$py.class
++
++# Distribution / packaging
++.Python
++build/
++develop-eggs/
++dist/
++downloads/
++eggs/
++.eggs/
++lib/
++lib64/
++parts/
++sdist/
++var/
++wheels/
++share/python-wheels/
++*.egg-info/
++.installed.cfg
++*.egg
++MANIFEST
++
++# PyInstaller
++#  Usually these files are written by a python script from a template
++#  before PyInstaller builds the exe, so as to inject date/other infos into it.
++*.manifest
++*.spec
++
++# Installer logs
++pip-log.txt
++pip-delete-this-directory.txt
++
++# Unit test / coverage reports
++htmlcov/
++.tox/
++.nox/
++.coverage
++.coverage.*
++.cache
++nosetests.xml
++coverage.xml
++*.cover
++*.py,cover
++.hypothesis/
++.pytest_cache/
++cover/
++
++# Translations
++*.mo
++*.pot
++
++# Django stuff:
++*.log
++local_settings.py
++db.sqlite3
++db.sqlite3-journal
++
++# Flask stuff:
++instance/
++.webassets-cache
++
++# Scrapy stuff:
++.scrapy
++
++# Sphinx documentation
++docs/_build/
++
++# PyBuilder
++.pybuilder/
++target/
++
++# Jupyter Notebook
++.ipynb_checkpoints
++
++# IPython
++profile_default/
++ipython_config.py
++
++# pyenv
++#   For a library or package, you might want to ignore these files since the code is
++#   intended to run in multiple environments; otherwise, check them in:
++.python-version
++
++# pipenv
++#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
++#   However, in case of collaboration, if having platform-specific dependencies or dependencies
++#   having no cross-platform support, pipenv may install dependencies that don't work, or not
++#   install all needed dependencies.
++Pipfile.lock
++
++# UV
++#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
++#   This is especially recommended for binary packages to ensure reproducibility, and is more
++#   commonly ignored for libraries.
++uv.lock
++
++# poetry
++#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
++#   This is especially recommended for binary packages to ensure reproducibility, and is more
++#   commonly ignored for libraries.
++#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
++poetry.lock
++
++# pdm
++#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
++#pdm.lock
++#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
++#   in version control.
++#   https://pdm.fming.dev/latest/usage/project/#working-with-version-control
++.pdm.toml
++.pdm-python
++.pdm-build/
++
++# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
++__pypackages__/
++
++# Celery stuff
++celerybeat-schedule
++celerybeat.pid
++
++# SageMath parsed files
++*.sage.py
++
++# Environments
++.env
++.venv
++env/
++venv/
++ENV/
++env.bak/
++venv.bak/
++
++# Spyder project settings
++.spyderproject
++.spyproject
++
++# Rope project settings
++.ropeproject
++
++# mkdocs documentation
++/site
++
++# mypy
++.mypy_cache/
++.dmypy.json
++dmypy.json
++
++# Pyre type checker
++.pyre/
++
++# pytype static type analyzer
++.pytype/
++
++# Cython debug symbols
++cython_debug/
++
++# PyCharm
++#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
++#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
++#  and can be added to the global gitignore or merged into this file.  For a more nuclear
++#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
++.idea/
++
++# Vscode
++.vscode/
++
++# Git
++.git/
++.gitignore
++.github/
++
++# Mac
++.DS_Store
++
++# Windows
++Thumbs.db
+diff --git a/tools/gaode/manifest.yaml b/tools/gaode/manifest.yaml
+index 97a8a043..84f02981 100644
+--- a/tools/gaode/manifest.yaml
++++ b/tools/gaode/manifest.yaml
+@@ -1,4 +1,4 @@
+-author: "langgenius"
++author: "cvte"
+ created_at: '2024-09-20T08:03:44.658609186Z'
+ description:
+   en_US: Autonavi Open Platform service toolkit.
+diff --git a/tools/gaode/provider/gaode.py b/tools/gaode/provider/gaode.py
+index c947c356..6a91199f 100644
+--- a/tools/gaode/provider/gaode.py
++++ b/tools/gaode/provider/gaode.py
+@@ -2,17 +2,18 @@ import urllib.parse
+ import requests
+ from dify_plugin.errors.tool import ToolProviderCredentialValidationError
+ from dify_plugin import ToolProvider
+-
++import os
+ 
+ class GaodeProvider(ToolProvider):
+-    def _validate_credentials(self, credentials: dict) -> None:
++    def _validate_credentials(self) -> None:
+         try:
+-            if "api_key" not in credentials or not credentials.get("api_key"):
+-                raise ToolProviderCredentialValidationError("Gaode API key is required.")
+             try:
++                GAODE_API_KEY = os.environ.get("GAODE_API_KEY")
++                if not GAODE_API_KEY:
++                    raise ToolProviderCredentialValidationError("GAODE_API_KEY is not set")
+                 response = requests.get(
+                     url="https://restapi.amap.com/v3/geocode/geo?address={address}&key={apikey}".format(
+-                        address=urllib.parse.quote("广东省广州市天河区广州塔"), apikey=credentials.get("api_key")
++                        address=urllib.parse.quote("广东省广州市天河区广州塔"), apikey=GAODE_API_KEY
+                     )
+                 )
+                 if response.status_code == 200 and response.json().get("info") == "OK":
+diff --git a/tools/gaode/provider/gaode.yaml b/tools/gaode/provider/gaode.yaml
+index 3180b3c9..71403cfe 100644
+--- a/tools/gaode/provider/gaode.yaml
++++ b/tools/gaode/provider/gaode.yaml
+@@ -1,23 +1,3 @@
+-credentials_for_provider:
+-  api_key:
+-    help:
+-      en_US: Get your API Key from Autonavi
+-      pt_BR: Obtenha sua chave de API do Autonavi
+-      zh_Hans: 从高德获取您的 API Key
+-    label:
+-      en_US: API Key
+-      pt_BR: Fogo a chave
+-      zh_Hans: API Key
+-    placeholder:
+-      en_US: Please enter your Autonavi API Key
+-      pt_BR: Insira sua chave de API Autonavi
+-      zh_Hans: 请输入你的高德开放平台 API Key
+-    required: true
+-    type: secret-input
+-    url: https://console.amap.com/dev/key/app
+-extra:
+-  python:
+-    source: provider/gaode.py
+ identity:
+   author: CharlieWei
+   description:
+@@ -35,5 +15,26 @@ identity:
+   - productivity
+   - travel
+   - weather
++# credentials_for_provider:
++#   api_key:
++#     help:
++#       en_US: Get your API Key from Autonavi
++#       pt_BR: Obtenha sua chave de API do Autonavi
++#       zh_Hans: 从高德获取您的 API Key
++#     label:
++#       en_US: API Key
++#       pt_BR: Fogo a chave
++#       zh_Hans: API Key
++#     placeholder:
++#       en_US: Please enter your Autonavi API Key
++#       pt_BR: Insira sua chave de API Autonavi
++#       zh_Hans: 请输入你的高德开放平台 API Key
++#     required: false
++#     type: secret-input
++#     url: https://console.amap.com/dev/key/app
++extra:
++  python:
++    source: provider/gaode.py
+ tools:
+ - tools/gaode_weather.yaml
++- tools/gaode_route_plan.yaml
+diff --git a/tools/gaode/tools/gaode_route_plan.py b/tools/gaode/tools/gaode_route_plan.py
+new file mode 100644
+index 00000000..287fb569
+--- /dev/null
++++ b/tools/gaode/tools/gaode_route_plan.py
+@@ -0,0 +1,57 @@
++import json
++import os
++from typing import Any, Generator
++import requests
++from dify_plugin.entities.tool import ToolInvokeMessage
++from dify_plugin import Tool
++
++
++class GaodeRoutePlan(Tool):
++
++    def _invoke(
++        self, tool_parameters: dict[str, Any]
++    ) -> Generator[ToolInvokeMessage, None, None]:
++        """
++        invoke tools
++        """
++        GAODE_API_KEY = os.environ.get("GAODE_API_KEY")
++        if not GAODE_API_KEY:
++            raise Exception("GAODE_API_KEY is not set")
++
++        try:
++            starting_city = tool_parameters.get("starting_city")
++            destination_city = tool_parameters.get("destination_city")
++
++            start_city_location = self.get_location(starting_city, GAODE_API_KEY)
++            destination_city_location = self.get_location(destination_city, GAODE_API_KEY)
++            route_plan = self.get_route_plan(start_city_location, destination_city_location, GAODE_API_KEY)
++            yield self.create_text_message(json.dumps(route_plan, ensure_ascii=False))
++        except Exception as e:
++            raise Exception(f"Failed to get route plan for {e}")
++
++
++    @staticmethod
++    def get_location(city: str, api_key: str):
++        location_url = f"https://restapi.amap.com/v3/geocode/geo?output=json&key={api_key}&address={city}"
++        response = requests.get(location_url)
++        if response.status_code != 200:
++            raise Exception(f"Failed to get location for {city}")
++
++        response_body = response.json()
++        if response_body["status"] != "1":
++            raise Exception(f"Failed to get location {response_body['info']}")
++
++        location = response_body["geocodes"][0]["location"]
++        return location
++
++    @staticmethod
++    def get_route_plan(start_location, destination_location, api_key: str):
++        route_plan_url = f"https://restapi.amap.com/v5/direction/driving?origin={start_location}&destination={destination_location}&key={api_key}&show_fields=cost"
++        response = requests.get(route_plan_url)
++        if response.status_code != 200:
++            raise Exception(f"Failed to get route plan for {start_location} to {destination_location}")
++        response_json = response.json()
++        if response_json["infocode"] == "10000":
++            return response_json["route"]
++        else:
++            raise Exception(f"Failed to get route plan for {response_json['info']}")
+\ No newline at end of file
+diff --git a/tools/gaode/tools/gaode_route_plan.yaml b/tools/gaode/tools/gaode_route_plan.yaml
+new file mode 100644
+index 00000000..5577942f
+--- /dev/null
++++ b/tools/gaode/tools/gaode_route_plan.yaml
+@@ -0,0 +1,44 @@
++description:
++  human:
++    en_US: Plan the path to take you to your destination.
++    zh_Hans: 路径规划。
++    pt_BR: Planeje o caminho para levá-lo ao seu destino.
++  llm:  Plan the path to take you to your destination.
++extra:
++  python:
++    source: tools/gaode_route_plan.py
++identity:
++  name: gaode_route_plan
++  author: chenxu
++  label:
++    en_US: Route Plan
++    zh_Hans: 路径规划
++    pt_BR: Previsão do tempo
++  icon: route.svg
++parameters:
++  - name: starting_city
++    type: string
++    required: true
++    label:
++      en_US: starting city
++      zh_Hans: 起始城市
++      pt_BR: cidade inicial
++    human_description:
++      en_US: starting city for route plan.
++      zh_Hans: 起始城市
++      pt_BR: cidade inicial para plano de rota.
++    llm_description: Plan the path to take you to your destination. If you don't know starting city name from the question or you can reply：Please tell me your city. You have to extract the Chinese city name from the question.
++    form: llm
++  - name: destination_city
++    type: string
++    required: true
++    label:
++      en_US: destination city
++      zh_Hans: 目的城市
++      pt_BR: cidade
++    human_description:
++      en_US: Target city for Route Plan.
++      zh_Hans: 目的城市。
++      pt_BR: Cidade de destino.
++    llm_description: The destination city you are going to or want to plan a route to.If you don't know destination city name from the question or you can reply：Please tell me your city. You have to extract the Chinese city name from the question.
++    form: llm
+diff --git a/tools/gaode/tools/gaode_weather.py b/tools/gaode/tools/gaode_weather.py
+index 1c38725f..ef2e5ef7 100644
+--- a/tools/gaode/tools/gaode_weather.py
++++ b/tools/gaode/tools/gaode_weather.py
+@@ -3,7 +3,7 @@ from typing import Any, Generator
+ import requests
+ from dify_plugin.entities.tool import ToolInvokeMessage
+ from dify_plugin import Tool
+-
++import os
+ 
+ class GaodeRepositoriesTool(Tool):
+     def _invoke(
+@@ -12,11 +12,14 @@ class GaodeRepositoriesTool(Tool):
+         """
+         invoke tools
+         """
++        GAODE_API_KEY = os.environ.get("GAODE_API_KEY")
++        if not GAODE_API_KEY:
++            raise Exception("GAODE_API_KEY is not set")
++
+         city = tool_parameters.get("city", "")
+         if not city:
+             yield self.create_text_message("Please tell me your city")
+-        if "api_key" not in self.runtime.credentials or not self.runtime.credentials.get("api_key"):
+-            yield self.create_text_message("Gaode API key is required.")
++
+         try:
+             s = requests.session()
+             api_domain = "https://restapi.amap.com/v3"
+@@ -24,7 +27,7 @@ class GaodeRepositoriesTool(Tool):
+                 method="GET",
+                 headers={"Content-Type": "application/json; charset=utf-8"},
+                 url="{url}/config/district?keywords={keywords}&subdistrict=0&extensions=base&key={apikey}".format(
+-                    url=api_domain, keywords=city, apikey=self.runtime.credentials.get("api_key")
++                    url=api_domain, keywords=city, apikey=GAODE_API_KEY
+                 ),
+             )
+             City_data = city_response.json()
+@@ -34,7 +37,7 @@ class GaodeRepositoriesTool(Tool):
+                     weatherInfo_response = s.request(
+                         method="GET",
+                         url="{url}/weather/weatherInfo?city={citycode}&extensions=all&key={apikey}&output=json".format(
+-                            url=api_domain, citycode=CityCode, apikey=self.runtime.credentials.get("api_key")
++                            url=api_domain, citycode=CityCode, apikey=GAODE_API_KEY
+                         ),
+                     )
+                     weatherInfo_data = weatherInfo_response.json()

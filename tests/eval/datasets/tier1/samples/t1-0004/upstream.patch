@@ -1,0 +1,30 @@
+diff --git a/tools/gaode/manifest.yaml b/tools/gaode/manifest.yaml
+index 97a8a043..bb88dc9a 100644
+--- a/tools/gaode/manifest.yaml
++++ b/tools/gaode/manifest.yaml
+@@ -36,4 +36,4 @@ tags:
+ - travel
+ - weather
+ type: plugin
+-version: 0.0.2
++version: 0.0.3
+diff --git a/tools/gaode/requirements.txt b/tools/gaode/requirements.txt
+index 5e06c37a..a2781f8e 100644
+--- a/tools/gaode/requirements.txt
++++ b/tools/gaode/requirements.txt
+@@ -1 +1 @@
+-dify_plugin==0.0.1b65
++dify_plugin>=0.3.0,<0.4.0
+\ No newline at end of file
+diff --git a/tools/gaode/tools/gaode_weather.py b/tools/gaode/tools/gaode_weather.py
+index 1c38725f..3535c7e6 100644
+--- a/tools/gaode/tools/gaode_weather.py
++++ b/tools/gaode/tools/gaode_weather.py
+@@ -55,6 +55,7 @@ class GaodeRepositoriesTool(Tool):
+                             yield self.create_text_message(
+                                 text=self.session.model.summary.invoke(json.dumps(contents, ensure_ascii=False), '')
+                             )
++                            return
+             s.close()
+             yield self.create_text_message(f"No weather information for {city} was found.")
+         except Exception as e:

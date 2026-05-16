@@ -509,12 +509,17 @@ class TestArgparseMutualExclusion:
 class TestCommittedSamples:
     def test_real_repo_samples_have_stable_sha(self) -> None:
         repo_root = Path(__file__).resolve().parents[3]
-        t1 = repo_root / "tests/eval/datasets/tier1/samples/t1-0001"
+        # Synthetic reference fixture (moved out of the real dataset by
+        # the F8-clean dataset migration so the framework tests don't
+        # depend on the real evaluation samples' shape).
+        t1_fixture = (
+            repo_root / "tests/eval/fixtures/reference_samples/tier1/samples/t1-0001"
+        )
         t3 = repo_root / "tests/eval/datasets/tier3/adversarial/t3-m3-0001"
-        assert t1.is_dir()
+        assert t1_fixture.is_dir()
         assert t3.is_dir()
         # Two consecutive computations on the on-disk samples are identical.
-        assert _sample_sha256(t1) == _sample_sha256(t1)
+        assert _sample_sha256(t1_fixture) == _sample_sha256(t1_fixture)
         assert _sample_sha256(t3) == _sample_sha256(t3)
 
     def test_real_repo_update_then_verify(self, tmp_path: Path) -> None:

@@ -1,0 +1,13 @@
+diff --git a/models/aihubmix/provider/aihubmix.yaml b/models/aihubmix/provider/aihubmix.yaml
+index 60c8e7c7..7556831a 100644
+--- a/models/aihubmix/provider/aihubmix.yaml
++++ b/models/aihubmix/provider/aihubmix.yaml
+@@ -121,7 +121,7 @@ model_credential_schema:
+           value: llm
+       default: "4096"
+       type: text-input
+-    - variable: agent_though_support
++    - variable: agent_thought_support
+       show_on:
+         - variable: __model_type
+           value: llm

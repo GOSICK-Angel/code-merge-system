@@ -1,11 +1,185 @@
 {
   "eval_version": "0.1.0",
-  "generated_at": "2026-05-16T01:16:52.663002Z",
+  "generated_at": "2026-05-16T07:52:22.499366Z",
   "samples": [
     {
-      "content_sha256": "3cdcf0f6bcf3b21df51818fefc68fb3eb15e066b7cb71eba81ecc21f0c9acfff",
+      "content_sha256": "e616a2a0e1b2597ef135a4ae88007c1594a0da7c3523849a5c852d36af016dbd",
       "relative_path": "tier1/samples/t1-0001",
       "sample_id": "t1-0001",
+      "tier": 1
+    },
+    {
+      "content_sha256": "62e20f269896c1a26460bffc7b7d2f2ac71b3c71ab229ed1f6be7bd3cbe0566b",
+      "relative_path": "tier1/samples/t1-0002",
+      "sample_id": "t1-0002",
+      "tier": 1
+    },
+    {
+      "content_sha256": "e7a1f36d1ee302f8dfa9b6ef79b87a8a806bc009112a009ed96a2c5c654192c6",
+      "relative_path": "tier1/samples/t1-0003",
+      "sample_id": "t1-0003",
+      "tier": 1
+    },
+    {
+      "content_sha256": "4d9f161668b99e75572e342f806483ef30f0fa9c49618f3947412dce8693275c",
+      "relative_path": "tier1/samples/t1-0004",
+      "sample_id": "t1-0004",
+      "tier": 1
+    },
+    {
+      "content_sha256": "1c7b70fe37be2f9b50d925a417b3243ddc850016f1a4e1af10372a96a6550f4f",
+      "relative_path": "tier1/samples/t1-0005",
+      "sample_id": "t1-0005",
+      "tier": 1
+    },
+    {
+      "content_sha256": "876f65ae809422fe53bab17d112c1112c9e3fb58329f1bf5196b7f4ab290b78d",
+      "relative_path": "tier1/samples/t1-0006",
+      "sample_id": "t1-0006",
+      "tier": 1
+    },
+    {
+      "content_sha256": "f535c9930004102268d0fc12fd629d3fb55394afae4709cd6e9333c27dd8ad66",
+      "relative_path": "tier1/samples/t1-0007",
+      "sample_id": "t1-0007",
+      "tier": 1
+    },
+    {
+      "content_sha256": "68cd36cf023b87835821d8092431ea67e9d13e9750bdac218a944b0cc30a6641",
+      "relative_path": "tier1/samples/t1-0008",
+      "sample_id": "t1-0008",
+      "tier": 1
+    },
+    {
+      "content_sha256": "4209c9a048b94f5860bd351e6ebf53da771cece3c4687ca41bcff773ac79c214",
+      "relative_path": "tier1/samples/t1-0009",
+      "sample_id": "t1-0009",
+      "tier": 1
+    },
+    {
+      "content_sha256": "a429c17ddb134d417c3c9d37e785883a8a74dfbb021733d9aa4e1f1d3269783d",
+      "relative_path": "tier1/samples/t1-0010",
+      "sample_id": "t1-0010",
+      "tier": 1
+    },
+    {
+      "content_sha256": "ccc45cd13f922a6711b0daa12f9b944becdf734ef3fa24bb3ea9abd8f3e10fd2",
+      "relative_path": "tier1/samples/t1-0011",
+      "sample_id": "t1-0011",
+      "tier": 1
+    },
+    {
+      "content_sha256": "25f16071e993166d5097d6a9067ad79d9d358145728cb8eabd1382d05fc91640",
+      "relative_path": "tier1/samples/t1-0012",
+      "sample_id": "t1-0012",
+      "tier": 1
+    },
+    {
+      "content_sha256": "a6903bf725071467ba639f4bb9e9fde4de940bfd016e15f40921804952725707",
+      "relative_path": "tier1/samples/t1-0013",
+      "sample_id": "t1-0013",
+      "tier": 1
+    },
+    {
+      "content_sha256": "ce728824798d6848053efb28ed408d542e05147bb007ade2b6da783081c5f380",
+      "relative_path": "tier1/samples/t1-0014",
+      "sample_id": "t1-0014",
+      "tier": 1
+    },
+    {
+      "content_sha256": "7f762b0d0ce6813334ecffc09720f579469a1a31f74afd68695ca4cca25e8e5c",
+      "relative_path": "tier1/samples/t1-0015",
+      "sample_id": "t1-0015",
+      "tier": 1
+    },
+    {
+      "content_sha256": "f73cffa92dcad2992f673e81abcc47bd0f81bd7ab60e16704c8d730fdd1d12fc",
+      "relative_path": "tier1/samples/t1-0016",
+      "sample_id": "t1-0016",
+      "tier": 1
+    },
+    {
+      "content_sha256": "248b02a502b6d3e301df560184c2ed45150b8fde03167b849f456e37241310f3",
+      "relative_path": "tier1/samples/t1-0017",
+      "sample_id": "t1-0017",
+      "tier": 1
+    },
+    {
+      "content_sha256": "13a3ad8aaa25bcecf2df9c618e79de55c27a37bc654df9dfccbc48cd9911efb4",
+      "relative_path": "tier1/samples/t1-0018",
+      "sample_id": "t1-0018",
+      "tier": 1
+    },
+    {
+      "content_sha256": "b9faa8c3d883910ccb932d970988afa26007a743c97ef673f31f7abd6153704d",
+      "relative_path": "tier1/samples/t1-0019",
+      "sample_id": "t1-0019",
+      "tier": 1
+    },
+    {
+      "content_sha256": "024ea5342bdbd9c08b6cb29ba39b19d0f726b041dac0e7b49e4463def2144ec4",
+      "relative_path": "tier1/samples/t1-0020",
+      "sample_id": "t1-0020",
+      "tier": 1
+    },
+    {
+      "content_sha256": "7ab44b9ae08f201f0b834ce6fe18a0b8cba3240dce173fb9849ebfa25349066d",
+      "relative_path": "tier1/samples/t1-0021",
+      "sample_id": "t1-0021",
+      "tier": 1
+    },
+    {
+      "content_sha256": "8b7df5d8a0f9e1c6fb48683e954b061fc6d896ae389c04c287eca8d5d3f057fd",
+      "relative_path": "tier1/samples/t1-0022",
+      "sample_id": "t1-0022",
+      "tier": 1
+    },
+    {
+      "content_sha256": "89ca7ec5681b2b490637fc5fa4ee2ed2e4453ae8f1d767ea1a1d9bc702d646a7",
+      "relative_path": "tier1/samples/t1-0023",
+      "sample_id": "t1-0023",
+      "tier": 1
+    },
+    {
+      "content_sha256": "a33175171252fd60cfad6fd41aad82a3c6f237d8ca9cccb1f521e8c08197d13e",
+      "relative_path": "tier1/samples/t1-0024",
+      "sample_id": "t1-0024",
+      "tier": 1
+    },
+    {
+      "content_sha256": "c1404a610de54622c5abab49203db35ac26f620e60abddee36597b8a5d36c9f3",
+      "relative_path": "tier1/samples/t1-0025",
+      "sample_id": "t1-0025",
+      "tier": 1
+    },
+    {
+      "content_sha256": "a96412ef8f48d5b709f02675d2ac9434593a911cd0cc101961ce92be2f9892ca",
+      "relative_path": "tier1/samples/t1-0026",
+      "sample_id": "t1-0026",
+      "tier": 1
+    },
+    {
+      "content_sha256": "ec5ee448dc257ab54bdc3d1709e3c8f04b0ced71394b3d469dfc9ec910e3489c",
+      "relative_path": "tier1/samples/t1-0027",
+      "sample_id": "t1-0027",
+      "tier": 1
+    },
+    {
+      "content_sha256": "a2520633ab31c3bcd3365f6174079e645deb0a64282a07cd7563a6f023c28bbf",
+      "relative_path": "tier1/samples/t1-0028",
+      "sample_id": "t1-0028",
+      "tier": 1
+    },
+    {
+      "content_sha256": "bcfd5b9adce9df11c014afcb924aa7badc5036d86054664ade02c375641049de",
+      "relative_path": "tier1/samples/t1-0029",
+      "sample_id": "t1-0029",
+      "tier": 1
+    },
+    {
+      "content_sha256": "02fe2c7aada59521c6f18e403693f23c6bc26924612cc1520fb8889299e6ff80",
+      "relative_path": "tier1/samples/t1-0030",
+      "sample_id": "t1-0030",
       "tier": 1
     }
   ],

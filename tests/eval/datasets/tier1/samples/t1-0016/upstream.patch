@@ -1,0 +1,7 @@
+diff --git a/models/zhinao/requirements.txt b/models/zhinao/requirements.txt
+index 5e06c37a..54b0f882 100644
+--- a/models/zhinao/requirements.txt
++++ b/models/zhinao/requirements.txt
+@@ -1 +1 @@
+-dify_plugin==0.0.1b65
++dify_plugin<0.6.0,>=0.5.0

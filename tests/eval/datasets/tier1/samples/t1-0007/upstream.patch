@@ -1,0 +1,10 @@
+diff --git a/tools/image_collage/requirements.txt b/tools/image_collage/requirements.txt
+index 7af92d50..9898e5f3 100644
+--- a/tools/image_collage/requirements.txt
++++ b/tools/image_collage/requirements.txt
+@@ -1,4 +1,4 @@
+-dify_plugin>=0.3.1,<=0.4.0
++dify_plugin>=0.6.2
+ Pillow>=11.3.0
+ requests>=2.31.0
+ 

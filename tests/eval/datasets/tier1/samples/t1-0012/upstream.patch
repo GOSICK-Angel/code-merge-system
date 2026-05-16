@@ -1,0 +1,28 @@
+diff --git a/tools/maxhub/tools/search_meeting.py b/tools/maxhub/tools/search_meeting.py
+index 1894d966..6c1f5c5c 100644
+--- a/tools/maxhub/tools/search_meeting.py
++++ b/tools/maxhub/tools/search_meeting.py
+@@ -246,7 +246,6 @@ class MAXHUBMeetingSearchTool(Tool):
+                 updated_headers = MAXHUBProvider.update_auth_headers(
+                     headers=headers.copy(), credentials=self.runtime.credentials, http_method="GET", api_path=api_path
+                 )
+-
+                 meeting_response = requests_retry_session().request(
+                     method="GET", headers=updated_headers, verify=True, url=f"{api_domain}{api_path}"
+                 )
+@@ -318,6 +317,7 @@ class MAXHUBMeetingSearchTool(Tool):
+             meeting_no = meeting.get("meeting_no", "Unknown")
+             theme = meeting.get("theme", "No theme")
+             address = meeting.get("address", "No location")
++            members=meeting.get("members", "No members")
+             
+             # 格式化时间
+             start_time = meeting.get("start_time")
+@@ -336,6 +336,7 @@ class MAXHUBMeetingSearchTool(Tool):
+             formatted_lines.append(f"• [{meeting_no}] {theme}")
+             formatted_lines.append(f"  Time: {time_str}")
+             formatted_lines.append(f"  Location: {address}")
++            formatted_lines.append(f"  Members: {members}")
+             formatted_lines.append("")
+ 
+         return "\n".join(formatted_lines)

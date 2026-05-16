@@ -1,8 +1,8 @@
 sample_id: t1-0001
 tier: 1
 category: C
-expected_human: false
+loss_class: null         # null or M1-M6 for Tier-3 / M-injected samples
+expected_human: false    # bool — should the system escalate?
 description: |
-  Greeting helper. Upstream extends the signature with a loud flag;
-  fork only added a leading comment. Golden keeps both: upstream
-  signature change plus fork comment.
+  TBD — one-line summary of base/upstream/fork divergence and the
+  golden resolution rationale.

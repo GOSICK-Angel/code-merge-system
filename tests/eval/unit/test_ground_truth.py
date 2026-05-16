@@ -204,9 +204,15 @@ class TestLoadSample:
 
 
 class TestCommittedSamples:
-    def test_real_tier1_loads(self) -> None:
+    def test_reference_tier1_fixture_loads(self) -> None:
+        # The synthetic tier1 reference sample lives under fixtures/ to keep
+        # it physically separate from the real evaluation dataset (dataset.md
+        # §1 "评估集不进入训练" — same isolation principle for fixtures vs
+        # real data so framework tests don't depend on real sample shape).
         repo_root = Path(__file__).resolve().parents[3]
-        bundle = load_sample(repo_root / "tests/eval/datasets/tier1/samples/t1-0001")
+        bundle = load_sample(
+            repo_root / "tests/eval/fixtures/reference_samples/tier1/samples/t1-0001"
+        )
         assert bundle.meta.sample_id == "t1-0001"
         assert any(f.relative_path == "hello.py" for f in bundle.golden_files)
 
