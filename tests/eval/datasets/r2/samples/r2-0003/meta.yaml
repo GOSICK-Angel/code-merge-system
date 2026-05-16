@@ -1,0 +1,11 @@
+sample_id: r2-0003
+tier: 2
+category: B
+loss_class: null
+expected_human: false
+description: |
+  dify-plugin-daemon PR #152 (quicksandznzn/add-redis-db-config) merged
+  2025-03-30. Adds redis DB index config knob and rewires several test
+  helpers; 42 files captured. Spans internal/utils/cache, internal/cluster,
+  internal/core/plugin_manager/debugging_runtime test infrastructure.
+  base=5d14f2ff, golden=b5fefd1a.

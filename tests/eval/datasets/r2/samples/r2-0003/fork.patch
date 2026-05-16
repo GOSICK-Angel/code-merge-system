@@ -1,0 +1,1544 @@
+diff --git a/.env.example b/.env.example
+index 5bba20a6..7291412c 100644
+--- a/.env.example
++++ b/.env.example
+@@ -13,7 +13,7 @@ PLUGIN_REMOTE_INSTALLING_PORT=5003
+ # s3 credentials
+ S3_USE_AWS_MANAGED_IAM=true
+ S3_ENDPOINT=
+-S3_BUCKET_NAME=
++S3_USE_PATH_STYLE=true
+ AWS_ACCESS_KEY=
+ AWS_SECRET_KEY=
+ AWS_REGION=
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index a1b5bfc0..4f37c790 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -33,6 +33,19 @@ jobs:
+         ports:
+           - 5432:5432
+ 
++      mysql:
++        image: mysql:8.0
++        env:
++          MYSQL_DATABASE: difyai
++          MYSQL_ROOT_PASSWORD: difyai123456
++        ports:
++          - 3306:3306
++        options: >-
++          --health-cmd="mysqladmin ping --silent"
++          --health-interval=10s
++          --health-timeout=5s
++          --health-retries=30
++
+     steps:
+       - uses: actions/checkout@v2
+ 
+diff --git a/.gitignore b/.gitignore
+index 1a1e8148..4aa7f372 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -12,4 +12,5 @@ media-cache
+ subprocesses
+ working
+ cwd/
+-bin/
+\ No newline at end of file
++bin/
++.venv/
+\ No newline at end of file
+diff --git a/cmd/server/main.go b/cmd/server/main.go
+index 523ba8c7..c782a93a 100644
+--- a/cmd/server/main.go
++++ b/cmd/server/main.go
+@@ -16,7 +16,7 @@ func main() {
+ 
+ 	err := envconfig.Process("", &config)
+ 	if err != nil {
+-		log.Panic("Error processing environment variables")
++		log.Panic("Error processing environment variables: %s", err.Error())
+ 	}
+ 
+ 	config.SetDefault()
+diff --git a/docker/local.dockerfile b/docker/local.dockerfile
+index 9870104f..75cc4c79 100644
+--- a/docker/local.dockerfile
++++ b/docker/local.dockerfile
+@@ -1,4 +1,4 @@
+-FROM golang:1.22-alpine as builder
++FROM golang:1.23-alpine as builder
+ 
+ ARG VERSION=unknown
+ 
+diff --git a/docker/serverless.dockerfile b/docker/serverless.dockerfile
+index 728d214e..873d03ac 100644
+--- a/docker/serverless.dockerfile
++++ b/docker/serverless.dockerfile
+@@ -1,4 +1,4 @@
+-FROM golang:1.22-alpine as builder
++FROM golang:1.23-alpine as builder
+ 
+ ARG VERSION=unknown
+ 
+diff --git a/go.mod b/go.mod
+index 1dcabea4..bd35421a 100644
+--- a/go.mod
++++ b/go.mod
+@@ -1,8 +1,8 @@
+ module github.com/langgenius/dify-plugin-daemon
+ 
+-go 1.21
++go 1.23.0
+ 
+-toolchain go1.21.6
++toolchain go1.23.3
+ 
+ require (
+ 	github.com/aws/aws-sdk-go-v2 v1.30.4
+@@ -22,6 +22,7 @@ require (
+ 	github.com/tencentyun/cos-go-sdk-v5 v0.7.62
+ 	github.com/vmihailenco/msgpack/v5 v5.4.1
+ 	github.com/xeipuuv/gojsonschema v1.2.0
++	gorm.io/driver/mysql v1.5.7
+ 	gorm.io/gorm v1.25.11
+ )
+ 
+@@ -50,6 +51,7 @@ require (
+ 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
+ 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
+ 	github.com/fsnotify/fsnotify v1.7.0 // indirect
++	github.com/go-sql-driver/mysql v1.7.0 // indirect
+ 	github.com/google/go-querystring v1.1.0 // indirect
+ 	github.com/hashicorp/hcl v1.0.0 // indirect
+ 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+@@ -68,6 +70,7 @@ require (
+ 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
+ 	github.com/muesli/cancelreader v0.2.2 // indirect
+ 	github.com/muesli/termenv v0.15.2 // indirect
++	github.com/panjf2000/ants/v2 v2.11.2 // indirect
+ 	github.com/rivo/uniseg v0.4.7 // indirect
+ 	github.com/rogpeppe/go-internal v1.12.0 // indirect
+ 	github.com/sagikazarmark/locafero v0.4.0 // indirect
+@@ -124,7 +127,7 @@ require (
+ 	golang.org/x/crypto v0.31.0 // indirect
+ 	golang.org/x/exp v0.0.0-20240613232115-7f521ea00fb8
+ 	golang.org/x/net v0.33.0 // indirect
+-	golang.org/x/sync v0.10.0 // indirect
++	golang.org/x/sync v0.12.0 // indirect
+ 	golang.org/x/sys v0.28.0 // indirect
+ 	golang.org/x/text v0.21.0 // indirect
+ 	google.golang.org/protobuf v1.34.2 // indirect
+diff --git a/go.sum b/go.sum
+index 5786e133..37f224d9 100644
+--- a/go.sum
++++ b/go.sum
+@@ -109,6 +109,8 @@ github.com/go-playground/universal-translator v0.18.1 h1:Bcnm0ZwsGyWbCzImXv+pAJn
+ github.com/go-playground/universal-translator v0.18.1/go.mod h1:xekY+UJKNuX9WP91TpwSH2VMlDf28Uj24BCp08ZFTUY=
+ github.com/go-playground/validator/v10 v10.22.0 h1:k6HsTZ0sTnROkhS//R0O+55JgM8C4Bx7ia+JlgcnOao=
+ github.com/go-playground/validator/v10 v10.22.0/go.mod h1:dbuPbCMFw/DrkbEynArYaCwl3amGuJotoKCe95atGMM=
++github.com/go-sql-driver/mysql v1.7.0 h1:ueSltNNllEqE3qcWBTD0iQd3IpL/6U+mJxLkazJ7YPc=
++github.com/go-sql-driver/mysql v1.7.0/go.mod h1:OXbVy3sEdcQ2Doequ6Z5BW6fXNQTmx+9S1MCJN5yJMI=
+ github.com/goccy/go-json v0.10.3 h1:KZ5WoDbxAIgm2HNbYckL0se1fHD6rz5j4ywS6ebzDqA=
+ github.com/goccy/go-json v0.10.3/go.mod h1:oq7eo15ShAhp70Anwd5lgX2pLfOS3QCiwU/PULtXL6M=
+ github.com/golang-jwt/jwt/v5 v5.2.1/go.mod h1:pqrtFR0X4osieyHYxtmOUWsAWrfe1Q5UVIyoH402zdk=
+@@ -198,6 +200,8 @@ github.com/panjf2000/ants v1.3.0 h1:8pQ+8leaLc9lys2viEEr8md0U4RN6uOSUCE9bOYjQ9M=
+ github.com/panjf2000/ants v1.3.0/go.mod h1:AaACblRPzq35m1g3enqYcxspbbiOJJYaxU2wMpm1cXY=
+ github.com/panjf2000/ants/v2 v2.10.0 h1:zhRg1pQUtkyRiOFo2Sbqwjp0GfBNo9cUY2/Grpx1p+8=
+ github.com/panjf2000/ants/v2 v2.10.0/go.mod h1:7ZxyxsqE4vvW0M7LSD8aI3cKwgFhBHbxnlN8mDqHa1I=
++github.com/panjf2000/ants/v2 v2.11.2 h1:AVGpMSePxUNpcLaBO34xuIgM1ZdKOiGnpxLXixLi5Jo=
++github.com/panjf2000/ants/v2 v2.11.2/go.mod h1:8u92CYMUc6gyvTIw8Ru7Mt7+/ESnJahz5EVtqfrilek=
+ github.com/panjf2000/gnet/v2 v2.5.5 h1:H+LqGgCHs2mGJq/4n6YELhMjZ027bNgd5Qb8Wj5nbrM=
+ github.com/panjf2000/gnet/v2 v2.5.5/go.mod h1:ppopMJ8VrDbJu8kDsqFQTgNmpMS8Le5CmPxISf+Sauk=
+ github.com/pelletier/go-buffruneio v0.2.0/go.mod h1:JkE26KsDizTr40EUHkXVtNPvgGtbSNq5BcowyYOWdKo=
+@@ -302,6 +306,8 @@ golang.org/x/net v0.33.0/go.mod h1:HXLR5J+9DxmrqMwG9qjGCxZ+zKXxBru04zlTvWlWuN4=
+ golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.10.0 h1:3NQrjDixjgGwUOCaF8w2+VYHv0Ve/vGYSbdkTa98gmQ=
+ golang.org/x/sync v0.10.0/go.mod h1:Czt+wKu1gCyEFDUtn0jG5QVvpJ6rzVqr5aXyt9drQfk=
++golang.org/x/sync v0.12.0 h1:MHc5BpPuC30uJk597Ri8TV3CNZcTLu6B6z4lJy+g6Jw=
++golang.org/x/sync v0.12.0/go.mod h1:1dzgHSNfp02xaA81J2MS99Qcpr2w7fw1gpm99rleRqA=
+ golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20190221075227-b4e8571b14e0/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+@@ -338,8 +344,11 @@ gopkg.in/warnings.v0 v0.1.2/go.mod h1:jksf8JmL6Qr/oQM2OXTHunEvvTAsrWBLb6OOjuVWRN
+ gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+ gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+ gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
++gorm.io/driver/mysql v1.5.7 h1:MndhOPYOfEp2rHKgkZIhJ16eVUIRf2HmzgoPmh7FCWo=
++gorm.io/driver/mysql v1.5.7/go.mod h1:sEtPWMiqiN1N1cMXoXmBbd8C6/l+TESwriotuRRpkDM=
+ gorm.io/driver/postgres v1.5.9 h1:DkegyItji119OlcaLjqN11kHoUgZ/j13E0jkJZgD6A8=
+ gorm.io/driver/postgres v1.5.9/go.mod h1:DX3GReXH+3FPWGrrgffdvCk3DQ1dwDPdmbenSkweRGI=
++gorm.io/gorm v1.25.7/go.mod h1:hbnx/Oo0ChWMn1BIhpy1oYozzpM15i4YPuHDmfYtwg8=
+ gorm.io/gorm v1.25.11 h1:/Wfyg1B/je1hnDx3sMkX+gAlxrlZpn6X0BXRlwXlvHg=
+ gorm.io/gorm v1.25.11/go.mod h1:xh7N7RHfYlNc5EmcI/El95gXusucDrQnHXe0+CgWcLQ=
+ nullprogram.com/x/optparse v1.0.0/go.mod h1:KdyPE+Igbe0jQUrVfMqDMeJQIJZEuyV7pjYmp6pbG50=
+diff --git a/internal/core/persistence/persistence_test.go b/internal/core/persistence/persistence_test.go
+index daa3ab7f..e8eedb2e 100644
+--- a/internal/core/persistence/persistence_test.go
++++ b/internal/core/persistence/persistence_test.go
+@@ -19,6 +19,7 @@ func TestPersistenceStoreAndLoad(t *testing.T) {
+ 	defer cache.Close()
+ 
+ 	db.Init(&app.Config{
++		DBType:            "postgresql",
+ 		DBUsername:        "postgres",
+ 		DBPassword:        "difyai123456",
+ 		DBHost:            "localhost",
+@@ -79,6 +80,7 @@ func TestPersistenceSaveAndLoadWithLongKey(t *testing.T) {
+ 	}
+ 	defer cache.Close()
+ 	db.Init(&app.Config{
++		DBType:     "postgresql",
+ 		DBUsername: "postgres",
+ 		DBPassword: "difyai123456",
+ 		DBHost:     "localhost",
+@@ -107,6 +109,7 @@ func TestPersistenceDelete(t *testing.T) {
+ 	}
+ 	defer cache.Close()
+ 	db.Init(&app.Config{
++		DBType:     "postgresql",
+ 		DBUsername: "postgres",
+ 		DBPassword: "difyai123456",
+ 		DBHost:     "localhost",
+diff --git a/internal/core/plugin_manager/debugging_runtime/server_test.go b/internal/core/plugin_manager/debugging_runtime/server_test.go
+index c12ef556..68c608cc 100644
+--- a/internal/core/plugin_manager/debugging_runtime/server_test.go
++++ b/internal/core/plugin_manager/debugging_runtime/server_test.go
+@@ -21,19 +21,37 @@ import (
+ 	"github.com/langgenius/dify-plugin-daemon/pkg/entities/plugin_entities"
+ )
+ 
++var defaultConfig = &app.Config{
++	DBType:     "postgresql",
++	DBUsername: "postgres",
++	DBPassword: "difyai123456",
++	DBHost:     "localhost",
++	DBPort:     5432,
++	DBDatabase: "dify_plugin_daemon",
++	DBSslMode:  "disable",
++}
++var mysqlConfig = &app.Config{
++	DBType:     "mysql",
++	DBUsername: "root",
++	DBPassword: "difyai123456",
++	DBHost:     "localhost",
++	DBPort:     3306,
++	DBDatabase: "dify_plugin_daemon",
++	DBSslMode:  "disable",
++}
++
++var testConfig = defaultConfig
++var testConfigs = []*app.Config{
++	defaultConfig,
++	mysqlConfig,
++}
++
+ func init() {
+ 	_mode = _PLUGIN_RUNTIME_MODE_CI
+ }
+ 
+ func preparePluginServer(t *testing.T) (*RemotePluginServer, uint16) {
+-	db.Init(&app.Config{
+-		DBUsername: "postgres",
+-		DBPassword: "difyai123456",
+-		DBHost:     "localhost",
+-		DBPort:     5432,
+-		DBDatabase: "dify_plugin_daemon",
+-		DBSslMode:  "disable",
+-	})
++	db.Init(testConfig)
+ 
+ 	port, err := network.GetRandomPort()
+ 	if err != nil {
+@@ -54,32 +72,40 @@ func preparePluginServer(t *testing.T) (*RemotePluginServer, uint16) {
+ 
+ // TestLaunchAndClosePluginServer tests the launch and close of the plugin server
+ func TestLaunchAndClosePluginServer(t *testing.T) {
+-	// start plugin server
+-	server, _ := preparePluginServer(t)
+-	if server == nil {
+-		return
+-	}
+-
+-	doneChan := make(chan error)
++	defer func() {
++		testConfig = defaultConfig
++	}()
++	for _, conf := range testConfigs {
++		testConfig = conf
++		t.Logf("Start to test on %s database", testConfig.DBType)
+ 
+-	go func() {
+-		err := server.Launch()
+-		if err != nil {
+-			doneChan <- err
++		// start plugin server
++		server, _ := preparePluginServer(t)
++		if server == nil {
++			return
+ 		}
+-	}()
+ 
+-	timer := time.NewTimer(time.Second * 5)
++		doneChan := make(chan error)
+ 
+-	select {
+-	case err := <-doneChan:
+-		t.Errorf("failed to launch plugin server: %s", err.Error())
+-		return
+-	case <-timer.C:
+-		err := server.Stop()
+-		if err != nil {
+-			t.Errorf("failed to stop plugin server: %s", err.Error())
++		go func() {
++			err := server.Launch()
++			if err != nil {
++				doneChan <- err
++			}
++		}()
++
++		timer := time.NewTimer(time.Second * 5)
++
++		select {
++		case err := <-doneChan:
++			t.Errorf("failed to launch plugin server: %s", err.Error())
+ 			return
++		case <-timer.C:
++			err := server.Stop()
++			if err != nil {
++				t.Errorf("failed to stop plugin server: %s", err.Error())
++				return
++			}
+ 		}
+ 	}
+ }
+diff --git a/internal/core/plugin_manager/local_runtime/environment_python.go b/internal/core/plugin_manager/local_runtime/environment_python.go
+index 33421947..5a6e6cf9 100644
+--- a/internal/core/plugin_manager/local_runtime/environment_python.go
++++ b/internal/core/plugin_manager/local_runtime/environment_python.go
+@@ -61,7 +61,7 @@ func (p *LocalPluginRuntime) InitPythonEnvironment() error {
+ 
+ 	uvPath := strings.TrimSpace(string(output))
+ 
+-	cmd = exec.Command(uvPath, "venv", ".venv")
++	cmd = exec.Command(uvPath, "venv", ".venv", "--python", "3.12")
+ 	cmd.Dir = p.State.WorkingPath
+ 	b := bytes.NewBuffer(nil)
+ 	cmd.Stdout = b
+diff --git a/internal/db/pgsql.go b/internal/db/executor.go
+similarity index 100%
+rename from internal/db/pgsql.go
+rename to internal/db/executor.go
+diff --git a/internal/db/pg_test.go b/internal/db/executor_test.go
+similarity index 73%
+rename from internal/db/pg_test.go
+rename to internal/db/executor_test.go
+index 8cfaeb69..e3fc4949 100644
+--- a/internal/db/pg_test.go
++++ b/internal/db/executor_test.go
+@@ -4,11 +4,13 @@ import (
+ 	"errors"
+ 	"testing"
+ 
++	"github.com/langgenius/dify-plugin-daemon/internal/db/pg"
+ 	"gorm.io/gorm"
+ )
+ 
+ func TestTransaction(t *testing.T) {
+-	if err := initDifyPluginDB("0.0.0.0", 5432, "testing", "postgres", "postgres", "difyai123456", "disable"); err != nil {
++	var err error
++	if DifyPluginDB, err = pg.InitPluginDB("0.0.0.0", 5432, "testing", "postgres", "postgres", "difyai123456", "disable"); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	defer Close()
+@@ -17,7 +19,7 @@ func TestTransaction(t *testing.T) {
+ 		gorm.Model
+ 	}
+ 
+-	err := CreateTable(&TestTable{})
++	err = CreateTable(&TestTable{})
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+diff --git a/internal/db/init.go b/internal/db/init.go
+index 4b23f2af..64eccf01 100644
+--- a/internal/db/init.go
++++ b/internal/db/init.go
+@@ -1,81 +1,13 @@
+ package db
+ 
+ import (
+-	"fmt"
+-	"time"
+-
++	"github.com/langgenius/dify-plugin-daemon/internal/db/mysql"
++	"github.com/langgenius/dify-plugin-daemon/internal/db/pg"
+ 	"github.com/langgenius/dify-plugin-daemon/internal/types/app"
+ 	"github.com/langgenius/dify-plugin-daemon/internal/types/models"
+ 	"github.com/langgenius/dify-plugin-daemon/internal/utils/log"
+-	"gorm.io/driver/postgres"
+-	"gorm.io/gorm"
+ )
+ 
+-func initDifyPluginDB(host string, port int, db_name string, default_db_name string, user string, pass string, sslmode string) error {
+-	// first try to connect to target database
+-	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", host, port, user, pass, db_name, sslmode)
+-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+-	if err != nil {
+-		// if connection fails, try to create database
+-		dsn = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", host, port, user, pass, default_db_name, sslmode)
+-		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+-		if err != nil {
+-			return err
+-		}
+-
+-		pgsqlDB, err := db.DB()
+-		if err != nil {
+-			return err
+-		}
+-		defer pgsqlDB.Close()
+-
+-		// check if the db exists
+-		rows, err := pgsqlDB.Query(fmt.Sprintf("SELECT 1 FROM pg_database WHERE datname = '%s'", db_name))
+-		if err != nil {
+-			return err
+-		}
+-
+-		if !rows.Next() {
+-			// create database
+-			_, err = pgsqlDB.Exec(fmt.Sprintf("CREATE DATABASE %s", db_name))
+-			if err != nil {
+-				return err
+-			}
+-		}
+-
+-		// connect to the new db
+-		dsn = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", host, port, user, pass, db_name, sslmode)
+-		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+-		if err != nil {
+-			return err
+-		}
+-	}
+-
+-	pgsqlDB, err := db.DB()
+-	if err != nil {
+-		return err
+-	}
+-
+-	// check if uuid-ossp extension exists
+-	rows, err := pgsqlDB.Query("SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp'")
+-	if err != nil {
+-		return err
+-	}
+-
+-	if !rows.Next() {
+-		// create the uuid-ossp extension
+-		_, err = pgsqlDB.Exec("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
+-		if err != nil {
+-			return err
+-		}
+-	}
+-
+-	pgsqlDB.SetConnMaxIdleTime(time.Minute * 1)
+-	DifyPluginDB = db
+-
+-	return nil
+-}
+-
+ func autoMigrate() error {
+ 	err := DifyPluginDB.AutoMigrate(
+ 		models.Plugin{},
+@@ -94,8 +26,8 @@ func autoMigrate() error {
+ 		return err
+ 	}
+ 
+-	// check if "declaration" table exists in Plugin/ServerlessRuntime/ToolInstallation/AIModelInstallation/AgentStrategyInstallation
+-	// delete the column if exists
++	// check if "declaration" column exists in Plugin/ServerlessRuntime/ToolInstallation/AIModelInstallation/AgentStrategyInstallation
++	// drop the "declaration" column not null constraint if exists
+ 	ignoreDeclarationColumn := func(table string) error {
+ 		if DifyPluginDB.Migrator().HasColumn(table, "declaration") {
+ 			// remove NOT NULL constraint on declaration column
+@@ -106,39 +38,48 @@ func autoMigrate() error {
+ 		return nil
+ 	}
+ 
+-	if err := ignoreDeclarationColumn("plugins"); err != nil {
+-		return err
++	tables := []string{
++		"plugins",
++		"serverless_runtimes",
++		"tool_installations",
++		"ai_model_installations",
++		"agent_strategy_installations",
+ 	}
+ 
+-	if err := ignoreDeclarationColumn("serverless_runtimes"); err != nil {
+-		return err
+-	}
+-
+-	if err := ignoreDeclarationColumn("tool_installations"); err != nil {
+-		return err
+-	}
+-
+-	if err := ignoreDeclarationColumn("ai_model_installations"); err != nil {
+-		return err
+-	}
+-
+-	if err := ignoreDeclarationColumn("agent_strategy_installations"); err != nil {
+-		return err
++	for _, table := range tables {
++		if err := ignoreDeclarationColumn(table); err != nil {
++			return err
++		}
+ 	}
+ 
+ 	return nil
+ }
+ 
+ func Init(config *app.Config) {
+-	err := initDifyPluginDB(
+-		config.DBHost,
+-		int(config.DBPort),
+-		config.DBDatabase,
+-		config.DBDefaultDatabase,
+-		config.DBUsername,
+-		config.DBPassword,
+-		config.DBSslMode,
+-	)
++	var err error
++	if config.DBType == "postgresql" {
++		DifyPluginDB, err = pg.InitPluginDB(
++			config.DBHost,
++			int(config.DBPort),
++			config.DBDatabase,
++			config.DBDefaultDatabase,
++			config.DBUsername,
++			config.DBPassword,
++			config.DBSslMode,
++		)
++	} else if config.DBType == "mysql" {
++		DifyPluginDB, err = mysql.InitPluginDB(
++			config.DBHost,
++			int(config.DBPort),
++			config.DBDatabase,
++			config.DBDefaultDatabase,
++			config.DBUsername,
++			config.DBPassword,
++			config.DBSslMode,
++		)
++	} else {
++		log.Panic("unsupported database type: %v", config.DBType)
++	}
+ 
+ 	if err != nil {
+ 		log.Panic("failed to init dify plugin db: %v", err)
+diff --git a/internal/db/mysql/dialector.go b/internal/db/mysql/dialector.go
+new file mode 100644
+index 00000000..923e5f14
+--- /dev/null
++++ b/internal/db/mysql/dialector.go
+@@ -0,0 +1,45 @@
++package mysql
++
++import (
++	"gorm.io/driver/mysql"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++	"gorm.io/gorm/schema"
++)
++
++type myDialector struct {
++	*mysql.Dialector
++}
++
++func (dialector myDialector) Migrator(db *gorm.DB) gorm.Migrator {
++	return myMigrator{dialector.Dialector.Migrator(db).(mysql.Migrator)}
++}
++
++func (dialector myDialector) DataTypeOf(field *schema.Field) string {
++	dataType := dialector.Dialector.DataTypeOf(field)
++	switch dataType {
++	case "uuid":
++		return "char(36)"
++	case "text":
++		return "longtext"
++	default:
++		return dataType
++	}
++}
++
++type myMigrator struct {
++	mysql.Migrator
++}
++
++func (migrator myMigrator) FullDataTypeOf(field *schema.Field) clause.Expr {
++	if field.DataType == "uuid" {
++		field.DataType = "char(36)"
++		if field.HasDefaultValue && field.DefaultValue == "uuid_generate_v4()" {
++			field.HasDefaultValue = false
++			field.DefaultValue = ""
++		}
++	} else if field.DataType == "text" {
++		field.DataType = "longtext"
++	}
++	return migrator.Migrator.FullDataTypeOf(field)
++}
+diff --git a/internal/db/mysql/mysql.go b/internal/db/mysql/mysql.go
+new file mode 100644
+index 00000000..a6478f33
+--- /dev/null
++++ b/internal/db/mysql/mysql.go
+@@ -0,0 +1,82 @@
++package mysql
++
++import (
++	"fmt"
++	"time"
++
++	"gorm.io/driver/mysql"
++	"gorm.io/gorm"
++)
++
++func InitPluginDB(host string, port int, dbName string, defaultDbName string, user string, password string, sslMode string) (*gorm.DB, error) {
++	initializer := mysqlDbInitializer{
++		host:     host,
++		port:     port,
++		user:     user,
++		password: password,
++		sslMode:  sslMode,
++	}
++
++	// first try to connect to target database
++	db, err := initializer.connect(dbName)
++	if err != nil {
++		// if connection fails, try to create database
++		db, err = initializer.connect(defaultDbName)
++		if err != nil {
++			return nil, err
++		}
++
++		err = initializer.createDatabaseIfNotExists(db, dbName)
++		if err != nil {
++			return nil, err
++		}
++
++		// connect to the new db
++		db, err = initializer.connect(dbName)
++		if err != nil {
++			return nil, err
++		}
++	}
++
++	pool, err := db.DB()
++	if err != nil {
++		return nil, err
++	}
++
++	pool.SetConnMaxIdleTime(time.Minute * 1)
++
++	return db, nil
++}
++
++// mysqlDbInitializer initializes database for MySQL.
++type mysqlDbInitializer struct {
++	host     string
++	port     int
++	user     string
++	password string
++	sslMode  string
++}
++
++func (m *mysqlDbInitializer) connect(dbName string) (*gorm.DB, error) {
++	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&tls=%v", m.user, m.password, m.host, m.port, dbName, m.sslMode == "require")
++	return gorm.Open(myDialector{Dialector: mysql.Open(dsn).(*mysql.Dialector)}, &gorm.Config{})
++}
++
++func (m *mysqlDbInitializer) createDatabaseIfNotExists(db *gorm.DB, dbName string) error {
++	pool, err := db.DB()
++	if err != nil {
++		return err
++	}
++	defer pool.Close()
++
++	rows, err := pool.Query(fmt.Sprintf("SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = '%s'", dbName))
++	if err != nil {
++		return err
++	}
++
++	if !rows.Next() {
++		// create database
++		_, err = pool.Exec(fmt.Sprintf("CREATE DATABASE %s", dbName))
++	}
++	return err
++}
+diff --git a/internal/db/pg/pg.go b/internal/db/pg/pg.go
+new file mode 100644
+index 00000000..7bd82651
+--- /dev/null
++++ b/internal/db/pg/pg.go
+@@ -0,0 +1,73 @@
++package pg
++
++import (
++	"fmt"
++	"time"
++
++	"gorm.io/driver/postgres"
++	"gorm.io/gorm"
++)
++
++func InitPluginDB(host string, port int, db_name string, default_db_name string, user string, pass string, sslmode string) (*gorm.DB, error) {
++	// first try to connect to target database
++	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", host, port, user, pass, db_name, sslmode)
++	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
++	if err != nil {
++		// if connection fails, try to create database
++		dsn = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", host, port, user, pass, default_db_name, sslmode)
++		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
++		if err != nil {
++			return nil, err
++		}
++
++		pgsqlDB, err := db.DB()
++		if err != nil {
++			return nil, err
++		}
++		defer pgsqlDB.Close()
++
++		// check if the db exists
++		rows, err := pgsqlDB.Query(fmt.Sprintf("SELECT 1 FROM pg_database WHERE datname = '%s'", db_name))
++		if err != nil {
++			return nil, err
++		}
++
++		if !rows.Next() {
++			// create database
++			_, err = pgsqlDB.Exec(fmt.Sprintf("CREATE DATABASE %s", db_name))
++			if err != nil {
++				return nil, err
++			}
++		}
++
++		// connect to the new db
++		dsn = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", host, port, user, pass, db_name, sslmode)
++		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
++		if err != nil {
++			return nil, err
++		}
++	}
++
++	pgsqlDB, err := db.DB()
++	if err != nil {
++		return nil, err
++	}
++
++	// check if uuid-ossp extension exists
++	rows, err := pgsqlDB.Query("SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp'")
++	if err != nil {
++		return nil, err
++	}
++
++	if !rows.Next() {
++		// create the uuid-ossp extension
++		_, err = pgsqlDB.Exec("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
++		if err != nil {
++			return nil, err
++		}
++	}
++
++	pgsqlDB.SetConnMaxIdleTime(time.Minute * 1)
++
++	return db, nil
++}
+diff --git a/internal/oss/local/local_storage.go b/internal/oss/local/local_storage.go
+index 6cfe6257..958ad90e 100644
+--- a/internal/oss/local/local_storage.go
++++ b/internal/oss/local/local_storage.go
+@@ -98,3 +98,7 @@ func (l *LocalStorage) Delete(key string) error {
+ 
+ 	return os.RemoveAll(path)
+ }
++
++func (l *LocalStorage) Type() string {
++	return oss.OSS_TYPE_LOCAL
++}
+\ No newline at end of file
+diff --git a/internal/oss/s3/s3_storage.go b/internal/oss/s3/s3_storage.go
+index 7bd915d4..83ff83a8 100644
+--- a/internal/oss/s3/s3_storage.go
++++ b/internal/oss/s3/s3_storage.go
+@@ -20,7 +20,7 @@ type S3Storage struct {
+ 	client *s3.Client
+ }
+ 
+-func NewS3Storage(useAws bool, endpoint string, ak string, sk string, bucket string, region string) (oss.OSS, error) {
++func NewS3Storage(useAws bool, endpoint string, usePathStyle bool, ak string, sk string, bucket string, region string) (oss.OSS, error) {
+ 	var cfg aws.Config
+ 	var err error
+ 	var client *s3.Client
+@@ -52,7 +52,7 @@ func NewS3Storage(useAws bool, endpoint string, ak string, sk string, bucket str
+ 	} else {
+ 		client = s3.New(s3.Options{
+ 			Credentials:  credentials.NewStaticCredentialsProvider(ak, sk, ""),
+-			UsePathStyle: true,
++			UsePathStyle: usePathStyle,
+ 			Region:       region,
+ 			EndpointResolver: s3.EndpointResolverFunc(
+ 				func(region string, options s3.EndpointResolverOptions) (aws.Endpoint, error) {
+@@ -176,3 +176,7 @@ func (s *S3Storage) State(key string) (oss.OSSState, error) {
+ 		LastModified: *resp.LastModified,
+ 	}, nil
+ }
++
++func (s *S3Storage) Type() string {
++	return oss.OSS_TYPE_S3
++}
+\ No newline at end of file
+diff --git a/internal/oss/tencent_cos/tencent_cos_storage.go b/internal/oss/tencent_cos/tencent_cos_storage.go
+index 6e3d62c0..0855a5ed 100644
+--- a/internal/oss/tencent_cos/tencent_cos_storage.go
++++ b/internal/oss/tencent_cos/tencent_cos_storage.go
+@@ -149,3 +149,7 @@ func (s *TencentCOSStorage) State(key string) (oss.OSSState, error) {
+ 		LastModified: lastModified,
+ 	}, nil
+ }
++
++func (s *TencentCOSStorage) Type() string {
++	return oss.OSS_TYPE_TENCENT_COS
++}
+\ No newline at end of file
+diff --git a/internal/oss/type.go b/internal/oss/type.go
+index 8e03a9ab..93406d38 100644
+--- a/internal/oss/type.go
++++ b/internal/oss/type.go
+@@ -2,6 +2,15 @@ package oss
+ 
+ import "time"
+ 
++// OSS supports different types of object storage services
++// such as local file system, AWS S3, and Tencent COS.
++// The interface defines methods for saving, loading, checking existence,
++const (
++	OSS_TYPE_LOCAL  = "local"
++	OSS_TYPE_S3     = "aws_s3"
++	OSS_TYPE_TENCENT_COS = "tencent_cos"
++)
++
+ type OSSState struct {
+ 	Size         int64
+ 	LastModified time.Time
+@@ -25,4 +34,7 @@ type OSS interface {
+ 	List(prefix string) ([]OSSPath, error)
+ 	// Delete deletes the data in the path key
+ 	Delete(key string) error
++	// Type returns the type of the storage
++	// For example: local, aws_s3, tencent_cos
++	Type() string
+ }
+diff --git a/internal/server/server.go b/internal/server/server.go
+index 64fc8ea8..d7c2d998 100644
+--- a/internal/server/server.go
++++ b/internal/server/server.go
+@@ -16,37 +16,38 @@ import (
+ )
+ 
+ func initOSS(config *app.Config) oss.OSS {
+-	// init oss
+-	var oss oss.OSS
++	// init storage
++	var storage oss.OSS
+ 	var err error
+-	if config.PluginStorageType == "aws_s3" {
+-		oss, err = s3.NewS3Storage(
++	switch config.PluginStorageType {
++	case oss.OSS_TYPE_S3:
++		storage, err = s3.NewS3Storage(
+ 			config.S3UseAwsManagedIam,
+ 			config.S3Endpoint,
++			config.S3UsePathStyle,
+ 			config.AWSAccessKey,
+ 			config.AWSSecretKey,
+ 			config.PluginStorageOSSBucket,
+ 			config.AWSRegion,
+ 		)
+-		if err != nil {
+-			log.Panic("Failed to create s3 storage: %s", err)
+-		}
+-	} else if config.PluginStorageType == "local" {
+-		oss = local.NewLocalStorage(config.PluginStorageLocalRoot)
+-	} else if config.PluginStorageType == "tencent_cos" {
+-		oss, err = tencent_cos.NewTencentCOSStorage(
++	case oss.OSS_TYPE_LOCAL:
++		storage = local.NewLocalStorage(config.PluginStorageLocalRoot)
++	case oss.OSS_TYPE_TENCENT_COS:
++		storage, err = tencent_cos.NewTencentCOSStorage(
+ 			config.TencentCOSSecretId,
+ 			config.TencentCOSSecretKey,
+ 			config.TencentCOSRegion,
+-			config.PluginStorageOSSBucket)
+-		if err != nil {
+-			log.Panic("Failed to create tencent cos storage: %s", err)
+-		}
+-	} else {
++			config.PluginStorageOSSBucket,
++		)
++	default:
+ 		log.Panic("Invalid plugin storage type: %s", config.PluginStorageType)
+ 	}
+ 
+-	return oss
++	if err != nil {
++		log.Panic("Failed to create storage: %s", err)
++	}
++
++	return storage
+ }
+ 
+ func (app *App) Run(config *app.Config) {
+diff --git a/internal/types/app/config.go b/internal/types/app/config.go
+index caaeae86..d46cbe5a 100644
+--- a/internal/types/app/config.go
++++ b/internal/types/app/config.go
+@@ -17,6 +17,7 @@ type Config struct {
+ 
+ 	S3UseAwsManagedIam bool   `envconfig:"S3_USE_AWS_MANAGED_IAM" default:"true"`
+ 	S3Endpoint         string `envconfig:"S3_ENDPOINT"`
++	S3UsePathStyle     bool   `envconfig:"S3_USE_PATH_STYLE" default:"true"`
+ 	AWSAccessKey       string `envconfig:"AWS_ACCESS_KEY"`
+ 	AWSSecretKey       string `envconfig:"AWS_SECRET_KEY"`
+ 	AWSRegion          string `envconfig:"AWS_REGION"`
+@@ -66,6 +67,7 @@ type Config struct {
+ 	RedisUseSsl bool   `envconfig:"REDIS_USE_SSL"`
+ 
+ 	// database
++	DBType            string `envconfig:"DB_TYPE" default:"postgresql"`
+ 	DBUsername        string `envconfig:"DB_USERNAME" validate:"required"`
+ 	DBPassword        string `envconfig:"DB_PASSWORD" validate:"required"`
+ 	DBHost            string `envconfig:"DB_HOST" validate:"required"`
+@@ -95,13 +97,13 @@ type Config struct {
+ 	MaxBundlePackageSize            int64 `envconfig:"MAX_BUNDLE_PACKAGE_SIZE" validate:"required"`
+ 	MaxServerlessTransactionTimeout int   `envconfig:"MAX_SERVERLESS_TRANSACTION_TIMEOUT"`
+ 
+-	PythonInterpreterPath      string `envconfig:"PYTHON_INTERPRETER_PATH"`
+-	PythonEnvInitTimeout  	   int    `envconfig:"PYTHON_ENV_INIT_TIMEOUT" validate:"required"`
+-	PythonCompileAllExtraArgs  string `envconfig:"PYTHON_COMPILE_ALL_EXTRA_ARGS"`
+-	PipMirrorUrl               string `envconfig:"PIP_MIRROR_URL"`
+-	PipPreferBinary            *bool  `envconfig:"PIP_PREFER_BINARY"`
+-	PipVerbose                 *bool  `envconfig:"PIP_VERBOSE"`
+-	PipExtraArgs               string `envconfig:"PIP_EXTRA_ARGS"`
++	PythonInterpreterPath     string `envconfig:"PYTHON_INTERPRETER_PATH"`
++	PythonEnvInitTimeout      int    `envconfig:"PYTHON_ENV_INIT_TIMEOUT" validate:"required"`
++	PythonCompileAllExtraArgs string `envconfig:"PYTHON_COMPILE_ALL_EXTRA_ARGS"`
++	PipMirrorUrl              string `envconfig:"PIP_MIRROR_URL"`
++	PipPreferBinary           *bool  `envconfig:"PIP_PREFER_BINARY"`
++	PipVerbose                *bool  `envconfig:"PIP_VERBOSE"`
++	PipExtraArgs              string `envconfig:"PIP_EXTRA_ARGS"`
+ 
+ 	DisplayClusterLog bool `envconfig:"DISPLAY_CLUSTER_LOG"`
+ 
+diff --git a/internal/types/app/default.go b/internal/types/app/default.go
+index c04ee1f3..1eeb98a5 100644
+--- a/internal/types/app/default.go
++++ b/internal/types/app/default.go
+@@ -33,7 +33,11 @@ func (config *Config) SetDefault() {
+ 	setDefaultBoolPtr(&config.ForceVerifyingSignature, true)
+ 	setDefaultBoolPtr(&config.PipPreferBinary, true)
+ 	setDefaultBoolPtr(&config.PipVerbose, true)
+-	setDefaultString(&config.DBDefaultDatabase, "postgres")
++	if config.DBType == "postgresql" {
++		setDefaultString(&config.DBDefaultDatabase, "postgres")
++	} else if config.DBType == "mysql" {
++		setDefaultString(&config.DBDefaultDatabase, "mysql")
++	}
+ 	setDefaultBoolPtr(&config.HealthApiLogEnabled, true)
+ }
+ 
+diff --git a/internal/types/models/base.go b/internal/types/models/base.go
+index 79001b13..0fa5ae77 100644
+--- a/internal/types/models/base.go
++++ b/internal/types/models/base.go
+@@ -2,6 +2,9 @@ package models
+ 
+ import (
+ 	"time"
++
++	"github.com/google/uuid"
++	"gorm.io/gorm"
+ )
+ 
+ type Model struct {
+@@ -9,3 +12,10 @@ type Model struct {
+ 	CreatedAt time.Time `json:"created_at"`
+ 	UpdatedAt time.Time `json:"updated_at"`
+ }
++
++func (m *Model) BeforeCreate(tx *gorm.DB) (err error) {
++	if tx.Dialector.Name() == "mysql" && m.ID == "" {
++		m.ID = uuid.New().String()
++	}
++	return
++}
+diff --git a/internal/utils/cache/redis.go b/internal/utils/cache/redis.go
+index 35243781..dec4b01b 100644
+--- a/internal/utils/cache/redis.go
++++ b/internal/utils/cache/redis.go
+@@ -90,11 +90,15 @@ func store(key string, value any, time time.Duration, context ...redis.Cmdable)
+ 
+ // Get the value with key
+ func Get[T any](key string, context ...redis.Cmdable) (*T, error) {
++	return get[T](serialKey(key), context...)
++}
++
++func get[T any](key string, context ...redis.Cmdable) (*T, error) {
+ 	if client == nil {
+ 		return nil, ErrDBNotInit
+ 	}
+ 
+-	val, err := getCmdable(context...).Get(ctx, serialKey(key)).Bytes()
++	val, err := getCmdable(context...).Get(ctx, key).Bytes()
+ 	if err != nil {
+ 		if err == redis.Nil {
+ 			return nil, ErrNotFound
+@@ -128,11 +132,15 @@ func GetString(key string, context ...redis.Cmdable) (string, error) {
+ 
+ // Del the key
+ func Del(key string, context ...redis.Cmdable) error {
++	return del(serialKey(key), context...)
++}
++
++func del(key string, context ...redis.Cmdable) error {
+ 	if client == nil {
+ 		return ErrDBNotInit
+ 	}
+ 
+-	_, err := getCmdable(context...).Del(ctx, serialKey(key)).Result()
++	_, err := getCmdable(context...).Del(ctx, key).Result()
+ 	if err != nil {
+ 		if err == redis.Nil {
+ 			return ErrNotFound
+diff --git a/internal/utils/cache/redis_auto_type.go b/internal/utils/cache/redis_auto_type.go
+index e775cf42..feff3dc8 100644
+--- a/internal/utils/cache/redis_auto_type.go
++++ b/internal/utils/cache/redis_auto_type.go
+@@ -5,7 +5,6 @@ import (
+ 	"reflect"
+ 	"time"
+ 
+-	"github.com/langgenius/dify-plugin-daemon/internal/utils/parser"
+ 	"github.com/redis/go-redis/v9"
+ )
+ 
+@@ -21,12 +20,7 @@ func AutoSet[T any](key string, value T, context ...redis.Cmdable) error {
+ 	fullTypeName := pkgPath + "." + typeName
+ 
+ 	key = serialKey("auto_type", fullTypeName, key)
+-	cborValue, err := parser.MarshalCBOR(value)
+-	if err != nil {
+-		return err
+-	}
+-
+-	return getCmdable(context...).Set(ctx, key, cborValue, time.Minute*30).Err()
++	return store(key, value, time.Minute*30, context...)
+ }
+ 
+ // Get the value with key
+@@ -51,24 +45,23 @@ func AutoGetWithGetter[T any](key string, getter func() (*T, error), context ...
+ 	fullTypeName := pkgPath + "." + typeName
+ 
+ 	key = serialKey("auto_type", fullTypeName, key)
+-	val, err := getCmdable(context...).Get(ctx, key).Bytes()
++	result, err := get[T](key, context...)
+ 	if err != nil {
+-		if err == redis.Nil {
+-			value, err := getter()
++		if err == ErrNotFound {
++			result, err = getter()
+ 			if err != nil {
+ 				return nil, err
+ 			}
+ 
+-			if err := store(key, value, time.Minute*30, context...); err != nil {
++			if err := store(key, result, time.Minute*30, context...); err != nil {
+ 				return nil, err
+ 			}
+-			return value, nil
++			return result, nil
+ 		}
+ 		return nil, err
+ 	}
+ 
+-	result, err := parser.UnmarshalCBOR[T](val)
+-	return &result, err
++	return result, err
+ }
+ 
+ // Delete the value with key
+@@ -85,5 +78,5 @@ func AutoDelete[T any](key string, context ...redis.Cmdable) error {
+ 	fullTypeName := pkgPath + "." + typeName
+ 
+ 	key = serialKey("auto_type", fullTypeName, key)
+-	return getCmdable(context...).Del(ctx, key).Err()
++	return del(key, context...)
+ }
+diff --git a/internal/utils/cache/redis_test.go b/internal/utils/cache/redis_test.go
+index 2ea80db4..f55c8d47 100644
+--- a/internal/utils/cache/redis_test.go
++++ b/internal/utils/cache/redis_test.go
+@@ -281,3 +281,35 @@ func TestGetRedisOptions(t *testing.T) {
+ 		return
+ 	}
+ }
++
++func TestSetAndGet(t *testing.T) {
++	if err := InitRedisClient("127.0.0.1:6379", "difyai123456", false); err != nil {
++		t.Fatal(err)
++	}
++	defer Close()
++
++	m := map[string]string{
++		"key": "hello",
++	}
++
++	err := Store(strings.Join([]string{TEST_PREFIX, "get-test"}, ":"), m, time.Minute)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	val, err := Get[map[string]string](strings.Join([]string{TEST_PREFIX, "get-test"}, ":"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if (*val)["key"] != "hello" {
++		t.Fatalf("Get[\"key\"] should be \"hello\"")
++	}
++	err = Del(strings.Join([]string{TEST_PREFIX, "get-test"}, ":"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	val, err = Get[map[string]string](strings.Join([]string{TEST_PREFIX, "get-test"}, ":"))
++	if err != ErrNotFound {
++		t.Fatalf("Get[\"key\"] should be ErrNotFound")
++	}
++}
+diff --git a/internal/utils/log/log.go b/internal/utils/log/log.go
+index 9ea4c5c7..a5a80f4f 100644
+--- a/internal/utils/log/log.go
++++ b/internal/utils/log/log.go
+@@ -37,7 +37,7 @@ func writeLog(level string, format string, stdout bool, v ...interface{}) {
+ 			logger.Output(3, LOG_LEVEL_ERROR_COLOR+format+LOG_LEVEL_COLOR_END)
+ 		} else if level == "PANIC" {
+ 			logger.Output(3, LOG_LEVEL_ERROR_COLOR+format+LOG_LEVEL_COLOR_END)
+-			panic(fmt.Sprintf(format, v...))
++			panic(format)
+ 		}
+ 	}
+ }
+diff --git a/internal/utils/mapping/converts.go b/internal/utils/mapping/converts.go
+new file mode 100644
+index 00000000..45d64fad
+--- /dev/null
++++ b/internal/utils/mapping/converts.go
+@@ -0,0 +1,31 @@
++package mapping
++
++import "fmt"
++
++// ConvertAnyMap converts a map[any]any to a map[string]any
++// please make sure i is a map[any]any
++func ConvertAnyMap(i any) any {
++	switch v := i.(type) {
++	case map[any]any:
++		m2 := make(map[string]any)
++		for k, val := range v {
++			keyStr := fmt.Sprintf("%v", k)
++			m2[keyStr] = ConvertAnyMap(val)
++		}
++		return m2
++	case map[string]any:
++		m2 := make(map[string]any)
++		for k, val := range v {
++			m2[k] = ConvertAnyMap(val)
++		}
++		return m2
++	case []any:
++		m2 := make([]any, len(v))
++		for i, val := range v {
++			m2[i] = ConvertAnyMap(val)
++		}
++		return m2
++	default:
++		return v
++	}
++}
+diff --git a/internal/utils/mapping/converts_test.go b/internal/utils/mapping/converts_test.go
+new file mode 100644
+index 00000000..1cb98878
+--- /dev/null
++++ b/internal/utils/mapping/converts_test.go
+@@ -0,0 +1,77 @@
++package mapping
++
++import (
++	"encoding/json"
++	"reflect"
++	"testing"
++)
++
++func TestConvertAnyMap(t *testing.T) {
++	src := map[any]any{
++		"a": 1,
++		"b": 2,
++		"c": map[any]any{
++			"d": 3,
++			"e": 4,
++			"f": []any{
++				1,
++				2,
++				3,
++			},
++		},
++	}
++
++	dst := ConvertAnyMap(src).(map[string]any)
++
++	// use reflect to check key is string
++	keys := reflect.ValueOf(dst).MapKeys()
++	for _, key := range keys {
++		if key.Kind() != reflect.String {
++			t.Errorf("key is not string: %v", key)
++		}
++	}
++
++	c := dst["c"]
++	keys = reflect.ValueOf(c).MapKeys()
++	for _, key := range keys {
++		if key.Kind() != reflect.String {
++			t.Errorf("key is not string: %v", key)
++		}
++	}
++
++	f := dst["c"].(map[string]any)["f"]
++	if _, ok := f.([]any); !ok {
++		t.Errorf("f is not []any: %v", f)
++	}
++
++	if len(f.([]any)) != 3 {
++		t.Errorf("f is not 3: %v", f)
++	}
++
++	if f.([]any)[0] != 1 {
++		t.Errorf("f[0] is not 1: %v", f)
++	}
++}
++
++func TestConvertAnyMap_JsonMarshal(t *testing.T) {
++	src := map[any]any{
++		"a": 1,
++		"b": 2,
++		"c": map[any]any{
++			"d": 3,
++			"e": 4,
++			"f": []any{
++				1,
++				2,
++				3,
++			},
++		},
++	}
++
++	dst := ConvertAnyMap(src).(map[string]any)
++
++	_, err := json.Marshal(dst)
++	if err != nil {
++		t.Errorf("json.Marshal error: %v", err)
++	}
++}
+diff --git a/internal/utils/mapping/sync.go b/internal/utils/mapping/sync.go
+index 32be4254..58fe48d8 100644
+--- a/internal/utils/mapping/sync.go
++++ b/internal/utils/mapping/sync.go
+@@ -8,9 +8,12 @@ import (
+ type Map[K comparable, V any] struct {
+ 	len   int32
+ 	store sync.Map
++	mu    sync.RWMutex
+ }
+ 
+ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
++	m.mu.RLock()
++	defer m.mu.RUnlock()
+ 	v, ok := m.store.Load(key)
+ 	if !ok {
+ 		return
+@@ -21,12 +24,25 @@ func (m *Map[K, V]) Load(key K) (value V, ok bool) {
+ }
+ 
+ func (m *Map[K, V]) Store(key K, value V) {
+-	atomic.AddInt32(&m.len, 1)
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	// If the key already exists, we don't want to increment the length
++	_, loaded := m.store.Load(key)
++	if !loaded {
++		atomic.AddInt32(&m.len, 1)
++	}
+ 	m.store.Store(key, value)
+ }
+ 
+ func (m *Map[K, V]) Delete(key K) {
+-	atomic.AddInt32(&m.len, -1)
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	_, loaded := m.store.Load(key)
++	// If the key exists, we want to decrement the length
++	// If the key does not exist, we don't want to decrement the length
++	if loaded {
++		atomic.AddInt32(&m.len, -1)
++	}
+ 	m.store.Delete(key)
+ }
+ 
+@@ -37,6 +53,9 @@ func (m *Map[K, V]) Range(f func(key K, value V) bool) {
+ }
+ 
+ func (m *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	
+ 	v, loaded := m.store.LoadOrStore(key, value)
+ 	actual = v.(V)
+ 	if !loaded {
+@@ -46,6 +65,9 @@ func (m *Map[K, V]) LoadOrStore(key K, value V) (actual V, loaded bool) {
+ }
+ 
+ func (m *Map[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++
+ 	v, loaded := m.store.LoadAndDelete(key)
+ 	value = v.(V)
+ 	if loaded {
+@@ -55,12 +77,18 @@ func (m *Map[K, V]) LoadAndDelete(key K) (value V, loaded bool) {
+ }
+ 
+ func (m *Map[K, V]) Swap(key K, value V) (actual V, swapped bool) {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++
+ 	v, swapped := m.store.Swap(key, value)
+ 	actual = v.(V)
+ 	return
+ }
+ 
+ func (m *Map[K, V]) Clear() {
++	m.mu.Lock()
++	defer m.mu.Unlock()
++	// Clear the map
+ 	m.store.Range(func(key, value interface{}) bool {
+ 		m.store.Delete(key)
+ 		return true
+diff --git a/internal/utils/mapping/sync_test.go b/internal/utils/mapping/sync_test.go
+new file mode 100644
+index 00000000..6676d36c
+--- /dev/null
++++ b/internal/utils/mapping/sync_test.go
+@@ -0,0 +1,111 @@
++package mapping
++
++import (
++	"sync"
++	"testing"
++)
++
++// TestLoadStore validates basic read/write operations
++func TestLoadStore(t *testing.T) {
++	t.Parallel()
++	m := Map[string, int]{}
++
++	// Test initial state
++	if val, ok := m.Load("missing"); ok {
++		t.Fatalf("Unexpected value for missing key: %v", val)
++	}
++
++	// Test basic store
++	m.Store("answer", 42)
++	if val, ok := m.Load("answer"); !ok || val != 42 {
++		t.Errorf("Load after Store failed, got (%v, %v)", val, ok)
++	}
++
++	// Test overwrite
++	prevLen := m.Len()
++	m.Store("answer", 100)
++	if m.Len() != prevLen {
++		t.Error("Overwriting existing key should not change length")
++	}
++}
++
++// TestDelete validates deletion behavior
++func TestDelete(t *testing.T) {
++	t.Parallel()
++	m := Map[string, string]{}
++
++	// Delete non-existent key
++	m.Delete("ghost")
++	if m.Len() != 0 {
++		t.Error("Deleting non-existent key should not affect length")
++	}
++
++	// Delete existing key
++	m.Store("name", "gopher")
++	m.Delete("name")
++	if _, ok := m.Load("name"); ok || m.Len() != 0 {
++		t.Error("Delete failed to remove item")
++	}
++}
++
++// TestConcurrentAccess verifies thread safety
++func TestConcurrentAccess(t *testing.T) {
++	t.Parallel()
++	m := Map[int, float64]{}
++	const workers = 100
++
++	var wg sync.WaitGroup
++	wg.Add(workers)
++	
++	for i := 0; i < workers; i++ {
++		go func(i int) {
++			defer wg.Done()
++			m.Store(i, float64(i)*1.5)
++			m.Load(i)
++			m.Delete(i)
++		}(i)
++	}
++	wg.Wait()
++
++	if m.Len() != 0 {
++		t.Errorf("Expected empty map after concurrent ops, got len %d", m.Len())
++	}
++}
++
++// TestLoadOrStore verifies conditional storage
++func TestLoadOrStore(t *testing.T) {
++	t.Parallel()
++	m := Map[string, interface{}]{}
++
++	// First store
++	val, loaded := m.LoadOrStore("data", []byte{1,2,3})
++	if loaded || val.([]byte)[0] != 1 {
++		t.Error("Initial LoadOrStore failed")
++	}
++
++	// Existing key
++	val, loaded = m.LoadOrStore("data", "new value")
++	if !loaded || len(val.([]byte)) != 3 {
++		t.Error("Existing key LoadOrStore failed")
++	}
++}
++
++
++
++// TestEdgeCases covers special scenarios
++func TestEdgeCases(t *testing.T) {
++	t.Parallel()
++	m := Map[bool, bool]{}
++
++	// Zero value storage
++	m.Store(true, false)
++	if val, _ := m.Load(true); val != false {
++		t.Error("Zero value storage failed")
++	}
++
++	// Clear operation
++	m.Clear()
++	if m.Len() != 0 {
++		t.Error("Clear failed to reset map")
++	}
++}
+\ No newline at end of file
+diff --git a/pkg/entities/plugin_entities/agent_declaration.go b/pkg/entities/plugin_entities/agent_declaration.go
+index e3814e9a..29c8a13e 100644
+--- a/pkg/entities/plugin_entities/agent_declaration.go
++++ b/pkg/entities/plugin_entities/agent_declaration.go
+@@ -77,6 +77,7 @@ type AgentStrategyDeclaration struct {
+ 	Description  I18nObject                `json:"description" yaml:"description" validate:"required"`
+ 	Parameters   []AgentStrategyParameter  `json:"parameters" yaml:"parameters" validate:"omitempty,dive"`
+ 	OutputSchema AgentStrategyOutputSchema `json:"output_schema" yaml:"output_schema" validate:"omitempty,json_schema"`
++	Features     []string                  `json:"features" yaml:"features" validate:"omitempty,dive,lt=256"`
+ }
+ 
+ type AgentStrategyProviderDeclaration struct {
+@@ -91,6 +92,13 @@ func (a *AgentStrategyProviderDeclaration) MarshalJSON() ([]byte, error) {
+ 	if p.Strategies == nil {
+ 		p.Strategies = []AgentStrategyDeclaration{}
+ 	}
++
++	for i := range p.Strategies {
++		if p.Strategies[i].Features == nil {
++			p.Strategies[i].Features = []string{}
++		}
++	}
++
+ 	return json.Marshal(p)
+ }
+ 
+diff --git a/pkg/entities/plugin_entities/identity.go b/pkg/entities/plugin_entities/identity.go
+index 66db35c8..7934d86f 100644
+--- a/pkg/entities/plugin_entities/identity.go
++++ b/pkg/entities/plugin_entities/identity.go
+@@ -26,7 +26,7 @@ var (
+ 
+ func NewPluginUniqueIdentifier(identifier string) (PluginUniqueIdentifier, error) {
+ 	if !pluginUniqueIdentifierRegexp.MatchString(identifier) {
+-		return "", errors.New("plugin_unique_identifier is not valid")
++		return "", errors.New("plugin_unique_identifier is not valid: " + identifier)
+ 	}
+ 	return PluginUniqueIdentifier(identifier), nil
+ }
+diff --git a/pkg/entities/plugin_entities/model_declaration.go b/pkg/entities/plugin_entities/model_declaration.go
+index b1e5766f..7592ccd0 100644
+--- a/pkg/entities/plugin_entities/model_declaration.go
++++ b/pkg/entities/plugin_entities/model_declaration.go
+@@ -8,6 +8,8 @@ import (
+ 	ut "github.com/go-playground/universal-translator"
+ 	"github.com/go-playground/validator/v10"
+ 	en_translations "github.com/go-playground/validator/v10/translations/en"
++	"github.com/langgenius/dify-plugin-daemon/internal/utils/log"
++	"github.com/langgenius/dify-plugin-daemon/internal/utils/mapping"
+ 	"github.com/langgenius/dify-plugin-daemon/internal/utils/parser"
+ 	"github.com/langgenius/dify-plugin-daemon/pkg/validators"
+ 	"github.com/shopspring/decimal"
+@@ -407,19 +409,30 @@ func (m *ModelDeclaration) UnmarshalJSON(data []byte) error {
+ 	return nil
+ }
+ 
+-func (m *ModelDeclaration) MarshalJSON() ([]byte, error) {
++func (m ModelDeclaration) MarshalJSON() ([]byte, error) {
+ 	type alias ModelDeclaration
+ 
+ 	temp := &struct {
+-		*alias `json:",inline"`
++		alias `json:",inline"`
+ 	}{
+-		alias: (*alias)(m),
++		alias: (alias)(m),
+ 	}
+ 
+ 	if temp.Label.EnUS == "" {
+ 		temp.Label.EnUS = temp.Model
+ 	}
+ 
++	// to avoid ModelProperties not serializable, we need to convert all the keys to string
++	// includes inner map and slice
++	if temp.ModelProperties != nil {
++		result, ok := mapping.ConvertAnyMap(temp.ModelProperties).(map[string]any)
++		if !ok {
++			log.Error("ModelProperties is not a map[string]any", "model_properties", temp.ModelProperties)
++		} else {
++			temp.ModelProperties = result
++		}
++	}
++
+ 	return json.Marshal(temp)
+ }
+ 

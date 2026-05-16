@@ -1,0 +1,11 @@
+sample_id: r2-0001
+tier: 2
+category: B
+loss_class: null
+expected_human: false
+description: |
+  dify-plugin-daemon Go fork (cvte 二开): upstream main merge into fork
+  (golden 4c481fb8, Oct 2025). Multi-module Go business code merge spans
+  plugin_daemon / plugin_manager / debugging_runtime; fork retains cvte
+  .gitignore and dockerfile changes while taking upstream trigger.gen.go
+  and access.go updates.

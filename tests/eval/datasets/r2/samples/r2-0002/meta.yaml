@@ -1,0 +1,11 @@
+sample_id: r2-0002
+tier: 2
+category: B
+loss_class: null
+expected_human: false
+description: |
+  dify-plugin-daemon PR #137 (kurokobo/sign) merged 2025-04-07. Introduces
+  a new signature CLI subtree under cmd/commandline/signature/ plus
+  updates to plugin_manager and plugin_decoder for verify support.
+  31 files captured; spans cmd/, internal/core/plugin_manager/,
+  internal/service/. base=7de65995, golden=8bf1252e.

@@ -1,0 +1,215 @@
+diff --git a/.env.example b/.env.example
+index 5bba20a6..918816fd 100644
+--- a/.env.example
++++ b/.env.example
+@@ -48,6 +48,7 @@ ROUTINE_POOL_SIZE=1024
+ REDIS_HOST=127.0.0.1
+ REDIS_PORT=6379
+ REDIS_PASSWORD=difyai123456
++REDIS_DB=0
+ 
+ DB_USERNAME=postgres
+ DB_PASSWORD=difyai123456
+diff --git a/internal/cluster/clutser_test.go b/internal/cluster/clutser_test.go
+index 5650d090..449045e3 100644
+--- a/internal/cluster/clutser_test.go
++++ b/internal/cluster/clutser_test.go
+@@ -11,7 +11,7 @@ import (
+ )
+ 
+ func createSimulationCluster(nums int) ([]*Cluster, error) {
+-	err := cache.InitRedisClient("0.0.0.0:6379", "difyai123456", false)
++	err := cache.InitRedisClient("0.0.0.0:6379", "difyai123456", false, 0)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/internal/core/persistence/persistence_test.go b/internal/core/persistence/persistence_test.go
+index daa3ab7f..14869dff 100644
+--- a/internal/core/persistence/persistence_test.go
++++ b/internal/core/persistence/persistence_test.go
+@@ -12,7 +12,7 @@ import (
+ )
+ 
+ func TestPersistenceStoreAndLoad(t *testing.T) {
+-	err := cache.InitRedisClient("localhost:6379", "difyai123456", false)
++	err := cache.InitRedisClient("localhost:6379", "difyai123456", false, 0)
+ 	if err != nil {
+ 		t.Fatalf("Failed to init redis client: %v", err)
+ 	}
+@@ -73,7 +73,7 @@ func TestPersistenceStoreAndLoad(t *testing.T) {
+ }
+ 
+ func TestPersistenceSaveAndLoadWithLongKey(t *testing.T) {
+-	err := cache.InitRedisClient("localhost:6379", "difyai123456", false)
++	err := cache.InitRedisClient("localhost:6379", "difyai123456", false, 0)
+ 	if err != nil {
+ 		t.Fatalf("Failed to init redis client: %v", err)
+ 	}
+@@ -101,7 +101,7 @@ func TestPersistenceSaveAndLoadWithLongKey(t *testing.T) {
+ }
+ 
+ func TestPersistenceDelete(t *testing.T) {
+-	err := cache.InitRedisClient("localhost:6379", "difyai123456", false)
++	err := cache.InitRedisClient("localhost:6379", "difyai123456", false, 0)
+ 	if err != nil {
+ 		t.Fatalf("Failed to init redis client: %v", err)
+ 	}
+diff --git a/internal/core/plugin_manager/debugging_runtime/connection_key_test.go b/internal/core/plugin_manager/debugging_runtime/connection_key_test.go
+index 88942cf5..7252e475 100644
+--- a/internal/core/plugin_manager/debugging_runtime/connection_key_test.go
++++ b/internal/core/plugin_manager/debugging_runtime/connection_key_test.go
+@@ -8,7 +8,7 @@ import (
+ )
+ 
+ func TestConnectionKey(t *testing.T) {
+-	err := cache.InitRedisClient("0.0.0.0:6379", "difyai123456", false)
++	err := cache.InitRedisClient("0.0.0.0:6379", "difyai123456", false, 0)
+ 	if err != nil {
+ 		t.Errorf("init redis client failed: %v", err)
+ 		return
+diff --git a/internal/core/plugin_manager/debugging_runtime/server_test.go b/internal/core/plugin_manager/debugging_runtime/server_test.go
+index c12ef556..283fdf91 100644
+--- a/internal/core/plugin_manager/debugging_runtime/server_test.go
++++ b/internal/core/plugin_manager/debugging_runtime/server_test.go
+@@ -86,7 +86,7 @@ func TestLaunchAndClosePluginServer(t *testing.T) {
+ 
+ // TestAcceptConnection tests the acceptance of the connection
+ func TestAcceptConnection(t *testing.T) {
+-	if cache.InitRedisClient("0.0.0.0:6379", "difyai123456", false) != nil {
++	if cache.InitRedisClient("0.0.0.0:6379", "difyai123456", false, 0) != nil {
+ 		t.Errorf("failed to init redis client")
+ 		return
+ 	}
+@@ -322,7 +322,7 @@ func TestNoHandleShakeIn10Seconds(t *testing.T) {
+ }
+ 
+ func TestIncorrectHandshake(t *testing.T) {
+-	if cache.InitRedisClient("0.0.0.0:6379", "difyai123456", false) != nil {
++	if cache.InitRedisClient("0.0.0.0:6379", "difyai123456", false, 0) != nil {
+ 		t.Errorf("failed to init redis client")
+ 		return
+ 	}
+diff --git a/internal/core/plugin_manager/manager.go b/internal/core/plugin_manager/manager.go
+index 274f4b50..2b575eee 100644
+--- a/internal/core/plugin_manager/manager.go
++++ b/internal/core/plugin_manager/manager.go
+@@ -163,6 +163,7 @@ func (p *PluginManager) Launch(configuration *app.Config) {
+ 		fmt.Sprintf("%s:%d", configuration.RedisHost, configuration.RedisPort),
+ 		configuration.RedisPass,
+ 		configuration.RedisUseSsl,
++		configuration.RedisDB,
+ 	); err != nil {
+ 		log.Panic("init redis client failed: %s", err.Error())
+ 	}
+diff --git a/internal/types/app/config.go b/internal/types/app/config.go
+index caaeae86..9e0db608 100644
+--- a/internal/types/app/config.go
++++ b/internal/types/app/config.go
+@@ -64,6 +64,7 @@ type Config struct {
+ 	RedisPort   uint16 `envconfig:"REDIS_PORT" validate:"required"`
+ 	RedisPass   string `envconfig:"REDIS_PASSWORD"`
+ 	RedisUseSsl bool   `envconfig:"REDIS_USE_SSL"`
++	RedisDB     int    `envconfig:"REDIS_DB"`
+ 
+ 	// database
+ 	DBUsername        string `envconfig:"DB_USERNAME" validate:"required"`
+@@ -95,13 +96,13 @@ type Config struct {
+ 	MaxBundlePackageSize            int64 `envconfig:"MAX_BUNDLE_PACKAGE_SIZE" validate:"required"`
+ 	MaxServerlessTransactionTimeout int   `envconfig:"MAX_SERVERLESS_TRANSACTION_TIMEOUT"`
+ 
+-	PythonInterpreterPath      string `envconfig:"PYTHON_INTERPRETER_PATH"`
+-	PythonEnvInitTimeout  	   int    `envconfig:"PYTHON_ENV_INIT_TIMEOUT" validate:"required"`
+-	PythonCompileAllExtraArgs  string `envconfig:"PYTHON_COMPILE_ALL_EXTRA_ARGS"`
+-	PipMirrorUrl               string `envconfig:"PIP_MIRROR_URL"`
+-	PipPreferBinary            *bool  `envconfig:"PIP_PREFER_BINARY"`
+-	PipVerbose                 *bool  `envconfig:"PIP_VERBOSE"`
+-	PipExtraArgs               string `envconfig:"PIP_EXTRA_ARGS"`
++	PythonInterpreterPath     string `envconfig:"PYTHON_INTERPRETER_PATH"`
++	PythonEnvInitTimeout      int    `envconfig:"PYTHON_ENV_INIT_TIMEOUT" validate:"required"`
++	PythonCompileAllExtraArgs string `envconfig:"PYTHON_COMPILE_ALL_EXTRA_ARGS"`
++	PipMirrorUrl              string `envconfig:"PIP_MIRROR_URL"`
++	PipPreferBinary           *bool  `envconfig:"PIP_PREFER_BINARY"`
++	PipVerbose                *bool  `envconfig:"PIP_VERBOSE"`
++	PipExtraArgs              string `envconfig:"PIP_EXTRA_ARGS"`
+ 
+ 	DisplayClusterLog bool `envconfig:"DISPLAY_CLUSTER_LOG"`
+ 
+diff --git a/internal/utils/cache/redis.go b/internal/utils/cache/redis.go
+index 35243781..22e2bd8c 100644
+--- a/internal/utils/cache/redis.go
++++ b/internal/utils/cache/redis.go
+@@ -20,10 +20,11 @@ var (
+ 	ErrNotFound  = errors.New("key not found")
+ )
+ 
+-func getRedisOptions(addr, password string, useSsl bool) *redis.Options {
++func getRedisOptions(addr, password string, useSsl bool, db int) *redis.Options {
+ 	opts := &redis.Options{
+ 		Addr:     addr,
+ 		Password: password,
++		DB:       db,
+ 	}
+ 	if useSsl {
+ 		opts.TLSConfig = &tls.Config{}
+@@ -31,8 +32,8 @@ func getRedisOptions(addr, password string, useSsl bool) *redis.Options {
+ 	return opts
+ }
+ 
+-func InitRedisClient(addr, password string, useSsl bool) error {
+-	opts := getRedisOptions(addr, password, useSsl)
++func InitRedisClient(addr, password string, useSsl bool, db int) error {
++	opts := getRedisOptions(addr, password, useSsl, db)
+ 	client = redis.NewClient(opts)
+ 
+ 	if _, err := client.Ping(ctx).Result(); err != nil {
+diff --git a/internal/utils/cache/redis_auto_type_test.go b/internal/utils/cache/redis_auto_type_test.go
+index a7d24757..50ec1d58 100644
+--- a/internal/utils/cache/redis_auto_type_test.go
++++ b/internal/utils/cache/redis_auto_type_test.go
+@@ -10,7 +10,7 @@ type TestAutoTypeStruct struct {
+ }
+ 
+ func TestAutoType(t *testing.T) {
+-	if err := InitRedisClient("127.0.0.1:6379", "difyai123456", false); err != nil {
++	if err := InitRedisClient("127.0.0.1:6379", "difyai123456", false, 0); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	defer Close()
+@@ -35,7 +35,7 @@ func TestAutoType(t *testing.T) {
+ }
+ 
+ func TestAutoTypeWithGetter(t *testing.T) {
+-	if err := InitRedisClient("127.0.0.1:6379", "difyai123456", false); err != nil {
++	if err := InitRedisClient("127.0.0.1:6379", "difyai123456", false, 0); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	defer Close()
+diff --git a/internal/utils/cache/redis_test.go b/internal/utils/cache/redis_test.go
+index 2ea80db4..6f36bf4a 100644
+--- a/internal/utils/cache/redis_test.go
++++ b/internal/utils/cache/redis_test.go
+@@ -15,7 +15,7 @@ const (
+ )
+ 
+ func getRedisConnection() error {
+-	return InitRedisClient("0.0.0.0:6379", "difyai123456", false)
++	return InitRedisClient("0.0.0.0:6379", "difyai123456", false, 0)
+ }
+ 
+ func TestRedisConnection(t *testing.T) {
+@@ -269,13 +269,13 @@ func TestRedisP2ARedis(t *testing.T) {
+ }
+ 
+ func TestGetRedisOptions(t *testing.T) {
+-	opts := getRedisOptions("dummy:6379", "password", false)
++	opts := getRedisOptions("dummy:6379", "password", false, 0)
+ 	if opts.TLSConfig != nil {
+ 		t.Errorf("TLSConfig should not be set")
+ 		return
+ 	}
+ 
+-	opts = getRedisOptions("dummy:6379", "password", true)
++	opts = getRedisOptions("dummy:6379", "password", true, 0)
+ 	if opts.TLSConfig == nil {
+ 		t.Errorf("TLSConfig should be set")
+ 		return

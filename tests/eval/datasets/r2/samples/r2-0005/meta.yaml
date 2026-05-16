@@ -1,0 +1,10 @@
+sample_id: r2-0005
+tier: 2
+category: B
+loss_class: null
+expected_human: false
+description: |
+  dify-plugin-daemon PR #172 (te-chan/feat/azure-blob-storage) merged
+  2025-04-08. Adds Azure Blob OSS backend at internal/oss/azure/ plus
+  config plumbing; 52 files captured spanning go.mod/go.sum, server
+  bootstrap, OSS type registry. base=7de65995, golden=0a556dfd.
