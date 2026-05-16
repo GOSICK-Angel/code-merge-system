@@ -194,12 +194,21 @@ def _compute_metrics(
     # F7: no-op merges have zero decision records — rationale and
     # discarded-content metrics are vacuous, so exclude them from those
     # denominators (metrics.md §2.2 / §3.4 "decision records 总数" semantics).
-    decisive_samples = [s for s in samples if not s.no_op]
+    # F9: system-escalated samples terminated in needs_human by design —
+    # the merge binary intentionally writes no merge_report / rationale,
+    # so any "rationale present" / "report intact" check would punish a
+    # correct outcome. Excluded from the same denominators as no_op.
+    decisive_samples = [s for s in samples if not s.no_op and not s.system_escalated]
     decisive_total = len(decisive_samples)
     rationale_ok = sum(1 for s in decisive_samples if s.rationale_length >= 30)
     discarded_ok = sum(
         1 for s in decisive_samples if s.discarded_content_present or s.label is None
     )
+    escalated_total = sum(1 for s in samples if s.system_escalated)
+    # RR is computed off-disk (three-artifact check). Skip the lookup for
+    # system_escalated samples because the merge binary by design omits
+    # merge_report_*.json in that terminal state.
+    rr_sample_ids = [s.sample_id for s in samples if not s.system_escalated]
 
     total_missed = sum(s.missed_lines for s in samples)
     total_extra = sum(s.extra_lines for s in samples)
@@ -214,14 +223,18 @@ def _compute_metrics(
         "DCRR": (
             _format_pct(discarded_ok / decisive_total)
             if decisive_total
-            else "N/A (no-op only)"
+            else "N/A (no decision-bearing samples)"
         ),
         "SRSR": "N/A (follow-up)",  # TR7 — plan v3 dependency
-        "RR": _format_pct(_compute_rr(runs_dir, [s.sample_id for s in samples])),
+        "RR": (
+            _format_pct(_compute_rr(runs_dir, rr_sample_ids))
+            if rr_sample_ids
+            else "N/A (all samples escalated)"
+        ),
         "RCR": (
             _format_pct(rationale_ok / decisive_total)
             if decisive_total
-            else "N/A (no-op only)"
+            else "N/A (no decision-bearing samples)"
         ),
         "Recall": {label: "N/A" for label in RECALL_LABELS},
         # Soft 9 (acceptance.md §2)
@@ -243,6 +256,11 @@ def _compute_metrics(
         # Auxiliary aggregates not gated but useful in the body
         "_total_missed_lines": total_missed,
         "_total_extra_lines": total_extra,
+        # F9 auxiliary: not in acceptance gates, lets reviewers see what
+        # fraction of samples ended in by-design escalation (a high value
+        # means OA is mostly driven by the SEMANTIC bucket — worth a manual
+        # spot-check against `expected_human`).
+        "EscalationRate": _format_pct(escalated_total / total),
     }
     # Recall_M3 is the only tier-3 sample shipped; mark it computed.
     has_m3 = any(s.loss_class == "M3" for s in samples)

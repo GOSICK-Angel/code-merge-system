@@ -432,6 +432,177 @@ class TestMissingWorkingTree:
 
 
 # ---------------------------------------------------------------------------
+# F9 — by-design escalation distinguished from a crash
+# ---------------------------------------------------------------------------
+
+
+class TestSystemEscalated:
+    """F9 contract: status=needs_human + checkpoint + plan_review intact
+    is a legitimate terminal state (the merge binary skips merge_report
+    on hand-off by design). Must be tagged ``system_escalated=True`` and
+    surfaced as ``match=SEMANTIC`` / ``label=None`` so OA stays correct
+    and RR / RCR / DCRR are not punished."""
+
+    def _seed_run(
+        self,
+        runs: Path,
+        sample_id: str,
+        *,
+        status: str,
+        with_plan_review: bool = True,
+    ) -> Path:
+        run_dir = runs / sample_id
+        (run_dir / "working_tree").mkdir(parents=True)
+        (run_dir / "working_tree" / "hello.py").write_bytes(b"x = 1\n")
+        # No merge_report_*.json by design (terminal escalation state).
+        (run_dir / "checkpoint.json").write_text(
+            json.dumps({"run_id": "FIXTURE", "status": status}),
+            encoding="utf-8",
+        )
+        if with_plan_review:
+            (run_dir / "plan_review_FIXTURE.md").write_text("plan", encoding="utf-8")
+        return run_dir
+
+    def test_needs_human_with_plan_review_is_escalated_not_missing(
+        self,
+        workspace: tuple[Path, Path, Path],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        runs, datasets, output = workspace
+        _write_dataset_sample(datasets, "t1-0001", golden={"hello.py": b"x = 1\n"})
+        self._seed_run(runs, "t1-0001", status="needs_human")
+        rc = main(
+            [
+                "--runs",
+                str(runs),
+                "--datasets",
+                str(datasets),
+                "--output",
+                str(output),
+                "--tier",
+                "1",
+            ]
+        )
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "SYSTEM_ESCALATED" in err
+        assert "MISSING_REPORT" not in err
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        entry = payload["samples"][0]
+        assert entry["system_escalated"] is True
+        assert entry["match"] == "SEMANTIC"
+        assert entry["label"] is None
+        # Strategy is the escalate marker so summarize.OverEscalationRate
+        # can pick it up if expected_human=false.
+        assert entry["system_decision"]["strategy"] == "escalate_human"
+        assert entry["system_decision"]["human"] is True
+
+    def test_uppercase_status_alias_is_recognised(
+        self,
+        workspace: tuple[Path, Path, Path],
+    ) -> None:
+        runs, datasets, output = workspace
+        _write_dataset_sample(datasets, "t1-0001", golden={"hello.py": b"x = 1\n"})
+        self._seed_run(runs, "t1-0001", status="AWAITING_HUMAN")
+        rc = main(
+            [
+                "--runs",
+                str(runs),
+                "--datasets",
+                str(datasets),
+                "--output",
+                str(output),
+                "--tier",
+                "1",
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        assert payload["samples"][0]["system_escalated"] is True
+
+    def test_needs_human_without_plan_review_is_still_missing_report(
+        self,
+        workspace: tuple[Path, Path, Path],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A checkpoint alone (without plan_review_*.md) is not enough —
+        the run might have aborted mid-planning and only persisted a
+        partial state. Treat as crash to be safe."""
+        runs, datasets, output = workspace
+        _write_dataset_sample(datasets, "t1-0001", golden={"hello.py": b"x = 1\n"})
+        self._seed_run(runs, "t1-0001", status="needs_human", with_plan_review=False)
+        rc = main(
+            [
+                "--runs",
+                str(runs),
+                "--datasets",
+                str(datasets),
+                "--output",
+                str(output),
+                "--tier",
+                "1",
+            ]
+        )
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "MISSING_REPORT" in err
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        entry = payload["samples"][0]
+        assert entry["system_escalated"] is False
+        assert entry["label"] == "MISSING_REPORT"
+
+    def test_unknown_status_is_missing_report(
+        self,
+        workspace: tuple[Path, Path, Path],
+    ) -> None:
+        runs, datasets, output = workspace
+        _write_dataset_sample(datasets, "t1-0001", golden={"hello.py": b"x = 1\n"})
+        self._seed_run(runs, "t1-0001", status="completed")
+        rc = main(
+            [
+                "--runs",
+                str(runs),
+                "--datasets",
+                str(datasets),
+                "--output",
+                str(output),
+                "--tier",
+                "1",
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        assert payload["samples"][0]["label"] == "MISSING_REPORT"
+
+    def test_corrupt_checkpoint_falls_back_to_missing_report(
+        self,
+        workspace: tuple[Path, Path, Path],
+    ) -> None:
+        runs, datasets, output = workspace
+        _write_dataset_sample(datasets, "t1-0001", golden={"hello.py": b"x = 1\n"})
+        run_dir = runs / "t1-0001"
+        (run_dir / "working_tree").mkdir(parents=True)
+        (run_dir / "working_tree" / "hello.py").write_bytes(b"x = 1\n")
+        (run_dir / "checkpoint.json").write_text("{not json", encoding="utf-8")
+        (run_dir / "plan_review_FIXTURE.md").write_text("plan", encoding="utf-8")
+        rc = main(
+            [
+                "--runs",
+                str(runs),
+                "--datasets",
+                str(datasets),
+                "--output",
+                str(output),
+                "--tier",
+                "1",
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        assert payload["samples"][0]["label"] == "MISSING_REPORT"
+
+
+# ---------------------------------------------------------------------------
 # T4-D9 — semantic_engine honestly labelled in fallback mode
 # ---------------------------------------------------------------------------
 

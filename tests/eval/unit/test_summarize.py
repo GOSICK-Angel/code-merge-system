@@ -10,7 +10,9 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 if TYPE_CHECKING:
-    from scripts.eval._schemas import DiffEntry
+    from typing import Literal
+
+    from scripts.eval._schemas import DiffEntry, RunMeta
 
 from scripts.eval import summarize as summarize_mod
 from scripts.eval.summarize import (
@@ -730,5 +732,149 @@ class TestF7NoOpExemption:
                 exit_code=0,
             )
         m = _compute_metrics(samples, metas, runs_dir=runs_dir)
-        assert "no-op only" in m["RCR"]
-        assert "no-op only" in m["DCRR"]
+        assert "no decision-bearing samples" in m["RCR"]
+        assert "no decision-bearing samples" in m["DCRR"]
+
+
+class TestF9SystemEscalatedExemption:
+    """F9: by-design escalation (status=needs_human) must not be punished
+    by RR / RCR / DCRR. OA still counts the sample as correct because
+    successful escalation is the right outcome for an unresolvable
+    semantic conflict."""
+
+    def _make_meta(
+        self,
+        sid: str,
+        *,
+        status: "Literal['success', 'failed']" = "success",
+    ) -> "RunMeta":
+        from scripts.eval._schemas import RunMeta
+
+        return RunMeta(
+            sample_id=sid,
+            run_id=f"r-{sid}",
+            seed=0,
+            concurrency=1,
+            cache_disabled=False,
+            wall_time_seconds=10.0,
+            cost_usd=0.01,
+            git_sha="x",
+            model_matrix={},
+            status=status,
+            memory_clean_check="passed",
+            exit_code=0,
+        )
+
+    def _make_escalated(self, sid: str) -> "DiffEntry":
+        from scripts.eval._schemas import (
+            DiffEntry,
+            MatchStatus,
+            SystemDecision,
+        )
+
+        return DiffEntry(
+            sample_id=sid,
+            category="C",
+            loss_class=None,
+            expected_human=False,
+            system_decision=SystemDecision(
+                strategy="escalate_human", risk="UNKNOWN", human=True
+            ),
+            match=MatchStatus.SEMANTIC,
+            label=None,
+            missed_lines=0,
+            extra_lines=0,
+            rationale_length=0,
+            discarded_content_present=False,
+            is_security_sensitive=False,
+            system_escalated=True,
+        )
+
+    def _make_exact(self, sid: str) -> "DiffEntry":
+        from scripts.eval._schemas import (
+            DiffEntry,
+            MatchStatus,
+            SystemDecision,
+        )
+
+        return DiffEntry(
+            sample_id=sid,
+            category="B",
+            loss_class=None,
+            expected_human=False,
+            system_decision=SystemDecision(
+                strategy="take_target", risk="UNKNOWN", human=False
+            ),
+            match=MatchStatus.EXACT,
+            label=None,
+            missed_lines=0,
+            extra_lines=0,
+            rationale_length=42,
+            discarded_content_present=False,
+            is_security_sensitive=False,
+        )
+
+    def test_escalated_samples_excluded_from_rr_rcr_dcrr(self, tmp_path: Path) -> None:
+        # 2 exact + 1 escalated. Without F9: RR=2/3 (escalated has no
+        # merge_report on disk). With F9: RR=2/2 and OA=3/3.
+        samples = (
+            self._make_exact("t1-0001"),
+            self._make_exact("t1-0002"),
+            self._make_escalated("t1-0003"),
+        )
+        runs_dir = tmp_path / "runs"
+        metas: dict[str, "RunMeta"] = {}
+        for sid in ("t1-0001", "t1-0002"):
+            d = runs_dir / sid
+            d.mkdir(parents=True)
+            (d / "merge_report_FIXTURE.json").write_text("{}", encoding="utf-8")
+            (d / "merge_report_FIXTURE.md").write_text("ok", encoding="utf-8")
+            (d / "plan_review_FIXTURE.md").write_text("ok", encoding="utf-8")
+            metas[sid] = self._make_meta(sid)
+        # escalated sample dir has only checkpoint + plan_review (no merge_report)
+        d = runs_dir / "t1-0003"
+        d.mkdir(parents=True)
+        (d / "plan_review_FIXTURE.md").write_text("plan", encoding="utf-8")
+        metas["t1-0003"] = self._make_meta("t1-0003")
+
+        m = _compute_metrics(samples, metas, runs_dir=runs_dir)
+        assert m["OA"] == "1.0000", "escalated counts as correct via SEMANTIC"
+        assert m["RR"] == "1.0000", "RR denominator excludes escalated samples"
+        assert m["RCR"] == "1.0000", "RCR denominator excludes escalated samples"
+        assert m["DCRR"] == "1.0000", "DCRR denominator excludes escalated samples"
+        assert m["EscalationRate"] == "0.3333"
+
+    def test_all_escalated_renders_na_for_decisive_metrics(
+        self, tmp_path: Path
+    ) -> None:
+        samples = (
+            self._make_escalated("t1-0001"),
+            self._make_escalated("t1-0002"),
+        )
+        runs_dir = tmp_path / "runs"
+        metas: dict[str, "RunMeta"] = {}
+        for sid in ("t1-0001", "t1-0002"):
+            d = runs_dir / sid
+            d.mkdir(parents=True)
+            metas[sid] = self._make_meta(sid)
+        m = _compute_metrics(samples, metas, runs_dir=runs_dir)
+        assert "no decision-bearing samples" in m["RCR"]
+        assert "no decision-bearing samples" in m["DCRR"]
+        assert m["RR"] == "N/A (all samples escalated)"
+        # OA still computable: 2/2 SEMANTIC
+        assert m["OA"] == "1.0000"
+        assert m["EscalationRate"] == "1.0000"
+
+    def test_escalated_does_not_overcount_over_escalation_when_expected(
+        self, tmp_path: Path
+    ) -> None:
+        """expected_human=True + escalated → not an over-escalation."""
+        e = self._make_escalated("t1-0001")
+        # Rebuild with expected_human=True (BaseModel frozen → model_copy)
+        e_expected = e.model_copy(update={"expected_human": True})
+        samples = (e_expected,)
+        runs_dir = tmp_path / "runs"
+        (runs_dir / "t1-0001").mkdir(parents=True)
+        metas = {"t1-0001": self._make_meta("t1-0001")}
+        m = _compute_metrics(samples, metas, runs_dir=runs_dir)
+        assert m["OverEscalationRate"] == "0.0000"

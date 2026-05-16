@@ -302,6 +302,81 @@ def _build_missing_report_entry(sample_id: str, dataset_sample_dir: Path) -> Dif
     )
 
 
+# Terminal `merge_state.status` values that the merge binary uses when it
+# deliberately stops to wait for a human decision. Mirrors the state
+# machine in `src/core/orchestrator.py` (status field of MergeReport when
+# the run ends in AWAITING_HUMAN / needs_human). Kept as a set so future
+# state names can be added without touching call sites.
+ESCALATED_STATUSES = frozenset(
+    {
+        "needs_human",
+        "awaiting_human",
+        "AWAITING_HUMAN",
+    }
+)
+
+
+def _is_system_escalated(run_dir: Path) -> bool:
+    """Return True iff the run terminated in a by-design escalation.
+
+    The merge binary writes ``checkpoint.json`` continuously throughout a
+    run; when the terminal status is one of :data:`ESCALATED_STATUSES`,
+    the binary intentionally skips ``merge_report_*.json`` (the report is
+    only emitted on auto-merge completion, not on hand-off). A run dir
+    that has the checkpoint *plus* a ``plan_review_*.md`` (proof that
+    planning finished) is therefore a successful escalation, not a crash.
+
+    Pure heuristic on disk artifacts so the eval layer stays decoupled
+    from the merge binary's internal state machine.
+    """
+    checkpoint = run_dir / "checkpoint.json"
+    if not checkpoint.is_file():
+        return False
+    try:
+        payload = json.loads(checkpoint.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    status = str(payload.get("status", ""))
+    if status not in ESCALATED_STATUSES:
+        return False
+    return any(run_dir.glob("plan_review_*.md"))
+
+
+def _build_system_escalated_entry(
+    sample_id: str, dataset_sample_dir: Path
+) -> DiffEntry:
+    """Build a DiffEntry for a run that ended in by-design escalation.
+
+    Distinguished from :func:`_build_missing_report_entry` because the
+    merge binary terminated cleanly in ``needs_human`` and left a
+    checkpoint + plan_review behind. We tag the entry with
+    ``system_escalated=True`` so summarisation can exclude it from RR /
+    RCR / DCRR (where the absence of ``merge_report_*.json`` would
+    otherwise read as a failure) while still counting it toward OA as a
+    correct outcome (``match=SEMANTIC``).
+    """
+    meta = load_meta(dataset_sample_dir)
+    return DiffEntry(
+        sample_id=sample_id,
+        category=str(meta.category),
+        loss_class=meta.loss_class,
+        expected_human=meta.expected_human,
+        system_decision=SystemDecision(
+            strategy="escalate_human",
+            risk="UNKNOWN",
+            human=True,
+        ),
+        match=MatchStatus.SEMANTIC,
+        label=None,
+        missed_lines=0,
+        extra_lines=0,
+        rationale_length=0,
+        discarded_content_present=False,
+        is_security_sensitive=False,
+        system_escalated=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level driver
 # ---------------------------------------------------------------------------
@@ -357,15 +432,19 @@ def cmd_diff(
         try:
             entry, engines = _diff_one_sample(sample_id, run_subdir, dataset_sample_dir)
         except RunArtifactMissing as exc:
-            # F5: the system attempted this sample (run dir present) but
-            # crashed before writing artifacts. Emit a MISSING_REPORT
-            # stub so summarisation counts the failure instead of
-            # silently dropping the sample.
-            _eprint(f"diff: {exc} — recording as MISSING_REPORT")
+            # F9: distinguish by-design escalation (status=needs_human,
+            # checkpoint + plan_review intact — merge binary skips
+            # merge_report by design) from a real crash. Only the latter
+            # warrants a MISSING_REPORT label that drags RR / RCR / DCRR
+            # down — the former is a legitimate terminal state.
+            if _is_system_escalated(run_subdir):
+                _eprint(f"diff: {exc} — recording as SYSTEM_ESCALATED")
+                builder = _build_system_escalated_entry
+            else:
+                _eprint(f"diff: {exc} — recording as MISSING_REPORT")
+                builder = _build_missing_report_entry
             try:
-                entries.append(
-                    _build_missing_report_entry(sample_id, dataset_sample_dir)
-                )
+                entries.append(builder(sample_id, dataset_sample_dir))
             except GroundTruthError as gt_exc:
                 _eprint(f"diff: {gt_exc}")
                 failures += 1

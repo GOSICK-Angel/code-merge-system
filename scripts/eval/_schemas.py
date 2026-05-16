@@ -109,6 +109,19 @@ class DiffEntry(BaseModel):
     # those denominators per metrics.md §2.2 / §3.4.
     no_op: bool = False
 
+    # F9: the sample ended with status=needs_human (the merge system's
+    # explicit escalation path). The merge binary intentionally does not
+    # write ``merge_report_*.json`` in this terminal state — only
+    # ``checkpoint.json`` + ``plan_review_*.md``. Without this flag those
+    # samples would be indistinguishable from genuine crashes
+    # (``MISSING_REPORT``), and the RR / RCR / DCRR formulas would punish
+    # the system for a by-design outcome. Summarisation excludes
+    # ``system_escalated`` samples from those three denominators; OA still
+    # counts them via ``match=SEMANTIC`` because successful escalation is a
+    # correct outcome (acceptance.md §2 EscalationRate captures the rate
+    # for inspection separately).
+    system_escalated: bool = False
+
 
 class DiffReportMeta(BaseModel):
     """Metadata block on :class:`DiffReport`.
