@@ -231,6 +231,11 @@ def _diff_one_sample(
         rationale_length=rationale_length,
         discarded_content_present=discarded_present,
         is_security_sensitive=is_security_sensitive,
+        # F7: a successful run with zero decision records means the merge
+        # was a legitimate no-op (e.g. upstream had no actionable changes
+        # in scope and the system correctly did nothing). Mark it so
+        # summarisation can exempt the sample from RCR / DCRR.
+        no_op=(len(decisions) == 0),
     )
     return entry, engines
 

@@ -102,6 +102,13 @@ class DiffEntry(BaseModel):
     discarded_content_present: bool = False
     is_security_sensitive: bool = False
 
+    # F7: the sample ran to completion but produced zero file_decision_records
+    # (a legitimate no-op merge — upstream had no actionable changes in scope).
+    # Rationale-coverage / discarded-content metrics are vacuous when there
+    # are no decisions to score, so summarisation excludes no_op samples from
+    # those denominators per metrics.md §2.2 / §3.4.
+    no_op: bool = False
+
 
 class DiffReportMeta(BaseModel):
     """Metadata block on :class:`DiffReport`.

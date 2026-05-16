@@ -191,9 +191,14 @@ def _compute_metrics(
     correct = sum(
         1 for s in samples if s.match in (MatchStatus.EXACT, MatchStatus.SEMANTIC)
     )
-    rationale_ok = sum(1 for s in samples if s.rationale_length >= 30)
+    # F7: no-op merges have zero decision records — rationale and
+    # discarded-content metrics are vacuous, so exclude them from those
+    # denominators (metrics.md §2.2 / §3.4 "decision records 总数" semantics).
+    decisive_samples = [s for s in samples if not s.no_op]
+    decisive_total = len(decisive_samples)
+    rationale_ok = sum(1 for s in decisive_samples if s.rationale_length >= 30)
     discarded_ok = sum(
-        1 for s in samples if s.discarded_content_present or s.label is None
+        1 for s in decisive_samples if s.discarded_content_present or s.label is None
     )
 
     total_missed = sum(s.missed_lines for s in samples)
@@ -206,10 +211,18 @@ def _compute_metrics(
         "MMR": _format_pct(miss_upstream / total),
         "WDR": _format_pct(miss_fork / total),
         "SSER": _format_pct(_compute_sser(samples)),
-        "DCRR": _format_pct(discarded_ok / total),
+        "DCRR": (
+            _format_pct(discarded_ok / decisive_total)
+            if decisive_total
+            else "N/A (no-op only)"
+        ),
         "SRSR": "N/A (follow-up)",  # TR7 — plan v3 dependency
         "RR": _format_pct(_compute_rr(runs_dir, [s.sample_id for s in samples])),
-        "RCR": _format_pct(rationale_ok / total),
+        "RCR": (
+            _format_pct(rationale_ok / decisive_total)
+            if decisive_total
+            else "N/A (no-op only)"
+        ),
         "Recall": {label: "N/A" for label in RECALL_LABELS},
         # Soft 9 (acceptance.md §2)
         "CRA": _format_pct(correct / total),

@@ -569,6 +569,65 @@ class TestF5MixedBatch:
         assert len(payload["samples"]) == 2
 
 
+class TestF7NoOpFlag:
+    """F7: a successful run with zero decision records → ``no_op=True``."""
+
+    def test_empty_decision_records_flags_no_op(
+        self,
+        workspace: tuple[Path, Path, Path],
+    ) -> None:
+        runs, datasets, output = workspace
+        _write_dataset_sample(datasets, "t1-0001", golden={"hello.py": b"x = 1\n"})
+        # Run completed with empty file_decision_records, working_tree present
+        # and matches golden exactly (legitimate no-op merge case).
+        _write_run(
+            runs,
+            "t1-0001",
+            working_files={"hello.py": b"x = 1\n"},
+            decision_records={},
+        )
+        rc = main(
+            [
+                "--runs",
+                str(runs),
+                "--datasets",
+                str(datasets),
+                "--output",
+                str(output),
+                "--tier",
+                "1",
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        entry = payload["samples"][0]
+        assert entry["no_op"] is True
+        assert entry["match"] == "EXACT"
+
+    def test_populated_decisions_keep_no_op_false(
+        self,
+        workspace: tuple[Path, Path, Path],
+    ) -> None:
+        runs, datasets, output = workspace
+        _write_dataset_sample(datasets, "t1-0001", golden={"hello.py": b"x = 1\n"})
+        _write_run(runs, "t1-0001", working_files={"hello.py": b"x = 1\n"})
+        rc = main(
+            [
+                "--runs",
+                str(runs),
+                "--datasets",
+                str(datasets),
+                "--output",
+                str(output),
+                "--tier",
+                "1",
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        assert payload["samples"][0]["no_op"] is False
+
+
 # ---------------------------------------------------------------------------
 # Argument validation
 # ---------------------------------------------------------------------------

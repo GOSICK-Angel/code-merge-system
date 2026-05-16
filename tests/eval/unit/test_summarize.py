@@ -612,3 +612,109 @@ class TestF5MissingReportFlow:
         assert m["RR"] == "0.6000"
         # RCR: 3 samples have rationale_length >= 30; missing entries don't.
         assert m["RCR"] == "0.6000"
+
+
+class TestF7NoOpExemption:
+    """F7: no_op samples vacate RCR / DCRR denominators."""
+
+    def _make_entry(
+        self,
+        sample_id: str,
+        *,
+        no_op: bool,
+        rationale_length: int = 0,
+        match: str = "EXACT",
+        label: str | None = None,
+    ):
+        from scripts.eval._schemas import DiffEntry, SystemDecision
+
+        return DiffEntry(
+            sample_id=sample_id,
+            category="C",
+            loss_class=None,
+            expected_human=False,
+            system_decision=SystemDecision(
+                strategy="take_target" if not no_op else "UNKNOWN",
+                risk="UNKNOWN",
+                human=False,
+            ),
+            match=match,
+            label=label,
+            missed_lines=0,
+            extra_lines=0,
+            rationale_length=rationale_length,
+            discarded_content_present=False,
+            is_security_sensitive=False,
+            no_op=no_op,
+        )
+
+    def test_no_op_samples_excluded_from_rcr_dcrr(self, tmp_path: Path) -> None:
+        from scripts.eval._schemas import RunMeta
+
+        samples = (
+            # 2 decisive samples with good rationale
+            self._make_entry("t1-0001", no_op=False, rationale_length=50),
+            self._make_entry("t1-0003", no_op=False, rationale_length=50),
+            # 2 no-op samples (would otherwise drag RCR / DCRR)
+            self._make_entry("t1-0002", no_op=True, rationale_length=0),
+            self._make_entry("t1-0005", no_op=True, rationale_length=0),
+        )
+        runs_dir = tmp_path / "runs"
+        metas: dict[str, RunMeta] = {}
+        for sid in ("t1-0001", "t1-0002", "t1-0003", "t1-0005"):
+            d = runs_dir / sid
+            d.mkdir(parents=True)
+            (d / "merge_report_FIXTURE.json").write_text("{}", encoding="utf-8")
+            (d / "merge_report_FIXTURE.md").write_text("ok", encoding="utf-8")
+            (d / "plan_review_FIXTURE.md").write_text("ok", encoding="utf-8")
+            metas[sid] = RunMeta(
+                sample_id=sid,
+                run_id=f"r-{sid}",
+                seed=0,
+                concurrency=1,
+                cache_disabled=False,
+                wall_time_seconds=10.0,
+                cost_usd=0.01,
+                git_sha="x",
+                model_matrix={},
+                status="success",
+                memory_clean_check="passed",
+                exit_code=0,
+            )
+        m = _compute_metrics(samples, metas, runs_dir=runs_dir)
+        # RCR denominator = 2 decisive samples, both have rationale ≥ 30 → 1.0
+        assert m["RCR"] == "1.0000"
+        # DCRR same: both decisive samples have label=None → discarded_ok=2/2
+        assert m["DCRR"] == "1.0000"
+        # OA still uses full denominator: 4/4 EXACT → 1.0
+        assert m["OA"] == "1.0000"
+
+    def test_all_no_op_renders_na(self, tmp_path: Path) -> None:
+        from scripts.eval._schemas import RunMeta
+
+        samples = (
+            self._make_entry("t1-0002", no_op=True),
+            self._make_entry("t1-0005", no_op=True),
+        )
+        runs_dir = tmp_path / "runs"
+        metas: dict[str, RunMeta] = {}
+        for sid in ("t1-0002", "t1-0005"):
+            d = runs_dir / sid
+            d.mkdir(parents=True)
+            metas[sid] = RunMeta(
+                sample_id=sid,
+                run_id=f"r-{sid}",
+                seed=0,
+                concurrency=1,
+                cache_disabled=False,
+                wall_time_seconds=10.0,
+                cost_usd=0.01,
+                git_sha="x",
+                model_matrix={},
+                status="success",
+                memory_clean_check="passed",
+                exit_code=0,
+            )
+        m = _compute_metrics(samples, metas, runs_dir=runs_dir)
+        assert "no-op only" in m["RCR"]
+        assert "no-op only" in m["DCRR"]
