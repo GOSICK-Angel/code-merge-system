@@ -55,15 +55,43 @@ async def run_guardrails(
 class EmptyPlanGuardrail(OutputGuardrail):  # type: ignore[type-arg]
     name = "empty_plan"
 
+    # Categories that drive an actionable merge phase. Mirrors
+    # ``src/core/phases/initialize.py`` so this guardrail can distinguish
+    # "planner crashed and produced nothing" from "scope was a legitimate
+    # no-op merge (upstream had no actionable changes)" — F6.
+    _ACTIONABLE_CATEGORIES = frozenset(
+        {"upstream_only", "both_changed", "upstream_new"}
+    )
+
     async def run(self, output: MergePlan, state: MergeState) -> GuardrailResult:
-        if not output.phases:
+        if output.phases:
+            return GuardrailResult(passed=True)
+        actionable_count = sum(
+            1
+            for cat in state.file_categories.values()
+            if cat.value in self._ACTIONABLE_CATEGORIES
+        )
+        if actionable_count == 0:
+            # F6: legitimate no-op — upstream side has nothing in scope,
+            # the merge is a fork-preserve no-op. Don't trip the
+            # guardrail; orchestrator can short-circuit cleanly.
             return GuardrailResult(
-                passed=False,
-                triggered=True,
-                reason="Planner returned a plan with no phases",
-                severity="block",
+                passed=True,
+                triggered=False,
+                reason=(
+                    "Empty plan but 0 actionable files (B/C/D_MISSING) — "
+                    "legitimate no-op merge"
+                ),
             )
-        return GuardrailResult(passed=True)
+        return GuardrailResult(
+            passed=False,
+            triggered=True,
+            reason=(
+                f"Planner returned a plan with no phases despite "
+                f"{actionable_count} actionable files"
+            ),
+            severity="block",
+        )
 
 
 class AllHumanRequiredGuardrail(OutputGuardrail):  # type: ignore[type-arg]
