@@ -121,7 +121,14 @@ def _evaluate_absolute_gate(
             operator=entry.operator,
             skipped_reason=f"metric {entry.id!r} not numeric in report",
         )
-    assert entry.threshold is not None  # invariant from model_validator
+    if entry.threshold is None:
+        # The model_validator already enforces this for kind=absolute, but
+        # guard explicitly so the invariant survives ``python -O`` (which
+        # strips asserts) and surfaces as a clear error if a future schema
+        # tweak breaks the constraint.
+        raise ValueError(
+            f"gate {entry.id!r}: kind=absolute entry must declare a threshold"
+        )
     operator = entry.operator or "<="
     passes = _operator_passes(
         operator.value if hasattr(operator, "value") else str(operator),
@@ -152,7 +159,11 @@ def _evaluate_relative_gate(
             multiplier=entry.multiplier,
             skipped_reason=f"metric {entry.id!r} not numeric in report",
         )
-    assert entry.multiplier is not None  # invariant from model_validator
+    if entry.multiplier is None:
+        # Same defensive raise as the absolute path — guards against ``-O``.
+        raise ValueError(
+            f"gate {entry.id!r}: kind=relative entry must declare a multiplier"
+        )
     if baseline_metrics is None:
         return GateResult(
             id=entry.id,

@@ -555,3 +555,56 @@ class TestInternalHelpers:
         )
         assert rc == 1
         assert "report not found" in capsys.readouterr().err
+
+
+class TestSkipPaths:
+    """Phase 6 P2-2 carry-forward: absent metric → SKIP path coverage."""
+
+    def test_absolute_gate_absent_metric_skipped(
+        self, workspace: tuple[Path, Path, Path]
+    ) -> None:
+        report, yml, out = workspace
+        metrics = _full_pass_report()
+        del metrics["WMR"]
+        report.write_text(_build_report(metrics), encoding="utf-8")
+        _write_yaml(yml, _full_pass_thresholds())
+        rc = _run_gate(
+            "--report", str(report), "--acceptance", str(yml), "--output", str(out)
+        )
+        assert rc == 0
+        wmr = next(
+            g
+            for g in json.loads(out.read_text(encoding="utf-8"))["hard_gates"]
+            if g["id"] == "WMR"
+        )
+        assert wmr["pass"] is None
+        assert "not numeric" in wmr["skipped_reason"]
+
+    def test_relative_gate_absent_metric_skipped(
+        self, workspace: tuple[Path, Path, Path], tmp_path: Path
+    ) -> None:
+        report, yml, out = workspace
+        metrics = _full_pass_report()
+        del metrics["cost_usd_per_run_p95"]
+        report.write_text(_build_report(metrics), encoding="utf-8")
+        _write_yaml(yml, _full_pass_thresholds())
+        baseline = tmp_path / "baseline.md"
+        baseline.write_text(_build_report(_full_pass_report()), encoding="utf-8")
+        rc = _run_gate(
+            "--report",
+            str(report),
+            "--acceptance",
+            str(yml),
+            "--output",
+            str(out),
+            "--baseline",
+            str(baseline),
+        )
+        assert rc == 0
+        cost = next(
+            g
+            for g in json.loads(out.read_text(encoding="utf-8"))["soft_gates"]
+            if g["id"] == "cost_usd_per_run_p95"
+        )
+        assert cost["pass"] is None
+        assert "not numeric" in cost["skipped_reason"]

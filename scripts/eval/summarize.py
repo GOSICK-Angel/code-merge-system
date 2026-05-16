@@ -133,22 +133,34 @@ def _compute_rr(runs_dir: Path | None, sample_ids: list[str]) -> float:
     and ``plan_review_*.md`` (lock-clean names produced by Phase 3).
     Returns ``1.0`` (vacuous) when ``runs_dir`` is ``None`` — the caller
     used the schema-only path.
+
+    Multi-match policy (Phase 6 P2-3 carry-forward): each glob may match
+    more than one file when a sample re-runs into the same directory.
+    The check is "any non-empty match counts" rather than "exactly one",
+    which is the union of the [code-phase-3] single-subdir assumption
+    (where there is always exactly one match) and the more permissive
+    re-run scenario; either way an intact sample passes.
     """
     if runs_dir is None or not sample_ids:
         return 1.0
     intact = 0
     for sample_id in sample_ids:
         sample_dir = runs_dir / sample_id
-        has_json = any(
-            p.stat().st_size > 0 for p in sample_dir.glob("merge_report_*.json")
-        )
-        has_md = any(p.stat().st_size > 0 for p in sample_dir.glob("merge_report_*.md"))
-        has_plan = any(
-            p.stat().st_size > 0 for p in sample_dir.glob("plan_review_*.md")
-        )
-        if has_json and has_md and has_plan:
-            intact += 1
+        if not _has_nonempty_match(sample_dir, "merge_report_*.json"):
+            continue
+        if not _has_nonempty_match(sample_dir, "merge_report_*.md"):
+            continue
+        if not _has_nonempty_match(sample_dir, "plan_review_*.md"):
+            continue
+        intact += 1
     return intact / len(sample_ids)
+
+
+def _has_nonempty_match(directory: Path, pattern: str) -> bool:
+    """Return True iff ``directory.glob(pattern)`` yields a non-empty file."""
+    if not directory.is_dir():
+        return False
+    return any(p.stat().st_size > 0 for p in directory.glob(pattern))
 
 
 def _compute_metrics(

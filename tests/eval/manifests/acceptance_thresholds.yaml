@@ -37,7 +37,7 @@ hard_gates:
     kind: absolute
     threshold: 1.0
     operator: "=="
-    source: "全量 (follow-up: requires plan v3 snapshot_rollback_events)"
+    source: "[FOLLOW-UP — auto-SKIP] 全量 — gate.py currently emits pass=null+skipped_reason because summarize.py SRSR anchor is the placeholder 'N/A (follow-up)' (test FINAL TR7). Verdict does NOT depend on SRSR until plan v3 lands MergeState.snapshot_rollback_events."
   - id: MMR
     kind: absolute
     threshold: 0.02
