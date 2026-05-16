@@ -23,7 +23,7 @@ mkdir -p "${RUNS_OUT}" "${LOG_DIR}"
 
 SAMPLES=("$@")
 if [ ${#SAMPLES[@]} -eq 0 ]; then
-  mapfile -t SAMPLES < <(ls "${DATASET_ROOT}" 2>/dev/null | sort)
+  while IFS= read -r line; do SAMPLES+=("$line"); done < <(ls "${DATASET_ROOT}" 2>/dev/null | sort)
 fi
 if [ ${#SAMPLES[@]} -eq 0 ]; then
   echo "run_r2.sh: no samples found under ${DATASET_ROOT}" >&2
