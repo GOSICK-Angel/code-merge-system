@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 import type { WsClient } from "../ws/client";
 import type { OutboundMessage } from "../ws/messages";
 import { useRunStore } from "../store/runStore";
-import { StatusBanner } from "../components/StatusBanner";
+import { Card, Pill } from "../components/brutalist";
+import type { PillTone } from "../components/brutalist";
 import type {
   JudgeIssuePayload,
   JudgeResolution,
@@ -13,14 +14,13 @@ interface Props {
   clientRef: React.MutableRefObject<WsClient | null>;
 }
 
-const SEVERITY_COLOR: Record<string, string> = {
-  critical: "bg-rose-700 text-rose-50",
-  high: "bg-rose-600 text-rose-50",
-  medium: "bg-amber-600 text-amber-50",
-  low: "bg-slate-600 text-slate-100",
-  info: "bg-slate-700 text-slate-200",
-  unknown: "bg-slate-700 text-slate-300",
-};
+function severityTone(s: string): PillTone {
+  if (s === "critical") return "red";
+  if (s === "high") return "orange";
+  if (s === "medium") return "amber";
+  if (s === "low") return "green";
+  return "teal";
+}
 
 function groupByFile(
   issues: JudgeIssuePayload[],
@@ -39,7 +39,6 @@ function groupByFile(
 
 export function JudgeVerdict({ clientRef }: Props): JSX.Element {
   const snapshot = useRunStore((s) => s.snapshot);
-  const conn = useRunStore((s) => s.conn);
   const verdict: JudgeVerdictType | null = snapshot?.judgeVerdict ?? null;
   const resolution: JudgeResolution | null = snapshot?.judgeResolution ?? null;
   const rerunRound = snapshot?.rerunRound ?? 0;
@@ -50,9 +49,8 @@ export function JudgeVerdict({ clientRef }: Props): JSX.Element {
   );
 
   const send = (msg: OutboundMessage) => clientRef.current?.send(msg);
-
   const submit = (r: JudgeResolution) => {
-    if (resolution !== null) return; // server-decided guard
+    if (resolution !== null) return;
     setPendingAction(r);
     send({ type: "submit_judge_resolution", payload: { resolution: r } });
   };
@@ -64,238 +62,327 @@ export function JudgeVerdict({ clientRef }: Props): JSX.Element {
 
   if (!verdict) {
     return (
-      <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100">
-        <StatusBanner
-          runId={snapshot?.runId ?? null}
-          status={snapshot?.status ?? null}
-          conn={conn}
-        />
-        <div className="flex-1 flex items-center justify-center text-slate-500 text-sm">
-          No judge verdict in state.
-        </div>
+      <div
+        className="dim"
+        style={{ padding: 24, fontSize: 12, textAlign: "center" }}
+      >
+        no judge verdict in state yet
       </div>
     );
   }
 
   const decided = resolution !== null || pendingAction !== null;
   const effectiveResolution = resolution ?? pendingAction;
+  const issuesByCount = {
+    critical: verdict.critical_issues_count,
+    high: verdict.high_issues_count,
+    medium: verdict.issues.filter((i) => i.severity === "medium").length,
+    low: verdict.issues.filter((i) => i.severity === "low").length,
+  };
+
+  // build a 4-cell rounds display: round 0 = first verdict, plus 3 repair
+  // budgets capped at maxRerunRounds (or 3 default for visual)
+  const roundsBudget = Math.max(maxRerunRounds, 3);
+  const rounds = Array.from({ length: roundsBudget + 1 }, (_, i) => {
+    let status: "done" | "cur" | "pending" = "pending";
+    if (i < rerunRound) status = "done";
+    else if (i === rerunRound) status = "cur";
+    const label =
+      i === 0
+        ? verdict.veto_triggered
+          ? "veto"
+          : verdict.verdict
+        : i === rerunRound
+          ? decided && effectiveResolution === "rerun"
+            ? "in progress"
+            : "open"
+          : i === rerunRound + 1
+            ? "queued"
+            : "pending";
+    return { i, status, label };
+  });
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100">
-      <StatusBanner
-        runId={snapshot?.runId ?? null}
-        status={snapshot?.status ?? null}
-        conn={conn}
-      />
-      {verdict.veto_triggered && (
-        <div className="px-4 py-3 bg-rose-900/70 border-b border-rose-700 text-sm" role="alert">
-          <div className="font-semibold text-rose-100 mb-1">
-            ⛔ Judge veto triggered
+    <div>
+      <div
+        className="row between mb-2"
+        style={{ alignItems: "flex-end" }}
+      >
+        <div>
+          <h1>Judge verdict</h1>
+          <div className="subhead">
+            Reviewed{" "}
+            <b style={{ color: "var(--fg-0)" }}>
+              {verdict.reviewed_files_count.toLocaleString()}
+            </b>{" "}
+            files · {verdict.passed_files.length.toLocaleString()} passed ·{" "}
+            {verdict.failed_files.length} failed ·{" "}
+            {verdict.conditional_files.length} conditional
           </div>
-          <div className="text-rose-100">
-            {verdict.veto_reason ?? "(no reason recorded)"}
-          </div>
         </div>
-      )}
-      <header className="px-4 py-3 border-b border-slate-800 flex flex-wrap items-center gap-4">
-        <div className="flex-1">
-          <h1 className="text-sm font-semibold text-slate-100">
-            Judge verdict ·{" "}
-            <span className="font-mono text-amber-300">{verdict.verdict}</span>
-          </h1>
-          <p className="text-xs text-slate-400 mt-1">{verdict.summary}</p>
+        <div className="row">
+          <Pill
+            tone={verdict.veto_triggered ? "red" : "amber"}
+            live={!decided}
+          >
+            {verdict.veto_triggered ? "VETO" : verdict.verdict.toUpperCase()}
+          </Pill>
+          <Pill tone="teal">
+            CONF {Math.round(verdict.overall_confidence * 100)}%
+          </Pill>
         </div>
-        <div className="text-xs text-slate-400 grid grid-cols-2 gap-x-4 gap-y-0.5">
-          <span>Reviewed:</span>
-          <span className="text-slate-100 font-mono">{verdict.reviewed_files_count}</span>
-          <span>Failed:</span>
-          <span className="text-rose-400 font-mono">{verdict.failed_files.length}</span>
-          <span>Critical:</span>
-          <span className="text-rose-400 font-mono">{verdict.critical_issues_count}</span>
-          <span>High:</span>
-          <span className="text-amber-400 font-mono">{verdict.high_issues_count}</span>
-          <span>Confidence:</span>
-          <span className="text-slate-100 font-mono">
-            {verdict.overall_confidence.toFixed(2)}
-          </span>
-          {maxRerunRounds > 0 && (
-            <>
-              <span>Rerun:</span>
-              <span className="text-slate-100 font-mono">
-                {rerunRound} / {maxRerunRounds}
-              </span>
-            </>
-          )}
-        </div>
-      </header>
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-5">
-        {verdict.failed_files.length > 0 && (
-          <section>
-            <h2 className="text-xs text-slate-500 uppercase tracking-wider mb-2">
-              Failed files ({verdict.failed_files.length})
-            </h2>
-            <ul className="text-xs font-mono space-y-0.5">
-              {verdict.failed_files.map((fp) => (
-                <li key={fp} className="text-rose-300">
-                  {fp}
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
-        {groupedIssues.length > 0 && (
-          <section>
-            <h2 className="text-xs text-slate-500 uppercase tracking-wider mb-2">
-              Issues ({verdict.issues.length})
-            </h2>
-            <div className="space-y-3">
-              {groupedIssues.map((group) => (
-                <div
-                  key={group.file_path}
-                  className="border border-slate-800 rounded"
-                >
-                  <div className="px-2 py-1.5 bg-slate-900/60 text-xs font-mono text-slate-200 border-b border-slate-800">
-                    {group.file_path}
-                    <span className="ml-2 text-slate-500">
-                      ({group.issues.length} issue
-                      {group.issues.length === 1 ? "" : "s"})
-                    </span>
-                  </div>
-                  <ul className="divide-y divide-slate-800">
-                    {group.issues.map((issue, idx) => (
-                      <li
-                        key={issue.issue_id ?? idx}
-                        className="px-2 py-2 text-xs space-y-1"
-                      >
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`px-1.5 py-0.5 rounded text-[10px] uppercase tracking-wide ${
-                              SEVERITY_COLOR[issue.severity] ??
-                              SEVERITY_COLOR.unknown
-                            }`}
-                          >
-                            {issue.severity}
-                          </span>
-                          <span className="text-slate-300 font-mono text-[11px]">
-                            {issue.issue_type}
-                          </span>
-                          {issue.must_fix_before_merge && (
-                            <span className="text-[10px] text-rose-300">
-                              must-fix
-                            </span>
-                          )}
-                          {issue.affected_lines.length > 0 && (
-                            <span className="text-[10px] text-slate-500 ml-auto font-mono">
-                              lines {issue.affected_lines.join(", ")}
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-slate-300 leading-relaxed">
-                          {issue.description}
-                        </p>
-                        {issue.suggested_fix && (
-                          <p className="text-slate-400 text-[11px] border-l-2 border-amber-700 pl-2">
-                            <span className="text-amber-400 font-medium">
-                              Suggested fix:{" "}
-                            </span>
-                            {issue.suggested_fix}
-                          </p>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
-        {verdict.repair_instructions.length > 0 && (
-          <section>
-            <h2 className="text-xs text-slate-500 uppercase tracking-wider mb-2">
-              Repair instructions ({verdict.repair_instructions.length})
-            </h2>
-            <ul className="space-y-1.5">
-              {verdict.repair_instructions.map((r, idx) => (
-                <li
-                  key={r.source_issue_id ?? idx}
-                  className="border border-slate-800 rounded px-2 py-1.5 text-xs space-y-0.5"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="text-slate-300 font-mono text-[11px]">
-                      {r.file_path}
-                    </span>
-                    {r.severity && (
-                      <span
-                        className={`text-[10px] px-1 py-0.5 rounded ${
-                          SEVERITY_COLOR[r.severity] ??
-                          SEVERITY_COLOR.unknown
-                        }`}
-                      >
-                        {r.severity}
-                      </span>
-                    )}
-                    <span
-                      className={`text-[10px] ml-auto ${
-                        r.is_repairable ? "text-emerald-400" : "text-rose-400"
-                      }`}
-                    >
-                      {r.is_repairable ? "repairable" : "manual"}
-                    </span>
-                  </div>
-                  <p className="text-slate-300">{r.instruction}</p>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
       </div>
-      <footer className="px-4 py-3 border-t border-slate-800 bg-slate-900/40 flex items-center justify-between gap-4">
-        <div className="text-xs text-slate-400">
-          {decided ? (
-            <span className="text-emerald-400">
-              Resolved: <code>{effectiveResolution}</code>{" "}
-              {resolution === null && (
-                <span className="text-slate-500">(awaiting server ack)</span>
-              )}
+
+      <div
+        className={`verdict-banner ${verdict.veto_triggered ? "veto" : ""}`}
+      >
+        <div>
+          <div className="title">
+            VERDICT:{" "}
+            <span className="v">
+              {verdict.verdict.toUpperCase().replace("_", " ")}
             </span>
-          ) : (
-            <span>Choose an action to resume the orchestrator</span>
-          )}
+          </div>
+          <div className="sub">
+            {verdict.veto_triggered && verdict.veto_reason
+              ? `⛔ ${verdict.veto_reason}`
+              : verdict.summary}
+          </div>
         </div>
-        <div className="flex gap-2">
+        <div className="row" style={{ gap: 10 }}>
           <button
             type="button"
-            onClick={() => submit("abort")}
+            className="btn primary"
+            onClick={() => submit("accept")}
             disabled={decided}
-            title="Abort the run; checkpoint preserved for resume"
-            className="text-xs px-3 py-1.5 rounded border border-rose-700 text-rose-200 hover:bg-rose-900/30 disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            Abort
+            ✓ ACCEPT
           </button>
           <button
             type="button"
+            className="btn"
             onClick={() => submit("rerun")}
-            disabled={decided || (rerunRound >= maxRerunRounds && maxRerunRounds > 0)}
+            disabled={
+              decided ||
+              (maxRerunRounds > 0 && rerunRound >= maxRerunRounds)
+            }
             title={
               maxRerunRounds > 0 && rerunRound >= maxRerunRounds
                 ? "Rerun budget exhausted"
                 : "Clear failed-file decisions and rerun auto-merge"
             }
-            className="text-xs px-3 py-1.5 rounded border border-amber-700 text-amber-200 hover:bg-amber-900/30 disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            Rerun
+            ↻ RERUN ({rerunRound}/{maxRerunRounds || "∞"})
           </button>
           <button
             type="button"
-            onClick={() => submit("accept")}
+            className="btn danger"
+            onClick={() => submit("abort")}
             disabled={decided}
-            title="Accept the verdict as-is and proceed"
-            className="text-xs px-3 py-1.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white disabled:opacity-40 disabled:cursor-not-allowed font-medium"
           >
-            Accept
+            ⌥ ABORT
           </button>
         </div>
-      </footer>
+      </div>
+
+      <Card title="› REPAIR ROUNDS" hint={`max ${maxRerunRounds || "∞"}`}>
+        <div className="rounds">
+          {rounds.map((r) => (
+            <div
+              key={r.i}
+              className={`r ${
+                r.status === "done"
+                  ? "done"
+                  : r.status === "cur"
+                    ? "cur"
+                    : ""
+              }`}
+            >
+              <div>
+                <div className="lbl">ROUND {r.i}</div>
+                <div style={{ fontSize: 10, marginTop: 2 }}>{r.label}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="dim" style={{ fontSize: 11 }}>
+          {decided ? (
+            <>
+              resolution =&nbsp;<code>{effectiveResolution}</code>
+              {resolution === null && (
+                <span className="dim"> (awaiting server ack)</span>
+              )}
+            </>
+          ) : (
+            "Pick an action above to resume the orchestrator."
+          )}
+        </div>
+      </Card>
+
+      <div className="judge-grid mt-2">
+        <div>
+          <Card
+            title="› ISSUES BY SEVERITY"
+            hint={`${issuesByCount.critical}C · ${issuesByCount.high}H · ${issuesByCount.medium}M · ${issuesByCount.low}L`}
+          >
+            <div className="row mb-2" style={{ gap: 8 }}>
+              <Pill tone="red">CRITICAL · {issuesByCount.critical}</Pill>
+              <Pill tone="orange">HIGH · {issuesByCount.high}</Pill>
+              <Pill tone="amber">MEDIUM · {issuesByCount.medium}</Pill>
+              <Pill tone="green">LOW · {issuesByCount.low}</Pill>
+            </div>
+            {groupedIssues.length === 0 ? (
+              <div
+                className="dim"
+                style={{ fontSize: 11, padding: "12px 0" }}
+              >
+                no issues recorded
+              </div>
+            ) : (
+              groupedIssues.flatMap((group) =>
+                group.issues.map((iss, idx) => (
+                  <div
+                    key={iss.issue_id ?? `${group.file_path}-${idx}`}
+                    className={`issue ${String(iss.severity).toLowerCase()}`}
+                  >
+                    <div className="top">
+                      <div className="row" style={{ gap: 8 }}>
+                        <Pill tone={severityTone(String(iss.severity))}>
+                          {String(iss.severity)}
+                        </Pill>
+                        <code
+                          className="dim"
+                          style={{ fontSize: 10 }}
+                        >
+                          {iss.issue_id ?? `iss-${idx}`} · {iss.issue_type}
+                        </code>
+                        {iss.must_fix_before_merge && (
+                          <span
+                            style={{
+                              color: "var(--red)",
+                              fontSize: 10,
+                              letterSpacing: "0.1em",
+                            }}
+                          >
+                            MUST_FIX
+                          </span>
+                        )}
+                      </div>
+                      {iss.affected_lines.length > 0 && (
+                        <span
+                          className="dim"
+                          style={{ fontSize: 10, fontFamily: "var(--mono)" }}
+                        >
+                          lines {iss.affected_lines.slice(0, 4).join(", ")}
+                          {iss.affected_lines.length > 4 ? "…" : ""}
+                        </span>
+                      )}
+                    </div>
+                    <div className="fp">{iss.file_path}</div>
+                    <div className="desc mt-1">{iss.description}</div>
+                    {iss.suggested_fix && (
+                      <div className="fix">{iss.suggested_fix}</div>
+                    )}
+                  </div>
+                )),
+              )
+            )}
+          </Card>
+        </div>
+
+        <div className="col">
+          <Card
+            title="› FAILED FILES"
+            hint={`${verdict.failed_files.length}`}
+          >
+            {verdict.failed_files.length === 0 &&
+            verdict.conditional_files.length === 0 ? (
+              <div
+                className="dim"
+                style={{ fontSize: 11, padding: "12px 0" }}
+              >
+                no failed or conditional files
+              </div>
+            ) : (
+              <>
+                {verdict.failed_files.map((f) => (
+                  <div
+                    key={`fail-${f}`}
+                    style={{
+                      padding: "10px 0",
+                      borderBottom: "1px solid var(--line)",
+                      fontFamily: "var(--mono)",
+                      fontSize: 11.5,
+                    }}
+                  >
+                    <div className="row between">
+                      <span style={{ color: "var(--fg-0)" }}>{f}</span>
+                      <Pill tone="red">FAILED</Pill>
+                    </div>
+                  </div>
+                ))}
+                {verdict.conditional_files.map((f) => (
+                  <div
+                    key={`cond-${f}`}
+                    style={{
+                      padding: "10px 0",
+                      borderBottom: "1px solid var(--line)",
+                      fontFamily: "var(--mono)",
+                      fontSize: 11.5,
+                    }}
+                  >
+                    <div className="row between">
+                      <span style={{ color: "var(--fg-0)" }}>{f}</span>
+                      <Pill tone="amber">CONDITIONAL</Pill>
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
+          </Card>
+
+          {verdict.repair_instructions.length > 0 && (
+            <Card
+              title="› REPAIR INSTRUCTIONS"
+              hint={`${verdict.repair_instructions.length}`}
+            >
+              {verdict.repair_instructions.map((r, idx) => (
+                <div
+                  key={r.source_issue_id ?? idx}
+                  className="hairline"
+                  style={{
+                    padding: 10,
+                    marginBottom: 8,
+                    background: "var(--bg-2)",
+                    fontSize: 11.5,
+                  }}
+                >
+                  <div
+                    className="row between"
+                    style={{ marginBottom: 4 }}
+                  >
+                    <code style={{ color: "var(--fg-0)" }}>
+                      {r.file_path}
+                    </code>
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: r.is_repairable
+                          ? "var(--green)"
+                          : "var(--red)",
+                        letterSpacing: "0.08em",
+                      }}
+                    >
+                      {r.is_repairable ? "REPAIRABLE" : "MANUAL"}
+                    </span>
+                  </div>
+                  <div style={{ color: "var(--fg-1)" }}>{r.instruction}</div>
+                </div>
+              ))}
+            </Card>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

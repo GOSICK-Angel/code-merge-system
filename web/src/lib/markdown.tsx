@@ -4,10 +4,14 @@ import { Fragment, type ReactNode } from "react";
  * Minimal markdown → React tree renderer.
  *
  * Trust model: the markdown comes from server-side templates generated
- * by the orchestrator (``runs/<id>/merge_report.md``). We still build a
- * React tree directly so all text is rendered as text content; no raw
- * HTML is interpreted, which keeps the XSS surface minimal. Supported
- * subset: H1-H3 / fenced code blocks / unordered lists / paragraphs.
+ * by the orchestrator (``runs/<id>/merge_report.md``). We build a React
+ * tree directly so all text renders as text content; no raw HTML is
+ * interpreted, which keeps the XSS surface minimal.
+ *
+ * Element styling is delegated to the enclosing ``.md`` container in
+ * ``index.css`` — we emit plain semantic tags here so the brutalist
+ * theme owns the look. Supported subset: H1-H3 / fenced code blocks /
+ * unordered lists / paragraphs.
  */
 export function renderMarkdown(md: string): ReactNode {
   const lines = md.split("\n");
@@ -19,11 +23,9 @@ export function renderMarkdown(md: string): ReactNode {
   const flushList = () => {
     if (listBuf.length === 0) return;
     nodes.push(
-      <ul className="ml-5 list-disc space-y-0.5" key={`ul-${nodes.length}`}>
+      <ul key={`ul-${nodes.length}`}>
         {listBuf.map((item, i) => (
-          <li key={i} className="text-slate-200 leading-relaxed">
-            {item}
-          </li>
+          <li key={i}>{item}</li>
         ))}
       </ul>,
     );
@@ -35,10 +37,7 @@ export function renderMarkdown(md: string): ReactNode {
       flushList();
       if (inCode) {
         nodes.push(
-          <pre
-            key={`pre-${nodes.length}`}
-            className="bg-slate-950 border border-slate-800 rounded p-2 overflow-x-auto text-[11px] my-2"
-          >
+          <pre key={`pre-${nodes.length}`}>
             <code>{codeBuf.join("\n")}</code>
           </pre>,
         );
@@ -56,57 +55,25 @@ export function renderMarkdown(md: string): ReactNode {
     const line = raw.trimEnd();
     if (line.startsWith("### ")) {
       flushList();
-      nodes.push(
-        <h3
-          key={`h3-${nodes.length}`}
-          className="text-sm font-semibold text-slate-100 mt-3"
-        >
-          {line.slice(4)}
-        </h3>,
-      );
+      nodes.push(<h3 key={`h3-${nodes.length}`}>{line.slice(4)}</h3>);
     } else if (line.startsWith("## ")) {
       flushList();
-      nodes.push(
-        <h2
-          key={`h2-${nodes.length}`}
-          className="text-base font-semibold text-slate-100 mt-4"
-        >
-          {line.slice(3)}
-        </h2>,
-      );
+      nodes.push(<h2 key={`h2-${nodes.length}`}>{line.slice(3)}</h2>);
     } else if (line.startsWith("# ")) {
       flushList();
-      nodes.push(
-        <h1
-          key={`h1-${nodes.length}`}
-          className="text-lg font-semibold text-slate-50 mt-2"
-        >
-          {line.slice(2)}
-        </h1>,
-      );
+      nodes.push(<h1 key={`h1-${nodes.length}`}>{line.slice(2)}</h1>);
     } else if (line.startsWith("- ")) {
       listBuf.push(line.slice(2));
     } else if (line === "") {
       flushList();
-      // Blank lines act as paragraph separators — no DOM node needed.
     } else {
       flushList();
-      nodes.push(
-        <p
-          key={`p-${nodes.length}`}
-          className="text-slate-200 leading-relaxed"
-        >
-          {line}
-        </p>,
-      );
+      nodes.push(<p key={`p-${nodes.length}`}>{line}</p>);
     }
   }
   if (inCode && codeBuf.length > 0) {
     nodes.push(
-      <pre
-        key={`pre-${nodes.length}`}
-        className="bg-slate-950 border border-slate-800 rounded p-2 overflow-x-auto text-[11px] my-2"
-      >
+      <pre key={`pre-${nodes.length}`}>
         <code>{codeBuf.join("\n")}</code>
       </pre>,
     );

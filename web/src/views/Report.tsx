@@ -1,13 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRunStore } from "../store/runStore";
-import { StatusBanner } from "../components/StatusBanner";
-import { CostCard } from "../components/CostCard";
-import { DecisionCountsCard } from "../components/DecisionCountsCard";
+import { Card, Pill } from "../components/brutalist";
 import { renderMarkdown } from "../lib/markdown";
+
+interface MemoryEntry {
+  key?: string;
+  value?: unknown;
+  phase?: string;
+}
 
 interface MemorySnapshot {
   phase_summaries: Record<string, unknown>;
-  entries: Array<{ key?: string; value?: unknown; phase?: string }>;
+  entries: MemoryEntry[];
 }
 
 function asMemorySnapshot(raw: unknown): MemorySnapshot {
@@ -18,17 +22,23 @@ function asMemorySnapshot(raw: unknown): MemorySnapshot {
   return {
     phase_summaries: (obj.phase_summaries as Record<string, unknown>) ?? {},
     entries:
-      (obj.entries as Array<{
-        key?: string;
-        value?: unknown;
-        phase?: string;
-      }>) ?? [],
+      (obj.entries as MemoryEntry[]) ??
+      ([] as MemoryEntry[]),
   };
+}
+
+function shortValue(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (v === null || v === undefined) return "—";
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
 }
 
 export function Report(): JSX.Element {
   const snapshot = useRunStore((s) => s.snapshot);
-  const conn = useRunStore((s) => s.conn);
   const runId = snapshot?.runId ?? null;
 
   const [markdown, setMarkdown] = useState<string | null>(null);
@@ -55,117 +65,310 @@ export function Report(): JSX.Element {
     };
   }, [runId]);
 
-  const memory = asMemorySnapshot(snapshot?.memory);
+  const memory = useMemo(
+    () => asMemorySnapshot(snapshot?.memory),
+    [snapshot],
+  );
   const status = snapshot?.status ?? null;
   const errors = snapshot?.errors ?? [];
 
+  const totalCost = snapshot?.costSummary?.total_cost_usd ?? 0;
+  const totalTokens = snapshot?.costSummary?.total_tokens ?? 0;
+  const byAgent = snapshot?.costSummary?.by_agent ?? {};
+
+  const decisionCounts = snapshot?.decisionRecordCounts ?? {};
+  const decisionTotal = Object.values(decisionCounts).reduce(
+    (a, b) => a + b,
+    0,
+  );
+
+  const completed = status === "completed";
+
   return (
-    <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100">
-      <StatusBanner runId={runId} status={status} conn={conn} />
+    <div>
       <div
-        className={`px-4 py-2 border-b ${
-          status === "completed"
-            ? "bg-emerald-900/40 border-emerald-800 text-emerald-100"
-            : "bg-rose-900/40 border-rose-800 text-rose-100"
-        } text-xs`}
+        className="row between mb-2"
+        style={{ alignItems: "flex-end" }}
       >
-        Run {status === "completed" ? "completed" : "failed"} ·{" "}
-        <code className="font-mono">{runId?.slice(0, 8) ?? "?"}</code>
-      </div>
-      <div className="flex flex-1 min-h-0">
-        <aside className="w-72 flex-shrink-0 p-4 border-r border-slate-800 space-y-3 overflow-y-auto">
-          <CostCard cost={snapshot?.costSummary ?? null} />
-          <DecisionCountsCard counts={snapshot?.decisionRecordCounts} />
-          {runId && (
-            <div className="bg-slate-900 border border-slate-800 rounded p-3 space-y-1.5">
-              <div className="text-xs text-slate-500 uppercase tracking-wider">
-                Artifacts
-              </div>
-              <div className="text-xs flex flex-col gap-1">
-                <a
-                  href={`/runs/${runId}/merge_report.md`}
-                  className="text-sky-300 hover:underline"
-                  target="_blank"
-                  rel="noopener"
-                >
-                  merge_report.md
-                </a>
-                <a
-                  href={`/runs/${runId}/plan_review.md`}
-                  className="text-sky-300 hover:underline"
-                  target="_blank"
-                  rel="noopener"
-                >
-                  plan_review.md
-                </a>
-                <a
-                  href={`/runs/${runId}/checkpoint.json`}
-                  className="text-sky-300 hover:underline"
-                  download
-                >
-                  checkpoint.json ↓
-                </a>
-              </div>
-            </div>
-          )}
-          <div className="bg-slate-900 border border-slate-800 rounded p-3 space-y-1.5">
-            <div className="text-xs text-slate-500 uppercase tracking-wider">
-              Memory ({memory.entries.length})
-            </div>
-            {memory.entries.length === 0 ? (
-              <div className="text-xs text-slate-500 italic">
-                No memory entries.
-              </div>
-            ) : (
-              <ul className="space-y-0.5 max-h-72 overflow-y-auto">
-                {memory.entries.slice(0, 50).map((entry, idx) => (
-                  <li
-                    key={entry.key ?? idx}
-                    className="text-[11px] text-slate-300"
-                  >
-                    <span className="text-slate-500 font-mono mr-2">
-                      {entry.phase ?? "—"}
-                    </span>
-                    <span className="truncate">
-                      {String(entry.value ?? entry.key ?? "")}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
+        <div>
+          <h1>
+            Run report —{" "}
+            <span className="dim">
+              {completed ? "COMPLETED" : (status ?? "—").toString().toUpperCase()}
+            </span>
+          </h1>
+          <div className="subhead">
+            run <code>{runId?.slice(0, 8) ?? "—"}</code> · cost $
+            {totalCost.toFixed(2)} · {(totalTokens / 1000).toFixed(0)}K tokens
           </div>
-        </aside>
-        <main className="flex-1 overflow-y-auto p-6">
+        </div>
+        <div className="row" style={{ gap: 8 }}>
+          <Pill tone={completed ? "green" : "red"} live={!completed}>
+            {(status ?? "UNKNOWN").toString().toUpperCase()}
+          </Pill>
+          {runId && (
+            <>
+              <a
+                href={`/runs/${runId}/merge_report.md`}
+                target="_blank"
+                rel="noopener"
+                className="btn"
+              >
+                ⬇ merge_report.md
+              </a>
+              <a
+                href={`/runs/${runId}/plan_review.md`}
+                target="_blank"
+                rel="noopener"
+                className="btn"
+              >
+                ⬇ plan_review.md
+              </a>
+              <a
+                href={`/runs/${runId}/checkpoint.json`}
+                download
+                className="btn"
+              >
+                ⬇ checkpoint.json
+              </a>
+            </>
+          )}
+        </div>
+      </div>
+
+      {errors.length > 0 && (
+        <div
+          className="hairline mb-2"
+          style={{
+            padding: "10px 14px",
+            background: "color-mix(in oklch, var(--red), transparent 88%)",
+            color: "var(--fg-0)",
+            fontSize: 11.5,
+            borderColor: "var(--red-dim)",
+          }}
+          role="alert"
+        >
+          <div className="upcase" style={{ marginBottom: 6 }}>
+            Errors · {errors.length}
+          </div>
+          <ul
+            style={{
+              margin: 0,
+              paddingLeft: 18,
+              listStyle: "disc",
+              color: "var(--fg-1)",
+            }}
+          >
+            {errors.slice(-5).map((e, i) => (
+              <li
+                key={i}
+                style={{
+                  fontFamily: "var(--mono)",
+                  fontSize: 11,
+                  marginBottom: 2,
+                }}
+              >
+                {e.message ?? JSON.stringify(e)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="report-grid">
+        <Card
+          title="› MERGE_REPORT.MD"
+          hint={runId ? `runs/${runId.slice(0, 8)}/merge_report.md` : "—"}
+          pad={false}
+        >
           {error && (
-            <div className="mb-4 px-3 py-2 rounded bg-rose-900/40 border border-rose-800 text-xs text-rose-200">
+            <div
+              style={{
+                padding: "10px 14px",
+                background: "color-mix(in oklch, var(--red), transparent 88%)",
+                color: "var(--fg-0)",
+                fontSize: 11.5,
+                borderBottom: "1px solid var(--red-dim)",
+              }}
+              role="alert"
+            >
               Report not available: {error}
             </div>
           )}
           {markdown ? (
-            <article className="max-w-none text-sm space-y-2">
+            <article
+              className="md"
+              style={{ maxHeight: 720, overflowY: "auto" }}
+            >
               {renderMarkdown(markdown)}
             </article>
           ) : !error ? (
-            <p className="text-xs text-slate-500 italic">Loading report...</p>
+            <div
+              className="dim"
+              style={{ padding: 16, fontSize: 11.5 }}
+            >
+              loading report ...
+            </div>
           ) : null}
-          {errors.length > 0 && (
-            <section className="mt-6">
-              <h2 className="text-sm font-semibold text-rose-300 mb-2">
-                Errors ({errors.length})
-              </h2>
-              <ul className="space-y-1 text-xs">
-                {errors.slice(-10).map((e, idx) => (
-                  <li
-                    key={idx}
-                    className="text-rose-300 font-mono leading-relaxed"
+        </Card>
+
+        <div className="col">
+          <Card title="› FINAL COST">
+            <div className="row between mb-2">
+              <span className="upcase">total</span>
+              <span
+                style={{
+                  fontFamily: "var(--sans)",
+                  fontSize: 28,
+                  fontWeight: 600,
+                  color: "var(--accent)",
+                }}
+              >
+                ${totalCost.toFixed(2)}
+              </span>
+            </div>
+            <div
+              className="dim mb-2"
+              style={{ fontSize: 11 }}
+            >
+              {(totalTokens / 1000).toFixed(0)}K tokens
+            </div>
+            {Object.entries(byAgent).length === 0 ? (
+              <div
+                className="dim"
+                style={{ fontSize: 11, padding: "8px 0" }}
+              >
+                no per-agent breakdown available
+              </div>
+            ) : (
+              Object.entries(byAgent).map(([who, v]) => {
+                const cost = v.cost_usd ?? 0;
+                const pct = totalCost > 0 ? (cost / totalCost) * 100 : 0;
+                return (
+                  <div key={who} className="cost-grid">
+                    <div className="who">{who}</div>
+                    <div className="val">${cost.toFixed(2)}</div>
+                    <div className="mini-bar">
+                      <div
+                        className="f"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </Card>
+
+          {decisionTotal > 0 && (
+            <Card
+              title="› DECISIONS"
+              hint={`${decisionTotal} records`}
+            >
+              {Object.entries(decisionCounts).map(([k, v]) => (
+                <div
+                  key={k}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr auto",
+                    padding: "6px 0",
+                    borderBottom: "1px dashed var(--line)",
+                    fontSize: 11.5,
+                  }}
+                >
+                  <code style={{ color: "var(--fg-1)" }}>{k}</code>
+                  <span
+                    style={{
+                      fontVariantNumeric: "tabular-nums",
+                      color: "var(--fg-0)",
+                    }}
                   >
-                    {e.message ?? JSON.stringify(e)}
-                  </li>
-                ))}
-              </ul>
-            </section>
+                    {v.toLocaleString()}
+                  </span>
+                </div>
+              ))}
+            </Card>
           )}
-        </main>
+
+          <Card
+            title="› LEARNED MEMORY"
+            hint={`${memory.entries.length} entries`}
+          >
+            {memory.entries.length === 0 ? (
+              <div
+                className="dim"
+                style={{ fontSize: 11, padding: "8px 0" }}
+              >
+                no memory entries
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexWrap: "wrap" }}>
+                {memory.entries.slice(0, 24).map((entry, i) => (
+                  <div key={entry.key ?? i} className="memchip">
+                    {entry.phase && <span className="k">{entry.phase}</span>}
+                    <span
+                      title={shortValue(entry.value ?? entry.key)}
+                      style={{
+                        maxWidth: 220,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      {shortValue(entry.value ?? entry.key)}
+                    </span>
+                  </div>
+                ))}
+                {memory.entries.length > 24 && (
+                  <div
+                    className="dim"
+                    style={{
+                      fontSize: 10,
+                      width: "100%",
+                      marginTop: 4,
+                    }}
+                  >
+                    + {memory.entries.length - 24} more entries
+                  </div>
+                )}
+              </div>
+            )}
+          </Card>
+
+          {runId && (
+            <Card title="› ARTIFACTS">
+              {[
+                ["merge_report.md", "view"],
+                ["plan_review.md", "view"],
+                ["checkpoint.json", "download"],
+              ].map(([f, kind]) => (
+                <div
+                  key={f}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr auto",
+                    gap: 10,
+                    padding: "6px 0",
+                    borderBottom: "1px dashed var(--line)",
+                    alignItems: "center",
+                    fontSize: 11.5,
+                  }}
+                >
+                  <code style={{ color: "var(--fg-0)" }}>{f}</code>
+                  <a
+                    href={`/runs/${runId}/${f}`}
+                    target={kind === "view" ? "_blank" : undefined}
+                    rel={kind === "view" ? "noopener" : undefined}
+                    download={kind === "download" ? true : undefined}
+                    className="btn ghost"
+                    style={{ padding: "2px 8px", fontSize: 10 }}
+                  >
+                    ⬇
+                  </a>
+                </div>
+              ))}
+            </Card>
+          )}
+        </div>
       </div>
     </div>
   );
