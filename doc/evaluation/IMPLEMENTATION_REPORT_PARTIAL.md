@@ -798,3 +798,54 @@ commit `77a8dd2`：
 - ✅ Tier 1 baseline 全过 → **可以推进 R2 (dify-plugin-daemon)** 5-sample pilot 看跨语言效果
 - 推荐 P-γ-2：R2 5-sample pilot（用 A 修后版本）→ 决定是否 scale 30
 - 可选 P-γ-3：Tier 2 / Tier 3 samples 扩展验证（如已有数据集）
+
+## 16. P-γ-2：R2 (Go dify-plugin-daemon) 单 sample 复测
+
+### 16.1 执行
+
+driver: `/tmp/eval-runs/run_v4_r2.sh`（基于 v3 driver，复用 r2-0001 现有 sample + cvte fork config）。1 sample，wall 16s，0 LLM 主路径调用（仅 judge 验证阶段）。
+
+### 16.2 v4 R2 vs v2 R2 对比
+
+| 维度 | v2 R2 (smoke) | **v4 R2** | Δ |
+|---|---|---|---|
+| status | needs_human (cascade) | **completed** | ✅ |
+| wall | 300s | **16s** | **-95%** |
+| cost | $4.60 | ~$0（无 LLM 主路径）| **-100%** |
+| `layered_execution dependencies skipped` 文件 | 3 (http_server.go, manager.go, helper.go) | **0** | ✅ §13 cascade fix 跨语言生效 |
+| **3 个 C 类难点文件 vs golden** | 污染 + escalate | **全部 `native_3way_merge` 命中 + byte-equal** | ✅ §15 native pass 跨语言生效 |
+| 32 个 cherry-pick 文件 | replay 命中 | replay 命中 | 不变 |
+| 整体 diff vs golden 行数 | 大量污染 | 2 项非内容差异（见 §16.3）| |
+
+### 16.3 残留 2 项非内容差异
+
+| 项 | 原因 | 性质 |
+|---|---|---|
+| `.gitignore` golden 有 / working_tree 无 | driver tar 显式 `--exclude='.gitignore'` 避免 git_bootstrap 自创污染（见 §11/12）| eval 层工件，**非 system bug** |
+| `pkg/plugin_packager/decoder/helper_test.go` working_tree 有 / golden 无 | base 里此文件存在，**fork 在 fork.patch 中删除**（grep -c=2），但 system file_classifier 把它误判为 D_MISSING（"upstream 新增、fork 没有"），从 upstream 复制回 working_tree | **新独立 src/ bug** — F-d-classification-fork-removed-file |
+
+### 16.4 关键发现
+
+- **cascade fix 跨语言生效**：dify-plugins (Python yaml/py) + dify-plugin-daemon (Go) 都受益于 §13 `vacuously_complete_layers`
+- **native 3-way merge 跨语言生效**：Go 文件 3/3 命中 native merge 干净（http_server.go、manager.go、helper.go），证实 §15 推论"行级不重叠比预想更普遍"在 Go 仓库同样成立
+- **R2 cost 模型重写**：v2 推断的 "$138 = 30 sample × $4.60" 已无效。v4 R2 单 sample ~$0 + 16s wall → **scale 30 sample 估算 ~$0 + 8 min wall**，与 dify-plugins Tier 1 全 baseline 同量级
+- **新暴露 bug 比修复的更"窄"**：F-d-classification-fork-removed-file 影响面取决于 fork 删除文件的频度（cvte 二开里中等频率），但不像 cascade/take_target 那样毁灭性
+
+### 16.5 R2 acceptance verdict
+
+不能宣称 R2 acceptance pass（OA = 0/1 因 helper_test.go bug）。但 **v4 已扫清原 R2 的两大结构性失败模式**（cascade + LLM-take_target-misdrop），剩余 bug 是新 classifier 问题，单独 ticket 修。
+
+### 16.6 残留 follow-up（增补）
+
+| ID | 描述 | 优先级 |
+|---|---|---|
+| **F-d-classification-fork-removed-file** | fork 显式 delete 的文件被 file_classifier 当 D_MISSING 处理，errouneously copy from upstream | 中（影响 fork 删除场景，dify-plugin-daemon 命中、dify-plugins 未命中）|
+| F-d-classification-fork-removed-file 配套 | 修后需在 dify-plugin-daemon 扩 5-sample pilot 验证 + 看 dify-plugins 是否曾隐式回避此 bug | 中 |
+| F-judge-source-of-truth | (§13.2) Judge verdict 读 staged context | 低（Tier 1 已过）|
+| F-F9-partial-escalate | (§12.5) | 低 |
+
+### 16.7 下一步选项
+
+1. **修 F-d-classification-fork-removed-file**（src/ PR） → 再跑 v5 R2 → 期望 R2 acceptance 全过
+2. **暂不修，造 4 个新 R2 sample**（用 sample_import 从 cvte fork merge 历史挖）→ 跑 5-sample pilot 看 acceptance 全貌
+3. **提 PR 把当前 feat/web 5 commit 合并 main**，独立开 ticket 跟 F-d-classification-fork-removed-file
