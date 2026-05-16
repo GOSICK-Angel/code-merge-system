@@ -355,7 +355,9 @@ class TestPerFileSourceContract:
 
 
 class TestMissingMergeReport:
-    def test_missing_report_returns_two(
+    """F5 contract: missing merge_report → MISSING_REPORT stub entry."""
+
+    def test_missing_report_emits_missing_report_stub(
         self,
         workspace: tuple[Path, Path, Path],
         capsys: pytest.CaptureFixture[str],
@@ -378,8 +380,12 @@ class TestMissingMergeReport:
                 "1",
             ]
         )
-        assert rc == 2
-        assert "merge_report" in capsys.readouterr().err
+        assert rc == 0
+        assert "MISSING_REPORT" in capsys.readouterr().err
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        assert len(payload["samples"]) == 1
+        assert payload["samples"][0]["label"] == "MISSING_REPORT"
+        assert payload["samples"][0]["match"] == "MISMATCH"
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +394,9 @@ class TestMissingMergeReport:
 
 
 class TestMissingWorkingTree:
-    def test_missing_working_tree_returns_two(
+    """F5 contract: missing working_tree → MISSING_REPORT stub entry."""
+
+    def test_missing_working_tree_emits_missing_report_stub(
         self,
         workspace: tuple[Path, Path, Path],
         capsys: pytest.CaptureFixture[str],
@@ -413,8 +421,14 @@ class TestMissingWorkingTree:
                 "1",
             ]
         )
-        assert rc == 2
-        assert "working_tree" in capsys.readouterr().err
+        assert rc == 0
+        err = capsys.readouterr().err
+        assert "working_tree" in err
+        assert "MISSING_REPORT" in err
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        assert payload["samples"][0]["label"] == "MISSING_REPORT"
+        # Stub carries neutral SystemDecision so summarize doesn't crash.
+        assert payload["samples"][0]["system_decision"]["strategy"] == "MISSING"
 
 
 # ---------------------------------------------------------------------------
@@ -502,9 +516,57 @@ class TestInternalHelpers:
         assert (
             diff_mod._escalate_label(ML.WRONG_MERGE, ML.EXTRA_NOISE) == ML.WRONG_MERGE
         )
+        # F5: MISSING_REPORT outranks WRONG_MERGE.
+        assert (
+            diff_mod._escalate_label(ML.WRONG_MERGE, ML.MISSING_REPORT)
+            == ML.MISSING_REPORT
+        )
         # None initial seed.
         assert diff_mod._escalate_label(None, ML.EXTRA_NOISE) == ML.EXTRA_NOISE
         assert diff_mod._escalate_label(ML.WRONG_MERGE, None) == ML.WRONG_MERGE
+
+
+class TestF5MixedBatch:
+    """End-to-end: mixed batch with some completed + some MISSING_REPORT."""
+
+    def test_mixed_batch_emits_full_sample_set(
+        self,
+        workspace: tuple[Path, Path, Path],
+    ) -> None:
+        runs, datasets, output = workspace
+        # Two samples in the dataset
+        _write_dataset_sample(datasets, "t1-0001", golden={"hello.py": b"x = 1\n"})
+        _write_dataset_sample(datasets, "t1-0002", golden={"world.py": b"y = 2\n"})
+        # Sample 1 completes (working_tree + merge_report).
+        _write_run(
+            runs,
+            "t1-0001",
+            working_files={"hello.py": b"x = 1\n"},
+        )
+        # Sample 2 has a run dir but only checkpoint — no merge_report / no working_tree
+        (runs / "t1-0002").mkdir(parents=True)
+        (runs / "t1-0002" / "checkpoint.json").write_text("{}", encoding="utf-8")
+        rc = main(
+            [
+                "--runs",
+                str(runs),
+                "--datasets",
+                str(datasets),
+                "--output",
+                str(output),
+                "--tier",
+                "1",
+            ]
+        )
+        assert rc == 0
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        ids_by_label = {s["sample_id"]: s["label"] for s in payload["samples"]}
+        assert ids_by_label == {
+            "t1-0001": None,
+            "t1-0002": "MISSING_REPORT",
+        }
+        # Both samples present in the diff — F5's whole point.
+        assert len(payload["samples"]) == 2
 
 
 # ---------------------------------------------------------------------------

@@ -513,3 +513,102 @@ class TestInternalHelpers:
         from scripts.eval.summarize import _compute_rr
 
         assert _compute_rr(None, ["t1-0001"]) == 1.0
+
+
+class TestF5MissingReportFlow:
+    """F5: MISSING_REPORT entries drag OA / RCR / DCRR / RR down correctly."""
+
+    def test_three_pass_two_missing_drags_metrics(self, tmp_path: Path) -> None:
+        from scripts.eval._schemas import DiffEntry, RunMeta, SystemDecision
+
+        samples = []
+        # 3 passing
+        for i in (1, 3, 4):
+            samples.append(
+                DiffEntry(
+                    sample_id=f"t1-000{i}",
+                    category="C",
+                    loss_class=None,
+                    expected_human=False,
+                    system_decision=SystemDecision(
+                        strategy="take_target", risk="UNKNOWN", human=False
+                    ),
+                    match="EXACT",
+                    label=None,
+                    missed_lines=0,
+                    extra_lines=0,
+                    rationale_length=42,
+                    discarded_content_present=False,
+                    is_security_sensitive=False,
+                )
+            )
+        # 2 missing-report stubs
+        for i in (2, 5):
+            samples.append(
+                DiffEntry(
+                    sample_id=f"t1-000{i}",
+                    category="C",
+                    loss_class=None,
+                    expected_human=False,
+                    system_decision=SystemDecision(
+                        strategy="MISSING", risk="UNKNOWN", human=False
+                    ),
+                    match="MISMATCH",
+                    label="MISSING_REPORT",
+                    missed_lines=0,
+                    extra_lines=0,
+                    rationale_length=0,
+                    discarded_content_present=False,
+                    is_security_sensitive=False,
+                )
+            )
+        runs_dir = tmp_path / "runs"
+        metas: dict[str, RunMeta] = {}
+        for i in (1, 3, 4):
+            d = runs_dir / f"t1-000{i}"
+            d.mkdir(parents=True)
+            (d / "merge_report_FIXTURE.json").write_text("{}", encoding="utf-8")
+            (d / "merge_report_FIXTURE.md").write_text("ok", encoding="utf-8")
+            (d / "plan_review_FIXTURE.md").write_text("ok", encoding="utf-8")
+            metas[f"t1-000{i}"] = RunMeta(
+                sample_id=f"t1-000{i}",
+                run_id=f"r-{i}",
+                seed=0,
+                concurrency=1,
+                cache_disabled=False,
+                wall_time_seconds=10.0,
+                cost_usd=0.01,
+                git_sha="x",
+                model_matrix={},
+                status="success",
+                memory_clean_check="passed",
+                exit_code=0,
+            )
+        for i in (2, 5):
+            d = runs_dir / f"t1-000{i}"
+            d.mkdir(parents=True)
+            # Only the bare run dir + run_meta (no merge artifacts)
+            metas[f"t1-000{i}"] = RunMeta(
+                sample_id=f"t1-000{i}",
+                run_id=f"r-{i}",
+                seed=0,
+                concurrency=1,
+                cache_disabled=False,
+                wall_time_seconds=10.0,
+                cost_usd=0.01,
+                git_sha="x",
+                model_matrix={},
+                status="failed",
+                memory_clean_check="passed",
+                exit_code=1,
+            )
+
+        m = _compute_metrics(tuple(samples), metas, runs_dir=runs_dir)
+        # 3/5 EXACT
+        assert m["OA"] == "0.6000"
+        # WMR: missing-report ≠ wrong-merge — stays zero (F5 design)
+        assert m["WMR"] == "0.0000"
+        # RR: only 3/5 have intact 3-artifact bundles
+        assert m["RR"] == "0.6000"
+        # RCR: 3 samples have rationale_length >= 30; missing entries don't.
+        assert m["RCR"] == "0.6000"

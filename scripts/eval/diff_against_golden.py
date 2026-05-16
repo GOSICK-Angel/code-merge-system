@@ -240,21 +240,61 @@ def _escalate_label(
 ) -> MismatchLabel | None:
     """Resolve label aggregation across multiple per-file mismatches.
 
-    Priority (highest → lowest): WRONG_MERGE > MISS_UPSTREAM > MISS_FORK
-    > EXTRA_NOISE. Reflects severity for the verdict — a real wrong
-    merge dominates a missed upstream which dominates noise.
+    Priority (highest → lowest): MISSING_REPORT > WRONG_MERGE >
+    MISS_UPSTREAM > MISS_FORK > EXTRA_NOISE. ``MISSING_REPORT`` ranks
+    above WRONG_MERGE because a system that crashed before deciding is
+    strictly worse than one that decided incorrectly.
     """
     if new is None:
         return current
     if current is None:
         return new
     priority = {
+        MismatchLabel.MISSING_REPORT: 5,
         MismatchLabel.WRONG_MERGE: 4,
         MismatchLabel.MISS_UPSTREAM: 3,
         MismatchLabel.MISS_FORK: 2,
         MismatchLabel.EXTRA_NOISE: 1,
     }
     return new if priority[new] > priority[current] else current
+
+
+def _build_missing_report_entry(sample_id: str, dataset_sample_dir: Path) -> DiffEntry:
+    """Build a stub DiffEntry for a sample whose run never produced a
+    ``merge_report`` (F5).
+
+    The system attempted the sample (a run sub-directory exists) but
+    crashed before writing the required artifacts — most commonly the
+    ``empty_plan`` guardrail aborting analysis. We still emit a
+    :class:`DiffEntry` so downstream summarisation counts it against
+    RR / WMR / OA, instead of silently dropping the sample and reporting
+    a misleading 100% PASS over only the runs that succeeded.
+
+    ``system_decision`` is populated with neutral defaults — there is
+    literally no decision to record — but ``match=MISMATCH`` +
+    ``label=MISSING_REPORT`` lets the metric formulas count this as a
+    failure mode without misclassifying it as a take_target / take_fork
+    error.
+    """
+    meta = load_meta(dataset_sample_dir)
+    return DiffEntry(
+        sample_id=sample_id,
+        category=str(meta.category),
+        loss_class=meta.loss_class,
+        expected_human=meta.expected_human,
+        system_decision=SystemDecision(
+            strategy="MISSING",
+            risk="UNKNOWN",
+            human=False,
+        ),
+        match=MatchStatus.MISMATCH,
+        label=MismatchLabel.MISSING_REPORT,
+        missed_lines=0,
+        extra_lines=0,
+        rationale_length=0,
+        discarded_content_present=False,
+        is_security_sensitive=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +351,21 @@ def cmd_diff(
             continue
         try:
             entry, engines = _diff_one_sample(sample_id, run_subdir, dataset_sample_dir)
-        except (RunArtifactMissing, GroundTruthError) as exc:
+        except RunArtifactMissing as exc:
+            # F5: the system attempted this sample (run dir present) but
+            # crashed before writing artifacts. Emit a MISSING_REPORT
+            # stub so summarisation counts the failure instead of
+            # silently dropping the sample.
+            _eprint(f"diff: {exc} — recording as MISSING_REPORT")
+            try:
+                entries.append(
+                    _build_missing_report_entry(sample_id, dataset_sample_dir)
+                )
+            except GroundTruthError as gt_exc:
+                _eprint(f"diff: {gt_exc}")
+                failures += 1
+            continue
+        except GroundTruthError as exc:
             _eprint(f"diff: {exc}")
             failures += 1
             continue

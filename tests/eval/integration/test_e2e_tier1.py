@@ -213,11 +213,15 @@ class TestE2eFailurePropagation:
             "failed run must not surface artifacts that downstream steps trust"
         )
 
-        # Diff cannot synthesize per-file truth without merge_report and
-        # signals partial failure via rc=2.
+        # F5: diff emits a MISSING_REPORT stub so downstream RR / OA reflect
+        # the failure instead of silently dropping the sample. rc=0 (no fatal
+        # diff error) but the sample carries label=MISSING_REPORT.
         diff_path = tmp_path / "diff.json"
         rc_diff = _run_diff(runs_dir=runs_dir, output=diff_path)
-        assert rc_diff == 2, "diff should not silently mask the missing report"
+        assert rc_diff == 0, "diff with run-but-no-artifacts should not be fatal"
+        payload = _read_json(diff_path)
+        sample_labels = {s["sample_id"]: s["label"] for s in payload["samples"]}
+        assert sample_labels.get("t1-0001") == "MISSING_REPORT"
 
 
 # ---------------------------------------------------------------------------

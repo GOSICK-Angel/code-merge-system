@@ -51,12 +51,16 @@ class MismatchLabel(str, Enum):
 
     ``MISS_UPSTREAM`` / ``MISS_FORK`` feed into MMR; ``WRONG_MERGE`` feeds
     into WMR; ``EXTRA_NOISE`` feeds into noise metrics.
+    ``MISSING_REPORT`` (F5) marks a sample that the system attempted but
+    failed before producing a merge_report (e.g. the empty_plan guardrail
+    aborted analysis); feeds into RR per metrics.md §5.3.
     """
 
     MISS_UPSTREAM = "MISS_UPSTREAM"
     MISS_FORK = "MISS_FORK"
     WRONG_MERGE = "WRONG_MERGE"
     EXTRA_NOISE = "EXTRA_NOISE"
+    MISSING_REPORT = "MISSING_REPORT"
 
 
 class SystemDecision(BaseModel):
