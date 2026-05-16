@@ -1,173 +1,249 @@
 # 评估系统执行计划（下阶段）
 
-> **状态**：评估框架 Phase 0-9 + F5/F6/F7/F8 修复 + 工具链（sample_import / git_bootstrap）+ 30 真样本数据集 全部已落地（feat/web 分支 19 commits ahead of origin）。
-> **本文用途**：登记接下来 3 项可执行任务，包含目标 / 预算 / 前置 / 风险 / 验收，避免会话续接时重新讨论。
-> **不修改**：`README.md / metrics.md / dataset.md / procedure.md / acceptance.md`（仅追加本文 + 视进度更新 IMPLEMENTATION_REPORT_PARTIAL.md）。
+> **状态（2026-05-16 更新）**：原 P1/P2/P3 全部落地 + 5 个 src/ fix branch（P-α / P-γ-1 / P-γ-1.5-A / P-γ-1.5-B）+ Tier 1 dify-plugins acceptance **全 hard gate 过**（OA 1.0 / WMR 0 / DCRR 1.0）+ R2 r2-0001 与 golden **byte-equal**。PR #1 已 open，56 commits ahead of main，等 CI 合并。
+> **本文用途**：登记下一阶段任务（P-γ-3 / Tier 2/3 / 低优 follow-up），并评估"用 agent team 实施"的可行性。
+> **不修改**：`metrics.md / dataset.md / procedure.md / acceptance.md`（仅追加本文 + IMPLEMENTATION_REPORT_PARTIAL.md）。
 
 ---
 
-## 0. 当前 baseline
+## 0. 当前 baseline（2026-05-16）
 
 | 项 | 状态 |
 |---|---|
-| `scripts/eval/` 框架 | Phase 0-9 全闭环 + F5/F6/F7/F8 修复 |
-| `tests/eval/` | 272/272 PASSED，cov 94% |
-| 真实数据集（Tier-1）| 30 个 dify-plugins 干净样本（6 C + 24 B）|
-| Synthetic fixture | `tests/eval/fixtures/reference_samples/`（hello.py 合成）|
-| 单次 1-sample 真跑（t1-0001 旧的）| `merge` 二进制端到端通过（match=EXACT, verdict=PASS）|
-| CI `eval-tier1` job | 已添加 (`workflow_dispatch` + `continue-on-error`)，未首次手动触发 |
-| DET / CPC 一致性 | 未跑（需 ≥ 2 runs） |
+| 评估框架 `scripts/eval/` | Phase 0-9 + F5/F6/F7/F8/F9 + F-OverEscalation + F-CI-1/2 全闭环 |
+| 评估单测 `tests/eval/` | 全 pass；新增覆盖率维持 |
+| 项目单测 `tests/unit/` | 2241 pass（2 偶发 isolation flaky，独立跑全过）|
+| Tier 1 数据集 | 30 dify-plugins 真样本（6 C + 24 B），meta backfilled（5 / 6 expected_human=true）|
+| Tier 1 v4 acceptance | **OA 1.0 / WMR 0 / DCRR 1.0 / SSER 1.0 / RR 1.0 / RCR 1.0 / OverEscalation 0**（全 hard gate 过 — IMPLEMENTATION_REPORT §15）|
+| R2 跨仓库 sample | r2-0001 (Go dify-plugin-daemon) v5 = **byte-equal golden**（§17）|
+| DET 测试 | 1.0（5×3 seed，IMPLEMENTATION_REPORT §8）|
+| CI `eval-tier1` | 全绿，多次手动触发通过 |
+| PR #1 | open，feat/web → main，等 CI |
+| 关键 src/ 修复 | `vacuously_complete_layers` (§13) + `three_way_merge_file` (§15) + `fork_delete_preserver` (§17) |
 
 ---
 
-## 1. 任务 P1：30 sample 全量真跑（Tier-1 acceptance baseline）
+## 1. 已完成任务（历史快照）
 
-**目标**：用真 `merge` 二进制跑完 30 sample，产出第一份完整的 `eval_report.md` + `eval_acceptance.json`，把 acceptance gates 由"理论"变成"有数"。
-
-**前置**：
-- `.merge/.env` 含有效 `ANTHROPIC_API_KEY` + `OPENAI_API_KEY`（已确认 `/Users/angel/AI/project/dify-official-plugins/.merge/.env` 可用）
-- 本地 `git_bootstrap` + `sample_import` 工具齐（已落地）
-- 30 个 sample 入仓 `tests/eval/datasets/tier1/samples/`（已落地）
-
-**步骤**（每个 sample 独立可重试）：
-
-1. `python -m scripts.eval.git_bootstrap --sample tests/eval/datasets/tier1/samples/t1-NNNN --out /tmp/eval-runs/repo-NNNN`
-2. `cp /Users/angel/AI/project/dify-official-plugins/.merge/{.env,config.yaml} /tmp/eval-runs/repo-NNNN/.merge/`
-3. `cd /tmp/eval-runs/repo-NNNN && set -a && source .merge/.env && set +a && python -m src.cli.main merge upstream --no-web --ci`
-4. 把 `merge_report_<rid>.json / .md / plan_review_<rid>.md` + working_tree 汇总到 `/tmp/eval-runs/runs/t1-NNNN/`，并合成最小 `run_meta.json`
-5. 跑 `diff_against_golden / summarize / gate` 三件套
-
-**估算**：
-| 维度 | 数值 |
-|---|---|
-| 单 sample wall-clock | 1-3 min（取决于 actionable 文件数 + 模型反应）|
-| 单 sample tokens | 5-30k（C 类型偏多）|
-| 单 sample 成本（claude-opus-4-6）| $0.10-0.50 |
-| 全 30 sample 总成本 | **$5-15**（取决于 cache 命中率 + C 占比）|
-| 全 30 sample wall-clock | ~60-90 分钟（串行） |
-
-**风险**：
-- C 类型的 6 个 sample 可能触发多轮 plan revision（成本 / 时长上不封顶）
-- 部分 sample 可能击中 max_files_per_run = 50 上限（当前 config，若需放宽 → 改 config）
-- API 限流：claude opus 上调 RPM 限制可能在中段触发 → 失败重试机制由 `BaseAgent._call_llm_with_retry` 兜底
-- t1-0001..t1-0006 (C 类) 命中真实语义冲突 → 系统可能产 ESCALATE_HUMAN，导致 verdict 非 PASS（这本身是评估目标）
-
-**验收**：
-- 全 30 sample 产 `merge_report_<rid>.json`（即使 verdict ≠ PASS 也算成功跑完）
-- `acceptance.json` 写出，含 OA / WMR / MMR / DCRR / RR / RCR / CRA / OverEscalationRate 全部有数
-- 单条 `tests/eval/datasets/tier1/results/<run_date>/` 持久化（建议新加 `.gitignore` 排除）
-- 产出 `doc/evaluation/IMPLEMENTATION_REPORT_PARTIAL.md` 后续追加 §"Tier-1 首份 acceptance" 段（含真实数值）
-
-**Stretch goal**：
-- 若 verdict=FAIL，定位 fail gate 并产分类失败清单（system 真错 vs sample 数据问题 vs threshold 设定问题）
-- 6 个 C 类 sample 的 system_decision 单独分析（系统对真实语义冲突的 take_target / fork_keep / escalate 比例）
+| 原任务 | 状态 | 文档 |
+|---|---|---|
+| **P1** 30-sample 全量真跑 | ✅ 完成（v1 → v2 → v3 → v4 共 4 轮 baseline）| §7 / §11 / §14 / §15 |
+| **P2** DET 一致性 | ✅ 完成（5×3 seed → DET 1.0）| §8 |
+| **P3** CI eval-tier1 首次触发 | ✅ 完成（5 次 push 全绿）| §9 |
+| **P-α** F9 区分 escalate vs crash | ✅ 完成 | §10 |
+| **P-β** 第 2 次 baseline + relative gate | ✅ 完成 | §11 |
+| **R2 smoke** 跨仓库 Go 项目 | ✅ 完成（暴露 cascade + classifier bug）| §12 |
+| **P-γ-1** layered_execution 假级联 src/ fix | ✅ 完成 | §13 / commit `471ac17` |
+| **P-γ-1.5-D** v3 baseline 数据分层 | ✅ 完成 | §14 |
+| **P-γ-1.5-A** native 3-way merge 前置 src/ fix | ✅ 完成 | §15 / commit `77a8dd2` |
+| **P-γ-2** R2 v4 单 sample 复测 | ✅ 完成（cost -100%, wall -95%）| §16 |
+| **P-γ-1.5-B** fork-delete 保留 src/ fix | ✅ 完成 | §17 / commit `9b229af` |
 
 ---
 
-## 2. 任务 P2：DET 一致性测试
+## 2. 下阶段待办（按优先级）
 
-**目标**：用同一 sample 多 seed 跑 3 遍，验证 `consistency.py --metric DET` ≥ 0.9 acceptance gate（metrics.md §6.1）。
+### 2.1 P-γ-3：R2 多 sample 扩展 + dify-plugins v5 regression check
 
-**前置**：P1 完成（DET 需要先确认 1-run 正常，且需要多 sample 才能拉开有意义数值）。
+**目标**：把 R2 (Go) 从 1 sample 扩到 5 sample，跑 acceptance；同时跑 dify-plugins v5 30-sample 验证 P-γ-1.5-B 无 regression（按 §17.4 推断 dify-plugins 0 FORK_DELETED entries 应仍 OA=1.0）。
+
+**前置**：PR #1 合并（或并行独立分支）。
 
 **实施**：
-- 挑 5 个 sample（推荐：1 C × 3 difficulty + 2 B）→ 控制成本 $1-2
-- 每 sample 3 次 run，`--seed 1/2/3`
-- 比对 strategy / target_risk_level 跨 run 一致性
-- `python -m scripts.eval.consistency --runs runs/run-1 runs/run-2 runs/run-3 --metric DET --output det.json`
+1. **造 4 个新 R2 sample**：用 `sample_import --from-merge SHA` 从 cvte fork merge 历史挖 4 个有代表性的 commit（候选 SHA 见 dify-plugin-daemon `git log --merges`）。每个 sample 需手工 backfill `meta.yaml` 的 `category` 与 `expected_human` 字段。
+2. **跑 5 R2 sample baseline v5**：用 `/tmp/eval-runs/run_v4_r2.sh r2-0001 r2-0002 ... r2-0005`
+3. **跑 dify-plugins v5 30-sample**：用 `/tmp/eval-runs/run_v4_full.sh` 全 30 重跑，对照 v4 数据
+4. **summarize + 写 §18**
 
 **估算**：
 | 维度 | 数值 |
 |---|---|
-| Sample × runs | 5 × 3 = 15 runs |
-| 总成本 | $1-2 |
-| wall-clock | 30-45 min（串行） |
+| R2 5 sample wall | ~80s (5×16s)，若有 sample 触发 LLM 主路径则按需上调 |
+| R2 cost | < $5（v5 后大部分走 native + cherry-pick）|
+| dify v5 wall | ~6 min |
+| dify v5 cost | ~$0.6 |
+| 总开销 | < $6 / ~10 min |
 
 **风险**：
-- claude opus 默认 temperature 不为零（config.yaml `judge.temperature=0.1`），可能造成 5% 抖动 → DET 真实 ≥ 0.9 是可达的 stretch
-- 多次跑同 sample 会击中 prompt cache → 实际成本估算偏低
+- 新 R2 sample 可能暴露未知 src bug（如 §17.4 所言，cvte 二开形态多样）→ 触发新 fix branch
+- `sample_import` 对 cvte fork 的 merge SHA 处理需要 `--from-merge` 选 PR-style merge commit
+- 4 个新 sample 的 expected_human 标注需要人工判断（与 golden 比对）
 
 **验收**：
-- DET ≥ 0.9（acceptance.md §2 soft gate）
-- 不一致样本清单可列出（plan 决策 3：DET 输出含 `inconsistent` 数组）
-- 如果 DET < 0.9，分析是 strategy 抖动还是 target_risk_level 抖动；后者更严重
+- R2 5 sample summary 全 EXACT 或 expected SEMANTIC
+- dify-plugins v5 acceptance 与 v4 全等（无 regression）
+- 新增 §18 / §19 IMPLEMENTATION_REPORT
 
 ---
 
-## 3. 任务 P3：CI eval-tier1 首次触发
+### 2.2 P-γ-4：F-judge-source-of-truth 低优修复
 
-**目标**：在 GitHub Actions 上手动触发 `eval-tier1` workflow，验证 CI 环境能跑通 lock --verify / fork-name-check / pytest tests/eval/ → 兼容 30-sample 数据集体量。
+**目标**：修 §13.2 中 Judge verdict 文本引用 LLM proposal 而非 working_tree 的 ground-truth gap。当前未导致错误决策，但 verdict 文本产噪音（如曾说"file contains '# ... omitted' artifact"实际磁盘无此字符串）。
 
-**前置**：P1 不一定完成（CI 现阶段不跑真 merge，只跑 framework 测试 + lock-verify）；30 sample 入仓即可触发。
+**前置**：无。可与 P-γ-3 并行。
 
 **实施**：
-- push 当前 feat/web 分支到 origin（19 commits）
-- GitHub Actions → "eval-tier1" workflow → "Run workflow" → branch=feat/web
-- 看 5 个 step 全过：`ruff` / `ruff format` / `mypy scripts/eval` / `pytest tests/eval/unit --cov-fail-under=80` / `python -m scripts.eval.lock --verify` / `python -m scripts.eval._fork_name_check scripts/eval tests/eval`
+1. 找 Judge 读 working_tree 的位点（应在 `src/agents/judge_agent.py` 或 `src/tools/three_way_diff.py`）
+2. 加测试：构造 working_tree 与 LLM proposal 不一致的场景，断言 verdict 文本仅引用 working_tree
+3. 修 Judge prompt builder（如适用），让 Judge 看到的"current state"就是磁盘读取
 
-**估算**：
-| 维度 | 数值 |
-|---|---|
-| 成本 | 仅 GitHub Actions 时间（≈ 5 min） |
-| wall-clock | 单次 5-10 min |
+**估算**：1-2 hr 工作量，0 LLM cost（pure src/ + unit test）。
 
-**风险**：
-- CI 环境差异：mypy / ruff 版本可能与本地不一致 → fail 后查 `actions/setup-python` 版本
-- pytest 时长：30 sample lock 读取多了 → `TestUnitSuiteRuntime` 25s 上限可能临界（本地实测 ~14s，CI 环境通常 + 30-50%）
-- 真实 merge 不在该 job（避免 secrets 入 CI）→ 仅 framework / schema sanity
-
-**验收**：
-- workflow run 显示 success，所有 step exit 0
-- 现有 PR (`test` job) 不受影响（eval-tier1 是独立 workflow_dispatch，不阻塞）
+**验收**：unit test 覆盖；可选 R2 / Tier 1 重跑确认 verdict 文本干净。
 
 ---
 
-## 4. 推荐执行顺序
+### 2.3 P-γ-5：Tier 2 历史回放数据集
+
+**目标**：按 `dataset.md §3` 设计，构造 ≥10 个跨 25 commits 的真实合并样本（dify-plugins 或 dify-plugin-daemon 任选）。
+
+**前置**：P-γ-3 完成（Tier 1 + R2 全过后再扩展）。
+
+**实施**：
+1. 在 fork 仓库找 ≥10 个 large merge SHA（涉及 25+ commits）
+2. 每个用 `sample_import --from-merge` 生成 tier 2 dataset
+3. 跑 baseline
+4. 评估 acceptance gate 是否需要调整阈值
+
+**估算**：中等工作量；造数据 1-2 hr / sample；baseline cost 与 R2 类比 < $50 全集。
+
+**验收**：tier 2 acceptance 数据入 lock；新增 §IMPLEMENTATION_REPORT 段。
+
+---
+
+### 2.4 P-γ-6：Tier 3 M-注入对抗集
+
+**目标**：按 `dataset.md §4` 构造 M1-M6 每类 ≥ 5 个样本（30 sample）验证 system 对 misleading 输入的鲁棒性。
+
+**前置**：P-γ-5 完成。
+
+**实施**：需要专门的注入工具（dataset.md §4 列出 6 类 mutation）。当前框架未提供注入器 → 需新建 `scripts/eval/m_inject.py`。
+
+**估算**：高工作量；造数据 + baseline 共 1-2 周。
+
+---
+
+## 3. 推荐执行顺序
 
 ```
-P3 (CI 触发 - 几乎零成本) → P1 (30 sample 真跑 - 主要里程碑) → P2 (DET - 收尾)
+P-γ-3 (5-R2 + v5 regression — < $6, < 10 min)
+  ↓
+P-γ-4 (F-judge-source-of-truth — pure src, 1-2 hr)
+  ↓
+P-γ-5 (Tier 2 数据集 — 中工作量)
+  ↓
+P-γ-6 (Tier 3 注入 — 高工作量)
 ```
 
 理由：
-- P3 不依赖任何外部资源，可以马上做，验证 CI 路径
-- P1 是评估系统的"真实测试"，结果驱动后续所有决策（threshold 微调 / 数据集增补方向 / 框架 bug 二轮）
-- P2 是 acceptance.md soft gate 兜底，等 P1 数据稳了再做更省钱
+- P-γ-3 最便宜，能立刻把 R2 acceptance 从单 sample 扩到统计意义
+- P-γ-4 与 P-γ-3 可并行，无 LLM 开销
+- P-γ-5/6 是数据集扩展，依赖框架稳态（P-γ-3 后再开）
 
 ---
 
-## 5. 推迟项 / 已知 limitation
+## 4. 推迟项 / 已知 limitation（更新版）
 
-| 项 | 推迟到 | 原因 |
+| 项 | 状态 | 备注 |
 |---|---|---|
-| Tier-2 历史回放 | Tier-1 稳定后 | dataset.md §3 设计，需要 ≥10 个跨 25 commits 的真实合并 |
-| Tier-3 M-注入对抗集补全 | Tier-1 稳定后 | M1-M6 每类 ≥ 5 个 → 30 sample，需要专门注入工具 |
-| SRSR 真实路径 | plan v3 | 需要 `MergeState.snapshot_rollback_events` 字段（acceptance_thresholds.yaml 当前 `[FOLLOW-UP — auto-SKIP]`）|
-| WDR hard gate 重启用 | Tier-2 后 | 当前 yaml 故意不含（[code-phase-4] MISS_FORK 简化）|
-| tree-sitter 真实 AST | optional dependency | `_ast_equiv.py` 当前 fallback-bytes，启用需 `pip install tree-sitter*` |
-| `--baseline` 数值 delta | 累积 ≥ 2 次完整 run | 需要 baseline schema 规范化 + 跨 run diff 工具 |
+| ~~F-CI-1: web/dist build~~ | ✅ 已修（§9）| |
+| ~~F-CI-2: 终端宽度敏感~~ | ✅ 已修（§9）| |
+| ~~F-WMR-t1-0003: cascade~~ | ✅ §13 修 | |
+| ~~F-WMR-t1-0003-2: take_target~~ | ✅ §15 修（native merge）| |
+| ~~F-d-classification-fork-removed-file~~ | ✅ §17 修 | |
+| F-judge-source-of-truth | open（中）| Judge verdict 文本 ground-truth gap — P-γ-4 |
+| F-F9-partial-escalate | open（低）| v5 后 R2 不再 escalate，此 corner case 极少触发 |
+| F-executor-strategy-tuning | open（低）| native merge 接管 C 类，LLM 路径很少触发 |
+| Tier-2 历史回放 | P-γ-5 | |
+| Tier-3 M-注入对抗集 | P-γ-6 | |
+| SRSR 真实路径 | plan v3 | 需要 `MergeState.snapshot_rollback_events` 字段 |
+| WDR hard gate 重启用 | Tier-2 后 | |
+| tree-sitter 真实 AST | optional dependency | 当前 fallback-bytes |
+| `--baseline` 数值 delta | ✅ 已用 4 次 baseline 跑出来 | |
 | 多文件 sample 聚合 | Phase 5 优化 | 当前 `_diff_one_sample` 只取首个 decision record |
-| `_decision_to_system_decision` 字段统一 | E2E 真跑校准 | 当前双字段名兜底（`decision`/`strategy`、`target_risk_level`/`risk`）|
-| `eval-tier1` nightly cron | 数据集 ≥ 50 + 预算确认 | 当前 `workflow_dispatch` only |
-| F-CI-1：`eval-tier1` job 缺 web/dist build step | 独立 PR | pip install -e `.[dev]` 因 `force-include "web/dist"` 失败（详见 IMPLEMENTATION_REPORT_PARTIAL §9.3）|
-| F-CI-2：`test_explicit_path_overrides_default` CI 终端宽度敏感 | 独立 PR | Rich 把 `custom-profile.yaml` 在 `ya`/`ml` 间换行，assertion 不能识别（详见 IMPLEMENTATION_REPORT_PARTIAL §9.3）|
+| nightly cron | 数据集 ≥ 50 + 预算确认 | 当前 `workflow_dispatch` only |
+| forks-profile 完整 authoring | open | cvte fork `forks-profile.yaml` `fork: name` 仍空，未影响 acceptance |
 
 ---
 
-## 6. 文档维护
+## 5. 文档维护规则
 
-- 完成 P1 后：把 acceptance 数值追加进 `IMPLEMENTATION_REPORT_PARTIAL.md` §"首次真实评估"
-- 完成 P2 后：DET 数值同上
-- 完成 P3 后：CI workflow URL 留存到 README
-- 如果发现新 F-class 框架缺陷：本文 §5 新增条目，并新建 fix branch
+- 完成 P-γ-3 / 4 / 5 / 6 任一后：追加 IMPLEMENTATION_REPORT §18 / 19 / 20 / 21（保持序号连续）
+- 发现新 src/ bug：本文 §2 新增任务条目，commit message 引用 `repro:` 真实证据
+- src/ fix 必须配 unit test + e2e 验证（baseline 或 R2 单 sample），不能仅靠 unit
+- PR 合并 main 后：本文 §0 baseline 表更新 commit ref
 
 ---
 
-## 7. 已通过 acceptance 阈值清单（供参考）
+## 6. 已通过 acceptance 阈值清单（v4 实测）
 
-来自 `tests/eval/manifests/acceptance_thresholds.yaml`：
+来自 `tests/eval/manifests/acceptance_thresholds.yaml` + IMPLEMENTATION_REPORT §15：
 
-**Hard gates (13)**：WMR ≤ 0 / SSER == 1.0 / DCRR == 1.0 / SRSR auto-SKIP / MMR ≤ 0.02 / Recall_M1-M6 ≥ 0.95 / RR == 1.0 / RCR == 1.0
+**Hard gates (13)**：
+- WMR ≤ 0.05 → **0.0** ✅
+- MMR ≤ 0.02 → **0.0** ✅
+- SSER == 1.0 → **1.0** ✅
+- DCRR == 1.0 → **1.0** ✅
+- RR == 1.0 → **1.0** ✅
+- RCR == 1.0 → **1.0** ✅
+- Recall_M1-M6 ≥ 0.95 → N/A（Tier 3 未跑）
+- SRSR — auto-SKIP
 
-**Soft gates (9)**：OA ≥ 0.95 / CRA ≥ 0.95 / OverEscalationRate ≤ 0.05 / JA ≥ 0.9 / DET ≥ 0.9 / CPC ≥ 0.85 / cost_p95 relative 1.15× / wall_time_p95 1.20× / plan_revision_rounds_p95 1.0×
+**Soft gates (9)**：
+- OA ≥ 0.95 → **1.0** ✅
+- CRA ≥ 0.95 → **1.0** ✅
+- OverEscalationRate ≤ 0.05 → **0.0** ✅
+- JA ≥ 0.9 → N/A (follow-up)
+- DET ≥ 0.9 → **1.0** ✅
+- CPC ≥ 0.85 → N/A (multi-provider)
+- cost_p95 relative 1.15× → N/A baseline 不变
+- wall_p95 relative 1.20× → 实测大幅低于（v3 24.1s → v4 15.6s）
+- plan_revision_rounds_p95 1.0× → N/A
 
-P1 跑完后会得到上述 gates 在 30-sample 真实环境的初始数值。
+→ Tier 1 dify-plugins acceptance **全过**。R2 r2-0001 单 sample 全过。
+
+---
+
+## 7. Agent team 实施可行性评估（不在本会话执行）
+
+针对 §2 的 4 项待办，按"是否适合 agent team 并行实施"分级：
+
+### 7.1 高适配（**推荐**用 agent team）
+
+| 任务 | 理由 | 推荐 agent 分工 |
+|---|---|---|
+| **P-γ-5 Tier 2 数据集构造** | 每个 sample 独立、流程标准化（pick SHA → sample_import → backfill meta → lock）。10 sample 并行可降 wall 80% | • `general-purpose` × N：每个负责 1-2 sample 端到端造数据<br>• `code-reviewer`：抽样审 meta.yaml 标注是否合理 |
+| **P-γ-6 Tier 3 M-注入工具 + 数据集** | 6 类 mutation 独立、注入工具 + 数据可并行 | • `feature-dev:code-architect`：先设计注入器接口<br>• `general-purpose` × 6：每类 mutation 一个 agent 实现 + 造 5 sample<br>• `code-reviewer`：注入语义正确性审查 |
+| **P-γ-4 F-judge-source-of-truth** | 单文件改动 + 配单测；可让 `debugger` 探 + `feature-dev:code-reviewer` 验 | • `debugger`：探 Judge ground-truth gap 真实位点<br>• `feature-dev:code-architect`：设计 fix<br>• `code-reviewer`：审 PR |
+
+### 7.2 中适配（部分 agent，关键人工决策）
+
+| 任务 | 理由 | 限制 |
+|---|---|---|
+| **P-γ-3 R2 多 sample 扩展** | 造 4 sample 可并行（agent 友好），但跑 baseline 是顺序的（API 限流 + sample 隔离），agent 加值有限 | sample expected_human 标注需人工判断，不能 full-auto |
+| **forks-profile 完整 authoring** | 需要 cvte 二开领域知识（用户自己最熟），agent 能起草但定稿需人审 | 决策依赖业务上下文 |
+
+### 7.3 低适配（**不建议**用 agent team）
+
+| 任务 | 理由 |
+|---|---|
+| **跑 e2e baseline / 收 acceptance 数据** | API 调用串行执行，agent 添加 orchestration 开销而无并行收益。直接 `bash` 跑即可 |
+| **PR 合并决策 / 阈值调整** | 需要全局视角 + 用户判断，agent 工作流冗余 |
+| **src/ 紧耦合 refactor** | 如 `MergeState` schema 演进、Judge 与 ConflictAnalyst 协议变更 — agent 间需频繁同步设计，merge conflict 概率高 |
+
+### 7.4 总体可行性结论
+
+| 维度 | 评估 |
+|---|---|
+| **整体可行性** | ✅ 中高 — §2 大部分任务能 agent team 并行 |
+| **建议 team 结构** | 1 leader (`claude` 协调) + 3-6 worker (`general-purpose` 造数据 / `feature-dev:*` 设计 / `code-reviewer` 审 / `debugger` 探 bug) |
+| **不建议 full-auto 的环节** | sample expected_human 标注 / forks-profile 业务字段 / PR 合并决策 / 阈值调整 |
+| **关键工作流约束** | (a) 每个 agent worktree 隔离避免 merge conflict；(b) 数据集类任务必须 leader 在 agent 提交前校验 `lock --verify`；(c) src fix 类任务必须 leader 强制 e2e baseline 验证（不仅 unit） |
+| **预期收益** | wall-clock 缩 60-80%（数据集任务）；总 LLM cost 略增 10-30%（agent 协调）；人工 review 量约持平 |
+| **潜在风险** | (a) agent 跨任务 commit message 风格不统一；(b) 数据集 sample_id 撞号需 leader 预分配；(c) `IMPLEMENTATION_REPORT` 多 agent 同时追加章节会冲突 — 建议每 agent 写独立子文档，leader 最后合并 |
+
+**推荐启动方式**：
+1. **先 P-γ-3 单 agent 验证**（agent team 基础流程演练）
+2. **再 P-γ-5 Tier 2 数据集** 全力开 agent team（最大收益）
+3. **P-γ-6 Tier 3 注入** 是 agent team 的"招牌项目" — 6 类并行最适合
+4. **P-γ-4 与上述任一并行** 用 1 agent 单独承包
