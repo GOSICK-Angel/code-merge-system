@@ -849,3 +849,67 @@ driver: `/tmp/eval-runs/run_v4_r2.sh`（基于 v3 driver，复用 r2-0001 现有
 1. **修 F-d-classification-fork-removed-file**（src/ PR） → 再跑 v5 R2 → 期望 R2 acceptance 全过
 2. **暂不修，造 4 个新 R2 sample**（用 sample_import 从 cvte fork merge 历史挖）→ 跑 5-sample pilot 看 acceptance 全貌
 3. **提 PR 把当前 feat/web 5 commit 合并 main**，独立开 ticket 跟 F-d-classification-fork-removed-file
+
+## 17. P-γ-1.5-B：fork 删除文件不再被 D_MISSING 路径恢复
+
+### 17.1 问题精确
+
+`classify_three_way` (file_classifier.py:344) 在 `head_hash is None and up_hash is not None` 时返回 D_MISSING，**无视 `base_hash` 是否存在**：
+
+- 真 D_MISSING：base==None + upstream!=None + fork==None → fork 从未有过此文件 → **应当从 upstream 复制**
+- FORK_DELETED：base!=None + upstream!=None + fork==None → **fork 显式删除** → **不应当复制**
+
+3 个 D_MISSING action 位点（`executor_agent.py:130` / `auto_merge.py:842` / `auto_merge.py:1462`）unconditional 调用 `_copy_from_upstream`，把 fork 删除的文件从 upstream 复制回 working_tree，silently 撤销 fork 删除意图。
+
+R2 r2-0001 v4 命中：`pkg/plugin_packager/decoder/helper_test.go`。
+
+### 17.2 修法
+
+`state.fork_divergence_map` 在 InitializePhase 已正确标记 FORK_DELETED（见 `compute_fork_divergence_map` 416 行），是现成真值源。
+
+`file_classifier.py` 新增：
+- `is_fork_deleted(state, file_path) -> bool`
+- `_fork_deleted_skip_record(file_path) -> FileDecisionRecord` (decision=SKIP, agent=`fork_delete_preserver`)
+
+3 个 action 位点前置 `if is_fork_deleted(state, fp): record = SKIP`。不动 enum，避免 contract / planner / summarize 扩散。
+
+8 个新 unit test (`tests/unit/test_fork_delete_preservation.py`)；executor 端集成靠 v5 R2 e2e 验证。
+
+commit `9b229af`。
+
+### 17.3 v5 R2 验证
+
+| 维度 | v4 R2 | **v5 R2** |
+|---|---|---|
+| `fork_delete_preserver` 决策记录 | 0 | **1** ✅ |
+| `helper_test.go` 在 working_tree | 是（误从 upstream 复制）| **否（fork 删除被保留）** |
+| working_tree vs golden (排除 `.gitignore` eval 工件) | 1 多余文件 | **byte-equal**（`diff -r` exit 0）✅ |
+| wall | 16s | 16s | 不变 |
+| 3 个 C 类难点文件 | 全 native merge 命中 | 全 native merge 命中 | 不变 |
+
+### 17.4 跨 sample 影响评估
+
+- **dify-plugins Tier 1 v4**: 已扫描，0 FORK_DELETED → 不受此 bug 影响 → v5 跑应仍 OA=1.0（无 regression 风险）
+- **dify-plugin-daemon R2**: 主战场，1 sample 已 100% 修
+- **未来其他 cvte 二开**: 凡 fork 显式删除 + upstream 未动的文件直接受益
+
+### 17.5 R2 acceptance verdict
+
+**R2 r2-0001 v5 = byte-equal golden = OA 1/1 EXACT** ✅
+
+可宣称 **R2 单 sample acceptance pass**。
+
+### 17.6 残留 follow-up（更新）
+
+| ID | 状态 |
+|---|---|
+| ~~F-d-classification-fork-removed-file~~ | ✅ §17 已修 |
+| F-judge-source-of-truth | open，低优先 |
+| F-F9-partial-escalate | open，低优先（v5 后 R2 不再 escalate）|
+| F-executor-strategy-tuning | open，低优先（native merge 接管 C 类）|
+
+### 17.7 下一步
+
+- ✅ R2 r2-0001 acceptance 全过
+- 用 `sample_import` 造 4 个新 R2 sample 扩展验证
+- 或更新 PR #1 description 把 v5 数据加进去（修复 ship）
