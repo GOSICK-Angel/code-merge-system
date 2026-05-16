@@ -148,6 +148,8 @@ P3 (CI 触发 - 几乎零成本) → P1 (30 sample 真跑 - 主要里程碑) →
 | 多文件 sample 聚合 | Phase 5 优化 | 当前 `_diff_one_sample` 只取首个 decision record |
 | `_decision_to_system_decision` 字段统一 | E2E 真跑校准 | 当前双字段名兜底（`decision`/`strategy`、`target_risk_level`/`risk`）|
 | `eval-tier1` nightly cron | 数据集 ≥ 50 + 预算确认 | 当前 `workflow_dispatch` only |
+| F-CI-1：`eval-tier1` job 缺 web/dist build step | 独立 PR | pip install -e `.[dev]` 因 `force-include "web/dist"` 失败（详见 IMPLEMENTATION_REPORT_PARTIAL §9.3）|
+| F-CI-2：`test_explicit_path_overrides_default` CI 终端宽度敏感 | 独立 PR | Rich 把 `custom-profile.yaml` 在 `ya`/`ml` 间换行，assertion 不能识别（详见 IMPLEMENTATION_REPORT_PARTIAL §9.3）|
 
 ---
 

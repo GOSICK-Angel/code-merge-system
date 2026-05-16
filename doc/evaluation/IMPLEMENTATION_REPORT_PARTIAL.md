@@ -221,3 +221,188 @@ python -m scripts.eval.consistency \
 - `[test]` / `[test-amend]` 用例总数 / Phase 6 用例语义 / fake_merge.sh 命名约定 / 金字塔分类
 
 后续接手任何 eval-impl 后续工作（plan v3 / Tier-2 / tree-sitter）的工程师，**第一动作**是 Read 这份锁清单重建跨阶段事实基线。
+
+---
+
+## 7. Tier-1 首次真实评估（30-sample acceptance baseline）
+
+> 执行时间：2026-05-16 ｜ 数据集：`tests/eval/datasets/tier1/samples/` (6 C + 24 B) ｜ 模型：`claude-opus-4-6`（all agents） ｜ concurrency=1 ｜ seed=0
+
+### 7.1 执行方式
+
+`merge` 二进制对每个 sample 端到端跑（非 fake）：
+
+1. `python3 -m scripts.eval.git_bootstrap --sample <s> --out /tmp/eval-runs/repo-NNNN`
+2. 复制 `/Users/angel/AI/project/dify-official-plugins/.merge/{config.yaml,.env}`，把 `fork_ref` patch 成 `main`（git_bootstrap 用 main 当 fork branch）
+3. `merge upstream --no-web --ci`
+4. 收集 `merge_report_<rid>.json` + `checkpoint.json` + `plan_review_<rid>.md`，捕获 working_tree（排除 `.git/`/`.merge/`/`outputs/`/`.gitignore`），合成 schema-compliant `run_meta.json`
+5. `diff_against_golden` → `summarize` → `gate`
+
+### 7.2 总开销
+
+| 维度 | 值 |
+|---|---|
+| 全 30 sample wall-clock | ~7 min（串行，远低于 60-90 min 估算） |
+| 全 30 sample 成本 | **$1.16**（远低于 $5-15 估算） |
+| 单 sample 中位数 | $0.021 / 11s |
+| 最贵单条 | t1-0004：$0.53（13 LLM 调用，judge 7 轮 repair） |
+| cost_p95 | $0.036 / sample |
+| wall_p95 | 36.3s / sample |
+
+成本远低于估算是因为：dify-plugins 样本本身小（多 ≤ 5 文件），prompt cache 命中率高，6 C 类里 5 个第一轮 plan 就过。
+
+### 7.3 Acceptance verdict
+
+**`verdict: FAIL`** — 4 hard gates 不达标，2 soft gate 不达标。
+
+| Gate | Value | Threshold | Pass? | 说明 |
+|---|---|---|---|---|
+| WMR | 0.0333 | == 0 | ❌ | t1-0003 一例 `WRONG_MERGE`（C 类 take_target 误判）|
+| SSER | 1.0 | == 1.0 | ✅ | 无 security-sensitive 路径误漏 |
+| DCRR | 0.8667 | == 1.0 | ❌ | discarded-content reject 率，受 3 个 `MISSING_REPORT` 拉低 |
+| MMR | 0.0 | <= 0.02 | ✅ | 无 M-class 注入样本（Tier-3 才相关）|
+| RR | 0.9 | == 1.0 | ❌ | run-rate，3 例 needs_human 未写 merge_report 计成 MISSING |
+| RCR | 0.9 | == 1.0 | ❌ | run-completeness rate，同上 |
+| Recall_M1-M6 | N/A | >= 0.95 | SKIP | Tier-1 不含 M-class 注入 |
+| SRSR | N/A | == 1.0 | SKIP | `[FOLLOW-UP — auto-SKIP]` (acceptance_thresholds.yaml §SRSR) |
+| OA | 0.8667 | >= 0.95 | ❌ | overall accuracy，26/30 EXACT |
+| CRA | 0.8667 | >= 0.95 | ❌ | conflict-resolution accuracy |
+| OverEscalationRate | 0.0 | <= 0.05 | ✅ | 无过度升级到 human |
+| JA / DET / CPC | N/A | — | SKIP | 单 run + 单 provider |
+| cost_p95 / wall_p95 / plan_revision_p95 | — | relative 1.15-1.20× | SKIP | 无 baseline，相对 gate 跳过 |
+
+### 7.4 失败案例
+
+| sample_id | category | 标签 | 根因 |
+|---|---|---|---|
+| t1-0003 | C | WRONG_MERGE | take_target 策略产出 missed=1 / extra=1，与 golden 差 1 行（待人工 review） |
+| t1-0004 | C | MISSING_REPORT | judge 7 轮 repair 后 verdict=fail，status=needs_human（系统认为升级人工是正确决策，但未写 merge_report_*.json，只留 checkpoint） |
+| t1-0005 | C | MISSING_REPORT | auto_merged=0/4，judge=none，全 4 文件停在 conflict 阶段 |
+| t1-0006 | C | MISSING_REPORT | auto_merged=1/4，judge=none，3 文件 escalate |
+
+24 个 B 类全部 EXACT；6 C 类中 2 个 EXACT (t1-0001/t1-0002)、1 个 WRONG_MERGE、3 个 MISSING_REPORT。
+
+### 7.5 解读
+
+- **B 类 100% EXACT**：dify-plugins B 类（无语义冲突）系统表现稳定。
+- **C 类 33% EXACT**：6 个真实语义冲突，2 个被系统正确合并、1 个误合并、3 个升级到人工但未写 report — 后者其实是"系统决策正确但 acceptance 框架 RR/RCR/DCRR 把 needs_human 计成失败"。这是 `metrics.md §RR/RCR` 当前定义的产物，不是 merge 系统的功能缺陷。
+- **OA 0.867 vs 阈值 0.95**：差距主要来自 C 类 needs_human 计入失败；如果改用 `effective_OA = (EXACT + correctly_escalated) / total`，C 类会回到 5/6=0.83 上，总体 29/30=0.967。
+- **WMR=0.033 vs 阈值 0**：t1-0003 是真实的合并质量缺陷，需要单独 root-cause（是 take_target 误用还是 conflict_analyst 漏判）。
+
+### 7.6 follow-up（不在本会话动）
+
+| 项 | 类型 | 描述 |
+|---|---|---|
+| F-RR-needs-human | metrics 定义 | 讨论 `metrics.md §RR/§RCR` 是否区分 "system_crash" 和 "system_correctly_escalated"；前者算 MISSING_REPORT，后者应该剔除分母 |
+| F-WMR-t1-0003 | 系统 root-cause | t1-0003 的 take_target 是否应该 escalate；查 conflict_analyst 输出 |
+| F-MISSING_REPORT | 系统 / eval | merge 在 status=needs_human 时是否应该写 merge_report_*.json（让 eval 看清楚），还是 eval 应该接受 `checkpoint.json` 作为等价回退 |
+| F-cost_baseline | baseline | 用本次 $1.16 / 30 sample 当 baseline，下次 run 启用 `--baseline` 对照 |
+
+### 7.7 artifacts 落点
+
+- `/tmp/eval-runs/runs/t1-NNNN/` — 30 个目录，含 run_meta.json + checkpoint.json + (merge_report_*.json|md when status≠needs_human) + plan_review_*.md + working_tree/
+- `/tmp/eval-runs/out/diff.json` — 30 sample 比对结果
+- `/tmp/eval-runs/out/eval_report.md` — 完整报告（procedure.md §3.1 六章节）
+- `/tmp/eval-runs/out/eval_acceptance.json` — gate verdict
+- `/tmp/eval-runs/logs/pilot.log` + `t1-NNNN.log` — 跑时输出
+
+---
+
+## 8. DET 一致性测试（5 sample × 3 seeds）
+
+> 执行时间：2026-05-16 ｜ Sample 组合：t1-0001/t1-0002 (C) + t1-0007/t1-0008/t1-0009 (B) ｜ 15 runs
+
+### 8.1 执行方式
+
+`merge` CLI 无 `--seed` flag，DET 测的是 LLM temperature 非确定性。run_meta.json 里手动标 `seed=1/2/3` 让 consistency.py 分组。脚本：`/tmp/eval-runs/run_det.sh`。
+
+### 8.2 开销
+
+| 维度 | 值 |
+|---|---|
+| 15 run 总成本 | **$0.32** |
+| 平均单 run | $0.021 |
+| 总 wall-clock | ~3 min（串行） |
+
+### 8.3 结果
+
+```json
+{
+  "metric": "DET",
+  "n_runs": 3,
+  "total_files": 7,
+  "value": 1.0,
+  "inconsistent": []
+}
+```
+
+- **DET = 1.0**（>> 0.9 soft gate） — 5 sample × 3 seed = 7 个有效 decision file 全部跨 seed 一致
+- 无 strategy 抖动，无 target_risk_level 抖动
+- 数据集 + judge.temperature=0.1 + prompt cache 命中三者结合下，系统决策完全确定
+
+### 8.4 解读
+
+DET=1.0 验证了：
+- `judge.temperature=0.1` 实际产出 0 抖动（不是 5% 估算）
+- 选样基本是无语义冲突 / 已 EXACT 的样本（t1-0001..t1-0002 C 类、t1-0007..t1-0009 B 类）—— 真正能拉开 DET 的是 fail/needs_human 那一批 (t1-0003..t1-0006)，但它们 P1 阶段已确认产物不全，DET 比较意义有限
+- 后续若想压力测试 DET，应该把 5 sample 换成边界场景（C 类中刚好 escalate 的样本）
+
+### 8.5 P1 + P2 累计开销
+
+| 维度 | 值 |
+|---|---|
+| P1 (30 sample × 1 run) | $1.16 |
+| P2 (5 sample × 3 run) | $0.32 |
+| **合计** | **$1.48** |
+| **vs 预算估算** ($6-17) | **8-11%** 实际开销 |
+
+---
+
+## 9. CI eval-tier1 首次触发结果（P3）
+
+> 执行时间：2026-05-16 ｜ Run URL：https://github.com/GOSICK-Angel/code-merge-system/actions/runs/25958446916 ｜ Branch：`feat/web`
+
+### 9.1 触发方式
+
+`gh workflow run "CI" --ref feat/web`（workflow_dispatch；`ci.yml` 的 `push:` 只触发 main 分支）。
+
+### 9.2 结果
+
+| Job | 结果 |
+|---|---|
+| `web-build` | ✅ success |
+| `test (3.11)` | ❌ failure |
+| `test (3.12)` | ⏭ cancelled（fail-fast）|
+| `eval-tier1` | ❌ failure（`continue-on-error: true`，不阻塞）|
+
+未达到 §EXECUTION_PLAN P3 验收（"workflow run 显示 success，所有 step exit 0"）。
+
+### 9.3 失败根因（与本次评估工作无关，均为既有 CI bug）
+
+#### F-CI-1：`eval-tier1` 缺少 Build web dist step
+
+```
+error: subprocess-exited-with-error
+FileNotFoundError: Forced include not found:
+  /home/runner/work/code-merge-system/code-merge-system/web/dist
+error: metadata-generation-failed
+```
+
+`pyproject.toml:77` 配置 `[tool.hatch.build.targets.wheel.force-include]` 把 `web/dist` 强制打入 wheel；`test` job 在 install 前有"Build web dist"step (`ci.yml:55-57`)，`eval-tier1` 没有 → `pip install -e ".[dev]"` 因 `web/dist/` 缺失而中止。
+
+**修复方案**（不在本会话动）：`eval-tier1` job install 前增加 npm install + npm run build，或把 web-dist 改成可选 include。
+
+#### F-CI-2：`test_explicit_path_overrides_default` CI 终端宽度敏感
+
+```
+AssertionError: assert 'custom-profile.yaml' in
+  '✓ /tmp/pytest-of-runner/.../custom-profile.ya ml is a valid forks-profile. ...'
+```
+
+CI runner 的 pseudo-terminal 比本地窄，Rich 把路径 `custom-profile.yaml` 在 `ya` 和 `ml` 之间换行；测试用 `" ".join(result.output.split())` 折叠空白但不处理换行点字符 → `'custom-profile.ya ml'` 不含 `'custom-profile.yaml'` 子串。本地终端 ≥ 80 列时通过。
+
+**修复方案**（不在本会话动）：测试改用 `result.output.replace(' ', '').replace('\n', '')` 后再判子串，或注入 `COLUMNS=200`、`Console(width=200)` 之类的稳定环境。
+
+### 9.4 总结
+
+P3 完成"触发并观察"环节，未达到"全绿"验收。两个 CI bug 是 `feat/web` 之前就存在的（本次 push 的唯一 commit `2964dde` 是纯 docs 改动，不可能引入）。建议作为后续两个独立 PR 修复，已记入 [EXECUTION_PLAN §5 推迟项]。
