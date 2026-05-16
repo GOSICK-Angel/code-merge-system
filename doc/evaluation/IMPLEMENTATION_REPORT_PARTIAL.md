@@ -636,3 +636,55 @@ R2 单 sample 成本远超 dify-plugins —— Go 文件大、Judge 反复 repai
 2. **P-γ-2**：fix 后跑 dify-plugins v3 baseline 对照 v2 → 看 WMR 是否归零
 3. **P-γ-3**：跑 R2 5-sample pilot（同样修复生效）→ 决定是否 scale 30
 4. **F-F9-partial-escalate**：评估层修 partial-escalate corner case
+
+## 13. P-γ-1：layered_execution dep gate 假级联修复
+
+### 13.1 问题精准定位
+
+通过 R2-0001 checkpoint + dify-plugins t1-0003 checkpoint 双侧反推：
+
+- planner 声明 layer 0 / 1 / 2 + chain depends_on
+- 但只 layer 2 收到 `AUTO_SAFE / AUTO_RISKY` batches（layer 0 / 1 vacuously 空）
+- AutoMergePhase 的 `sorted_layer_ids` 只迭代 `layer_batches.keys()`，layer 0 / 1 永不执行
+- `completed_layers` 自然永远不包含 0 / 1
+- layer 2 跑到 `verify_layer_deps` 时拿空 set 验 `depends_on=[1]` → False
+- 整层 layer 2 落入 `layer_dep_gate` escalate fallback (`auto_merge.py:769-783`)
+
+### 13.2 §12 omit-marker 假设的更正
+
+直接 grep R2 `working_tree` 全部 36 文件 — **无任何 `sections omitted` 字符串**。`src/tools/patch_applier.py:59` 已有 `has_elision` gate 命中即 rollback，**`# ... omitted` 从未真正写入磁盘**。Judge 的 verdict 文本里出现该 marker 是它评了 **LLM proposal / staged context** 而非真磁盘文件（一个独立的 Judge ground-truth bug，留作后续 ticket）。**§12.4 表格中 "新 bug：omitted artifact 写入 working_tree" 行作废。**
+
+### 13.3 Minimal fix
+
+`src/core/phases/_gate_helpers.py` 新增 `vacuously_complete_layers(layer_index, layers_with_batches) -> set[int]` — plan declared 但 `layer_batches` 里没出现的 layer 是 vacuously complete（无 merge 可做，不能 block 下游 deps）。
+
+`src/core/phases/auto_merge.py` 主循环前预填 `completed_layers |= vacuously_complete_layers(...)`。
+
+5 个新 unit test (`TestVacuouslyCompleteLayers` in `tests/unit/test_p0_classification.py`)，覆盖：单 layer 全空、所有 layer 都有 batch、None key 不冲突、空 plan、t1-0003 cascade shape end-to-end。
+
+commit `471ac17`。
+
+### 13.4 验证：t1-0003 v3 (真 LLM)
+
+| 维度 | v2 (修前) | v3 (修后) |
+|---|---|---|
+| manifest.yaml 决策 | `escalate_human` by `layer_dep_gate` | `take_target` by `executor` ✅ |
+| escalate rationale | "layer 2 skipped: deps [1] not in completed_layers" | (正常 merge) |
+| run status | completed (WMR — patch 没 apply) | completed |
+| 全文件 decisions | `{take_target: 2, escalate_human: 1}` | `{take_target: 3}` ✅ |
+| wall | ~30s | **14s** |
+| 残留 1-line diff vs golden | manifest.yaml version 旧（patch 没生效）| `author: cvte → langgenius`（fork 字段未保留 — **新独立 bug**，不在 P-γ-1 范围）|
+
+P-γ-1 修复**精准命中**：cascade 消除，layer 1 / layer 2 之间的假依赖不再误杀正常 merge。剩余 1-line WRONG_MERGE 是**另一个 src/ bug**（fork-author preservation），列入新 follow-up `F-fork-author-preserve`。
+
+### 13.5 R2-0001 复测决策
+
+R2 单 sample $4.60。当前 fix 已通过 9/9 unit test + t1-0003 真 LLM 端到端验证，cascade 机制完全消除。R2 复测可推迟到 P-γ-3 的 5-sample pilot（同样修复 + 多样本统计意义）。**P-γ-1 关单**。
+
+### 13.6 残留 follow-up
+
+| ID | 描述 | 优先级 |
+|---|---|---|
+| F-fork-author-preserve | dify-plugins t1-0003 v3 显示 manifest.yaml `author` 字段被 upstream 覆盖（fork 应保留 `author: cvte`）— planner / executor 没识别该字段为 fork-only | 高（每个 cvte 二开插件都受影响）|
+| F-judge-source-of-truth | Judge verdict 文本提到 `# ... omitted` artifact，但磁盘无此字符串 — Judge 读的是 LLM proposal / staged context 而非真 working_tree | 中（产噪音 verdict，但不影响最终 decision） |
+| F-F9-partial-escalate | §12.5 — escalate 但 `applied_patches` 非空时 F9 应跑 diff | 低（评估层）|
