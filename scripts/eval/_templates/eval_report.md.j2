@@ -1,0 +1,98 @@
+{# Procedure.md §3.1 — six-section eval report template. #}
+# Evaluation Report — Tier {{ tier }}
+
+{% if not_authoritative -%}
+> **NOTE — wall_time/cost not authoritative**: at least one sample ran
+> under `--concurrency > 1` (max={{ max_concurrency }}). The aggregated
+> wall_time_seconds / cost_usd values below are reported for plumbing
+> verification only; treat them as schema-valid but not measurement-grade.
+
+{% endif -%}
+
+## 1. 元信息
+
+| Field | Value |
+|---|---|
+| git_sha | {{ git_sha }} |
+| evaluated_at | {{ evaluated_at }} |
+| samples_total | {{ samples_total }} |
+| samples_failed | {{ samples_failed }} |
+| dataset_lock_sha | {{ dataset_lock_sha }} |
+| semantic_engine | {{ semantic_engine }} |
+| model_matrix | {{ model_matrix_repr }} |
+| concurrency_max | {{ max_concurrency }} |
+
+## 2. 总体指标摘要
+
+### Hard gates (acceptance.md §1)
+
+| Metric | Value |
+|---|---|
+| OA | {{ metrics.OA }} |
+| WMR | {{ metrics.WMR }} |
+| MMR | {{ metrics.MMR }} |
+| WDR | {{ metrics.WDR }} |
+| SSER | {{ metrics.SSER }} |
+| DCRR | {{ metrics.DCRR }} |
+| SRSR | {{ metrics.SRSR }} |
+| RR | {{ metrics.RR }} |
+| RCR | {{ metrics.RCR }} |
+{%- for label, value in metrics.Recall.items() %}
+| Recall_{{ label }} | {{ value }} |
+{%- endfor %}
+
+### Soft gates (acceptance.md §2)
+
+| Metric | Value |
+|---|---|
+| OA | {{ metrics.OA }} |
+| CRA | {{ metrics.CRA }} |
+| OverEscalationRate | {{ metrics.OverEscalationRate }} |
+| JA | {{ metrics.JA }} |
+| DET | {{ metrics.DET }} |
+| CPC | {{ metrics.CPC }} |
+| cost_usd_per_run_p95 | {{ metrics.cost_usd_per_run_p95 }} |
+| wall_time_seconds_p95 | {{ metrics.wall_time_seconds_p95 }} |
+| plan_revision_rounds_p95 | {{ metrics.plan_revision_rounds_p95 }} |
+
+## 3. 分 tier 结果
+
+| sample_id | category | loss_class | match | label | missed_lines | extra_lines |
+|---|---|---|---|---|---|---|
+{%- for s in samples %}
+| {{ s.sample_id }} | {{ s.category }} | {{ s.loss_class or "-" }} | {{ s.match }} | {{ s.label or "-" }} | {{ s.missed_lines }} | {{ s.extra_lines }} |
+{%- endfor %}
+
+## 4. 失败案例清单
+
+{% if failures -%}
+| sample_id | label | strategy | rationale_excerpt |
+|---|---|---|---|
+{%- for f in failures %}
+| {{ f.sample_id }} | {{ f.label }} | {{ f.strategy }} | {{ f.rationale_excerpt }} |
+{%- endfor %}
+{%- else %}
+*No failed samples in this run.*
+{%- endif %}
+
+## 5. 与上一基线对比表
+
+{% if baseline -%}
+| Metric | Current | Baseline | Δ |
+|---|---|---|---|
+{%- for row in baseline_diff %}
+| {{ row.id }} | {{ row.current }} | {{ row.baseline }} | {{ row.delta }} |
+{%- endfor %}
+{%- else %}
+*No baseline supplied — comparison table skipped.*
+{%- endif %}
+
+## 6. 异常 / 已知问题 / 缓解措施
+
+{% if known_issues -%}
+{%- for note in known_issues %}
+- {{ note }}
+{%- endfor %}
+{%- else %}
+*No anomalies recorded for this run.*
+{%- endif %}
