@@ -2,7 +2,10 @@ sample_id: t1-0005
 tier: 1
 category: C
 loss_class: null         # null or M1-M6 for Tier-3 / M-injected samples
-expected_human: false    # bool — should the system escalate?
+expected_human: true     # bool — should the system escalate?
 description: |
-  TBD — one-line summary of base/upstream/fork divergence and the
-  golden resolution rationale.
+  C-class: tools/bing — upstream + fork modify the same 3 files
+  (manifest.yaml / bing_web_search.py / bing_web_search.yaml). `git
+  merge` produces conflict markers, so the system is correct to
+  escalate (expected_human=true). Backfilled 2026-05-16 from real
+  3-way merge dry-run.

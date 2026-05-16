@@ -461,3 +461,35 @@ F5 路径 (`_build_missing_report_entry`) 把这 3 个 sample 标 MISSING_REPORT
 | F-DCRR-no-discarded | t1-0003 是 WRONG_MERGE 但 `discarded_content_present=False`，DCRR 公式将其算 fail。检查 conflict_analyst 是否漏报 discarded | DCRR 偏低 |
 
 P-α 的目标（让评估正确归因，不把 by-design escalate 算系统失败）已达成。剩余 FAIL 都是真实可定位缺陷，非评估口径噪声。
+
+### 10.5 t1-0003 / t1-0004 / t1-0005 / t1-0006 root-cause
+
+用 git 3-way merge dry-run（`git merge --no-commit upstream` on bootstrapped repo）作为客观 ground truth：
+
+| sample | git_merge rc | conflict files | 真实 expected_human | 系统行为 | 评估结论 |
+|---|---|---|---|---|---|
+| t1-0001 | 0 | 0 | false | EXACT | ✅ 正确 |
+| t1-0002 | 0 | 0 | false | EXACT | ✅ 正确 |
+| t1-0003 | 0 | 0 | false | WRONG_MERGE（manifest 版本未升）| ❌ 系统真错（src/ layered_execution dep + judge no-diff bug）|
+| t1-0004 | 0 | 0 | false | system_escalated（judge 7 轮 repair 后 fail）| ⚠ 系统过度升级（git 能干净合并）|
+| t1-0005 | 1 | 3 | **true** | system_escalated | ✅ 系统正确升级 |
+| t1-0006 | 1 | 1 | **true** | system_escalated | ✅ 系统正确升级 |
+
+backfill `t1-0005/t1-0006/meta.yaml` 的 `expected_human=true`，并刷 `tier1.lock.json`。重跑（artifacts 复用，$0 API）：
+
+| 指标 | F9 后 | backfill 后 |
+|---|---|---|
+| OverEscalationRate | 0.10 (>0.05) ❌ | **0.0333** ✅ |
+| 其它指标 | 不变 | 不变 |
+
+最终状态：**13 hard gates 中 11 PASS / 2 FAIL** (WMR + DCRR，全部 t1-0003 单点)；**9 soft gates 中 3 PASS / 6 SKIP**（无 baseline / 无多 run 多 provider 数据）。verdict 仍 FAIL 但 root cause 100% 收敛到一个可定位的真实合并缺陷。
+
+### 10.6 残留 follow-up
+
+| ID | 类型 | 描述 |
+|---|---|---|
+| F-WMR-t1-0003 | src/ bug | layered_execution `layer 2 skipped: dependencies [1] not in completed_layers` 让 manifest.yaml patch 没 apply；Judge 又没真 diff working_tree 误判 pass。需要独立 PR 给 `src/core/orchestrator.py` + `src/agents/judge.py` 修，超出 eval 范围 |
+| F-t1-0004-over-escalation | src/ tune | 系统 7 轮 judge repair 后 bail 一个 git 能干净合并的 sample。建议查 judge 是否对 manifest.yaml author 字段过敏（cvte fork 标记）|
+| F-meta-backfill-t1-0001..0004 | 数据集 | meta.yaml 还是 stub description；t1-0001/02/03/04 应补 description 字段 + 写明 expected_human 推断依据。低优先级 |
+
+P-α 在评估层能做的部分到此为止。剩余 follow-up 全部出 eval 边界。
