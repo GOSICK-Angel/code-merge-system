@@ -94,8 +94,10 @@ class TestValidate:
             cli, ["forks-profile", "validate", "--path", str(custom)]
         )
         assert result.exit_code == 0
-        # Rich may wrap the path across lines — match basename only.
-        assert "custom-profile.yaml" in " ".join(result.output.split())
+        # Rich may wrap the path mid-token when the terminal is narrow (CI
+        # default ~80 cols), inserting a newline between e.g. ``ya`` and
+        # ``ml``. Strip newlines outright so any wrap point is tolerated.
+        assert "custom-profile.yaml" in result.output.replace("\n", "")
 
 
 class TestSchema:
