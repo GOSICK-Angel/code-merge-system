@@ -456,6 +456,81 @@ class AutoMergePhase(Phase):
                         fp for fp in batch.file_paths if fp not in take_target_set
                     ]
 
+        # --- P-γ-1.5-A: try git's native line-level 3-way merge before LLM ---
+        # Calibration: dify-plugins v3 baseline showed 2/3 WRONG_MERGE
+        # failures were C-class files where fork and upstream edited
+        # disjoint line ranges (manifest.yaml: fork ``author`` line 1 +
+        # upstream ``version`` line 37). The LLM executor reliably picks
+        # ``take_target`` and drops the fork change. ``git merge-file``
+        # resolves these deterministically without LLM cost.
+        #
+        # On clean merge: write via apply_with_snapshot and remove from
+        # batch so the LLM loop skips. On conflict / missing ref / any
+        # error: leave the file in the batch — LLM executor / conflict
+        # analyst will see it unchanged.
+        merge_base = state.merge_base_commit
+        if merge_base:
+            from src.tools.patch_applier import apply_with_snapshot as _apply
+
+            native_merged: set[str] = set()
+            for batch in state.merge_plan.phases:
+                if batch.risk_level not in (RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY):
+                    continue
+                for fp in list(batch.file_paths):
+                    if fp in replayed_set:
+                        continue
+                    if fp in state.file_decision_records:
+                        continue
+                    if is_binary_asset(fp):
+                        continue
+                    merged_content = ctx.git_tool.three_way_merge_file(
+                        base_ref=merge_base,
+                        ours_ref=state.config.fork_ref,
+                        theirs_ref=state.config.upstream_ref,
+                        file_path=fp,
+                    )
+                    if merged_content is None:
+                        continue
+                    try:
+                        record = await _apply(
+                            fp,
+                            merged_content,
+                            ctx.git_tool,
+                            state,
+                            phase="auto_merge",
+                            agent="native_3way_merge",
+                            decision=MergeDecision.SEMANTIC_MERGE,
+                            rationale=(
+                                "Resolved via git's native line-level 3-way "
+                                "merge (no conflicts after fork/base/upstream "
+                                "reconciliation). Bypassed LLM executor."
+                            ),
+                            confidence=0.95,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "native_3way_merge: apply failed for %s: %s — "
+                            "leaving for LLM fallback",
+                            fp,
+                            exc,
+                        )
+                        continue
+                    state.file_decision_records[fp] = record
+                    native_merged.add(fp)
+
+            if native_merged:
+                logger.info(
+                    "native_3way_merge: %d file(s) resolved without LLM: %s",
+                    len(native_merged),
+                    ", ".join(sorted(native_merged)[:10])
+                    + (" ..." if len(native_merged) > 10 else ""),
+                )
+                for batch in state.merge_plan.phases:
+                    if batch.risk_level in (RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY):
+                        batch.file_paths = [
+                            fp for fp in batch.file_paths if fp not in native_merged
+                        ]
+
         # --- Pre-pass: handle HUMAN_REQUIRED and DELETED_ONLY before any merge ---
         # Dedupe: auto_merge may run multiple times (e.g. after conflict
         # analysis rebounds); keep each file's first entry (preferring any

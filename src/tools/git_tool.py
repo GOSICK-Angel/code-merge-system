@@ -74,6 +74,69 @@ class GitTool:
         target_content = self.get_file_content(target, file_path)
         return base_content, current_content, target_content
 
+    def three_way_merge_file(
+        self,
+        base_ref: str,
+        ours_ref: str,
+        theirs_ref: str,
+        file_path: str,
+    ) -> str | None:
+        """Attempt git's native line-level 3-way merge for one file.
+
+        Returns the merged content on a clean merge (no conflict markers,
+        git exit 0). Returns ``None`` on any conflict, missing ref, or
+        error — caller must then fall back to LLM-driven semantic merge.
+
+        Side-effect free: operates on temp files; does not touch the
+        worktree or the index.
+
+        Calibrated via P-γ-1.5: covers C-class files where fork and
+        upstream edited disjoint line ranges (e.g. fork edits manifest
+        ``author`` line 1, upstream edits ``version`` line 37) — git's
+        3-way merge resolves these deterministically without LLM.
+        """
+        import tempfile
+
+        base_content = self.get_file_content(base_ref, file_path)
+        ours_content = self.get_file_content(ours_ref, file_path)
+        theirs_content = self.get_file_content(theirs_ref, file_path)
+        if base_content is None or ours_content is None or theirs_content is None:
+            return None
+
+        with tempfile.TemporaryDirectory() as td:
+            base_p = Path(td) / "base"
+            ours_p = Path(td) / "ours"
+            theirs_p = Path(td) / "theirs"
+            base_p.write_text(base_content, encoding="utf-8")
+            ours_p.write_text(ours_content, encoding="utf-8")
+            theirs_p.write_text(theirs_content, encoding="utf-8")
+            try:
+                output = self.repo.git.merge_file(
+                    "--stdout",
+                    "-L",
+                    "fork",
+                    "-L",
+                    "base",
+                    "-L",
+                    "upstream",
+                    str(ours_p),
+                    str(base_p),
+                    str(theirs_p),
+                    strip_newline_in_stdout=False,
+                )
+            except git.GitCommandError:
+                # exit code > 0 = conflicts; defer to LLM.
+                return None
+
+        text = (
+            output
+            if isinstance(output, str)
+            else output.decode("utf-8", errors="surrogateescape")
+        )
+        if "<<<<<<< " in text or "\n=======\n" in text or ">>>>>>> " in text:
+            return None
+        return text
+
     def create_working_branch(self, branch_name: str, base_ref: str) -> str:
         from datetime import datetime
 
