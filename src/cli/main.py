@@ -48,9 +48,54 @@ def _load_repo_env(repo_path: str) -> None:
 console = Console()
 
 
-@click.group()
-def cli() -> None:
+class _DefaultMergeGroup(click.Group):
+    """Treat ``merge <flags>`` as ``merge merge <flags>``.
+
+    The installed entry point is named ``merge`` (see pyproject.toml),
+    so users naturally type ``merge`` / ``merge --ci`` without the
+    extra ``merge`` subcommand token. Click's default group resolution
+    requires a named subcommand though — without this override,
+    ``merge --ci`` fails with "no such option". The existing
+    subcommands (resume / validate / init / ...) keep working because
+    Click resolves real subcommand names before falling back here.
+    """
+
+    def resolve_command(
+        self, ctx: click.Context, args: list[str]
+    ) -> tuple[str | None, click.Command | None, list[str]]:
+        # No args at all → invoke the ``merge`` subcommand with no flags.
+        if not args:
+            merge_cmd = self.commands.get("merge")
+            if merge_cmd is not None:
+                return "merge", merge_cmd, []
+        # First arg starts with `-` (a flag) → caller meant the default
+        # merge command, not a subcommand. Forward as-is.
+        if args and args[0].startswith("-") and args[0] != "--help":
+            merge_cmd = self.commands.get("merge")
+            if merge_cmd is not None:
+                return "merge", merge_cmd, args
+        return super().resolve_command(ctx, args)
+
+
+@click.group(
+    cls=_DefaultMergeGroup,
+    invoke_without_command=True,
+    # ``merge --ci`` must reach the merge subcommand without Click
+    # rejecting ``--ci`` as an unknown group-level option. Same for
+    # ``--web-port`` / ``--ws-port`` / ``--auto-decisions`` — they're
+    # all subcommand flags that the resolver routes to ``merge``.
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+@click.pass_context
+def cli(ctx: click.Context) -> None:
     load_env()
+    # When invoked with zero args (``merge`` alone), Click would
+    # normally render the help screen. Override that: route to the
+    # ``merge`` subcommand so ``merge`` (no args) opens the browser.
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(
+            merge_command, ci=False, web_port=5173, ws_port=8765, auto_decisions=None
+        )
 
 
 @cli.command("merge")
