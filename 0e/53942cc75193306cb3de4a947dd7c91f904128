@@ -1,0 +1,23 @@
+src/cli/main.py
+  bfa0b1c4db6dab39 51-90,92-98
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.14",
+  "base_commit_sha": "0e53942cc75193306cb3de4a947dd7c91f904128",
+  "prompts": {
+    "bfa0b1c4db6dab39": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4f43589f-86cf-488b-aaef-1dfc27e41326",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Angel <heanqi@cvte.com>",
+      "messages": [],
+      "total_additions": 47,
+      "total_deletions": 2,
+      "accepted_lines": 47,
+      "overriden_lines": 0
+    }
+  }
+}
