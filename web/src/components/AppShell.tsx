@@ -146,6 +146,8 @@ export function AppShell({
     return "amber";
   })();
 
+  const isSetup = activeView === "setup";
+
   return (
     <>
       <BgFx scanline={1} />
@@ -158,6 +160,7 @@ export function AppShell({
             </span>
             <span className="v">v0.9.3</span>
           </div>
+          {!isSetup && (
           <div className="meta">
             <div className="kv">
               <span className="k">repo</span>
@@ -185,23 +188,46 @@ export function AppShell({
               </span>
             </div>
           </div>
+          )}
+          {isSetup && (
+            <div className="meta">
+              <div className="kv">
+                <span className="k">mode</span>
+                <span className="v" style={{ color: "var(--accent)" }}>
+                  SETUP
+                </span>
+              </div>
+              <div className="kv">
+                <span className="k">UTC</span>
+                <span
+                  className="v"
+                  style={{ fontVariantNumeric: "tabular-nums" }}
+                >
+                  {clock}
+                </span>
+              </div>
+            </div>
+          )}
           <div className="actions">
-            <button
-              type="button"
-              className="btn danger"
-              onClick={onCancel}
-              disabled={cancelDisabled}
-              title={
-                cancelDisabled
-                  ? "Cancel only enabled while awaiting human"
-                  : "Cancel the current run"
-              }
-            >
-              ⌥ CANCEL
-            </button>
+            {!isSetup && (
+              <button
+                type="button"
+                className="btn danger"
+                onClick={onCancel}
+                disabled={cancelDisabled}
+                title={
+                  cancelDisabled
+                    ? "Cancel only enabled while awaiting human"
+                    : "Cancel the current run"
+                }
+              >
+                ⌥ CANCEL
+              </button>
+            )}
           </div>
         </header>
 
+        {!isSetup && (
         <div className="brut-runstrip">
           <Pill
             tone={statusPillTone as "amber" | "green" | "orange" | "red"}
@@ -248,9 +274,10 @@ export function AppShell({
             </span>
           </span>
         </div>
+        )}
 
-        <div className="brut-work">
-          {activeView === "setup" ? null : (
+        <div className={`brut-work${isSetup ? " setup" : ""}`}>
+          {isSetup ? null : (
           <aside className="brut-sidebar">
             <div className="sect">› VIEWS</div>
             {NAV.map((n) => {
@@ -369,14 +396,23 @@ export function AppShell({
 
         <footer className="brut-footbar">
           <div className="lhs">
-            <span className="blink">orchestrator.heartbeat</span>
-            <span>● run {shortHash(snapshot?.runId, 8)}</span>
-            <span>
-              ● phase{" "}
-              <span style={{ color: "var(--fg-1)" }}>
-                {snapshot?.currentPhase ?? "—"}
-              </span>
-            </span>
+            {isSetup ? (
+              <>
+                <span className="blink">setup.wizard</span>
+                <span>● waiting for submit</span>
+              </>
+            ) : (
+              <>
+                <span className="blink">orchestrator.heartbeat</span>
+                <span>● run {shortHash(snapshot?.runId, 8)}</span>
+                <span>
+                  ● phase{" "}
+                  <span style={{ color: "var(--fg-1)" }}>
+                    {snapshot?.currentPhase ?? "—"}
+                  </span>
+                </span>
+              </>
+            )}
           </div>
           <div className="rhs">
             <span>ws {conn}</span>

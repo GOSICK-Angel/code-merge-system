@@ -243,6 +243,9 @@
   min-height: 0;
   overflow: hidden;
 }
+.brut-work.setup {
+  grid-template-columns: 1fr;
+}
 .brut-sidebar {
   background: var(--bg-0);
   border-right: 1px solid var(--line);
