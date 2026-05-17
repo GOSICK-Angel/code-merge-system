@@ -114,7 +114,7 @@ class TestSetupSubmit:
             "target_branch": "upstream/main",
             "fork_ref": "feat/x",
             "project_context": "demo",
-            "api_keys": {"ANTHROPIC_API_KEY": "sk-test"},
+            "anthropic": {"enabled": True, "api_key": "sk-test"},
             "thresholds": None,
             "dry_run": False,
             "workflow": None,
@@ -157,7 +157,7 @@ class TestSetupSubmit:
         valid = {
             "target_branch": "upstream/main",
             "fork_ref": "feat/x",
-            "api_keys": {},
+            "anthropic": {"enabled": True, "api_key": "sk-test"},
         }
         await setup_bridge._handle_command(
             ws,  # type: ignore[arg-type]

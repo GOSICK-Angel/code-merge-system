@@ -26,7 +26,7 @@ from src.cli.commands.setup import (
     _load_global_defaults,
     apply_setup_payload,
 )
-from src.models.setup import SetupPayload, ThresholdsPayload
+from src.models.setup import ProviderConfig, SetupPayload, ThresholdsPayload
 
 
 @pytest.fixture(autouse=True)
@@ -42,7 +42,7 @@ def _payload(**overrides: object) -> SetupPayload:
         "target_branch": "upstream/main",
         "fork_ref": "feature/x",
         "project_context": "",
-        "api_keys": {},
+        "anthropic": ProviderConfig(enabled=True, api_key="sk-ant"),
     }
     defaults.update(overrides)
     return SetupPayload.model_validate(defaults)
@@ -173,7 +173,13 @@ class TestApplySetupPayloadGlobals:
         written = yaml.safe_load(
             (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
         )
-        assert written["agents"]["planner_judge"]["model"] == "gpt-5.4"
+        # Single-provider payload (anthropic only) — all agents land on
+        # anthropic with the per-agent built-in default model.
+        assert written["agents"]["planner_judge"]["provider"] == "anthropic"
+        assert written["agents"]["planner_judge"]["model"] == "claude-opus-4-6"
+        assert (
+            written["agents"]["human_interface"]["model"] == "claude-haiku-4-5-20251001"
+        )
 
     def test_global_yaml_overrides_hardcoded_model(self, tmp_path: Path) -> None:
         global_path = tmp_path / "global_config.yaml"

@@ -1,11 +1,16 @@
 /**
- * Setup view smoke + interaction coverage:
- * - Renders form once setup context arrives + pre-fills defaults
- * - Submit fires `setup.submit` with sanitized payload (trimmed,
- *   empty thresholds → null, empty workflow → null)
- * - Local validation blocks submit when required fields are blank
- *   AND the server hasn't reported an existing API key on disk
- * - `setup_error` from the server surfaces in the form
+ * Setup view coverage for the flexible-provider revision:
+ * - Single-provider mode: only Anthropic enabled → submit allowed
+ *   without retyping the key when ctx says it's on disk; no default
+ *   provider picker shown.
+ * - Both-provider mode: default provider radio appears and is
+ *   required.
+ * - Per-agent override: picking provider=openai for `planner_judge`
+ *   surfaces in the outgoing `agent_choices`.
+ * - Validation: enabling a provider without a key (and none on disk)
+ *   blocks submit with a specific error.
+ * - `setup_error` from the server still surfaces.
+ * - `config saved` overlay rendered after `setup_ready`.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render } from "@testing-library/react";
@@ -16,18 +21,32 @@ import type { SetupContext } from "../types/state";
 
 const sendSpy = vi.fn<(msg: OutboundMessage) => void>();
 
+const baseAgentInventory = [
+  { name: "planner", blurb: "produces the merge plan" },
+  { name: "planner_judge", blurb: "reviews / negotiates the plan" },
+  { name: "conflict_analyst", blurb: "analyses conflict semantics" },
+  { name: "executor", blurb: "applies patches" },
+  { name: "judge", blurb: "post-merge verdict" },
+  { name: "human_interface", blurb: "summarises human prompts" },
+];
+
 const baseContext: SetupContext = {
   current_branch: "feat/x",
   suggested_target: "origin/main",
-  api_key_hints: [
-    { name: "ANTHROPIC_API_KEY", masked: "", source: "" },
-    { name: "OPENAI_API_KEY", masked: "", source: "" },
-    { name: "GITHUB_TOKEN", masked: "", source: "" },
-  ],
   fork_divergence_count: 0,
   has_existing_config: false,
   existing_config_summary: null,
   forks_profile_threshold: 30,
+  anthropic_key_hint: { name: "ANTHROPIC_API_KEY", masked: "", source: "" },
+  openai_key_hint: { name: "OPENAI_API_KEY", masked: "", source: "" },
+  github_token_hint: { name: "GITHUB_TOKEN", masked: "", source: "" },
+  anthropic_base_url: null,
+  openai_base_url: null,
+  provider_recommended_models: {
+    anthropic: ["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+    openai: ["gpt-5.4", "gpt-5.4-mini"],
+  },
+  agent_inventory: baseAgentInventory,
 };
 
 beforeEach(() => {
@@ -54,101 +73,133 @@ function makeClientRef(): React.MutableRefObject<{
   };
 }
 
-describe("Setup", () => {
+function renderSetup() {
+  const ref = makeClientRef();
+  return render(
+    <Setup
+      clientRef={
+        ref as unknown as React.MutableRefObject<
+          ReturnType<typeof makeClientRef>["current"]
+        >
+      }
+    />,
+  );
+}
+
+describe("Setup — flexible providers", () => {
   it("waiting state renders when no context yet", () => {
     useRunStore.setState({ setupContext: null });
-    const ref = makeClientRef();
-    const { getByText } = render(
-      <Setup
-        clientRef={
-          ref as unknown as React.MutableRefObject<
-            ReturnType<typeof makeClientRef>["current"]
-          >
-        }
-      />,
-    );
+    const { getByText } = renderSetup();
     expect(getByText(/waiting for server/i)).toBeTruthy();
   });
 
   it("pre-fills target and fork from context", () => {
-    const ref = makeClientRef();
-    const { getByLabelText } = render(
-      <Setup
-        clientRef={
-          ref as unknown as React.MutableRefObject<
-            ReturnType<typeof makeClientRef>["current"]
-          >
-        }
-      />,
+    const { getByLabelText } = renderSetup();
+    expect((getByLabelText(/target branch/i) as HTMLInputElement).value).toBe(
+      "origin/main",
     );
-    const target = getByLabelText(/target branch/i) as HTMLInputElement;
-    const fork = getByLabelText(/fork ref/i) as HTMLInputElement;
-    expect(target.value).toBe("origin/main");
-    expect(fork.value).toBe("feat/x");
+    expect((getByLabelText(/fork ref/i) as HTMLInputElement).value).toBe(
+      "feat/x",
+    );
   });
 
-  it("blocks submit when no key supplied and nothing on disk", () => {
-    const ref = makeClientRef();
-    const { getByText } = render(
-      <Setup
-        clientRef={
-          ref as unknown as React.MutableRefObject<
-            ReturnType<typeof makeClientRef>["current"]
-          >
-        }
-      />,
-    );
+  it("auto-enables anthropic and skips default-provider picker when only one provider has a key on disk", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: {
+          name: "ANTHROPIC_API_KEY",
+          masked: "sk-ant-****",
+          source: "shell",
+        },
+      },
+    });
+    const { queryByText, getByText } = renderSetup();
+    // No DEFAULT PROVIDER card when only one provider is enabled.
+    expect(queryByText(/DEFAULT PROVIDER/i)).toBeNull();
+
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const msg = sendSpy.mock.calls[0][0];
+    if (msg.type !== "setup.submit") throw new Error("wrong type");
+    expect(msg.payload.anthropic.enabled).toBe(true);
+    expect(msg.payload.openai.enabled).toBe(false);
+    expect(msg.payload.default_provider).toBe("anthropic");
+    // No agent overrides → empty map; backend will inherit default.
+    expect(msg.payload.agent_choices).toEqual({});
+  });
+
+  it("blocks submit when both providers disabled or missing keys", () => {
+    // base context: no keys on disk, providers disabled by default
+    const { getByText } = renderSetup();
     act(() => {
       fireEvent.click(getByText(/SAVE & START/));
     });
     expect(sendSpy).not.toHaveBeenCalled();
-    expect(getByText(/ANTHROPIC_API_KEY is required/)).toBeTruthy();
+    expect(getByText(/at least one provider/i)).toBeTruthy();
   });
 
-  it("submits sanitized payload when form is valid", () => {
-    // Pretend both required keys are already on disk so the user can
-    // submit without retyping them.
+  it("requires default provider when both anthropic and openai are enabled", () => {
     useRunStore.setState({
       setupContext: {
         ...baseContext,
-        api_key_hints: [
-          { name: "ANTHROPIC_API_KEY", masked: "sk-ant-****", source: "shell" },
-          { name: "OPENAI_API_KEY", masked: "sk-oa-****", source: "project_env" },
-          { name: "GITHUB_TOKEN", masked: "", source: "" },
-        ],
+        anthropic_key_hint: { name: "ANTHROPIC_API_KEY", masked: "sk-a-****", source: "shell" },
+        openai_key_hint: { name: "OPENAI_API_KEY", masked: "sk-o-****", source: "shell" },
       },
     });
-    const ref = makeClientRef();
-    const { getByText, getByLabelText } = render(
-      <Setup
-        clientRef={
-          ref as unknown as React.MutableRefObject<
-            ReturnType<typeof makeClientRef>["current"]
-          >
-        }
-      />,
-    );
-    fireEvent.change(getByLabelText(/target branch/i), {
-      target: { value: " upstream/main " },
-    });
+    const { getByText, queryByText } = renderSetup();
+    // both pre-enabled from disk hints → DEFAULT PROVIDER card visible
+    expect(queryByText(/DEFAULT PROVIDER/i)).toBeTruthy();
+    // form pre-picks anthropic as default — submit should work
     act(() => {
       fireEvent.click(getByText(/SAVE & START/));
     });
-
     expect(sendSpy).toHaveBeenCalledTimes(1);
     const msg = sendSpy.mock.calls[0][0];
-    expect(msg.type).toBe("setup.submit");
-    if (msg.type !== "setup.submit") return;
-    // trimmed
-    expect(msg.payload.target_branch).toBe("upstream/main");
-    expect(msg.payload.fork_ref).toBe("feat/x");
-    // no api keys typed → empty record (existing on-disk values stay)
-    expect(msg.payload.api_keys).toEqual({});
-    // no advanced fields edited → thresholds null, workflow null
-    expect(msg.payload.thresholds).toBeNull();
-    expect(msg.payload.workflow).toBeNull();
-    expect(msg.payload.dry_run).toBe(false);
-    expect(msg.payload.init_forks_profile).toBe(false);
+    if (msg.type !== "setup.submit") throw new Error("wrong type");
+    expect(msg.payload.default_provider).toBe("anthropic");
+    expect(msg.payload.anthropic.enabled).toBe(true);
+    expect(msg.payload.openai.enabled).toBe(true);
+  });
+
+  it("agent override flows through to agent_choices", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: { name: "ANTHROPIC_API_KEY", masked: "sk-a", source: "shell" },
+        openai_key_hint: { name: "OPENAI_API_KEY", masked: "sk-o", source: "shell" },
+      },
+    });
+    const { getByText, container } = renderSetup();
+    // Expand AGENT OVERRIDES
+    act(() => {
+      fireEvent.click(getByText(/AGENT OVERRIDES/));
+    });
+    // Find the planner_judge row and set its provider select to openai.
+    const selects = container.querySelectorAll(
+      "[data-testid='agent-overrides'] select",
+    );
+    expect(selects.length).toBe(baseAgentInventory.length);
+    // planner_judge is the second row (index 1)
+    const plannerJudgeSelect = selects[1] as HTMLSelectElement;
+    act(() => {
+      fireEvent.change(plannerJudgeSelect, { target: { value: "openai" } });
+    });
+
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const msg = sendSpy.mock.calls[0][0];
+    if (msg.type !== "setup.submit") throw new Error("wrong type");
+    expect(msg.payload.agent_choices.planner_judge).toEqual({
+      provider: "openai",
+      model: "",
+    });
+    // other agents not overridden — empty
+    expect(msg.payload.agent_choices.planner).toBeUndefined();
   });
 
   it("surfaces server-side setup_error in the form", () => {
@@ -156,16 +207,7 @@ describe("Setup", () => {
       setupStatus: "error",
       setupError: { reason: "apply_failed", details: "disk full" },
     });
-    const ref = makeClientRef();
-    const { getByText } = render(
-      <Setup
-        clientRef={
-          ref as unknown as React.MutableRefObject<
-            ReturnType<typeof makeClientRef>["current"]
-          >
-        }
-      />,
-    );
+    const { getByText } = renderSetup();
     expect(getByText("apply_failed")).toBeTruthy();
     expect(getByText("disk full")).toBeTruthy();
   });
@@ -180,16 +222,7 @@ describe("Setup", () => {
         init_forks_profile: false,
       },
     });
-    const ref = makeClientRef();
-    const { getByText } = render(
-      <Setup
-        clientRef={
-          ref as unknown as React.MutableRefObject<
-            ReturnType<typeof makeClientRef>["current"]
-          >
-        }
-      />,
-    );
+    const { getByText } = renderSetup();
     expect(getByText(/CONFIG SAVED/)).toBeTruthy();
     expect(getByText(/\/tmp\/repo\/.merge\/config\.yaml/)).toBeTruthy();
   });

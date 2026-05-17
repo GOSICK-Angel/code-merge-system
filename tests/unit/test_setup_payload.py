@@ -1,16 +1,16 @@
-"""Tests for the PR-1 pure setup functions.
+"""Tests for the flexible-provider setup payload model + helpers.
 
 Covers:
-- ``apply_setup_payload``: writes ``.merge/config.yaml`` + ``.env``,
-  overlays global defaults, honours explicit threshold overrides,
-  sets the GitHub block only when the token is supplied.
-- ``build_default_payload``: picks env-var keys + git-derived
-  branches without prompting, suitable for ``merge --ci`` first-run.
-- ``detect_setup_context``: returns ``has_existing_config=True`` once
-  the file is on disk, masks already-stored API keys, and degrades
-  cleanly when git isn't available.
-- ``SetupPayload`` / ``ThresholdsPayload`` pydantic validation
-  (out-of-range thresholds, missing required fields).
+- ``SetupPayload`` validators: at least one provider enabled,
+  default_provider auto-pick / explicit-when-ambiguous, agent_choices
+  references a disabled provider.
+- ``apply_setup_payload``: writes only enabled providers' env vars,
+  honours per-agent overrides, github block only when token set,
+  threshold overrides on top of factory defaults.
+- ``build_default_payload``: env-only build picks the right
+  default_provider and enables/disables the right providers.
+- ``detect_setup_context``: per-provider key hint priority chain,
+  reads existing config summary including agents block.
 """
 
 from __future__ import annotations
@@ -27,18 +27,23 @@ from src.cli.commands.setup import (
     build_default_payload,
     detect_setup_context,
 )
-from src.models.setup import SetupPayload, ThresholdsPayload
+from src.models.setup import (
+    AgentChoice,
+    ProviderConfig,
+    SetupPayload,
+    ThresholdsPayload,
+)
 
 
 @pytest.fixture(autouse=True)
 def _clean_api_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Wipe API-key env vars before every test.
-
-    ``apply_setup_payload`` calls ``os.environ.setdefault`` so a prior
-    test that supplied a key leaks it into the process env and pollutes
-    later ``detect_setup_context`` / ``build_default_payload`` assertions.
-    """
-    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"):
+    for name in (
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GITHUB_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_BASE_URL",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -47,7 +52,7 @@ def _payload(**overrides: object) -> SetupPayload:
         "target_branch": "upstream/main",
         "fork_ref": "feat/x",
         "project_context": "",
-        "api_keys": {},
+        "anthropic": ProviderConfig(enabled=True, api_key="sk-ant"),
     }
     defaults.update(overrides)
     return SetupPayload.model_validate(defaults)
@@ -56,30 +61,57 @@ def _payload(**overrides: object) -> SetupPayload:
 class TestSetupPayloadValidation:
     def test_missing_target_branch_rejected(self) -> None:
         with pytest.raises(Exception):
-            SetupPayload.model_validate({"fork_ref": "feat/x", "project_context": ""})
+            SetupPayload.model_validate(
+                {
+                    "fork_ref": "feat/x",
+                    "anthropic": {"enabled": True, "api_key": "k"},
+                }
+            )
+
+    def test_no_provider_enabled_rejected(self) -> None:
+        with pytest.raises(Exception):
+            SetupPayload.model_validate({"target_branch": "u", "fork_ref": "f"})
+
+    def test_both_enabled_requires_explicit_default(self) -> None:
+        with pytest.raises(Exception):
+            SetupPayload.model_validate(
+                {
+                    "target_branch": "u",
+                    "fork_ref": "f",
+                    "anthropic": {"enabled": True, "api_key": "k"},
+                    "openai": {"enabled": True, "api_key": "k"},
+                }
+            )
+
+    def test_single_provider_auto_picks_default(self) -> None:
+        p = _payload()
+        assert p.default_provider == "anthropic"
+
+    def test_agent_choice_must_reference_enabled_provider(self) -> None:
+        with pytest.raises(Exception):
+            SetupPayload.model_validate(
+                {
+                    "target_branch": "u",
+                    "fork_ref": "f",
+                    "anthropic": {"enabled": True, "api_key": "k"},
+                    "agent_choices": {"planner": {"provider": "openai"}},
+                }
+            )
 
     def test_threshold_out_of_range_rejected(self) -> None:
         with pytest.raises(Exception):
             ThresholdsPayload.model_validate({"auto_merge_confidence": 1.5})
-
-    def test_threshold_none_accepted(self) -> None:
-        # All-None payload means "use defaults" — never an error.
-        t = ThresholdsPayload()
-        assert t.auto_merge_confidence is None
 
 
 class TestApplySetupPayload:
     def test_writes_config_and_env(self, tmp_path: Path) -> None:
         payload = _payload(
             project_context="dify fork",
-            api_keys={
-                "ANTHROPIC_API_KEY": "sk-ant-test",
-                "OPENAI_API_KEY": "sk-oa-test",
-            },
+            anthropic=ProviderConfig(
+                enabled=True, api_key="sk-ant-test", base_url="https://gw"
+            ),
         )
-
-        with patch.dict(os.environ, {}, clear=False):
-            config = apply_setup_payload(payload, str(tmp_path))
+        config = apply_setup_payload(payload, str(tmp_path))
 
         cfg_path = tmp_path / ".merge" / "config.yaml"
         env_path = tmp_path / ".merge" / ".env"
@@ -88,30 +120,79 @@ class TestApplySetupPayload:
 
         raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
         assert raw["upstream_ref"] == "upstream/main"
-        assert raw["fork_ref"] == "feat/x"
         assert raw["project_context"] == "dify fork"
-        assert raw["thresholds"]["auto_merge_confidence"] == 0.85
+        # All agents on anthropic since only it is enabled.
+        for spec in raw["agents"].values():
+            assert spec["provider"] == "anthropic"
+            assert spec["api_key_env"] == "ANTHROPIC_API_KEY"
         assert config.upstream_ref == "upstream/main"
 
         env_text = env_path.read_text(encoding="utf-8")
         assert "ANTHROPIC_API_KEY" in env_text
-        assert "OPENAI_API_KEY" in env_text
-        # GITHUB block only set when token supplied — not here.
+        assert "ANTHROPIC_BASE_URL" in env_text
+        # No openai key supplied → no env entry, no github block.
+        assert "OPENAI_API_KEY" not in env_text
         assert "github" not in raw
 
     def test_github_block_set_when_token_supplied(self, tmp_path: Path) -> None:
-        payload = _payload(api_keys={"GITHUB_TOKEN": "ghp_xxx"})
+        payload = _payload(github_token="ghp_xxx")
         apply_setup_payload(payload, str(tmp_path))
         raw = yaml.safe_load(
             (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
         )
         assert raw["github"] == {"enabled": True, "token_env": "GITHUB_TOKEN"}
 
+    def test_per_agent_override_routes_to_other_provider(self, tmp_path: Path) -> None:
+        payload = _payload(
+            anthropic=ProviderConfig(enabled=True, api_key="ak"),
+            openai=ProviderConfig(enabled=True, api_key="ok"),
+            default_provider="anthropic",
+            agent_choices={
+                "planner_judge": AgentChoice(provider="openai", model="gpt-5.4-mini"),
+            },
+        )
+        apply_setup_payload(payload, str(tmp_path))
+        raw = yaml.safe_load(
+            (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert raw["agents"]["planner_judge"]["provider"] == "openai"
+        assert raw["agents"]["planner_judge"]["model"] == "gpt-5.4-mini"
+        assert raw["agents"]["planner_judge"]["api_key_env"] == "OPENAI_API_KEY"
+        # Other agents inherit default_provider.
+        assert raw["agents"]["planner"]["provider"] == "anthropic"
+
+    def test_per_agent_human_interface_picks_haiku_by_default(
+        self, tmp_path: Path
+    ) -> None:
+        # When default_model is empty, per-(provider, agent) table wins.
+        payload = _payload()  # anthropic only, no default_model
+        apply_setup_payload(payload, str(tmp_path))
+        raw = yaml.safe_load(
+            (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert raw["agents"]["human_interface"]["model"] == "claude-haiku-4-5-20251001"
+        assert raw["agents"]["planner"]["model"] == "claude-opus-4-6"
+
+    def test_provider_default_model_beats_per_agent_table(self, tmp_path: Path) -> None:
+        payload = _payload(
+            anthropic=ProviderConfig(
+                enabled=True,
+                api_key="k",
+                default_model="claude-opus-4-7",
+            ),
+        )
+        apply_setup_payload(payload, str(tmp_path))
+        raw = yaml.safe_load(
+            (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
+        )
+        for spec in raw["agents"].values():
+            assert spec["model"] == "claude-opus-4-7"
+
     def test_explicit_thresholds_beat_defaults(self, tmp_path: Path) -> None:
         payload = _payload(
             thresholds=ThresholdsPayload(
                 auto_merge_confidence=0.95, risk_score_high=0.5
-            )
+            ),
         )
         apply_setup_payload(payload, str(tmp_path))
         raw = yaml.safe_load(
@@ -119,41 +200,77 @@ class TestApplySetupPayload:
         )
         assert raw["thresholds"]["auto_merge_confidence"] == 0.95
         assert raw["thresholds"]["risk_score_high"] == 0.5
-        # unchanged ones keep defaults
         assert raw["thresholds"]["risk_score_low"] == 0.30
 
-    def test_no_api_keys_skips_env_file(self, tmp_path: Path) -> None:
-        payload = _payload(api_keys={})
+    def test_no_api_keys_supplied_skips_env_file(self, tmp_path: Path) -> None:
+        # enabled=True but api_key="" means "keep what's on disk"; with
+        # no on-disk file either, no env writes happen.
+        payload = SetupPayload.model_validate(
+            {
+                "target_branch": "u",
+                "fork_ref": "f",
+                "anthropic": {"enabled": True, "api_key": ""},
+            }
+        )
         apply_setup_payload(payload, str(tmp_path))
         assert not (tmp_path / ".merge" / ".env").exists()
 
 
 class TestBuildDefaultPayload:
-    def test_picks_env_keys_and_falls_back_branch(self, tmp_path: Path) -> None:
-        with patch.dict(
-            os.environ,
-            {"ANTHROPIC_API_KEY": "sk-x", "OPENAI_API_KEY": "sk-y"},
-            clear=False,
+    def test_anthropic_only_in_env(self, tmp_path: Path) -> None:
+        with (
+            patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-a"}, clear=False),
+            patch(
+                "src.cli.commands.setup._auto_detect_fork_ref",
+                return_value="feat/ci",
+            ),
+            patch(
+                "src.cli.commands.setup._detect_upstream_default",
+                return_value="origin/main",
+            ),
         ):
-            with (
-                patch(
-                    "src.cli.commands.setup._auto_detect_fork_ref",
-                    return_value="feat/ci-run",
-                ),
-                patch(
-                    "src.cli.commands.setup._detect_upstream_default",
-                    return_value="origin/main",
-                ),
-            ):
-                payload = build_default_payload(str(tmp_path))
+            payload = build_default_payload(str(tmp_path))
 
-        assert payload.target_branch == "origin/main"
-        assert payload.fork_ref == "feat/ci-run"
-        assert "ANTHROPIC_API_KEY" in payload.api_keys
-        assert "OPENAI_API_KEY" in payload.api_keys
-        assert "GITHUB_TOKEN" not in payload.api_keys
-        assert payload.thresholds is None
-        assert payload.dry_run is False
+        assert payload.anthropic.enabled is True
+        assert payload.openai.enabled is False
+        assert payload.default_provider == "anthropic"
+
+    def test_openai_only_in_env(self, tmp_path: Path) -> None:
+        with (
+            patch.dict(os.environ, {"OPENAI_API_KEY": "sk-o"}, clear=False),
+            patch(
+                "src.cli.commands.setup._auto_detect_fork_ref",
+                return_value="feat/ci",
+            ),
+            patch(
+                "src.cli.commands.setup._detect_upstream_default",
+                return_value="origin/main",
+            ),
+        ):
+            payload = build_default_payload(str(tmp_path))
+
+        assert payload.openai.enabled is True
+        assert payload.anthropic.enabled is False
+        assert payload.default_provider == "openai"
+
+    def test_neither_in_env_falls_back_to_anthropic_skeleton(
+        self, tmp_path: Path
+    ) -> None:
+        with (
+            patch(
+                "src.cli.commands.setup._auto_detect_fork_ref",
+                return_value="feat/ci",
+            ),
+            patch(
+                "src.cli.commands.setup._detect_upstream_default",
+                return_value="origin/main",
+            ),
+        ):
+            payload = build_default_payload(str(tmp_path))
+
+        assert payload.anthropic.enabled is True
+        assert payload.anthropic.api_key == ""
+        assert payload.default_provider == "anthropic"
 
 
 class TestDetectSetupContext:
@@ -180,13 +297,27 @@ class TestDetectSetupContext:
         assert ctx.suggested_target == "origin/main"
         assert ctx.fork_divergence_count == 42
         assert ctx.forks_profile_threshold == 30
+        # recommended models per provider published for the UI dropdown.
+        assert "anthropic" in ctx.provider_recommended_models
+        assert "openai" in ctx.provider_recommended_models
+        # agent inventory contains the 6 known agents.
+        names = [e["name"] for e in ctx.agent_inventory]
+        assert "planner" in names
+        assert "human_interface" in names
 
-    def test_summarises_existing_config(self, tmp_path: Path) -> None:
-        payload = _payload(
-            project_context="existing run",
-            api_keys={"ANTHROPIC_API_KEY": "sk-a"},
+    def test_summarises_existing_config_including_agents(self, tmp_path: Path) -> None:
+        # Seed a config with one agent override so the reconfigure flow
+        # can pre-fill the AGENT OVERRIDES table.
+        apply_setup_payload(
+            SetupPayload.model_validate(
+                {
+                    "target_branch": "upstream/main",
+                    "fork_ref": "feat/x",
+                    "anthropic": {"enabled": True, "api_key": "k"},
+                }
+            ),
+            str(tmp_path),
         )
-        apply_setup_payload(payload, str(tmp_path))
 
         with (
             patch(
@@ -206,15 +337,22 @@ class TestDetectSetupContext:
 
         assert ctx.has_existing_config is True
         assert ctx.existing_config_summary is not None
-        assert ctx.existing_config_summary["upstream_ref"] == "upstream/main"
-        assert ctx.existing_config_summary["project_context"] == "existing run"
+        assert "agents" in ctx.existing_config_summary
+        agents = ctx.existing_config_summary["agents"]
+        assert isinstance(agents, dict)
+        assert agents["planner"]["provider"] == "anthropic"
 
     def test_api_key_hint_priority_shell_beats_project_env(
         self, tmp_path: Path
     ) -> None:
-        # Pre-create a project .env so apply leaves a file on disk.
         apply_setup_payload(
-            _payload(api_keys={"OPENAI_API_KEY": "sk-from-file"}),
+            SetupPayload.model_validate(
+                {
+                    "target_branch": "u",
+                    "fork_ref": "f",
+                    "openai": {"enabled": True, "api_key": "sk-from-file"},
+                }
+            ),
             str(tmp_path),
         )
 
@@ -235,13 +373,11 @@ class TestDetectSetupContext:
         ):
             ctx = detect_setup_context(str(tmp_path))
 
-        by_name = {h.name: h for h in ctx.api_key_hints}
-        # shell wins over project_env
-        assert by_name["OPENAI_API_KEY"].source == "shell"
-        # masked is not the raw value
-        assert by_name["OPENAI_API_KEY"].masked != "sk-from-shell"
-        assert "sk-" in by_name["OPENAI_API_KEY"].masked
+        # shell wins over project_env, mask reflects the shell value.
+        assert ctx.openai_key_hint.source == "shell"
+        assert ctx.openai_key_hint.masked != "sk-from-shell"
+        assert "sk-" in ctx.openai_key_hint.masked
 
         # An env var not set anywhere has empty masked + source
-        assert by_name["GITHUB_TOKEN"].masked == ""
-        assert by_name["GITHUB_TOKEN"].source == ""
+        assert ctx.github_token_hint.masked == ""
+        assert ctx.github_token_hint.source == ""

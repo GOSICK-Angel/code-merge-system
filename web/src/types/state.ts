@@ -303,13 +303,15 @@ export interface AgentActivityEvent {
   elapsed: number | null;
 }
 
-// ---- Setup wizard (PR-1 protocol) -----------------------------------------
+// ---- Setup wizard ---------------------------------------------------------
 // Mirrors src/models/setup.py. The setup view is shown when the backend
 // reports `setup_snapshot` (i.e. no .merge/config.yaml exists yet, or the
 // run was launched with reconfigure intent). Submission flows through the
 // same WebSocket as run-mode commands; once the server emits `setup_ready`
 // + a `state_snapshot`, the store flips `mode` to "run" and rendering
 // auto-routes to the dashboard.
+
+export type ProviderName = "anthropic" | "openai";
 
 export type ApiKeyHintSource = "shell" | "project_env" | "global_env" | "";
 
@@ -319,14 +321,41 @@ export interface ApiKeyHint {
   source: ApiKeyHintSource;
 }
 
+export interface ProviderConfig {
+  enabled: boolean;
+  api_key: string;
+  base_url: string | null;
+  default_model: string;
+}
+
+export interface AgentChoice {
+  provider: ProviderName;
+  model: string;
+}
+
+export interface AgentInventoryEntry {
+  name: string;
+  blurb: string;
+}
+
 export interface SetupContext {
   current_branch: string;
   suggested_target: string;
-  api_key_hints: ApiKeyHint[];
   fork_divergence_count: number;
   has_existing_config: boolean;
   existing_config_summary: Record<string, unknown> | null;
   forks_profile_threshold: number;
+
+  // Per-provider key/base-url hints + the recommended-model dropdown
+  // source. ``agent_inventory`` is the ordered list of agent roles to
+  // render in the AGENT OVERRIDES table.
+  anthropic_key_hint: ApiKeyHint;
+  openai_key_hint: ApiKeyHint;
+  github_token_hint: ApiKeyHint;
+  anthropic_base_url: string | null;
+  openai_base_url: string | null;
+  provider_recommended_models: Record<ProviderName, string[]>;
+  agent_inventory: AgentInventoryEntry[];
 }
 
 export interface ThresholdsPayload {
@@ -339,7 +368,11 @@ export interface SetupPayload {
   target_branch: string;
   fork_ref: string;
   project_context: string;
-  api_keys: Record<string, string>;
+  anthropic: ProviderConfig;
+  openai: ProviderConfig;
+  github_token: string;
+  default_provider: ProviderName | null;
+  agent_choices: Record<string, AgentChoice>;
   thresholds: ThresholdsPayload | null;
   dry_run: boolean;
   workflow: string | null;

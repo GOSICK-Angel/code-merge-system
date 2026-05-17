@@ -12,7 +12,8 @@ import { Card, Pill } from "../components/brutalist";
 import { useSetup } from "../ws/useSetup";
 import type { WsClient } from "../ws/client";
 import type {
-  ApiKeyHint,
+  AgentChoice,
+  ProviderName,
   SetupContext,
   SetupPayload,
   ThresholdsPayload,
@@ -22,11 +23,28 @@ interface Props {
   clientRef: MutableRefObject<WsClient | null>;
 }
 
+interface ProviderFormState {
+  enabled: boolean;
+  api_key: string;
+  base_url: string;
+  default_model: string;
+}
+
+interface AgentRowState {
+  // "" means "inherit default_provider" (no agent_choices entry sent).
+  provider: ProviderName | "";
+  model: string;
+}
+
 interface FormState {
   target_branch: string;
   fork_ref: string;
   project_context: string;
-  api_keys: Record<string, string>;
+  anthropic: ProviderFormState;
+  openai: ProviderFormState;
+  github_token: string;
+  default_provider: ProviderName | "";
+  agents: Record<string, AgentRowState>;
   threshold_auto: string;
   threshold_low: string;
   threshold_high: string;
@@ -35,32 +53,6 @@ interface FormState {
   init_forks_profile: boolean;
 }
 
-const API_KEY_FIELDS: Array<{
-  name: string;
-  label: string;
-  required: boolean;
-  help: string;
-}> = [
-  {
-    name: "ANTHROPIC_API_KEY",
-    label: "ANTHROPIC_API_KEY",
-    required: true,
-    help: "planner / conflict_analyst / judge / human_interface",
-  },
-  {
-    name: "OPENAI_API_KEY",
-    label: "OPENAI_API_KEY",
-    required: true,
-    help: "planner_judge / executor",
-  },
-  {
-    name: "GITHUB_TOKEN",
-    label: "GITHUB_TOKEN",
-    required: false,
-    help: "optional — enables PR / issue lookups",
-  },
-];
-
 const WORKFLOW_OPTIONS = [
   { value: "", label: "(default)" },
   { value: "standard", label: "standard" },
@@ -68,19 +60,6 @@ const WORKFLOW_OPTIONS = [
   { value: "fast", label: "fast" },
   { value: "analysis-only", label: "analysis-only" },
 ];
-
-const FORM_DEFAULTS: FormState = {
-  target_branch: "",
-  fork_ref: "",
-  project_context: "",
-  api_keys: { ANTHROPIC_API_KEY: "", OPENAI_API_KEY: "", GITHUB_TOKEN: "" },
-  threshold_auto: "",
-  threshold_low: "",
-  threshold_high: "",
-  dry_run: false,
-  workflow: "",
-  init_forks_profile: false,
-};
 
 const inputStyle: CSSProperties = {
   width: "100%",
@@ -91,6 +70,7 @@ const inputStyle: CSSProperties = {
   fontFamily: "var(--mono)",
   fontSize: 12,
   outline: "none",
+  boxSizing: "border-box",
 };
 
 const labelStyle: CSSProperties = {
@@ -108,6 +88,19 @@ const rowStyle: CSSProperties = {
   gridTemplateColumns: "1fr 1fr",
 };
 
+const containerStyle: CSSProperties = {
+  padding: "32px 24px",
+  maxWidth: 820,
+  margin: "0 auto",
+  width: "100%",
+  boxSizing: "border-box",
+};
+
+const PROVIDER_LABEL: Record<ProviderName, string> = {
+  anthropic: "Anthropic",
+  openai: "OpenAI",
+};
+
 function deriveDefaults(ctx: SetupContext): FormState {
   const summary = ctx.existing_config_summary ?? {};
   const target =
@@ -119,18 +112,61 @@ function deriveDefaults(ctx: SetupContext): FormState {
       ? summary.fork_ref
       : ctx.current_branch;
   const project =
-    typeof summary.project_context === "string"
-      ? summary.project_context
-      : "";
+    typeof summary.project_context === "string" ? summary.project_context : "";
   const thresholds =
     summary.thresholds && typeof summary.thresholds === "object"
       ? (summary.thresholds as Record<string, number | undefined>)
       : {};
+
+  // Pre-fill providers from disk hints: enable a provider if a key
+  // exists in the resolved chain so the user can submit without
+  // retyping. Base URLs are pre-filled from the resolved chain too.
+  const anthropicHasKey = !!ctx.anthropic_key_hint.masked;
+  const openaiHasKey = !!ctx.openai_key_hint.masked;
+  const anthropic: ProviderFormState = {
+    enabled: anthropicHasKey,
+    api_key: "",
+    base_url: ctx.anthropic_base_url ?? "",
+    default_model: "",
+  };
+  const openai: ProviderFormState = {
+    enabled: openaiHasKey,
+    api_key: "",
+    base_url: ctx.openai_base_url ?? "",
+    default_model: "",
+  };
+
+  // If the existing config carries per-agent provider blocks, seed the
+  // AGENT OVERRIDES table so reconfigure shows the user's existing choices.
+  const existingAgents =
+    summary.agents && typeof summary.agents === "object"
+      ? (summary.agents as Record<string, { provider?: string; model?: string }>)
+      : {};
+  const agents: Record<string, AgentRowState> = {};
+  for (const entry of ctx.agent_inventory) {
+    const existing = existingAgents[entry.name];
+    const provider = existing?.provider;
+    if (provider === "anthropic" || provider === "openai") {
+      agents[entry.name] = { provider, model: existing?.model ?? "" };
+    } else {
+      agents[entry.name] = { provider: "", model: "" };
+    }
+  }
+
+  let defaultProvider: ProviderName | "" = "";
+  if (anthropic.enabled && !openai.enabled) defaultProvider = "anthropic";
+  else if (openai.enabled && !anthropic.enabled) defaultProvider = "openai";
+  else if (anthropic.enabled && openai.enabled) defaultProvider = "anthropic";
+
   return {
-    ...FORM_DEFAULTS,
     target_branch: target,
     fork_ref: fork,
     project_context: project,
+    anthropic,
+    openai,
+    github_token: "",
+    default_provider: defaultProvider,
+    agents,
     threshold_auto:
       thresholds.auto_merge_confidence === undefined
         ? ""
@@ -143,14 +179,10 @@ function deriveDefaults(ctx: SetupContext): FormState {
       thresholds.risk_score_high === undefined
         ? ""
         : String(thresholds.risk_score_high),
+    dry_run: false,
+    workflow: "",
+    init_forks_profile: false,
   };
-}
-
-function findHint(
-  hints: ApiKeyHint[] | undefined,
-  name: string,
-): ApiKeyHint | null {
-  return hints?.find((h) => h.name === name) ?? null;
 }
 
 function buildThresholds(form: FormState): ThresholdsPayload | null {
@@ -170,15 +202,31 @@ function buildThresholds(form: FormState): ThresholdsPayload | null {
 }
 
 function buildPayload(form: FormState): SetupPayload {
-  const apiKeys: Record<string, string> = {};
-  for (const [k, v] of Object.entries(form.api_keys)) {
-    if (v.trim()) apiKeys[k] = v.trim();
+  const agent_choices: Record<string, AgentChoice> = {};
+  for (const [name, row] of Object.entries(form.agents)) {
+    if (row.provider === "") continue; // inherit default
+    agent_choices[name] = { provider: row.provider, model: row.model.trim() };
   }
   return {
     target_branch: form.target_branch.trim(),
     fork_ref: form.fork_ref.trim(),
     project_context: form.project_context,
-    api_keys: apiKeys,
+    anthropic: {
+      enabled: form.anthropic.enabled,
+      api_key: form.anthropic.api_key.trim(),
+      base_url: form.anthropic.base_url.trim() || null,
+      default_model: form.anthropic.default_model.trim(),
+    },
+    openai: {
+      enabled: form.openai.enabled,
+      api_key: form.openai.api_key.trim(),
+      base_url: form.openai.base_url.trim() || null,
+      default_model: form.openai.default_model.trim(),
+    },
+    github_token: form.github_token.trim(),
+    default_provider:
+      form.default_provider === "" ? null : form.default_provider,
+    agent_choices,
     thresholds: buildThresholds(form),
     dry_run: form.dry_run,
     workflow: form.workflow.trim() === "" ? null : form.workflow,
@@ -189,12 +237,44 @@ function buildPayload(form: FormState): SetupPayload {
 function validate(form: FormState, ctx: SetupContext): string | null {
   if (!form.target_branch.trim()) return "Target branch is required.";
   if (!form.fork_ref.trim()) return "Fork ref is required.";
-  for (const field of API_KEY_FIELDS) {
-    if (!field.required) continue;
-    const supplied = form.api_keys[field.name]?.trim();
-    const onDisk = findHint(ctx.api_key_hints, field.name)?.masked ?? "";
-    if (!supplied && !onDisk) {
-      return `${field.name} is required (no existing value on disk).`;
+
+  // At least one provider must be enabled AND have a key (in the form
+  // OR already on disk per ctx).
+  const enabledList: ProviderName[] = [];
+  const providerOk = (
+    p: ProviderName,
+    state: ProviderFormState,
+    hintMasked: string,
+  ): boolean => {
+    if (!state.enabled) return true; // disabled providers are always OK
+    if (!state.api_key.trim() && !hintMasked) {
+      return false;
+    }
+    enabledList.push(p);
+    return true;
+  };
+  if (!providerOk("anthropic", form.anthropic, ctx.anthropic_key_hint.masked)) {
+    return "Anthropic is enabled but no API key was supplied and none is on disk.";
+  }
+  if (!providerOk("openai", form.openai, ctx.openai_key_hint.masked)) {
+    return "OpenAI is enabled but no API key was supplied and none is on disk.";
+  }
+  if (enabledList.length === 0) {
+    return "At least one provider (Anthropic or OpenAI) must be enabled.";
+  }
+  if (enabledList.length > 1 && !form.default_provider) {
+    return "Pick a default provider when both Anthropic and OpenAI are enabled.";
+  }
+  if (
+    form.default_provider !== "" &&
+    !enabledList.includes(form.default_provider)
+  ) {
+    return `Default provider "${form.default_provider}" is not enabled.`;
+  }
+  for (const [name, row] of Object.entries(form.agents)) {
+    if (row.provider === "") continue;
+    if (!enabledList.includes(row.provider)) {
+      return `Agent "${name}" is assigned to ${row.provider}, which is not enabled.`;
     }
   }
   for (const [key, raw] of [
@@ -211,41 +291,169 @@ function validate(form: FormState, ctx: SetupContext): string | null {
   return null;
 }
 
+interface ProviderSectionProps {
+  provider: ProviderName;
+  state: ProviderFormState;
+  hint: { masked: string; source: string };
+  recommendedModels: string[];
+  onChange: (next: ProviderFormState) => void;
+  disabled: boolean;
+}
+
+function ProviderSection({
+  provider,
+  state,
+  hint,
+  recommendedModels,
+  onChange,
+  disabled,
+}: ProviderSectionProps): JSX.Element {
+  const update = useCallback(
+    <K extends keyof ProviderFormState>(
+      key: K,
+      value: ProviderFormState[K],
+    ) => {
+      onChange({ ...state, [key]: value });
+    },
+    [onChange, state],
+  );
+
+  return (
+    <Card
+      title={
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={state.enabled}
+            disabled={disabled}
+            onChange={(e) => update("enabled", e.target.checked)}
+          />
+          {`› ${PROVIDER_LABEL[provider].toUpperCase()}`}
+        </span>
+      }
+      hint={
+        hint.masked
+          ? `existing key: ${hint.masked} (from ${hint.source || "?"})`
+          : "no key on disk"
+      }
+    >
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 12,
+          opacity: state.enabled ? 1 : 0.5,
+        }}
+      >
+        <div>
+          <label style={labelStyle} htmlFor={`${provider}_api_key`}>
+            api key
+          </label>
+          <input
+            id={`${provider}_api_key`}
+            style={inputStyle}
+            type="password"
+            autoComplete="off"
+            value={state.api_key}
+            disabled={!state.enabled}
+            onChange={(e) => update("api_key", e.target.value)}
+            placeholder={
+              hint.masked
+                ? `${hint.masked} (leave blank to keep)`
+                : "paste API key"
+            }
+          />
+        </div>
+        <div style={rowStyle}>
+          <div>
+            <label style={labelStyle} htmlFor={`${provider}_base_url`}>
+              base url (optional)
+            </label>
+            <input
+              id={`${provider}_base_url`}
+              style={inputStyle}
+              value={state.base_url}
+              disabled={!state.enabled}
+              onChange={(e) => update("base_url", e.target.value)}
+              placeholder="https://api.anthropic.com or gateway URL"
+            />
+          </div>
+          <div>
+            <label style={labelStyle} htmlFor={`${provider}_default_model`}>
+              default model
+            </label>
+            <input
+              id={`${provider}_default_model`}
+              style={inputStyle}
+              value={state.default_model}
+              disabled={!state.enabled}
+              onChange={(e) => update("default_model", e.target.value)}
+              list={`${provider}_model_options`}
+              placeholder="(leave blank for per-agent defaults)"
+            />
+            <datalist id={`${provider}_model_options`}>
+              {recommendedModels.map((m) => (
+                <option key={m} value={m} />
+              ))}
+            </datalist>
+          </div>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 export function Setup({ clientRef }: Props): JSX.Element {
   const { context, status, error, ready, submit, refresh } = useSetup(clientRef);
-  const [form, setForm] = useState<FormState>(FORM_DEFAULTS);
+  const [form, setForm] = useState<FormState | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
-  const [initialised, setInitialised] = useState(false);
 
-  // Seed the form the first time a context arrives. After that, treat
-  // ``context`` as a static snapshot — re-seeding on every refresh would
-  // discard user edits each time the divergence count refreshes.
   useEffect(() => {
-    if (context && !initialised) {
+    if (context && form === null) {
       setForm(deriveDefaults(context));
-      setInitialised(true);
     }
-  }, [context, initialised]);
+  }, [context, form]);
 
   const updateField = useCallback(
     <K extends keyof FormState>(key: K, value: FormState[K]) => {
-      setForm((prev) => ({ ...prev, [key]: value }));
+      setForm((prev) => (prev ? { ...prev, [key]: value } : prev));
     },
     [],
   );
 
-  const updateApiKey = useCallback((name: string, value: string) => {
-    setForm((prev) => ({
-      ...prev,
-      api_keys: { ...prev.api_keys, [name]: value },
-    }));
+  const updateProvider = useCallback(
+    (which: "anthropic" | "openai", next: ProviderFormState) => {
+      setForm((prev) => {
+        if (!prev) return prev;
+        const merged: FormState = { ...prev, [which]: next };
+        // When the user disables a provider that was previously the
+        // default, drop the default so validation forces a fresh
+        // choice; auto-pick if the other one is the sole survivor.
+        if (!next.enabled && merged.default_provider === which) {
+          const other = which === "anthropic" ? "openai" : "anthropic";
+          merged.default_provider = merged[other].enabled ? other : "";
+        }
+        if (next.enabled && merged.default_provider === "") {
+          merged.default_provider = which;
+        }
+        return merged;
+      });
+    },
+    [],
+  );
+
+  const updateAgent = useCallback((name: string, next: AgentRowState) => {
+    setForm((prev) =>
+      prev ? { ...prev, agents: { ...prev.agents, [name]: next } } : prev,
+    );
   }, []);
 
   const handleSubmit = useCallback(
     (e: FormEvent<HTMLFormElement>) => {
       e.preventDefault();
-      if (!context) return;
+      if (!context || !form) return;
       const validationError = validate(form, context);
       if (validationError) {
         setLocalError(validationError);
@@ -264,9 +472,9 @@ export function Setup({ clientRef }: Props): JSX.Element {
     [context],
   );
 
-  if (!context) {
+  if (!context || !form) {
     return (
-      <div style={{ padding: 32 }}>
+      <div style={containerStyle}>
         <Card title="› SETUP">
           <div className="dim" style={{ fontSize: 12 }}>
             Waiting for server to publish setup context…
@@ -277,15 +485,9 @@ export function Setup({ clientRef }: Props): JSX.Element {
   }
 
   if (status === "ready" && ready) {
-    // After a successful submit we sit here until the server pushes the
-    // first state_snapshot, at which point runStore.applySnapshot flips
-    // mode → "run" and routing leaves this view.
     return (
-      <div style={{ padding: 32 }}>
-        <Card
-          title="› CONFIG SAVED"
-          hint={<Pill tone="green">READY</Pill>}
-        >
+      <div style={containerStyle}>
+        <Card title="› CONFIG SAVED" hint={<Pill tone="green">READY</Pill>}>
           <div style={{ fontSize: 12, lineHeight: 1.6 }}>
             <div>
               Wrote{" "}
@@ -308,10 +510,15 @@ export function Setup({ clientRef }: Props): JSX.Element {
     ? "reconfigure existing .merge/config.yaml"
     : "first-run setup — no .merge/config.yaml yet";
 
+  const enabledProviders: ProviderName[] = [];
+  if (form.anthropic.enabled) enabledProviders.push("anthropic");
+  if (form.openai.enabled) enabledProviders.push("openai");
+  const needsDefaultPick = enabledProviders.length > 1;
+
   return (
     <form
       onSubmit={handleSubmit}
-      style={{ padding: 24, display: "flex", flexDirection: "column", gap: 16 }}
+      style={{ ...containerStyle, display: "flex", flexDirection: "column", gap: 16 }}
     >
       <Card title="› MERGE TARGET" hint={headerHint}>
         <div style={rowStyle}>
@@ -374,71 +581,177 @@ export function Setup({ clientRef }: Props): JSX.Element {
         </button>
       </Card>
 
-      <Card title="› API KEYS">
-        <div
-          style={{ display: "flex", flexDirection: "column", gap: 12 }}
-          data-testid="api-key-fields"
-        >
-          {API_KEY_FIELDS.map((field) => {
-            const hint = findHint(context.api_key_hints, field.name);
-            const placeholder = hint?.masked
-              ? `${hint.masked} (from ${hint.source || "?"} — leave blank to keep)`
-              : field.required
-                ? "required"
-                : "optional";
-            return (
-              <div key={field.name}>
-                <label style={labelStyle} htmlFor={`key_${field.name}`}>
-                  {field.label}
-                  {field.required && (
-                    <span style={{ color: "var(--red)", marginLeft: 4 }}>
-                      *
-                    </span>
-                  )}
-                </label>
+      <ProviderSection
+        provider="anthropic"
+        state={form.anthropic}
+        hint={{
+          masked: context.anthropic_key_hint.masked,
+          source: context.anthropic_key_hint.source,
+        }}
+        recommendedModels={context.provider_recommended_models.anthropic ?? []}
+        onChange={(next) => updateProvider("anthropic", next)}
+        disabled={submitting}
+      />
+
+      <ProviderSection
+        provider="openai"
+        state={form.openai}
+        hint={{
+          masked: context.openai_key_hint.masked,
+          source: context.openai_key_hint.source,
+        }}
+        recommendedModels={context.provider_recommended_models.openai ?? []}
+        onChange={(next) => updateProvider("openai", next)}
+        disabled={submitting}
+      />
+
+      {needsDefaultPick && (
+        <Card title="› DEFAULT PROVIDER" hint="agents inherit unless overridden below">
+          <div style={{ display: "flex", gap: 16, fontSize: 12 }}>
+            {enabledProviders.map((p) => (
+              <label
+                key={p}
+                style={{ display: "flex", alignItems: "center", gap: 6 }}
+              >
                 <input
-                  id={`key_${field.name}`}
-                  style={inputStyle}
-                  type="password"
-                  autoComplete="off"
-                  value={form.api_keys[field.name] ?? ""}
-                  onChange={(e) => updateApiKey(field.name, e.target.value)}
-                  placeholder={placeholder}
+                  type="radio"
+                  name="default_provider"
+                  checked={form.default_provider === p}
+                  onChange={() => updateField("default_provider", p)}
                 />
-                <div className="dim" style={{ fontSize: 10, marginTop: 4 }}>
-                  {field.help}
+                {PROVIDER_LABEL[p]}
+              </label>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      <Card
+        title={
+          <span style={{ cursor: "pointer" }} onClick={() => setAgentsOpen((v) => !v)}>
+            › AGENT OVERRIDES {agentsOpen ? "▾" : "▸"}
+          </span>
+        }
+        hint={
+          agentsOpen
+            ? "per-agent provider + model (blank = inherit default)"
+            : "click to expand"
+        }
+      >
+        {agentsOpen && (
+          <div
+            style={{ display: "flex", flexDirection: "column", gap: 10 }}
+            data-testid="agent-overrides"
+          >
+            {context.agent_inventory.map((entry) => {
+              const row = form.agents[entry.name] ?? {
+                provider: "" as const,
+                model: "",
+              };
+              const providerOptions: Array<ProviderName | ""> = [
+                "",
+                ...enabledProviders,
+              ];
+              const datalistId = `agent_${entry.name}_models`;
+              const recommended =
+                row.provider === ""
+                  ? []
+                  : context.provider_recommended_models[row.provider] ?? [];
+              return (
+                <div
+                  key={entry.name}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "150px 110px 1fr",
+                    gap: 10,
+                    alignItems: "center",
+                  }}
+                >
+                  <div>
+                    <div style={{ fontFamily: "var(--mono)", fontSize: 11 }}>
+                      {entry.name}
+                    </div>
+                    <div className="dim" style={{ fontSize: 9 }}>
+                      {entry.blurb}
+                    </div>
+                  </div>
+                  <select
+                    style={inputStyle}
+                    value={row.provider}
+                    onChange={(e) =>
+                      updateAgent(entry.name, {
+                        ...row,
+                        provider: e.target.value as ProviderName | "",
+                      })
+                    }
+                  >
+                    {providerOptions.map((p) => (
+                      <option key={p || "_default"} value={p}>
+                        {p === "" ? "(default)" : PROVIDER_LABEL[p]}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    style={inputStyle}
+                    value={row.model}
+                    list={datalistId}
+                    disabled={row.provider === ""}
+                    onChange={(e) =>
+                      updateAgent(entry.name, { ...row, model: e.target.value })
+                    }
+                    placeholder={
+                      row.provider === ""
+                        ? "(uses default provider's model)"
+                        : "(blank = provider default)"
+                    }
+                  />
+                  <datalist id={datalistId}>
+                    {recommended.map((m) => (
+                      <option key={m} value={m} />
+                    ))}
+                  </datalist>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </Card>
 
       <Card
         title={
-          <span
-            style={{ cursor: "pointer" }}
-            onClick={() => setAdvancedOpen((v) => !v)}
-          >
+          <span style={{ cursor: "pointer" }} onClick={() => setAdvancedOpen((v) => !v)}>
             › ADVANCED {advancedOpen ? "▾" : "▸"}
           </span>
         }
         hint={
           advancedOpen
-            ? "thresholds / dry-run / workflow"
+            ? "github / thresholds / dry-run / workflow"
             : "click to expand"
         }
       >
         {advancedOpen && (
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div>
+              <label style={labelStyle} htmlFor="github_token">
+                github token (optional)
+              </label>
+              <input
+                id="github_token"
+                style={inputStyle}
+                type="password"
+                autoComplete="off"
+                value={form.github_token}
+                onChange={(e) => updateField("github_token", e.target.value)}
+                placeholder={
+                  context.github_token_hint.masked
+                    ? `${context.github_token_hint.masked} (leave blank to keep)`
+                    : "enables PR / issue lookups"
+                }
+              />
+            </div>
             <div style={rowStyle}>
               <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  fontSize: 12,
-                }}
+                style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}
               >
                 <input
                   type="checkbox"
@@ -465,7 +778,6 @@ export function Setup({ clientRef }: Props): JSX.Element {
                 </select>
               </div>
             </div>
-
             <div style={{ ...rowStyle, gridTemplateColumns: "1fr 1fr 1fr" }}>
               <div>
                 <label style={labelStyle} htmlFor="t_auto">
@@ -475,9 +787,7 @@ export function Setup({ clientRef }: Props): JSX.Element {
                   id="t_auto"
                   style={inputStyle}
                   value={form.threshold_auto}
-                  onChange={(e) =>
-                    updateField("threshold_auto", e.target.value)
-                  }
+                  onChange={(e) => updateField("threshold_auto", e.target.value)}
                   placeholder="0.85"
                 />
               </div>
@@ -489,9 +799,7 @@ export function Setup({ clientRef }: Props): JSX.Element {
                   id="t_low"
                   style={inputStyle}
                   value={form.threshold_low}
-                  onChange={(e) =>
-                    updateField("threshold_low", e.target.value)
-                  }
+                  onChange={(e) => updateField("threshold_low", e.target.value)}
                   placeholder="0.30"
                 />
               </div>
@@ -503,22 +811,14 @@ export function Setup({ clientRef }: Props): JSX.Element {
                   id="t_high"
                   style={inputStyle}
                   value={form.threshold_high}
-                  onChange={(e) =>
-                    updateField("threshold_high", e.target.value)
-                  }
+                  onChange={(e) => updateField("threshold_high", e.target.value)}
                   placeholder="0.60"
                 />
               </div>
             </div>
-
             {showForksProfile && (
               <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  fontSize: 12,
-                }}
+                style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}
               >
                 <input
                   type="checkbox"

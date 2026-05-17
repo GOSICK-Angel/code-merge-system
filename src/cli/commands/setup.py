@@ -41,12 +41,101 @@ from src.cli.paths import (
 )
 from src.models.config import MergeConfig
 from src.models.setup import (
-    ApiKeyHint,
+    ApiKeyHintSource,
+    ProviderConfig,
+    ProviderName,
     SetupContext,
     SetupPayload,
 )
 
 console = Console()
+
+
+# --- Provider / agent inventory --------------------------------------------
+
+# Ordered list of agent roles the orchestrator drives. The setup form
+# renders one row per entry under AGENT OVERRIDES so the user can opt
+# any of them off the default provider. Keep in sync with
+# ``MergeConfig.agents`` field names.
+AGENT_INVENTORY: list[dict[str, str]] = [
+    {"name": "planner", "blurb": "produces the merge plan"},
+    {"name": "planner_judge", "blurb": "reviews / negotiates the plan"},
+    {"name": "conflict_analyst", "blurb": "analyses conflict semantics"},
+    {"name": "executor", "blurb": "applies patches"},
+    {"name": "judge", "blurb": "post-merge verdict"},
+    {"name": "human_interface", "blurb": "summarises human prompts"},
+]
+
+PROVIDER_API_KEY_ENV: dict[ProviderName, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+PROVIDER_BASE_URL_ENV: dict[ProviderName, str] = {
+    "anthropic": "ANTHROPIC_BASE_URL",
+    "openai": "OPENAI_BASE_URL",
+}
+
+# Suggested model dropdown source for each provider — populated into
+# ``SetupContext.provider_recommended_models``. Users can also type a
+# custom model name; the resolver doesn't validate against this list.
+PROVIDER_RECOMMENDED_MODELS: dict[ProviderName, list[str]] = {
+    "anthropic": [
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001",
+    ],
+    "openai": [
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-4o",
+    ],
+}
+
+# Built-in (provider, agent_name) → model fallback used when an agent's
+# ``AgentChoice`` doesn't specify a model and the provider's
+# ``default_model`` is also empty. Lets ``human_interface`` quietly pick
+# Haiku on Anthropic without forcing the user to fill model boxes for
+# every agent.
+DEFAULT_AGENT_MODELS: dict[tuple[ProviderName, str], str] = {
+    ("anthropic", "planner"): "claude-opus-4-6",
+    ("anthropic", "planner_judge"): "claude-opus-4-6",
+    ("anthropic", "conflict_analyst"): "claude-opus-4-6",
+    ("anthropic", "executor"): "claude-opus-4-6",
+    ("anthropic", "judge"): "claude-opus-4-6",
+    ("anthropic", "human_interface"): "claude-haiku-4-5-20251001",
+    ("openai", "planner"): "gpt-5.4",
+    ("openai", "planner_judge"): "gpt-5.4",
+    ("openai", "conflict_analyst"): "gpt-5.4",
+    ("openai", "executor"): "gpt-5.4",
+    ("openai", "judge"): "gpt-5.4",
+    ("openai", "human_interface"): "gpt-5.4-mini",
+}
+
+# Agents whose existing config block carries a stable ``temperature`` —
+# preserved across the new provider/model selection so the resolver
+# doesn't silently drop tuning that lived in the old hardcoded block.
+AGENT_TEMPERATURE: dict[str, float] = {
+    "executor": 0.1,
+    "judge": 0.1,
+}
+
+
+def _resolve_agent_model(
+    provider: ProviderName, agent: str, provider_default: str
+) -> str:
+    """Pick the model for one (provider, agent) cell.
+
+    Resolution order: explicit choice handled by caller → provider
+    ``default_model`` → built-in (provider, agent) table → first entry
+    in ``PROVIDER_RECOMMENDED_MODELS`` as last resort.
+    """
+    if provider_default:
+        return provider_default
+    table_model = DEFAULT_AGENT_MODELS.get((provider, agent))
+    if table_model:
+        return table_model
+    return PROVIDER_RECOMMENDED_MODELS[provider][0]
 
 
 def _auto_detect_fork_ref(repo_path: str) -> str:
@@ -67,15 +156,56 @@ def _auto_detect_fork_ref(repo_path: str) -> str:
     return "origin/main"
 
 
+def _build_agents_block(payload: SetupPayload) -> dict[str, dict[str, Any]]:
+    """Translate per-agent provider/model choices into the config.yaml block.
+
+    Each agent in ``AGENT_INVENTORY`` lands as one entry. Resolution
+    per agent: ``payload.agent_choices[name]`` if present, else the
+    payload's ``default_provider`` paired with that provider's
+    ``default_model`` (or the built-in role default if empty). The
+    ``api_key_env`` always points at the canonical env var for the
+    chosen provider so the LLM client picks up keys regardless of
+    whether the user pasted one into the form or had it on disk.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    default_provider = payload.default_provider
+    assert default_provider is not None, "payload validator guarantees this"
+
+    for entry in AGENT_INVENTORY:
+        name = entry["name"]
+        choice = payload.agent_choices.get(name)
+        if choice is not None:
+            provider = choice.provider
+            override_model = choice.model
+        else:
+            provider = default_provider
+            override_model = ""
+
+        provider_default = (
+            payload.anthropic.default_model
+            if provider == "anthropic"
+            else payload.openai.default_model
+        )
+        model = override_model or _resolve_agent_model(provider, name, provider_default)
+
+        block: dict[str, Any] = {
+            "provider": provider,
+            "model": model,
+            "api_key_env": PROVIDER_API_KEY_ENV[provider],
+        }
+        if name in AGENT_TEMPERATURE:
+            block["temperature"] = AGENT_TEMPERATURE[name]
+        out[name] = block
+    return out
+
+
 def _default_config_data(payload: SetupPayload, repo_path: str) -> dict[str, Any]:
     """Build the ``.merge/config.yaml`` dict from a validated payload.
 
-    Mirrors the literal block previously inlined in ``_interactive_setup``
-    so the wizard and the Web UI / ``--ci`` fallback all produce
-    byte-identical yaml. ``thresholds`` here holds the *defaults*; the
-    caller layers ``payload.thresholds`` overrides on top after global
-    defaults are merged in (otherwise the global defaults would silently
-    beat a user-supplied override).
+    ``thresholds`` here holds the *defaults*; the caller layers
+    ``payload.thresholds`` overrides on top after global defaults are
+    merged in (otherwise the global defaults would silently beat a
+    user-supplied override).
     """
     return {
         "upstream_ref": payload.target_branch,
@@ -86,40 +216,7 @@ def _default_config_data(payload: SetupPayload, repo_path: str) -> dict[str, Any
         "project_context": payload.project_context,
         "max_files_per_run": 500,
         "max_plan_revision_rounds": 2,
-        "agents": {
-            "planner": {
-                "provider": "anthropic",
-                "model": "claude-opus-4-6",
-                "api_key_env": "ANTHROPIC_API_KEY",
-            },
-            "planner_judge": {
-                "provider": "openai",
-                "model": "gpt-5.4",
-                "api_key_env": "OPENAI_API_KEY",
-            },
-            "conflict_analyst": {
-                "provider": "anthropic",
-                "model": "claude-opus-4-6",
-                "api_key_env": "ANTHROPIC_API_KEY",
-            },
-            "executor": {
-                "provider": "openai",
-                "model": "gpt-5.4",
-                "temperature": 0.1,
-                "api_key_env": "OPENAI_API_KEY",
-            },
-            "judge": {
-                "provider": "anthropic",
-                "model": "claude-opus-4-6",
-                "temperature": 0.1,
-                "api_key_env": "ANTHROPIC_API_KEY",
-            },
-            "human_interface": {
-                "provider": "anthropic",
-                "model": "claude-haiku-4-5-20251001",
-                "api_key_env": "ANTHROPIC_API_KEY",
-            },
-        },
+        "agents": _build_agents_block(payload),
         "thresholds": {
             "auto_merge_confidence": 0.85,
             "human_escalation": 0.60,
@@ -131,6 +228,33 @@ def _default_config_data(payload: SetupPayload, repo_path: str) -> dict[str, Any
             "formats": ["json", "markdown"],
         },
     }
+
+
+def _collect_env_writes(payload: SetupPayload) -> dict[str, str]:
+    """Collect the per-provider env vars to merge into ``.merge/.env``.
+
+    Only writes keys the user actually supplied in this submit (blank
+    fields mean "keep whatever is on disk / shell"). Includes
+    ``*_BASE_URL`` when set so enterprise gateway routing survives a
+    reconfigure, and ``GITHUB_TOKEN`` when supplied. Disabled providers
+    contribute nothing — the user explicitly turned them off, so we
+    don't leave their old key around to confuse the agent selection.
+    """
+    out: dict[str, str] = {}
+    providers: list[tuple[ProviderName, ProviderConfig]] = [
+        ("anthropic", payload.anthropic),
+        ("openai", payload.openai),
+    ]
+    for provider, cfg in providers:
+        if not cfg.enabled:
+            continue
+        if cfg.api_key:
+            out[PROVIDER_API_KEY_ENV[provider]] = cfg.api_key
+        if cfg.base_url:
+            out[PROVIDER_BASE_URL_ENV[provider]] = cfg.base_url
+    if payload.github_token:
+        out["GITHUB_TOKEN"] = payload.github_token
+    return out
 
 
 def apply_setup_payload(payload: SetupPayload, repo_path: str = ".") -> MergeConfig:
@@ -147,10 +271,14 @@ def apply_setup_payload(payload: SetupPayload, repo_path: str = ".") -> MergeCon
     """
     ensure_merge_dir(repo_path)
 
-    if payload.api_keys:
+    env_writes = _collect_env_writes(payload)
+    if env_writes:
         env_path = get_project_merge_dir(repo_path) / ".env"
-        write_env_file(env_path, payload.api_keys)
-        for k, v in payload.api_keys.items():
+        write_env_file(env_path, env_writes)
+        for k, v in env_writes.items():
+            # ``setdefault`` not ``[k] = v`` so a freshly supplied key
+            # doesn't clobber an existing shell env var (the run-time
+            # priority chain is shell > project_env > global_env).
             os.environ.setdefault(k, v)
 
     config_data = _default_config_data(payload, repo_path)
@@ -166,7 +294,7 @@ def apply_setup_payload(payload: SetupPayload, repo_path: str = ".") -> MergeCon
         if explicit:
             config_data.setdefault("thresholds", {}).update(explicit)
 
-    if "GITHUB_TOKEN" in payload.api_keys:
+    if payload.github_token:
         config_data["github"] = {"enabled": True, "token_env": "GITHUB_TOKEN"}
 
     config_path = get_config_path(repo_path)
@@ -188,7 +316,11 @@ def detect_setup_context(repo_path: str = ".") -> SetupContext:
     """
     current_branch = _auto_detect_fork_ref(repo_path)
     suggested_target = _detect_upstream_default(repo_path)
-    api_key_hints = _build_api_key_hints(repo_path)
+    anthropic_hint = _api_key_hint("ANTHROPIC_API_KEY", repo_path)
+    openai_hint = _api_key_hint("OPENAI_API_KEY", repo_path)
+    github_hint = _api_key_hint("GITHUB_TOKEN", repo_path)
+    anthropic_base = _resolve_env_value("ANTHROPIC_BASE_URL", repo_path)
+    openai_base = _resolve_env_value("OPENAI_BASE_URL", repo_path)
 
     has_existing_config = get_config_path(repo_path).exists()
     existing_config_summary: dict[str, Any] | None = None
@@ -201,6 +333,10 @@ def detect_setup_context(repo_path: str = ".") -> SetupContext:
                     "fork_ref": raw.get("fork_ref"),
                     "project_context": raw.get("project_context", ""),
                     "thresholds": raw.get("thresholds", {}),
+                    # Surface the existing per-agent provider/model so
+                    # the form's AGENT OVERRIDES table can pre-fill on
+                    # reconfigure runs.
+                    "agents": raw.get("agents", {}),
                 }
         except Exception:
             existing_config_summary = None
@@ -210,7 +346,15 @@ def detect_setup_context(repo_path: str = ".") -> SetupContext:
     return SetupContext(
         current_branch=current_branch,
         suggested_target=suggested_target,
-        api_key_hints=api_key_hints,
+        anthropic_key_hint=anthropic_hint,
+        openai_key_hint=openai_hint,
+        github_token_hint=github_hint,
+        anthropic_base_url=anthropic_base,
+        openai_base_url=openai_base,
+        provider_recommended_models={
+            k: list(v) for k, v in PROVIDER_RECOMMENDED_MODELS.items()
+        },
+        agent_inventory=[dict(entry) for entry in AGENT_INVENTORY],
         fork_divergence_count=divergence,
         has_existing_config=has_existing_config,
         existing_config_summary=existing_config_summary,
@@ -222,25 +366,48 @@ def build_default_payload(repo_path: str = ".") -> SetupPayload:
     """Synthesise a SetupPayload for ``merge --ci`` first-run.
 
     Used when the user runs ``merge --ci`` and no ``.merge/config.yaml``
-    exists yet: we cannot prompt, so we pick safe defaults from git +
-    env vars and let ``apply_setup_payload`` write them. The caller is
-    expected to print the resulting config path so the operator can
-    review/tweak before the next run.
+    exists yet: we cannot prompt, so we pick safe defaults from env
+    vars + git. Whichever provider has an API key in the env gets
+    enabled; if both are present we pick ``anthropic`` as
+    ``default_provider``. If neither is present we still enable
+    ``anthropic`` so ``apply_setup_payload`` writes a runnable
+    config — the operator gets a clear error from the LLM client on
+    the next run instead of a confusing setup failure.
     """
     current_branch = _auto_detect_fork_ref(repo_path)
     suggested_target = _detect_upstream_default(repo_path)
 
-    api_keys: dict[str, str] = {}
-    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"):
-        val = os.environ.get(name)
-        if val:
-            api_keys[name] = val
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+
+    has_anthropic = bool(anthropic_key)
+    has_openai = bool(openai_key)
+    if not has_anthropic and not has_openai:
+        # Neither key in env — default to enabling anthropic so the
+        # payload validates and we produce a config skeleton the user
+        # can fix up.
+        has_anthropic = True
+
+    default_provider: ProviderName = "anthropic" if has_anthropic else "openai"
 
     return SetupPayload(
         target_branch=suggested_target,
         fork_ref=current_branch,
         project_context="",
-        api_keys=api_keys,
+        anthropic=ProviderConfig(
+            enabled=has_anthropic,
+            api_key=anthropic_key,
+            base_url=os.environ.get("ANTHROPIC_BASE_URL") or None,
+        ),
+        openai=ProviderConfig(
+            enabled=has_openai,
+            api_key=openai_key,
+            base_url=os.environ.get("OPENAI_BASE_URL") or None,
+        ),
+        github_token=github_token,
+        default_provider=default_provider,
+        agent_choices={},
         thresholds=None,
         dry_run=False,
         workflow=None,
@@ -277,49 +444,54 @@ def _detect_upstream_default(repo_path: str) -> str:
     return "origin/main"
 
 
-def _build_api_key_hints(repo_path: str) -> list[ApiKeyHint]:
-    """Return a masked hint per known API key env var.
-
-    Priority for the ``source`` label matches ``_resolve_api_keys``:
-    shell env beats project ``.env`` beats global ``.env``. The
-    masked value is built from whichever wins so the UI can show the
-    same string the run will actually pick up.
-    """
+def _resolved_env_chain(repo_path: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Read project + global ``.env`` files once for ``_api_key_hint`` reuse."""
     global_env = get_global_env_path()
     global_entries = read_env_file(global_env) if global_env.exists() else {}
 
     project_env = get_project_merge_dir(repo_path) / ".env"
     project_entries = read_env_file(project_env) if project_env.exists() else {}
+    return project_entries, global_entries
 
-    hints: list[ApiKeyHint] = []
-    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"):
-        if os.environ.get(name):
-            hints.append(
-                ApiKeyHint(
-                    name=name,
-                    masked=_mask_key(os.environ[name]),
-                    source="shell",
-                )
-            )
-        elif name in project_entries:
-            hints.append(
-                ApiKeyHint(
-                    name=name,
-                    masked=_mask_key(project_entries[name]),
-                    source="project_env",
-                )
-            )
-        elif name in global_entries:
-            hints.append(
-                ApiKeyHint(
-                    name=name,
-                    masked=_mask_key(global_entries[name]),
-                    source="global_env",
-                )
-            )
-        else:
-            hints.append(ApiKeyHint(name=name, masked="", source=""))
-    return hints
+
+def _api_key_hint(name: str, repo_path: str) -> ApiKeyHintSource:
+    """Return one masked-key hint with the source label.
+
+    Priority: shell env > project ``.env`` > global ``.env``. Identical
+    to the run-time loader chain so the UI shows whichever value the
+    run will actually pick up.
+    """
+    project_entries, global_entries = _resolved_env_chain(repo_path)
+    if os.environ.get(name):
+        return ApiKeyHintSource(
+            name=name, masked=_mask_key(os.environ[name]), source="shell"
+        )
+    if name in project_entries:
+        return ApiKeyHintSource(
+            name=name, masked=_mask_key(project_entries[name]), source="project_env"
+        )
+    if name in global_entries:
+        return ApiKeyHintSource(
+            name=name, masked=_mask_key(global_entries[name]), source="global_env"
+        )
+    return ApiKeyHintSource(name=name, masked="", source="")
+
+
+def _resolve_env_value(name: str, repo_path: str) -> str | None:
+    """Look up the resolved value of a non-key env var (e.g. ``*_BASE_URL``).
+
+    Same priority chain as ``_api_key_hint`` but returns the literal
+    string so the form can pre-fill the input box. Used to round-trip
+    ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL`` through Setup.
+    """
+    if os.environ.get(name):
+        return os.environ[name]
+    project_entries, global_entries = _resolved_env_chain(repo_path)
+    if name in project_entries:
+        return project_entries[name]
+    if name in global_entries:
+        return global_entries[name]
+    return None
 
 
 def _count_fork_deleted_files(upstream_ref: str, fork_ref: str, repo_path: str) -> int:
