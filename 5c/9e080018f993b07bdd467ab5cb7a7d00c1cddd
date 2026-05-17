@@ -1,0 +1,43 @@
+web/src/ws/useSetup.ts
+  bfa0b1c4db6dab39 1-63
+web/src/views/Setup.test.tsx
+  bfa0b1c4db6dab39 1-196
+web/src/views/Setup.tsx
+  bfa0b1c4db6dab39 1-563
+web/src/ws/useWsClient.ts
+  bfa0b1c4db6dab39 24-26,48-68,77-86
+web/src/components/AppShell.tsx
+  bfa0b1c4db6dab39 253,365
+web/src/lib/classifyView.ts
+  bfa0b1c4db6dab39 4,11-12,38,40-44
+web/src/types/state.ts
+  bfa0b1c4db6dab39 305-359
+web/src/ws/messages.ts
+  bfa0b1c4db6dab39 1-8,18-24,68-70
+web/src/store/runStore.ts
+  bfa0b1c4db6dab39 5-7,9,14-15,18,22-25,32-35,40-44,48-51,53-56,69-81
+web/src/lib/classifyView.test.ts
+  bfa0b1c4db6dab39 29-35
+web/src/App.tsx
+  bfa0b1c4db6dab39 11,17,20,41
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.14",
+  "base_commit_sha": "5c9e080018f993b07bdd467ab5cb7a7d00c1cddd",
+  "prompts": {
+    "bfa0b1c4db6dab39": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4f43589f-86cf-488b-aaef-1dfc27e41326",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "Angel <heanqi@cvte.com>",
+      "messages": [],
+      "total_additions": 992,
+      "total_deletions": 5,
+      "accepted_lines": 992,
+      "overriden_lines": 0
+    }
+  }
+}
