@@ -100,6 +100,39 @@ AGENT_TEMPERATURE: dict[str, float] = {
     "judge": 0.1,
 }
 
+# UI-side pre-fill hints for the AGENT OVERRIDES table. Maps
+# ``(provider, agent_name)`` to the model the form should pick when
+# pre-populating that row. NOT a runtime fallback — the resolver still
+# uses ``default_provider.models[0]`` for unassigned agents. This
+# table only tells the UI "if both opus and haiku are configured for
+# Anthropic, prefer haiku for human_interface". The UI only consults
+# the hint when the recommended model actually appears in the
+# configured ``provider.models`` list; otherwise it falls back to
+# ``models[0]``.
+RECOMMENDED_AGENT_MODELS: dict[tuple[ProviderName, str], str] = {
+    ("anthropic", "planner"): "claude-opus-4-7",
+    ("anthropic", "planner_judge"): "claude-opus-4-7",
+    ("anthropic", "conflict_analyst"): "claude-opus-4-7",
+    ("anthropic", "executor"): "claude-opus-4-7",
+    ("anthropic", "judge"): "claude-opus-4-7",
+    ("anthropic", "human_interface"): "claude-haiku-4-5-20251001",
+    ("openai", "planner"): "gpt-5.4",
+    ("openai", "planner_judge"): "gpt-5.4",
+    ("openai", "conflict_analyst"): "gpt-5.4",
+    ("openai", "executor"): "gpt-5.4",
+    ("openai", "judge"): "gpt-5.4",
+    ("openai", "human_interface"): "gpt-5.4-mini",
+}
+
+
+def _build_recommended_agent_models() -> dict[str, dict[str, str]]:
+    """Flatten ``RECOMMENDED_AGENT_MODELS`` into the dict-of-dicts shape
+    the SetupContext exposes to the UI."""
+    out: dict[str, dict[str, str]] = {}
+    for (provider, agent), model in RECOMMENDED_AGENT_MODELS.items():
+        out.setdefault(provider, {})[agent] = model
+    return out
+
 
 def _auto_detect_fork_ref(repo_path: str) -> str:
     """Return the current git branch name, falling back to 'origin/main'."""
@@ -317,6 +350,7 @@ def detect_setup_context(repo_path: str = ".") -> SetupContext:
             k: list(v) for k, v in PROVIDER_RECOMMENDED_MODELS.items()
         },
         agent_inventory=[dict(entry) for entry in AGENT_INVENTORY],
+        recommended_agent_models=_build_recommended_agent_models(),
         fork_divergence_count=divergence,
         has_existing_config=has_existing_config,
         existing_config_summary=existing_config_summary,

@@ -34,8 +34,11 @@ interface ProviderFormState {
 }
 
 interface AgentRowState {
-  // "" means "inherit default_provider" (no agent_choices entry sent).
-  provider: ProviderName | "";
+  // Every row always carries an explicit (provider, model). The form
+  // pre-fills using ``recommended_agent_models[provider][agent]`` when
+  // available, falling back to ``provider.models[0]``. No "(default)"
+  // option — the user always sees what each agent will run.
+  provider: ProviderName;
   model: string;
 }
 
@@ -104,6 +107,21 @@ const PROVIDER_LABEL: Record<ProviderName, string> = {
   openai: "OpenAI",
 };
 
+function recommendedModelFor(
+  ctx: SetupContext,
+  provider: ProviderName,
+  agentName: string,
+  availableModels: string[],
+): string {
+  // Prefer the (provider, agent) recommendation when it's actually in
+  // the configured model list — otherwise the dropdown wouldn't be
+  // able to show it. Falls back to models[0] for a sane default.
+  const recommended = ctx.recommended_agent_models?.[provider]?.[agentName];
+  if (recommended && availableModels.includes(recommended)) return recommended;
+  return availableModels[0] ?? "";
+}
+
+
 function deriveDefaults(ctx: SetupContext): FormState {
   const summary = ctx.existing_config_summary ?? {};
   const target =
@@ -145,27 +163,71 @@ function deriveDefaults(ctx: SetupContext): FormState {
     models_text: recommendedOpenai.join("\n"),
   };
 
-  // If the existing config carries per-agent provider blocks, seed the
-  // AGENT OVERRIDES table so reconfigure shows the user's existing choices.
+  // Compute the default provider first — every agent row needs an
+  // explicit (provider, model) so we need to know which provider to
+  // pre-fill against. If both are enabled, anthropic wins by default
+  // (user can switch via the DEFAULT PROVIDER radio).
+  let defaultProvider: ProviderName | "" = "";
+  if (anthropic.enabled && !openai.enabled) defaultProvider = "anthropic";
+  else if (openai.enabled && !anthropic.enabled) defaultProvider = "openai";
+  else if (anthropic.enabled && openai.enabled) defaultProvider = "anthropic";
+
+  // Existing config (reconfigure flow) — use whatever the on-disk
+  // config has for each agent. Otherwise pre-fill every row with
+  // (default_provider, recommended_or_models[0]).
   const existingAgents =
     summary.agents && typeof summary.agents === "object"
       ? (summary.agents as Record<string, { provider?: string; model?: string }>)
       : {};
   const agents: Record<string, AgentRowState> = {};
+  const anthropicModels =
+    ctx.provider_recommended_models.anthropic ?? [];
+  const openaiModels = ctx.provider_recommended_models.openai ?? [];
   for (const entry of ctx.agent_inventory) {
     const existing = existingAgents[entry.name];
-    const provider = existing?.provider;
-    if (provider === "anthropic" || provider === "openai") {
-      agents[entry.name] = { provider, model: existing?.model ?? "" };
+    const existingProvider =
+      existing?.provider === "anthropic" || existing?.provider === "openai"
+        ? existing.provider
+        : null;
+    if (existingProvider) {
+      agents[entry.name] = {
+        provider: existingProvider,
+        model: existing?.model ?? "",
+      };
+      continue;
+    }
+    // No existing config for this agent — fall back to defaults.
+    if (defaultProvider === "") {
+      // Form has no enabled provider yet; the agent rows will become
+      // valid as soon as the user enables one (agent dispatcher in
+      // updateProvider re-derives). Use anthropic as a placeholder
+      // shape so the row object always has the right type.
+      const placeholderModels = anthropicModels.length
+        ? anthropicModels
+        : openaiModels;
+      agents[entry.name] = {
+        provider: anthropicModels.length ? "anthropic" : "openai",
+        model: recommendedModelFor(
+          ctx,
+          anthropicModels.length ? "anthropic" : "openai",
+          entry.name,
+          placeholderModels,
+        ),
+      };
     } else {
-      agents[entry.name] = { provider: "", model: "" };
+      const availableModels =
+        defaultProvider === "anthropic" ? anthropicModels : openaiModels;
+      agents[entry.name] = {
+        provider: defaultProvider,
+        model: recommendedModelFor(
+          ctx,
+          defaultProvider,
+          entry.name,
+          availableModels,
+        ),
+      };
     }
   }
-
-  let defaultProvider: ProviderName | "" = "";
-  if (anthropic.enabled && !openai.enabled) defaultProvider = "anthropic";
-  else if (openai.enabled && !anthropic.enabled) defaultProvider = "openai";
-  else if (anthropic.enabled && openai.enabled) defaultProvider = "anthropic";
 
   return {
     target_branch: target,
@@ -225,10 +287,13 @@ function parseModels(text: string): string[] {
 }
 
 function buildPayload(form: FormState): SetupPayload {
+  // Every agent ships with an explicit (provider, model) — there's no
+  // "inherit" path on the wire any more. The backend resolver still
+  // accepts a missing agent and falls back to default_provider for
+  // backwards compatibility, but the new UI always populates.
   const agent_choices: Record<string, AgentChoice> = {};
   for (const [name, row] of Object.entries(form.agents)) {
-    if (row.provider === "") continue; // inherit default
-    if (!row.model) continue; // need an explicit model to override
+    if (!row.model) continue; // defensive: don't ship rows with empty model
     agent_choices[name] = { provider: row.provider, model: row.model };
   }
   return {
@@ -258,10 +323,9 @@ function buildPayload(form: FormState): SetupPayload {
   };
 }
 
-function modelsFor(form: FormState, provider: ProviderName | ""): string[] {
+function modelsFor(form: FormState, provider: ProviderName): string[] {
   if (provider === "anthropic") return parseModels(form.anthropic.models_text);
-  if (provider === "openai") return parseModels(form.openai.models_text);
-  return [];
+  return parseModels(form.openai.models_text);
 }
 
 function validate(form: FormState, ctx: SetupContext): string | null {
@@ -311,13 +375,12 @@ function validate(form: FormState, ctx: SetupContext): string | null {
     return `Default provider "${form.default_provider}" is not enabled.`;
   }
   for (const [name, row] of Object.entries(form.agents)) {
-    if (row.provider === "") continue;
     if (!enabledList.includes(row.provider)) {
       return `Agent "${name}" is assigned to ${row.provider}, which is not enabled.`;
     }
     const available = modelsFor(form, row.provider);
-    if (row.model && !available.includes(row.model)) {
-      return `Agent "${name}" uses model "${row.model}" which isn't in ${row.provider}.models.`;
+    if (!row.model || !available.includes(row.model)) {
+      return `Agent "${name}" must pick a model from ${row.provider}.models.`;
     }
   }
   for (const [key, raw] of [
@@ -511,11 +574,67 @@ export function Setup({ clientRef }: Props): JSX.Element {
         if (next.enabled && merged.default_provider === "") {
           merged.default_provider = which;
         }
+        // Repoint any agent rows assigned to the now-disabled provider
+        // so the form doesn't fall into an unsubmittable state. We
+        // only migrate when there's a single surviving enabled
+        // provider; if both are still enabled the rows are fine.
+        if (!next.enabled) {
+          const other: ProviderName = which === "anthropic" ? "openai" : "anthropic";
+          const otherEnabled = merged[other].enabled;
+          if (otherEnabled) {
+            const otherModels = parseModels(merged[other].models_text);
+            if (otherModels.length > 0 && context) {
+              const repointed: Record<string, AgentRowState> = {};
+              for (const [name, row] of Object.entries(merged.agents)) {
+                if (row.provider === which) {
+                  repointed[name] = {
+                    provider: other,
+                    model: recommendedModelFor(
+                      context,
+                      other,
+                      name,
+                      otherModels,
+                    ),
+                  };
+                } else {
+                  repointed[name] = row;
+                }
+              }
+              merged.agents = repointed;
+            }
+          }
+        }
         return merged;
       });
     },
-    [],
+    [context],
   );
+
+  // Re-derive every agent row from current providers / default — used
+  // by the AGENT OVERRIDES "RESET TO DEFAULTS" button so the user can
+  // undo manual edits in one click.
+  const resetAgentsToDefaults = useCallback(() => {
+    if (!context) return;
+    setForm((prev) => {
+      if (!prev) return prev;
+      if (prev.default_provider === "") return prev;
+      const provider = prev.default_provider;
+      const available = parseModels(
+        provider === "anthropic"
+          ? prev.anthropic.models_text
+          : prev.openai.models_text,
+      );
+      if (available.length === 0) return prev;
+      const fresh: Record<string, AgentRowState> = {};
+      for (const entry of context.agent_inventory) {
+        fresh[entry.name] = {
+          provider,
+          model: recommendedModelFor(context, provider, entry.name, available),
+        };
+      }
+      return { ...prev, agents: fresh };
+    });
+  }, [context]);
 
   const updateAgent = useCallback((name: string, next: AgentRowState) => {
     setForm((prev) =>
@@ -706,9 +825,23 @@ export function Setup({ clientRef }: Props): JSX.Element {
           </span>
         }
         hint={
-          agentsOpen
-            ? "per-agent provider + model (blank = inherit default)"
-            : "click to expand"
+          agentsOpen ? (
+            <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>per-agent provider + model</span>
+              <button
+                type="button"
+                className="btn ghost"
+                style={{ fontSize: 9, padding: "2px 6px" }}
+                onClick={resetAgentsToDefaults}
+                disabled={submitting}
+                title="restore every row to the recommended (provider, model) defaults"
+              >
+                reset to defaults
+              </button>
+            </span>
+          ) : (
+            "click to expand"
+          )
         }
       >
         {agentsOpen && (
@@ -717,24 +850,13 @@ export function Setup({ clientRef }: Props): JSX.Element {
             data-testid="agent-overrides"
           >
             {context.agent_inventory.map((entry) => {
-              const row = form.agents[entry.name] ?? {
-                provider: "" as const,
-                model: "",
-              };
-              const providerOptions: Array<ProviderName | ""> = [
-                "",
-                ...enabledProviders,
-              ];
-              // Model dropdown source = the configured models for the
-              // picked provider. When provider="(default)" we show the
-              // inherited default model as a disabled hint so the user
-              // can see what they're inheriting without selecting.
+              const row = form.agents[entry.name];
+              if (!row) return null;
+              // Both dropdowns are always populated. Provider list =
+              // enabled providers (no "(default)" placeholder). Model
+              // list = whatever models the chosen provider currently
+              // has configured.
               const availableModels = modelsFor(form, row.provider);
-              const defaultProviderModels =
-                form.default_provider === ""
-                  ? []
-                  : modelsFor(form, form.default_provider);
-              const inheritedDefault = defaultProviderModels[0] ?? "";
               return (
                 <div
                   key={entry.name}
@@ -757,62 +879,45 @@ export function Setup({ clientRef }: Props): JSX.Element {
                     style={inputStyle}
                     value={row.provider}
                     onChange={(e) => {
-                      const provider = e.target.value as ProviderName | "";
-                      // When switching provider, pick the first
-                      // available model so the row is immediately
-                      // submittable; switching back to (default)
-                      // clears the model so we don't send a stale
-                      // override.
-                      const nextModel =
-                        provider === ""
-                          ? ""
-                          : modelsFor(form, provider)[0] ?? "";
-                      updateAgent(entry.name, {
+                      const provider = e.target.value as ProviderName;
+                      // When switching provider, snap the model to
+                      // the (provider, agent) recommendation so the
+                      // row stays consistent without an extra click.
+                      const nextModels = modelsFor(form, provider);
+                      const nextModel = recommendedModelFor(
+                        context,
                         provider,
-                        model: nextModel,
-                      });
+                        entry.name,
+                        nextModels,
+                      );
+                      updateAgent(entry.name, { provider, model: nextModel });
                     }}
                   >
-                    {providerOptions.map((p) => (
-                      <option key={p || "_default"} value={p}>
-                        {p === "" ? "(default)" : PROVIDER_LABEL[p]}
+                    {enabledProviders.map((p) => (
+                      <option key={p} value={p}>
+                        {PROVIDER_LABEL[p]}
                       </option>
                     ))}
                   </select>
-                  {row.provider === "" ? (
-                    <select
-                      style={inputStyle}
-                      value=""
-                      disabled
-                      title={`inherits ${form.default_provider || "default"}'s first model`}
-                    >
-                      <option value="">
-                        {inheritedDefault
-                          ? `(inherits ${inheritedDefault})`
-                          : "(no default available)"}
+                  <select
+                    style={inputStyle}
+                    value={row.model}
+                    onChange={(e) =>
+                      updateAgent(entry.name, {
+                        ...row,
+                        model: e.target.value,
+                      })
+                    }
+                  >
+                    {availableModels.length === 0 && (
+                      <option value="">(provider has no models)</option>
+                    )}
+                    {availableModels.map((m) => (
+                      <option key={m} value={m}>
+                        {m}
                       </option>
-                    </select>
-                  ) : (
-                    <select
-                      style={inputStyle}
-                      value={row.model}
-                      onChange={(e) =>
-                        updateAgent(entry.name, {
-                          ...row,
-                          model: e.target.value,
-                        })
-                      }
-                    >
-                      {availableModels.length === 0 && (
-                        <option value="">(provider has no models)</option>
-                      )}
-                      {availableModels.map((m) => (
-                        <option key={m} value={m}>
-                          {m}
-                        </option>
-                      ))}
-                    </select>
-                  )}
+                    ))}
+                  </select>
                 </div>
               );
             })}

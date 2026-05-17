@@ -230,3 +230,11 @@ class SetupContext(BaseModel):
     # Source for the AGENT OVERRIDES table — ordered list of agent names
     # with a short blurb describing what each does.
     agent_inventory: list[dict[str, str]] = Field(default_factory=list)
+    # ``(provider, agent_name)`` → recommended model used to pre-fill
+    # the AGENT OVERRIDES table. Example: ``("anthropic",
+    # "human_interface") → "claude-haiku-4-5-20251001"`` so the row
+    # for ``human_interface`` lands on haiku by default when haiku
+    # appears in ``anthropic.models``. UI falls back to
+    # ``provider.models[0]`` when the recommended one isn't in the
+    # configured models list.
+    recommended_agent_models: dict[str, dict[str, str]] = Field(default_factory=dict)

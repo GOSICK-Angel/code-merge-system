@@ -47,6 +47,24 @@ const baseContext: SetupContext = {
     openai: ["gpt-5.4", "gpt-5.4-mini"],
   },
   agent_inventory: baseAgentInventory,
+  recommended_agent_models: {
+    anthropic: {
+      planner: "claude-opus-4-7",
+      planner_judge: "claude-opus-4-7",
+      conflict_analyst: "claude-opus-4-7",
+      executor: "claude-opus-4-7",
+      judge: "claude-opus-4-7",
+      human_interface: "claude-haiku-4-5-20251001",
+    },
+    openai: {
+      planner: "gpt-5.4",
+      planner_judge: "gpt-5.4",
+      conflict_analyst: "gpt-5.4",
+      executor: "gpt-5.4",
+      judge: "gpt-5.4",
+      human_interface: "gpt-5.4-mini",
+    },
+  },
 };
 
 beforeEach(() => {
@@ -135,7 +153,22 @@ describe("Setup — flexible providers", () => {
     // re-enabling later doesn't wipe it; backend validator only
     // requires models for ENABLED providers.
     expect(msg.payload.openai.enabled).toBe(false);
-    expect(msg.payload.agent_choices).toEqual({});
+    // AGENT OVERRIDES always pre-fills every agent explicitly — no
+    // implicit "inherit default" path on the wire any more.
+    expect(Object.keys(msg.payload.agent_choices).sort()).toEqual(
+      baseAgentInventory.map((e) => e.name).sort(),
+    );
+    // Every row pre-populated to (anthropic, recommended-for-agent).
+    // human_interface picks haiku because it's in models and the
+    // (anthropic, human_interface) recommendation points at it.
+    expect(msg.payload.agent_choices.planner).toEqual({
+      provider: "anthropic",
+      model: "claude-opus-4-7",
+    });
+    expect(msg.payload.agent_choices.human_interface).toEqual({
+      provider: "anthropic",
+      model: "claude-haiku-4-5-20251001",
+    });
   });
 
   it("blocks submit when an enabled provider has an empty models list", () => {
@@ -236,7 +269,12 @@ describe("Setup — flexible providers", () => {
       provider: "openai",
       model: "gpt-5.4-mini",
     });
-    expect(msg.payload.agent_choices.planner).toBeUndefined();
+    // Non-overridden rows still ship — they carry the pre-filled
+    // (default_provider, recommended-for-agent) defaults.
+    expect(msg.payload.agent_choices.planner).toEqual({
+      provider: "anthropic",
+      model: "claude-opus-4-7",
+    });
 
     // models lists go through verbatim, parsed from the textarea
     // (pre-filled from ctx.provider_recommended_models).

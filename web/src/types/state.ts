@@ -359,6 +359,10 @@ export interface SetupContext {
   openai_base_url: string | null;
   provider_recommended_models: Record<ProviderName, string[]>;
   agent_inventory: AgentInventoryEntry[];
+  // (provider, agent_name) → recommended model name. UI uses it to
+  // pre-fill the AGENT OVERRIDES table; falls back to provider.models[0]
+  // when the recommended one isn't in the configured models list.
+  recommended_agent_models: Partial<Record<ProviderName, Record<string, string>>>;
 }
 
 export interface ThresholdsPayload {
