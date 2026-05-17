@@ -33,7 +33,7 @@
 | B | `26dc2f0` | fix(eval): bash 3.2 兼容 — run_r2 / run_tier1 用 while-read 替代 mapfile |
 | C | `1048248` | feat(eval): Phase C R3 OpenHands fork-divergence sample (r3-0001) + helper r3 支持 |
 | D | `c08d816` | docs(eval): Phase D §18/§19/§20 + EXECUTION_PLAN status 升级（v1）|
-| D | `<v2-tba>` | feat(eval): Phase D normalize_run_meta adapter — 解锁 13-gate JSON |
+| D | `7b56414` | feat(eval): Phase D normalize_run_meta adapter — 解锁 13-gate JSON |
 
 ---
 
