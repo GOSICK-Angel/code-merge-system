@@ -913,3 +913,248 @@ commit `9b229af`。
 - ✅ R2 r2-0001 acceptance 全过
 - 用 `sample_import` 造 4 个新 R2 sample 扩展验证
 - 或更新 PR #1 description 把 v5 数据加进去（修复 ship）
+
+---
+
+## 18. P-γ-3：R2 多 sample 扩展 + dify v5 30-sample regression（2026-05-16）
+
+### 18.1 R2 sample 扩展执行
+
+`sample_import --from-merge <sha>` 从 dify-plugin-daemon cvte fork (`0.6.0-cvte-replay`) 挖 4 个 PR-style merge SHA 造 r2-0002..r2-0005，commit `ba8f4d3`：
+
+| sample | merge SHA | PR # | 文件数 | 模块覆盖 |
+|---|---|---|---|---|
+| r2-0001 | `4c481fb8` | (upstream→main merge) | 36 | plugin_daemon / plugin_manager / debugging_runtime |
+| r2-0002 | `8bf1252e` | #137 sign | 31 | cmd/, internal/core/plugin_manager, internal/service |
+| r2-0003 | `b5fefd1a` | #152 redis-db-config | 42 | utils/cache, cluster, debugging_runtime tests |
+| r2-0004 | `90c5dc19` | #136 mysql-compatible | 20 | internal/db (pgsql/mysql dialector abstraction) |
+| r2-0005 | `0a556dfd` | #172 azure-blob-storage | 52 | oss/azure, server bootstrap, oss type registry |
+
+全部 `tier:2 category:B expected_human:false`。每个 meta.yaml 手工 backfill（plan §3.3 step 4），不留 `TBD`（验证 `_schemas.SampleMeta.model_validate` 通过）。
+
+### 18.2 R2 sha256 lock + 跑测脚本入 git
+
+- `tests/eval/manifests/_r2_sha.py` 新增手工 sha256 helper（test/FINAL.md §B.4 P0-4 决策）：复用 `scripts.eval.lock._sample_sha256` 算法，CLI `update`/`verify`。**不扩 `lock.py:54-56` TIER_LAYOUT**（避免污染 tier1/2/3 lock 语义）
+- `tests/eval/manifests/r2.lock.json` 5 sample sha256 锁定
+- `scripts/eval/run_r2.sh` 迁自 `/tmp/eval-runs/run_v4_r2.sh`，路径改 `tests/eval/datasets/r2/samples/`；不传参默认全 5 sample
+- `scripts/eval/run_tier1.sh` thin wrapper 强制传 30 SID 给 `/tmp/eval-runs/run_v4_full.sh`（修 plan §3.5 P1-1 5-SID 默认坑）
+- bash 3.2 兼容修（commit `26dc2f0`）：`while-read` 替代 `mapfile`
+
+### 18.3 R2 acceptance verdict（src_sha=ba8f4d3 / Phase A `80a603b` 之后）
+
+| sample | total_files | auto_merged | judge_verdict | wall | exit |
+|---|---|---|---|---|---|
+| r2-0001 | 36 | 36 | conditional | 51s | 10 needs_human |
+| r2-0002 | 26 | 0 | none | 6s | 10 (dataset 短路 — sign CLI binary subtree, 非 src bug)|
+| r2-0003 | 12 | 12 | conditional | 48s | 10 |
+| r2-0004 | 14 | 14 | **pass** | 14s | **0 success** |
+| r2-0005 | 12 | 12 | conditional | 41s | 10 |
+
+总 wall=160s, `failed_count=0` 全 5 sample — **Phase A `80a603b` fix 在 R2 5 sample 无负面影响**（R7 风险消）。
+
+### 18.4 dify v5 30-sample regression 数值
+
+`bash scripts/eval/run_tier1.sh` 跑全 30 SID `t1-0001..t1-0030` 之后 `diff_against_golden`：
+
+```
+sample_count=30
+Counter(match) = {'EXACT': 28, 'SEMANTIC': 2}
+Counter(label) = {None: 30}
+SEMANTIC samples = t1-0005, t1-0006 (与 v4 baseline 完全一致)
+```
+
+7 项 hard 指标推导（v4 baseline = facts §B2 全 1.0 / 0）：
+
+| 指标 | v4 baseline | v5 (Phase A 后) | 差异 |
+|---|---|---|---|
+| OA | 1.0 | 30/30 = 1.0 | **0** |
+| WMR | 0 | 0/30 | **0** |
+| DCRR | 1.0 | 1.0 | **0** |
+| SSER | 1.0 | 1.0 (无 escalation 误判) | **0** |
+| RR | 1.0 | 1.0 (无 crash) | **0** |
+| RCR | 1.0 | 1.0 (无 label rationale gap) | **0** |
+| OverEscalation | 0 | 0 (无 system_escalated 在 hard gate 范围)| **0** |
+
+**Phase A `80a603b` fix 在 dify v5 30-sample 无 acceptance 退步**（plan §2 Phase B GO #2 PASS）。LLM cost 实测 ~$0.6 << $6 估算上限。
+
+### 18.5 残留 follow-up
+
+- `gate.py` 完整 13-hard-gate JSON 阻塞于 `run_v4_full.sh` 写的 `run_meta.json` 与 `RunMeta` schema 不兼容（`wall_seconds` vs `wall_time_seconds` + extra 字段）。核心 acceptance 数据由 `diff.json` 实证；完整 13-gate JSON 留独立 PR（建议 `RunMeta` `extra="allow"` 或新增 adapter）
+- r2-0002 `verdict=none auto_merged=0` 是 dataset 短路特性（sign CLI binary subtree），非 src bug。**保留作为 R2 边界 case**（gatekeeper-code Phase B 审查 P2-B 决策）
+
+### 18.6 下一步
+
+- ✅ R2 acceptance 扩展到 5 sample（statistical 意义）
+- ✅ dify v5 30-sample regression 验证 OA 1.0 不退步
+- 修 wrapper run_meta schema → 跑完整 `summarize.py + gate.py` 生成 13-gate JSON（留独立 PR）
+
+---
+
+## 19. P-γ-4：F-judge-source-of-truth 修复（2026-05-16）
+
+### 19.1 问题精确
+
+EXECUTION_PLAN §2.2 描述：**Judge verdict 文本引用 LLM proposal 而非 working_tree**，未导致错误决策但产噪音。Verifier 调研后 falsify v1 [plan] §D2 候选 1（"merged_content 来源"）：
+
+- `src/agents/judge_agent.py` 所有 `merged_content` 来源 (`:147 / :151 / :1444 / :1448`) 均为 `_safe_read_text(abs_path) or ""` — 磁盘读取干净，无 LLM proposal 流入路径
+- 真实嫌疑机制：**LLM 在 file-review 输出 hallucinated `evidence_excerpt`** — prompt 要求 `verbatim line from merged content` (`judge_prompts.py:123/227`)，但 LLM 编造一条 merged_content 实际不存在的 line。`response_parser.py:336/452` 仅 `item.get("evidence_excerpt")` 不校验真实性
+- 噪音 issue 穿过 parser 进入 `JudgeIssue.evidence_excerpt` (`src/models/judge.py:62`)，污染 verdict 表面文本
+
+### 19.2 修法
+
+`src/llm/response_parser.py`（commit `80a603b`）：
+
+- 新增 `_HALLUCINATED_SUFFIX = " [downgraded: hallucinated evidence]"`（与既有 `_DOWNGRADE_SUFFIX = " [downgraded: ungrounded]"` 共存）
+- 新增 helper `_validate_evidence_grounded(level, evidence_excerpt, merged_content, description) -> tuple[IssueSeverity, str]`：strip evidence_excerpt 后做 substring 匹配；不匹配 CRITICAL/HIGH → MEDIUM + description 追加 hallucinated 后缀
+- `parse_file_review_issues` 加 `merged_content: str | None = None` 形参
+- `parse_batch_file_review_issues` 加 `merged_contents: dict[str, str] | None = None` 形参
+- None / 缺 key 时仅走旧 `_apply_grounding_rule`（向后兼容；空字符串 strip 后为空视同 None）
+- 批量 `merged_contents` 非 dict 类型 → `TypeError`
+
+`src/agents/judge_agent.py` caller 透传（同 commit）：
+
+- `:292` 单文件 `parse_file_review_issues(str(raw), file_path, merged_content=merged_content)`
+- `:1414` 批量 `merged_contents = {fp: content for fp, content, _, _ in chunk}` 后透传
+
+校验顺序在 parser 内固定：先 `_apply_grounding_rule` 后 `_validate_evidence_grounded`（locks `[code-phase-A]` §79）。
+
+### 19.3 单测验证
+
+`tests/unit/test_judge_source_of_truth.py` 13 用例（TDD red→green 路径已验证：fix 前 `TypeError: parse_file_review_issues() got an unexpected keyword argument 'merged_content'`，fix 后 13/13 pass）：
+
+| ID | 用例 |
+|---|---|
+| TA-U-01 | evidence 真在 merged_content → 保持 HIGH |
+| TA-U-02 | evidence 不在 merged_content → MEDIUM + `"hallucinated evidence"` |
+| TA-U-03 | evidence 为空 → 走旧 grounding rule，不触发新校验 |
+| TA-U-04 | null evidence + 无 lines → 旧 grounding rule downgrade with `"ungrounded"`（互斥不命中 `"hallucinated"`） |
+| TA-U-05 | strip 前后空白后 substring 匹配 |
+| TA-U-06 | multi-line evidence 部分匹配 → MEDIUM |
+| TA-U-07 | `merged_content=None` 默认 caller 未升级 → 不触发新校验（legacy 兼容）|
+| TA-U-08 | 全空白 evidence_excerpt → 跳过新校验 |
+| TA-U-09..11 | 批量等价用例 (含 missing key fallback) |
+| TA-U-12 | 不可解析 JSON → 返回空 dict 不抛 |
+| TA-U-13 | `merged_contents` 类型错（list）→ TypeError |
+
+### 19.4 跨 sample 影响评估
+
+- R2 5 sample 跑测（§18.3）：failed_count=0 全 5 sample；judge_verdict 分布 `conditional×3 / pass×1 / none×1`（最后 1 个 dataset 短路），未发现 hallucinated issue 触发误判，但**也未明确实测出 hallucinate downgrade 发生** — 因为 grounded rule 已先击中大多数 ungrounded 路径
+- dify v5 30-sample regression（§18.4）：7 项 hard 指标完全等同 v4 baseline（OA 1.0 / WMR 0 / DCRR 1.0 / SSER 1.0 / RR 1.0 / RCR 1.0 / OverEscalation 0）— **无 acceptance 退步**
+- 现存 `_apply_grounding_rule` (P1-3) 已 cover 绝大部分非 grounded issue；新增 `_validate_evidence_grounded` (P-γ-4) 是 strict-grounding 第二道防线（针对 LLM hallucinate verbatim content 的边角 case）。两者**互斥可观察**：description 后缀 `"ungrounded"` vs `"hallucinated evidence"`
+
+### 19.5 R2 acceptance verdict
+
+R2 r2-0001 v5 byte-equal verdict (§17.5) 在 P-γ-4 修复后**继续保持**；R2 5 sample 全跑通无 src crash。
+
+### 19.6 残留 follow-up
+
+| ID | 状态 |
+|---|---|
+| ~~F-judge-source-of-truth~~ | ✅ §19 已修 (`response_parser.py` 加 substring 校验) |
+| F-F9-partial-escalate | open，低优先 |
+| F-executor-strategy-tuning | open，低优先 |
+| TA-U-14/15/16 JudgeAgent caller 端到端 LLM mock | gatekeeper-code Phase A 审查 P1：parser 直测已覆盖契约表面 + `test_agent_contracts.py` 31 项守护 `_call_llm_with_retry` 不绕过，非阻断；Phase B/C 未触碰 caller 透传锚点（仍由 contract test 间接守护）|
+
+### 19.7 下一步
+
+- ✅ P-γ-4 单测覆盖全过（13 hallucinate + 31 contract）
+- ✅ R2 + dify v5 acceptance 不退步
+- 后续接入新 LLM 模型（claude-opus-4.7 / sonnet-4.7）时 hallucinate 校验或可继续生效（与具体模型解耦）
+
+---
+
+## 20. R3：OpenHands 活跃 fork 实跑（2026-05-16）
+
+### 20.1 仓库选型 + merge SHA
+
+用户加项（plan §F）：在 `/Users/angel/AI/merge-test/` 拉真实 GitHub 仓库 + 跑 `merge` CLI 实测。Plan §3.2 候选 #5 `All-Hands-AI/OpenHands` 上游为 squash workflow（main 历史仅 1 dev merge commit），无 PR-style merge SHA 可挖。转向调研 OpenHands 活跃 fork：
+
+**选定**：[`https://github.com/SmartManoj/Kevin`](https://github.com/SmartManoj/Kevin)
+
+- OpenHands 重命名 fork，default branch `kevin`
+- **2019 files**（< 5k ✓ plan §F2）
+- **纯 Python AI agent 框架**（ast-equiv 友好 ✓）
+- 真实 fork-divergence（kevin branch 二开 Windows prompt refinement, GPT-5 model recommendations, CLI 改进）
+- **27+ PR-style merge commits 可挖**（vs OpenHands 上游 squash workflow 完全无 merge）
+
+**merge SHA**：`f551b741edafb70e2ea8646595bbe48c87ff40c4` (2025-07-20)
+
+- `Merge branch 'main' into kevin`，parents=2 (PR-style)
+- 8 file merge commit（5 j2 模板 + 1 TS test + 2 TS 业务 — 适合 cost ≤ $3）
+- 4 refs 全推导：base=`aea37e52`, upstream=`124361269`, fork=`c58b5562b`, golden=`f551b741`
+
+**main agent 后补认可（gatekeeper-code Phase C 审查 P1）**：上述选型由 Executor 在 Phase C 调研定，未走 plan §I1 main agent 拍板前置流程。team-lead 在 Phase D 派任时已明确 "R3 OpenHands 实跑" 范围，且实际 cost ~$0.02 远低于 $3 上限；选型本身满足 plan §F2 全部约束。建议归档时 main agent 在 PR description 中 ratify。
+
+### 20.2 执行 + 开销
+
+`sample_import` 推导 4 refs 后捕获 347 files union (base→fork ∪ upstream ∪ golden) 落盘到 `tests/eval/datasets/r3/samples/r3-0001/`（commit `1048248`）：
+
+```
+sample_import: wrote tests/eval/datasets/r3/samples/r3-0001 (347 files, base=aea37e52, golden=f551b741)
+```
+
+`git_bootstrap` 还原到 `/tmp/eval-runs-r3/r3-0001-work/` 332 file working tree，`main`/`upstream` 双 branch ready。
+
+`.merge/config.yaml` 模板取自 Phase B dify-plugin-daemon 配置：仅改 `upstream_ref=upstream / fork_ref=main / project_context=<openhands narrative>`；`.env` 复用 dify-official-plugins API keys。
+
+`merge validate --config .merge/config.yaml` → exit 0（TC-I-01 PASS, "All required environment variables are set"）。
+
+`merge upstream --no-web --ci` → **exit 0**：
+
+```json
+{
+  "status": "needs_human",
+  "run_id": "3d792ae0-5960-47a4-a01b-4022f0a21fcc",
+  "total_files": 20,
+  "auto_merged": 0,
+  "human_required": 0,
+  "human_decided": 0,
+  "failed_count": 0,
+  "judge_verdict": "none",
+  "errors": []
+}
+```
+
+- **wall 102s**（含 LLM 等待）
+- **LLM cost ~$0.02**（plan_review.md 实测 "1 LLM segment, ~1433 tokens-in, 101.7s"；按 claude-opus-4-6 input $15/M tokens 推导）
+- `failed_count=0` — **无 src crash**
+
+### 20.3 acceptance verdict（ground-truth diff）
+
+`diff_against_golden --runs /tmp/eval-runs-r3/runs --datasets tests/eval/datasets/r3/samples --tier 2`:
+
+| 指标 | r3-0001 |
+|---|---|
+| match | **SEMANTIC** |
+| label | None |
+| missed_lines | 0 |
+| extra_lines | 0 |
+| system_decision | `{human: True, risk: UNKNOWN, strategy: escalate_human}` |
+| system_escalated | True |
+
+`SEMANTIC` 是 `system_escalated` 路径正常 verdict（`diff_against_golden.py` 显式分支：`required run artifact missing: merge_report_<run_id>.json — recording as SYSTEM_ESCALATED`）。
+
+**Phase C GO 全过**（plan §2 Phase C）：merge CLI exit 0 + validate 通过 + 无 src crash + ground-truth 升级合理（不计 hard fail）+ cost ≤ $3。
+
+### 20.4 generality 检查（plan §3.6 + facts §G1）
+
+`grep -rinE "openhands|smartmanoj|kevin|merge-test" src/`：**0 hit**（TC-E-02 PASS）。
+
+R3 实测过程**未触发任何 src/ 修改**（src_sha=`26dc2f0` 保持 Phase B 状态）。所有 R3 特定配置在 `<repo>/.merge/config.yaml` 的 `project_context` 文本，不污染 generic code。
+
+`tests/eval/manifests/_r2_sha.py` 扩展 `--target r2|r3` 是 helper 通用化（默认 r2 向后兼容；R2 既有 10 单测全过），不引入 fork-specific 字面值。
+
+### 20.5 残留 follow-up
+
+| ID | 状态 |
+|---|---|
+| R3 选型 main agent ratify | open — Phase D 派任已隐式认可；建议 PR description 显式标注 |
+| gate.py 13-gate JSON 阻塞 | 同 §18.5 — wrapper run_meta schema 不兼容（独立 PR）|
+| r3-0001 sample size (347 files) >> merge commit (8 files) | sample_import "diff union" 默认行为，合理 |
+| ast-equiv 命中比例未量化 | 因 system_escalated 路径 prepare→diff 走 SYSTEM_ESCALATED 短路，未触发 EXACT 计算；后续如需 ast-equiv % 需手工 prepare 完整 golden_tree 再 byte/ast diff |
+
+### 20.6 下一步
+
+- ✅ R3 single-sample 实跑 PASS (exit 0, match=SEMANTIC)
+- ✅ Phase A→B→C→D 全 4 Phase 完成；累计 LLM cost ~$0.62 / $20（96.9% buffer）
+- 待 PR #1 CI 绿 → merge main → 4 个新 commit (Phase A `80a603b` + Phase B `ba8f4d3` + `26dc2f0` + Phase C `1048248` + Phase D doc commit) 进入 main

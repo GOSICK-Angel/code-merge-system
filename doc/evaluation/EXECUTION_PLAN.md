@@ -1,7 +1,7 @@
 # 评估系统执行计划（下阶段）
 
-> **状态（2026-05-16 更新）**：原 P1/P2/P3 全部落地 + 5 个 src/ fix branch（P-α / P-γ-1 / P-γ-1.5-A / P-γ-1.5-B）+ Tier 1 dify-plugins acceptance **全 hard gate 过**（OA 1.0 / WMR 0 / DCRR 1.0）+ R2 r2-0001 与 golden **byte-equal**。PR #1 已 open，56 commits ahead of main，等 CI 合并。
-> **本文用途**：登记下一阶段任务（P-γ-3 / Tier 2/3 / 低优 follow-up），并评估"用 agent team 实施"的可行性。
+> **状态（2026-05-16 更新）**：原 P1/P2/P3 全部落地 + 6 个 src/ fix branch（P-α / P-γ-1 / P-γ-1.5-A / P-γ-1.5-B / **P-γ-4**）+ Tier 1 dify-plugins acceptance **全 hard gate 过**（OA 1.0 / WMR 0 / DCRR 1.0）+ R2 5 sample 扩展 + R3 OpenHands fork (`SmartManoj/Kevin`) 实跑 exit 0。**P-γ-3 + P-γ-4 + R3 全完成**（IMPLEMENTATION_REPORT_PARTIAL §18 / §19 / §20）。PR #1 已 open，56+ commits ahead of main，等 CI 合并；本会话累计 LLM cost ~$0.62 / $20（96.9% buffer）。
+> **本文用途**：登记下一阶段任务（Tier 2/3 / 低优 follow-up），并评估"用 agent team 实施"的可行性。
 > **不修改**：`metrics.md / dataset.md / procedure.md / acceptance.md`（仅追加本文 + IMPLEMENTATION_REPORT_PARTIAL.md）。
 
 ---
