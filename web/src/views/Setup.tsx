@@ -604,6 +604,32 @@ export function Setup({ clientRef }: Props): JSX.Element {
             }
           }
         }
+        // Re-point agent rows whose current model has been removed from
+        // this provider's models_text. Without this the form silently
+        // rots: textarea edit leaves agents[name].model pointing at a
+        // value that no longer appears in the list, surfacing later as
+        // "must pick a model from <provider>.models" at submit time.
+        if (next.enabled && context) {
+          const newModels = parseModels(next.models_text);
+          const survivors = new Set(newModels);
+          let touched = false;
+          const fixed: Record<string, AgentRowState> = {};
+          for (const [name, row] of Object.entries(merged.agents)) {
+            if (row.provider === which && !survivors.has(row.model)) {
+              touched = true;
+              fixed[name] = {
+                provider: which,
+                model:
+                  newModels.length > 0
+                    ? recommendedModelFor(context, which, name, newModels)
+                    : "",
+              };
+            } else {
+              fixed[name] = row;
+            }
+          }
+          if (touched) merged.agents = fixed;
+        }
         return merged;
       });
     },

@@ -291,6 +291,55 @@ describe("Setup — flexible providers", () => {
     ).toBeTruthy();
   });
 
+  it("re-points agent rows whose model is removed from the provider's models textarea", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: {
+          name: "ANTHROPIC_API_KEY",
+          masked: "sk-a",
+          source: "shell",
+        },
+      },
+    });
+    const { container, getByText, getByTestId } = renderSetup();
+    // Default planner row is (anthropic, claude-opus-4-7) — first
+    // recommended model. Remove that line from the Anthropic Models
+    // textarea, leaving only claude-haiku-4-5-20251001 available.
+    const anthModels = getByTestId(
+      "anthropic_models",
+    ) as HTMLTextAreaElement;
+    act(() => {
+      fireEvent.change(anthModels, {
+        target: { value: "claude-haiku-4-5-20251001" },
+      });
+    });
+    // Without the fix, submit would error with
+    // "Agent \"planner\" must pick a model from anthropic.models."
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const msg = sendSpy.mock.calls[0][0];
+    if (msg.type !== "setup.submit") throw new Error("wrong type");
+    // planner should have been migrated to the remaining model.
+    expect(msg.payload.agent_choices.planner.provider).toBe("anthropic");
+    expect(msg.payload.agent_choices.planner.model).toBe(
+      "claude-haiku-4-5-20251001",
+    );
+    expect(msg.payload.anthropic.models).toEqual([
+      "claude-haiku-4-5-20251001",
+    ]);
+    // No leftover stale reference to the removed model anywhere.
+    for (const [, choice] of Object.entries(msg.payload.agent_choices)) {
+      if (choice.provider === "anthropic") {
+        expect(choice.model).not.toBe("claude-opus-4-7");
+      }
+    }
+    expect(container.querySelector("[data-testid='anthropic_models']"))
+      .toBeTruthy();
+  });
+
   it("surfaces server-side setup_error in the form", () => {
     useRunStore.setState({
       setupStatus: "error",
