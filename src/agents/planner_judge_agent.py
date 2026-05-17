@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import cast
 
-from src.agents.base_agent import BaseAgent
+from src.agents.base_agent import AgentError, BaseAgent
 from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage, MessageType
 from src.models.plan import MergePlan, MergePhase
@@ -561,12 +561,26 @@ class PlannerJudgeAgent(BaseAgent):
         except Exception as e:
             self.logger.error("Plan review failed: %s", e)
             error_type = type(e).__name__
-            is_llm_unavailable = any(
-                marker in error_type
-                for marker in ("AgentExhaustedError", "APIError", "RateLimitError")
-            ) or any(
-                marker in str(e)
-                for marker in ("LLM call failed", "502", "503", "No available accounts")
+            is_llm_unavailable = (
+                isinstance(e, AgentError)
+                or any(
+                    marker in error_type
+                    for marker in (
+                        "AgentExhaustedError",
+                        "CircuitBreakerOpen",
+                        "APIError",
+                        "RateLimitError",
+                    )
+                )
+                or any(
+                    marker in str(e)
+                    for marker in (
+                        "LLM call failed",
+                        "502",
+                        "503",
+                        "No available accounts",
+                    )
+                )
             )
             result = (
                 PlanJudgeResult.LLM_UNAVAILABLE

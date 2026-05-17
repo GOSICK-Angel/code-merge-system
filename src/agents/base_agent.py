@@ -359,18 +359,38 @@ class BaseAgent(ABC):
             return False
 
     def _on_fallback_needed(self, classified: ClassifiedError) -> bool:
-        """Hook for provider fallback (extension point for C2 credential pool).
+        """Switch to the configured fallback LLM provider, if any.
 
-        Subclasses or future multi-provider support can override this to
-        switch to a different LLM provider on permanent auth failures.
-        Returns True if fallback succeeded.
+        Default implementation: if ``self._fallback_llm`` is wired (yaml has
+        ``fallback:``) and we are not already running on it, mutate
+        ``self.llm`` / ``self.llm_config`` to the fallback, reset the
+        circuit breaker, and return True so the retry loop continues.
+        The swap is sticky for the agent's lifetime — primary credentials
+        that produce a permanent-auth or empty-content failure don't get
+        re-tried on later calls. Subclasses can override for richer policies
+        (e.g. credential pool rotation in C2).
         """
+        if self._fallback_llm is None or self._using_fallback:
+            self.logger.warning(
+                "Provider fallback requested but no fallback provider "
+                "configured / already on fallback (category=%s)",
+                classified.category.value,
+            )
+            return False
+        fallback_cfg = self.llm_config.fallback
+        assert fallback_cfg is not None
         self.logger.warning(
-            "Provider fallback requested but no fallback provider configured "
-            "(category=%s)",
+            "Switching to fallback provider %s/%s (category=%s)",
+            fallback_cfg.provider,
+            fallback_cfg.model,
             classified.category.value,
         )
-        return False
+        self.llm = self._fallback_llm
+        self.llm_config = fallback_cfg
+        self._using_fallback = True
+        self._consecutive_failures = 0
+        self._sliding_window.clear()
+        return True
 
     def _mitigate_context_pressure(
         self,
