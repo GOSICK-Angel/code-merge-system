@@ -197,6 +197,54 @@ class TestApplySetupPayload:
         )
         assert raw["github"] == {"enabled": True, "token_env": "GITHUB_TOKEN"}
 
+    def test_non_default_agent_gets_fallback_pointing_at_default(
+        self, tmp_path: Path
+    ) -> None:
+        # When an agent's primary (provider, model) differs from
+        # (default_provider, default_provider.models[0]), the resolver
+        # must attach a fallback block so BaseAgent's circuit breaker
+        # can recover when the primary fails (e.g. model deprecated,
+        # 429 storm, provider outage). Same-as-default agents skip
+        # fallback to avoid a self-pointing retry.
+        payload = _payload(
+            anthropic=ProviderConfig(
+                enabled=True,
+                api_key="ak",
+                models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+            ),
+            openai=ProviderConfig(
+                enabled=True, api_key="ok", models=["gpt-5.4", "gpt-5.4-mini"]
+            ),
+            default_provider="anthropic",
+            agent_choices={
+                "planner_judge": AgentChoice(provider="openai", model="gpt-5.4-mini"),
+                "human_interface": AgentChoice(
+                    provider="anthropic", model="claude-haiku-4-5-20251001"
+                ),
+            },
+        )
+        apply_setup_payload(payload, str(tmp_path))
+        raw = yaml.safe_load(
+            (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
+        )
+
+        # planner_judge runs on openai → fallback to anthropic opus.
+        pj_fb = raw["agents"]["planner_judge"].get("fallback")
+        assert pj_fb is not None
+        assert pj_fb["provider"] == "anthropic"
+        assert pj_fb["model"] == "claude-opus-4-7"
+        assert pj_fb["api_key_env"] == "ANTHROPIC_API_KEY"
+
+        # human_interface runs on anthropic haiku (same provider, diff
+        # model) → still needs fallback to opus.
+        hi_fb = raw["agents"]["human_interface"].get("fallback")
+        assert hi_fb is not None
+        assert hi_fb["model"] == "claude-opus-4-7"
+
+        # planner already matches default → fallback would be self-pointing
+        # and is therefore omitted.
+        assert "fallback" not in raw["agents"]["planner"]
+
     def test_per_agent_override_routes_to_other_provider(self, tmp_path: Path) -> None:
         payload = _payload(
             anthropic=ProviderConfig(

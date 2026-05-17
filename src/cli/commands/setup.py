@@ -172,6 +172,12 @@ def _build_agents_block(payload: SetupPayload) -> dict[str, dict[str, Any]]:
     default_cfg = (
         payload.anthropic if default_provider == "anthropic" else payload.openai
     )
+    fallback_model = default_cfg.models[0]
+    fallback_block: dict[str, Any] = {
+        "provider": default_provider,
+        "model": fallback_model,
+        "api_key_env": PROVIDER_API_KEY_ENV[default_provider],
+    }
 
     for entry in AGENT_INVENTORY:
         name = entry["name"]
@@ -181,7 +187,7 @@ def _build_agents_block(payload: SetupPayload) -> dict[str, dict[str, Any]]:
             model = choice.model
         else:
             provider = default_provider
-            model = default_cfg.models[0]
+            model = fallback_model
 
         block: dict[str, Any] = {
             "provider": provider,
@@ -190,6 +196,15 @@ def _build_agents_block(payload: SetupPayload) -> dict[str, dict[str, Any]]:
         }
         if name in AGENT_TEMPERATURE:
             block["temperature"] = AGENT_TEMPERATURE[name]
+        # Attach a circuit-breaker fallback so BaseAgent can keep the
+        # run alive when this agent's primary (provider, model) starts
+        # failing — e.g. a deprecated model id, a 429 storm, or a
+        # provider outage. Resolves to (default_provider,
+        # default_provider.models[0]). Skip when the primary already
+        # IS the default, since a self-fallback would just retry the
+        # same broken config and add a confusing log line.
+        if (provider, model) != (default_provider, fallback_model):
+            block["fallback"] = dict(fallback_block)
         out[name] = block
     return out
 
