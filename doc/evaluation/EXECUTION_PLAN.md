@@ -6,20 +6,34 @@
 
 ---
 
-## 0. 当前 baseline（2026-05-16）
+## 0. 当前 baseline（2026-05-17 — Phase D 完成）
 
 | 项 | 状态 |
 |---|---|
-| 评估框架 `scripts/eval/` | Phase 0-9 + F5/F6/F7/F8/F9 + F-OverEscalation + F-CI-1/2 全闭环 |
-| 评估单测 `tests/eval/` | 全 pass；新增覆盖率维持 |
-| 项目单测 `tests/unit/` | 2241 pass（2 偶发 isolation flaky，独立跑全过）|
+| 评估框架 `scripts/eval/` | Phase 0-9 + F5/F6/F7/F8/F9 + F-OverEscalation + F-CI-1/2 + `normalize_run_meta` adapter (Phase D) 全闭环 |
+| 评估单测 `tests/eval/` | 全 pass；Phase B 新增 r2 meta/sha lock 10 用例 + Phase D normalize 7 用例 |
+| 项目单测 `tests/unit/` | 2276 pass（含 Phase A 13 hallucinate 用例）|
 | Tier 1 数据集 | 30 dify-plugins 真样本（6 C + 24 B），meta backfilled（5 / 6 expected_human=true）|
-| Tier 1 v4 acceptance | **OA 1.0 / WMR 0 / DCRR 1.0 / SSER 1.0 / RR 1.0 / RCR 1.0 / OverEscalation 0**（全 hard gate 过 — IMPLEMENTATION_REPORT §15）|
-| R2 跨仓库 sample | r2-0001 (Go dify-plugin-daemon) v5 = **byte-equal golden**（§17）|
+| Tier 1 v4 acceptance | OA 1.0 / WMR 0 / DCRR 1.0 / SSER 1.0 / RR 1.0 / RCR 1.0 / OverEscalation 0（IMPLEMENTATION_REPORT §15）|
+| Tier 1 **v5 acceptance**（Phase B 后）| 完整 13-gate verdict=**PASS**（gate.json v5-phaseD）；7 项主指标与 v4 baseline 0 差异（§18.4 + §18.5）|
+| R2 跨仓库 sample | 5 sample 扩展（r2-0001 byte-equal §17；r2-0002..0005 Phase B 实跑 failed_count=0 全 §18.3）|
+| R3 跨仓库 sample | r3-0001 (OpenHands fork `SmartManoj/Kevin`) Phase C 实跑 exit 0 / match=SEMANTIC（§20）|
 | DET 测试 | 1.0（5×3 seed，IMPLEMENTATION_REPORT §8）|
 | CI `eval-tier1` | 全绿，多次手动触发通过 |
-| PR #1 | open，feat/web → main，等 CI |
-| 关键 src/ 修复 | `vacuously_complete_layers` (§13) + `three_way_merge_file` (§15) + `fork_delete_preserver` (§17) |
+| PR #1 | open，feat/web → main，等 CI；本会话新增 6 commits 待 push |
+| 关键 src/ 修复 | `vacuously_complete_layers` (§13) + `three_way_merge_file` (§15) + `fork_delete_preserver` (§17) + **`_validate_evidence_grounded` Phase A** (§19, commit `80a603b`) |
+| 本会话累计 LLM cost | **~$0.62 / $20 上限**（Phase A $0 + Phase B $0.6 + Phase C $0.02 + Phase D $0；96.9% buffer）|
+
+### 0.1 本会话 commit refs（按时序）
+
+| Phase | commit | 摘要 |
+|---|---|---|
+| A | `80a603b` | fix(judge): P-γ-4 校验 evidence_excerpt 必须在 merged_content 出现 |
+| B | `ba8f4d3` | feat(eval): Phase B P-γ-3 R2 数据集 + sha256 lock helper + 跑测脚本 |
+| B | `26dc2f0` | fix(eval): bash 3.2 兼容 — run_r2 / run_tier1 用 while-read 替代 mapfile |
+| C | `1048248` | feat(eval): Phase C R3 OpenHands fork-divergence sample (r3-0001) + helper r3 支持 |
+| D | `c08d816` | docs(eval): Phase D §18/§19/§20 + EXECUTION_PLAN status 升级（v1）|
+| D | `<v2-tba>` | feat(eval): Phase D normalize_run_meta adapter — 解锁 13-gate JSON |
 
 ---
 
