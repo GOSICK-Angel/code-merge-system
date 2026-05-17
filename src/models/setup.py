@@ -45,16 +45,25 @@ class ProviderConfig(BaseModel):
     proxy or a self-hosted compatible endpoint). Written to ``.env``
     as ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL``.
 
-    ``default_model`` is the user's preferred model for this provider
-    when an agent override doesn't specify a model. Per-agent built-in
-    defaults (e.g. ``human_interface`` → haiku) still apply when this
-    field is left blank.
+    ``models`` enumerates the model names available to AGENT OVERRIDES
+    for this provider. The list is authoritative: every agent's model
+    pick (explicit override or inherited default) must come from this
+    list. ``models[0]`` is the implicit default for agents without an
+    explicit override (which is why the UI keeps the user's ordering).
     """
 
     enabled: bool = False
     api_key: str = ""
     base_url: str | None = None
-    default_model: str = ""
+    models: list[str] = Field(default_factory=list)
+
+    @field_validator("models")
+    @classmethod
+    def _validate_models(cls, v: list[str]) -> list[str]:
+        cleaned = [m.strip() for m in v if m and m.strip()]
+        if len(cleaned) != len(set(cleaned)):
+            raise ValueError("models list must not contain duplicates")
+        return cleaned
 
 
 class AgentChoice(BaseModel):
@@ -62,17 +71,14 @@ class AgentChoice(BaseModel):
 
     Listed in ``SetupPayload.agent_choices`` keyed by the agent name
     (e.g. ``planner`` / ``judge`` / ``human_interface``). Agents
-    missing from the map inherit ``default_provider`` + the built-in
-    (provider, agent) recommended model defined in
-    ``src/cli/commands/setup.py:DEFAULT_AGENT_MODELS``.
-
-    ``model`` may be left empty to fall back to the agent-role default
-    for the chosen provider; the resolver inside
-    ``apply_setup_payload`` substitutes the built-in.
+    missing from the map inherit ``default_provider`` + that
+    provider's ``models[0]``. The cross-check that ``model`` appears in
+    the chosen provider's ``models`` list lives on
+    ``SetupPayload._validate_providers`` so it can see both fields.
     """
 
     provider: ProviderName
-    model: str = ""
+    model: str = Field(..., min_length=1)
 
 
 class ThresholdsPayload(BaseModel):
@@ -125,14 +131,24 @@ class SetupPayload(BaseModel):
                 "at least one provider (anthropic or openai) must be enabled"
             )
 
+        # Every enabled provider needs at least one model — the UI
+        # picks from this list, so an empty list would mean "no agent
+        # can be assigned here". The resolver in setup.py treats
+        # ``models[0]`` as the implicit default for agents without an
+        # explicit override.
+        for name in enabled:
+            cfg = self.anthropic if name == "anthropic" else self.openai
+            if not cfg.models:
+                raise ValueError(
+                    f"provider {name!r} is enabled but its models list is empty"
+                )
+
         if self.default_provider is None:
             # Auto-pick when there's no ambiguity. Both-enabled case
             # rejects so the caller (UI or CI builder) is forced to be
             # explicit — silently picking would surprise users with
             # both keys configured.
             if len(enabled) == 1:
-                # Mutate via model_construct-style attribute write is
-                # safe in mode="after" since we own the instance.
                 object.__setattr__(self, "default_provider", enabled[0])
             else:
                 raise ValueError(
@@ -148,6 +164,14 @@ class SetupPayload(BaseModel):
                 raise ValueError(
                     f"agent_choices[{agent_name!r}].provider={choice.provider!r} "
                     "is not enabled"
+                )
+            provider_cfg = (
+                self.anthropic if choice.provider == "anthropic" else self.openai
+            )
+            if choice.model not in provider_cfg.models:
+                raise ValueError(
+                    f"agent_choices[{agent_name!r}].model={choice.model!r} "
+                    f"is not in {choice.provider}.models={provider_cfg.models!r}"
                 )
         return self
 

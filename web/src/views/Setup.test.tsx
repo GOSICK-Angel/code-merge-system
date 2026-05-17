@@ -115,7 +115,6 @@ describe("Setup — flexible providers", () => {
       },
     });
     const { queryByText, getByText } = renderSetup();
-    // No DEFAULT PROVIDER card when only one provider is enabled.
     expect(queryByText(/DEFAULT PROVIDER/i)).toBeNull();
 
     act(() => {
@@ -127,8 +126,36 @@ describe("Setup — flexible providers", () => {
     expect(msg.payload.anthropic.enabled).toBe(true);
     expect(msg.payload.openai.enabled).toBe(false);
     expect(msg.payload.default_provider).toBe("anthropic");
-    // No agent overrides → empty map; backend will inherit default.
+    // The models textarea pre-fills from ctx.provider_recommended_models
+    // so first-run submission lists those models verbatim.
+    expect(msg.payload.anthropic.models).toEqual(
+      baseContext.provider_recommended_models.anthropic,
+    );
+    // Disabled provider still sends its pre-filled models textarea so
+    // re-enabling later doesn't wipe it; backend validator only
+    // requires models for ENABLED providers.
+    expect(msg.payload.openai.enabled).toBe(false);
     expect(msg.payload.agent_choices).toEqual({});
+  });
+
+  it("blocks submit when an enabled provider has an empty models list", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: {
+          name: "ANTHROPIC_API_KEY",
+          masked: "sk-ant",
+          source: "shell",
+        },
+        provider_recommended_models: { anthropic: [], openai: [] },
+      },
+    });
+    const { getByText } = renderSetup();
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(getByText(/models list is empty/i)).toBeTruthy();
   });
 
   it("blocks submit when both providers disabled or missing keys", () => {
@@ -164,7 +191,7 @@ describe("Setup — flexible providers", () => {
     expect(msg.payload.openai.enabled).toBe(true);
   });
 
-  it("agent override flows through to agent_choices", () => {
+  it("agent override flows through to agent_choices with model auto-picked", () => {
     useRunStore.setState({
       setupContext: {
         ...baseContext,
@@ -172,20 +199,31 @@ describe("Setup — flexible providers", () => {
         openai_key_hint: { name: "OPENAI_API_KEY", masked: "sk-o", source: "shell" },
       },
     });
-    const { getByText, container } = renderSetup();
-    // Expand AGENT OVERRIDES
+    const { getByTestId, getByText, container } = renderSetup();
+    // Expand AGENT OVERRIDES — click the title span (not the hint text).
     act(() => {
-      fireEvent.click(getByText(/AGENT OVERRIDES/));
+      fireEvent.click(getByText(/^› AGENT OVERRIDES/));
     });
-    // Find the planner_judge row and set its provider select to openai.
-    const selects = container.querySelectorAll(
-      "[data-testid='agent-overrides'] select",
-    );
-    expect(selects.length).toBe(baseAgentInventory.length);
-    // planner_judge is the second row (index 1)
-    const plannerJudgeSelect = selects[1] as HTMLSelectElement;
+    // Two selects per row (provider, model). planner_judge is row 1.
+    const overrides = getByTestId("agent-overrides");
+    const rows = overrides.children;
+    const plannerJudgeRow = rows[1] as HTMLElement;
+    const [providerSelect, modelSelect] =
+      plannerJudgeRow.querySelectorAll("select");
+    expect(providerSelect).toBeDefined();
+    expect(modelSelect).toBeDefined();
+
     act(() => {
-      fireEvent.change(plannerJudgeSelect, { target: { value: "openai" } });
+      fireEvent.change(providerSelect, { target: { value: "openai" } });
+    });
+
+    // Switching provider auto-picks the first model of that provider so
+    // the row is immediately submittable.
+    expect((modelSelect as HTMLSelectElement).value).toBe("gpt-5.4");
+
+    // Now switch model to gpt-5.4-mini explicitly.
+    act(() => {
+      fireEvent.change(modelSelect, { target: { value: "gpt-5.4-mini" } });
     });
 
     act(() => {
@@ -196,10 +234,23 @@ describe("Setup — flexible providers", () => {
     if (msg.type !== "setup.submit") throw new Error("wrong type");
     expect(msg.payload.agent_choices.planner_judge).toEqual({
       provider: "openai",
-      model: "",
+      model: "gpt-5.4-mini",
     });
-    // other agents not overridden — empty
     expect(msg.payload.agent_choices.planner).toBeUndefined();
+
+    // models lists go through verbatim, parsed from the textarea
+    // (pre-filled from ctx.provider_recommended_models).
+    expect(msg.payload.anthropic.models).toEqual(
+      baseContext.provider_recommended_models.anthropic,
+    );
+    expect(msg.payload.openai.models).toEqual(
+      baseContext.provider_recommended_models.openai,
+    );
+    // Verify the data-testid exists on the textarea(s) too — confirms
+    // the UI rendered the new "available models" widget.
+    expect(
+      container.querySelector("[data-testid='anthropic_models']"),
+    ).toBeTruthy();
   });
 
   it("surfaces server-side setup_error in the form", () => {

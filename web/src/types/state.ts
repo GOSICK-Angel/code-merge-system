@@ -325,7 +325,10 @@ export interface ProviderConfig {
   enabled: boolean;
   api_key: string;
   base_url: string | null;
-  default_model: string;
+  // Authoritative list of models this provider exposes to AGENT
+  // OVERRIDES. ``models[0]`` is the implicit default for agents
+  // without an explicit override.
+  models: string[];
 }
 
 export interface AgentChoice {

@@ -114,7 +114,11 @@ class TestSetupSubmit:
             "target_branch": "upstream/main",
             "fork_ref": "feat/x",
             "project_context": "demo",
-            "anthropic": {"enabled": True, "api_key": "sk-test"},
+            "anthropic": {
+                "enabled": True,
+                "api_key": "sk-test",
+                "models": ["claude-opus-4-7"],
+            },
             "thresholds": None,
             "dry_run": False,
             "workflow": None,
@@ -157,7 +161,11 @@ class TestSetupSubmit:
         valid = {
             "target_branch": "upstream/main",
             "fork_ref": "feat/x",
-            "anthropic": {"enabled": True, "api_key": "sk-test"},
+            "anthropic": {
+                "enabled": True,
+                "api_key": "sk-test",
+                "models": ["claude-opus-4-7"],
+            },
         }
         await setup_bridge._handle_command(
             ws,  # type: ignore[arg-type]

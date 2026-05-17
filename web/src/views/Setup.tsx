@@ -27,7 +27,10 @@ interface ProviderFormState {
   enabled: boolean;
   api_key: string;
   base_url: string;
-  default_model: string;
+  // Free-text — newline-separated model names. Parsed into a list on
+  // submit; the UI keeps it as a string so the user can edit
+  // incomplete lines without the textarea losing focus on each parse.
+  models_text: string;
 }
 
 interface AgentRowState {
@@ -120,20 +123,26 @@ function deriveDefaults(ctx: SetupContext): FormState {
 
   // Pre-fill providers from disk hints: enable a provider if a key
   // exists in the resolved chain so the user can submit without
-  // retyping. Base URLs are pre-filled from the resolved chain too.
+  // retyping. Base URLs come from the resolved chain too. The
+  // models textarea is pre-filled with the recommended list so a
+  // first-run user only has to click submit; existing config (if
+  // any) overrides below.
   const anthropicHasKey = !!ctx.anthropic_key_hint.masked;
   const openaiHasKey = !!ctx.openai_key_hint.masked;
+  const recommendedAnthropic =
+    ctx.provider_recommended_models.anthropic ?? [];
+  const recommendedOpenai = ctx.provider_recommended_models.openai ?? [];
   const anthropic: ProviderFormState = {
     enabled: anthropicHasKey,
     api_key: "",
     base_url: ctx.anthropic_base_url ?? "",
-    default_model: "",
+    models_text: recommendedAnthropic.join("\n"),
   };
   const openai: ProviderFormState = {
     enabled: openaiHasKey,
     api_key: "",
     base_url: ctx.openai_base_url ?? "",
-    default_model: "",
+    models_text: recommendedOpenai.join("\n"),
   };
 
   // If the existing config carries per-agent provider blocks, seed the
@@ -201,11 +210,26 @@ function buildThresholds(form: FormState): ThresholdsPayload | null {
   return Object.keys(result).length === 0 ? null : result;
 }
 
+function parseModels(text: string): string[] {
+  // Newline-primary, comma-secondary so users can paste either form.
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of text.split(/[\n,]/)) {
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
 function buildPayload(form: FormState): SetupPayload {
   const agent_choices: Record<string, AgentChoice> = {};
   for (const [name, row] of Object.entries(form.agents)) {
     if (row.provider === "") continue; // inherit default
-    agent_choices[name] = { provider: row.provider, model: row.model.trim() };
+    if (!row.model) continue; // need an explicit model to override
+    agent_choices[name] = { provider: row.provider, model: row.model };
   }
   return {
     target_branch: form.target_branch.trim(),
@@ -215,13 +239,13 @@ function buildPayload(form: FormState): SetupPayload {
       enabled: form.anthropic.enabled,
       api_key: form.anthropic.api_key.trim(),
       base_url: form.anthropic.base_url.trim() || null,
-      default_model: form.anthropic.default_model.trim(),
+      models: parseModels(form.anthropic.models_text),
     },
     openai: {
       enabled: form.openai.enabled,
       api_key: form.openai.api_key.trim(),
       base_url: form.openai.base_url.trim() || null,
-      default_model: form.openai.default_model.trim(),
+      models: parseModels(form.openai.models_text),
     },
     github_token: form.github_token.trim(),
     default_provider:
@@ -234,31 +258,46 @@ function buildPayload(form: FormState): SetupPayload {
   };
 }
 
+function modelsFor(form: FormState, provider: ProviderName | ""): string[] {
+  if (provider === "anthropic") return parseModels(form.anthropic.models_text);
+  if (provider === "openai") return parseModels(form.openai.models_text);
+  return [];
+}
+
 function validate(form: FormState, ctx: SetupContext): string | null {
   if (!form.target_branch.trim()) return "Target branch is required.";
   if (!form.fork_ref.trim()) return "Fork ref is required.";
 
   // At least one provider must be enabled AND have a key (in the form
-  // OR already on disk per ctx).
+  // OR already on disk per ctx) AND list ≥1 model.
   const enabledList: ProviderName[] = [];
   const providerOk = (
     p: ProviderName,
     state: ProviderFormState,
     hintMasked: string,
-  ): boolean => {
-    if (!state.enabled) return true; // disabled providers are always OK
+  ): string | null => {
+    if (!state.enabled) return null;
     if (!state.api_key.trim() && !hintMasked) {
-      return false;
+      return `${p} is enabled but no API key was supplied and none is on disk.`;
+    }
+    if (parseModels(state.models_text).length === 0) {
+      return `${p} is enabled but its models list is empty.`;
     }
     enabledList.push(p);
-    return true;
+    return null;
   };
-  if (!providerOk("anthropic", form.anthropic, ctx.anthropic_key_hint.masked)) {
-    return "Anthropic is enabled but no API key was supplied and none is on disk.";
-  }
-  if (!providerOk("openai", form.openai, ctx.openai_key_hint.masked)) {
-    return "OpenAI is enabled but no API key was supplied and none is on disk.";
-  }
+  const anthropicErr = providerOk(
+    "anthropic",
+    form.anthropic,
+    ctx.anthropic_key_hint.masked,
+  );
+  if (anthropicErr) return anthropicErr;
+  const openaiErr = providerOk(
+    "openai",
+    form.openai,
+    ctx.openai_key_hint.masked,
+  );
+  if (openaiErr) return openaiErr;
   if (enabledList.length === 0) {
     return "At least one provider (Anthropic or OpenAI) must be enabled.";
   }
@@ -275,6 +314,10 @@ function validate(form: FormState, ctx: SetupContext): string | null {
     if (row.provider === "") continue;
     if (!enabledList.includes(row.provider)) {
       return `Agent "${name}" is assigned to ${row.provider}, which is not enabled.`;
+    }
+    const available = modelsFor(form, row.provider);
+    if (row.model && !available.includes(row.model)) {
+      return `Agent "${name}" uses model "${row.model}" which isn't in ${row.provider}.models.`;
     }
   }
   for (const [key, raw] of [
@@ -317,6 +360,14 @@ function ProviderSection({
     },
     [onChange, state],
   );
+
+  const parsedCount = useMemo(
+    () => parseModels(state.models_text).length,
+    [state.models_text],
+  );
+  const restoreRecommended = useCallback(() => {
+    update("models_text", recommendedModels.join("\n"));
+  }, [recommendedModels, update]);
 
   return (
     <Card
@@ -364,38 +415,60 @@ function ProviderSection({
             }
           />
         </div>
-        <div style={rowStyle}>
-          <div>
-            <label style={labelStyle} htmlFor={`${provider}_base_url`}>
-              base url (optional)
+        <div>
+          <label style={labelStyle} htmlFor={`${provider}_base_url`}>
+            base url (optional)
+          </label>
+          <input
+            id={`${provider}_base_url`}
+            style={inputStyle}
+            value={state.base_url}
+            disabled={!state.enabled}
+            onChange={(e) => update("base_url", e.target.value)}
+            placeholder="https://api.anthropic.com or gateway URL"
+          />
+        </div>
+        <div>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "baseline",
+            }}
+          >
+            <label style={labelStyle} htmlFor={`${provider}_models`}>
+              available models ({parsedCount} listed)
             </label>
-            <input
-              id={`${provider}_base_url`}
-              style={inputStyle}
-              value={state.base_url}
+            <button
+              type="button"
+              className="btn ghost"
+              style={{ fontSize: 9, padding: "2px 6px" }}
               disabled={!state.enabled}
-              onChange={(e) => update("base_url", e.target.value)}
-              placeholder="https://api.anthropic.com or gateway URL"
-            />
+              onClick={restoreRecommended}
+              title="replace the textarea with the built-in recommended list"
+            >
+              restore recommended
+            </button>
           </div>
-          <div>
-            <label style={labelStyle} htmlFor={`${provider}_default_model`}>
-              default model
-            </label>
-            <input
-              id={`${provider}_default_model`}
-              style={inputStyle}
-              value={state.default_model}
-              disabled={!state.enabled}
-              onChange={(e) => update("default_model", e.target.value)}
-              list={`${provider}_model_options`}
-              placeholder="(leave blank for per-agent defaults)"
-            />
-            <datalist id={`${provider}_model_options`}>
-              {recommendedModels.map((m) => (
-                <option key={m} value={m} />
-              ))}
-            </datalist>
+          <textarea
+            id={`${provider}_models`}
+            data-testid={`${provider}_models`}
+            style={{
+              ...inputStyle,
+              minHeight: 84,
+              resize: "vertical",
+              fontFamily: "var(--mono)",
+            }}
+            value={state.models_text}
+            disabled={!state.enabled}
+            onChange={(e) => update("models_text", e.target.value)}
+            placeholder={
+              "one model per line, e.g.\nclaude-opus-4-7\nclaude-haiku-4-5-20251001"
+            }
+          />
+          <div className="dim" style={{ fontSize: 10, marginTop: 4 }}>
+            AGENT OVERRIDES picks from this list. First entry is the
+            default for agents without an override.
           </div>
         </div>
       </div>
@@ -652,11 +725,16 @@ export function Setup({ clientRef }: Props): JSX.Element {
                 "",
                 ...enabledProviders,
               ];
-              const datalistId = `agent_${entry.name}_models`;
-              const recommended =
-                row.provider === ""
+              // Model dropdown source = the configured models for the
+              // picked provider. When provider="(default)" we show the
+              // inherited default model as a disabled hint so the user
+              // can see what they're inheriting without selecting.
+              const availableModels = modelsFor(form, row.provider);
+              const defaultProviderModels =
+                form.default_provider === ""
                   ? []
-                  : context.provider_recommended_models[row.provider] ?? [];
+                  : modelsFor(form, form.default_provider);
+              const inheritedDefault = defaultProviderModels[0] ?? "";
               return (
                 <div
                   key={entry.name}
@@ -678,12 +756,22 @@ export function Setup({ clientRef }: Props): JSX.Element {
                   <select
                     style={inputStyle}
                     value={row.provider}
-                    onChange={(e) =>
+                    onChange={(e) => {
+                      const provider = e.target.value as ProviderName | "";
+                      // When switching provider, pick the first
+                      // available model so the row is immediately
+                      // submittable; switching back to (default)
+                      // clears the model so we don't send a stale
+                      // override.
+                      const nextModel =
+                        provider === ""
+                          ? ""
+                          : modelsFor(form, provider)[0] ?? "";
                       updateAgent(entry.name, {
-                        ...row,
-                        provider: e.target.value as ProviderName | "",
-                      })
-                    }
+                        provider,
+                        model: nextModel,
+                      });
+                    }}
                   >
                     {providerOptions.map((p) => (
                       <option key={p || "_default"} value={p}>
@@ -691,25 +779,40 @@ export function Setup({ clientRef }: Props): JSX.Element {
                       </option>
                     ))}
                   </select>
-                  <input
-                    style={inputStyle}
-                    value={row.model}
-                    list={datalistId}
-                    disabled={row.provider === ""}
-                    onChange={(e) =>
-                      updateAgent(entry.name, { ...row, model: e.target.value })
-                    }
-                    placeholder={
-                      row.provider === ""
-                        ? "(uses default provider's model)"
-                        : "(blank = provider default)"
-                    }
-                  />
-                  <datalist id={datalistId}>
-                    {recommended.map((m) => (
-                      <option key={m} value={m} />
-                    ))}
-                  </datalist>
+                  {row.provider === "" ? (
+                    <select
+                      style={inputStyle}
+                      value=""
+                      disabled
+                      title={`inherits ${form.default_provider || "default"}'s first model`}
+                    >
+                      <option value="">
+                        {inheritedDefault
+                          ? `(inherits ${inheritedDefault})`
+                          : "(no default available)"}
+                      </option>
+                    </select>
+                  ) : (
+                    <select
+                      style={inputStyle}
+                      value={row.model}
+                      onChange={(e) =>
+                        updateAgent(entry.name, {
+                          ...row,
+                          model: e.target.value,
+                        })
+                      }
+                    >
+                      {availableModels.length === 0 && (
+                        <option value="">(provider has no models)</option>
+                      )}
+                      {availableModels.map((m) => (
+                        <option key={m} value={m}>
+                          {m}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </div>
               );
             })}

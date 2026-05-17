@@ -92,26 +92,6 @@ PROVIDER_RECOMMENDED_MODELS: dict[ProviderName, list[str]] = {
     ],
 }
 
-# Built-in (provider, agent_name) → model fallback used when an agent's
-# ``AgentChoice`` doesn't specify a model and the provider's
-# ``default_model`` is also empty. Lets ``human_interface`` quietly pick
-# Haiku on Anthropic without forcing the user to fill model boxes for
-# every agent.
-DEFAULT_AGENT_MODELS: dict[tuple[ProviderName, str], str] = {
-    ("anthropic", "planner"): "claude-opus-4-6",
-    ("anthropic", "planner_judge"): "claude-opus-4-6",
-    ("anthropic", "conflict_analyst"): "claude-opus-4-6",
-    ("anthropic", "executor"): "claude-opus-4-6",
-    ("anthropic", "judge"): "claude-opus-4-6",
-    ("anthropic", "human_interface"): "claude-haiku-4-5-20251001",
-    ("openai", "planner"): "gpt-5.4",
-    ("openai", "planner_judge"): "gpt-5.4",
-    ("openai", "conflict_analyst"): "gpt-5.4",
-    ("openai", "executor"): "gpt-5.4",
-    ("openai", "judge"): "gpt-5.4",
-    ("openai", "human_interface"): "gpt-5.4-mini",
-}
-
 # Agents whose existing config block carries a stable ``temperature`` —
 # preserved across the new provider/model selection so the resolver
 # doesn't silently drop tuning that lived in the old hardcoded block.
@@ -119,23 +99,6 @@ AGENT_TEMPERATURE: dict[str, float] = {
     "executor": 0.1,
     "judge": 0.1,
 }
-
-
-def _resolve_agent_model(
-    provider: ProviderName, agent: str, provider_default: str
-) -> str:
-    """Pick the model for one (provider, agent) cell.
-
-    Resolution order: explicit choice handled by caller → provider
-    ``default_model`` → built-in (provider, agent) table → first entry
-    in ``PROVIDER_RECOMMENDED_MODELS`` as last resort.
-    """
-    if provider_default:
-        return provider_default
-    table_model = DEFAULT_AGENT_MODELS.get((provider, agent))
-    if table_model:
-        return table_model
-    return PROVIDER_RECOMMENDED_MODELS[provider][0]
 
 
 def _auto_detect_fork_ref(repo_path: str) -> str:
@@ -160,33 +123,32 @@ def _build_agents_block(payload: SetupPayload) -> dict[str, dict[str, Any]]:
     """Translate per-agent provider/model choices into the config.yaml block.
 
     Each agent in ``AGENT_INVENTORY`` lands as one entry. Resolution
-    per agent: ``payload.agent_choices[name]`` if present, else the
-    payload's ``default_provider`` paired with that provider's
-    ``default_model`` (or the built-in role default if empty). The
-    ``api_key_env`` always points at the canonical env var for the
-    chosen provider so the LLM client picks up keys regardless of
-    whether the user pasted one into the form or had it on disk.
+    per agent:
+
+    - ``payload.agent_choices[name]`` if present — use its
+      ``(provider, model)`` directly (validators have already ensured
+      the model exists in the provider's ``models`` list).
+    - Otherwise inherit ``payload.default_provider`` and use that
+      provider's ``models[0]`` as the model. That's why the UI keeps
+      user ordering in the textarea: the first line is the implicit
+      default for every unassigned agent.
     """
     out: dict[str, dict[str, Any]] = {}
     default_provider = payload.default_provider
     assert default_provider is not None, "payload validator guarantees this"
+    default_cfg = (
+        payload.anthropic if default_provider == "anthropic" else payload.openai
+    )
 
     for entry in AGENT_INVENTORY:
         name = entry["name"]
         choice = payload.agent_choices.get(name)
         if choice is not None:
             provider = choice.provider
-            override_model = choice.model
+            model = choice.model
         else:
             provider = default_provider
-            override_model = ""
-
-        provider_default = (
-            payload.anthropic.default_model
-            if provider == "anthropic"
-            else payload.openai.default_model
-        )
-        model = override_model or _resolve_agent_model(provider, name, provider_default)
+            model = default_cfg.models[0]
 
         block: dict[str, Any] = {
             "provider": provider,
@@ -399,11 +361,19 @@ def build_default_payload(repo_path: str = ".") -> SetupPayload:
             enabled=has_anthropic,
             api_key=anthropic_key,
             base_url=os.environ.get("ANTHROPIC_BASE_URL") or None,
+            # CI first-run pre-seeds the recommended model list so the
+            # payload validates ( enabled provider must have ≥1 model )
+            # without forcing the operator to edit yaml before the
+            # next run.
+            models=list(PROVIDER_RECOMMENDED_MODELS["anthropic"])
+            if has_anthropic
+            else [],
         ),
         openai=ProviderConfig(
             enabled=has_openai,
             api_key=openai_key,
             base_url=os.environ.get("OPENAI_BASE_URL") or None,
+            models=list(PROVIDER_RECOMMENDED_MODELS["openai"]) if has_openai else [],
         ),
         github_token=github_token,
         default_provider=default_provider,

@@ -37,12 +37,17 @@ def _clean_api_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
+_TEST_MODELS = ["claude-opus-4-7", "claude-haiku-4-5-20251001"]
+
+
 def _payload(**overrides: object) -> SetupPayload:
     defaults: dict[str, object] = {
         "target_branch": "upstream/main",
         "fork_ref": "feature/x",
         "project_context": "",
-        "anthropic": ProviderConfig(enabled=True, api_key="sk-ant"),
+        "anthropic": ProviderConfig(
+            enabled=True, api_key="sk-ant", models=list(_TEST_MODELS)
+        ),
     }
     defaults.update(overrides)
     return SetupPayload.model_validate(defaults)
@@ -173,13 +178,12 @@ class TestApplySetupPayloadGlobals:
         written = yaml.safe_load(
             (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
         )
-        # Single-provider payload (anthropic only) — all agents land on
-        # anthropic with the per-agent built-in default model.
+        # Single-provider payload (anthropic only) — every agent
+        # without an override lands on default_provider.models[0],
+        # which is the first entry in the textarea-derived list.
         assert written["agents"]["planner_judge"]["provider"] == "anthropic"
-        assert written["agents"]["planner_judge"]["model"] == "claude-opus-4-6"
-        assert (
-            written["agents"]["human_interface"]["model"] == "claude-haiku-4-5-20251001"
-        )
+        assert written["agents"]["planner_judge"]["model"] == _TEST_MODELS[0]
+        assert written["agents"]["human_interface"]["model"] == _TEST_MODELS[0]
 
     def test_global_yaml_overrides_hardcoded_model(self, tmp_path: Path) -> None:
         global_path = tmp_path / "global_config.yaml"

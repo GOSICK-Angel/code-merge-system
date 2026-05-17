@@ -47,12 +47,18 @@ def _clean_api_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
+_DEFAULT_ANTHROPIC_MODELS = ["claude-opus-4-7", "claude-haiku-4-5-20251001"]
+_DEFAULT_OPENAI_MODELS = ["gpt-5.4", "gpt-5.4-mini"]
+
+
 def _payload(**overrides: object) -> SetupPayload:
     defaults: dict[str, object] = {
         "target_branch": "upstream/main",
         "fork_ref": "feat/x",
         "project_context": "",
-        "anthropic": ProviderConfig(enabled=True, api_key="sk-ant"),
+        "anthropic": ProviderConfig(
+            enabled=True, api_key="sk-ant", models=list(_DEFAULT_ANTHROPIC_MODELS)
+        ),
     }
     defaults.update(overrides)
     return SetupPayload.model_validate(defaults)
@@ -64,7 +70,11 @@ class TestSetupPayloadValidation:
             SetupPayload.model_validate(
                 {
                     "fork_ref": "feat/x",
-                    "anthropic": {"enabled": True, "api_key": "k"},
+                    "anthropic": {
+                        "enabled": True,
+                        "api_key": "k",
+                        "models": ["claude-opus-4-7"],
+                    },
                 }
             )
 
@@ -78,8 +88,46 @@ class TestSetupPayloadValidation:
                 {
                     "target_branch": "u",
                     "fork_ref": "f",
-                    "anthropic": {"enabled": True, "api_key": "k"},
-                    "openai": {"enabled": True, "api_key": "k"},
+                    "anthropic": {
+                        "enabled": True,
+                        "api_key": "k",
+                        "models": ["claude-opus-4-7"],
+                    },
+                    "openai": {
+                        "enabled": True,
+                        "api_key": "k",
+                        "models": ["gpt-5.4"],
+                    },
+                }
+            )
+
+    def test_enabled_provider_with_empty_models_rejected(self) -> None:
+        with pytest.raises(Exception):
+            SetupPayload.model_validate(
+                {
+                    "target_branch": "u",
+                    "fork_ref": "f",
+                    "anthropic": {"enabled": True, "api_key": "k", "models": []},
+                }
+            )
+
+    def test_agent_choice_model_must_be_in_provider_list(self) -> None:
+        with pytest.raises(Exception):
+            SetupPayload.model_validate(
+                {
+                    "target_branch": "u",
+                    "fork_ref": "f",
+                    "anthropic": {
+                        "enabled": True,
+                        "api_key": "k",
+                        "models": ["claude-opus-4-7"],
+                    },
+                    "agent_choices": {
+                        "planner": {
+                            "provider": "anthropic",
+                            "model": "claude-opus-4-DOES-NOT-EXIST",
+                        }
+                    },
                 }
             )
 
@@ -93,7 +141,11 @@ class TestSetupPayloadValidation:
                 {
                     "target_branch": "u",
                     "fork_ref": "f",
-                    "anthropic": {"enabled": True, "api_key": "k"},
+                    "anthropic": {
+                        "enabled": True,
+                        "api_key": "k",
+                        "models": ["claude-opus-4-7"],
+                    },
                     "agent_choices": {"planner": {"provider": "openai"}},
                 }
             )
@@ -108,7 +160,10 @@ class TestApplySetupPayload:
         payload = _payload(
             project_context="dify fork",
             anthropic=ProviderConfig(
-                enabled=True, api_key="sk-ant-test", base_url="https://gw"
+                enabled=True,
+                api_key="sk-ant-test",
+                base_url="https://gw",
+                models=list(_DEFAULT_ANTHROPIC_MODELS),
             ),
         )
         config = apply_setup_payload(payload, str(tmp_path))
@@ -144,8 +199,12 @@ class TestApplySetupPayload:
 
     def test_per_agent_override_routes_to_other_provider(self, tmp_path: Path) -> None:
         payload = _payload(
-            anthropic=ProviderConfig(enabled=True, api_key="ak"),
-            openai=ProviderConfig(enabled=True, api_key="ok"),
+            anthropic=ProviderConfig(
+                enabled=True, api_key="ak", models=list(_DEFAULT_ANTHROPIC_MODELS)
+            ),
+            openai=ProviderConfig(
+                enabled=True, api_key="ok", models=list(_DEFAULT_OPENAI_MODELS)
+            ),
             default_provider="anthropic",
             agent_choices={
                 "planner_judge": AgentChoice(provider="openai", model="gpt-5.4-mini"),
@@ -158,35 +217,54 @@ class TestApplySetupPayload:
         assert raw["agents"]["planner_judge"]["provider"] == "openai"
         assert raw["agents"]["planner_judge"]["model"] == "gpt-5.4-mini"
         assert raw["agents"]["planner_judge"]["api_key_env"] == "OPENAI_API_KEY"
-        # Other agents inherit default_provider.
+        # Other agents inherit default_provider + default_provider.models[0].
         assert raw["agents"]["planner"]["provider"] == "anthropic"
+        assert raw["agents"]["planner"]["model"] == _DEFAULT_ANTHROPIC_MODELS[0]
 
-    def test_per_agent_human_interface_picks_haiku_by_default(
+    def test_agents_without_override_use_default_providers_first_model(
         self, tmp_path: Path
     ) -> None:
-        # When default_model is empty, per-(provider, agent) table wins.
-        payload = _payload()  # anthropic only, no default_model
-        apply_setup_payload(payload, str(tmp_path))
-        raw = yaml.safe_load(
-            (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
-        )
-        assert raw["agents"]["human_interface"]["model"] == "claude-haiku-4-5-20251001"
-        assert raw["agents"]["planner"]["model"] == "claude-opus-4-6"
-
-    def test_provider_default_model_beats_per_agent_table(self, tmp_path: Path) -> None:
+        # The user enumerates models; models[0] is the implicit default
+        # for every unassigned agent. No more per-(provider, agent)
+        # table — if you want haiku for human_interface, ask for it
+        # explicitly via agent_choices.
         payload = _payload(
             anthropic=ProviderConfig(
                 enabled=True,
                 api_key="k",
-                default_model="claude-opus-4-7",
+                models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
             ),
         )
         apply_setup_payload(payload, str(tmp_path))
         raw = yaml.safe_load(
             (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
         )
-        for spec in raw["agents"].values():
-            assert spec["model"] == "claude-opus-4-7"
+        for name, spec in raw["agents"].items():
+            assert spec["provider"] == "anthropic"
+            assert spec["model"] == "claude-opus-4-7", name
+
+    def test_explicit_human_interface_override_picks_haiku(
+        self, tmp_path: Path
+    ) -> None:
+        payload = _payload(
+            anthropic=ProviderConfig(
+                enabled=True,
+                api_key="k",
+                models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+            ),
+            agent_choices={
+                "human_interface": AgentChoice(
+                    provider="anthropic", model="claude-haiku-4-5-20251001"
+                ),
+            },
+        )
+        apply_setup_payload(payload, str(tmp_path))
+        raw = yaml.safe_load(
+            (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert raw["agents"]["human_interface"]["model"] == "claude-haiku-4-5-20251001"
+        # Everyone else still uses models[0].
+        assert raw["agents"]["planner"]["model"] == "claude-opus-4-7"
 
     def test_explicit_thresholds_beat_defaults(self, tmp_path: Path) -> None:
         payload = _payload(
@@ -209,7 +287,11 @@ class TestApplySetupPayload:
             {
                 "target_branch": "u",
                 "fork_ref": "f",
-                "anthropic": {"enabled": True, "api_key": ""},
+                "anthropic": {
+                    "enabled": True,
+                    "api_key": "",
+                    "models": ["claude-opus-4-7"],
+                },
             }
         )
         apply_setup_payload(payload, str(tmp_path))
@@ -313,7 +395,11 @@ class TestDetectSetupContext:
                 {
                     "target_branch": "upstream/main",
                     "fork_ref": "feat/x",
-                    "anthropic": {"enabled": True, "api_key": "k"},
+                    "anthropic": {
+                        "enabled": True,
+                        "api_key": "k",
+                        "models": ["claude-opus-4-7"],
+                    },
                 }
             ),
             str(tmp_path),
@@ -350,7 +436,11 @@ class TestDetectSetupContext:
                 {
                     "target_branch": "u",
                     "fork_ref": "f",
-                    "openai": {"enabled": True, "api_key": "sk-from-file"},
+                    "openai": {
+                        "enabled": True,
+                        "api_key": "sk-from-file",
+                        "models": ["gpt-5.4"],
+                    },
                 }
             ),
             str(tmp_path),
