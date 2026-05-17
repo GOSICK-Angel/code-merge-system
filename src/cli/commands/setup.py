@@ -29,6 +29,12 @@ from src.cli.paths import (
     get_project_merge_dir,
 )
 from src.models.config import MergeConfig
+from src.models.setup import (
+    ApiKeyHint,
+    SetupContext,
+    SetupPayload,
+    ThresholdsPayload,
+)
 
 console = Console()
 
@@ -117,6 +123,298 @@ def _resolve_api_keys(repo_path: str) -> dict[str, str]:
     return resolved
 
 
+def _default_config_data(payload: SetupPayload, repo_path: str) -> dict[str, Any]:
+    """Build the ``.merge/config.yaml`` dict from a validated payload.
+
+    Mirrors the literal block previously inlined in ``_interactive_setup``
+    so the wizard and the Web UI / ``--ci`` fallback all produce
+    byte-identical yaml. ``thresholds`` here holds the *defaults*; the
+    caller layers ``payload.thresholds`` overrides on top after global
+    defaults are merged in (otherwise the global defaults would silently
+    beat a user-supplied override).
+    """
+    return {
+        "upstream_ref": payload.target_branch,
+        "fork_ref": payload.fork_ref,
+        "working_branch": "merge/auto-{timestamp}",
+        "enable_working_branch": False,
+        "repo_path": repo_path,
+        "project_context": payload.project_context,
+        "max_files_per_run": 500,
+        "max_plan_revision_rounds": 2,
+        "agents": {
+            "planner": {
+                "provider": "anthropic",
+                "model": "claude-opus-4-6",
+                "api_key_env": "ANTHROPIC_API_KEY",
+            },
+            "planner_judge": {
+                "provider": "openai",
+                "model": "gpt-5.4",
+                "api_key_env": "OPENAI_API_KEY",
+            },
+            "conflict_analyst": {
+                "provider": "anthropic",
+                "model": "claude-opus-4-6",
+                "api_key_env": "ANTHROPIC_API_KEY",
+            },
+            "executor": {
+                "provider": "openai",
+                "model": "gpt-5.4",
+                "temperature": 0.1,
+                "api_key_env": "OPENAI_API_KEY",
+            },
+            "judge": {
+                "provider": "anthropic",
+                "model": "claude-opus-4-6",
+                "temperature": 0.1,
+                "api_key_env": "ANTHROPIC_API_KEY",
+            },
+            "human_interface": {
+                "provider": "anthropic",
+                "model": "claude-haiku-4-5-20251001",
+                "api_key_env": "ANTHROPIC_API_KEY",
+            },
+        },
+        "thresholds": {
+            "auto_merge_confidence": 0.85,
+            "human_escalation": 0.60,
+            "risk_score_low": 0.30,
+            "risk_score_high": 0.60,
+        },
+        "output": {
+            "directory": "./outputs",
+            "formats": ["json", "markdown"],
+        },
+    }
+
+
+def apply_setup_payload(payload: SetupPayload, repo_path: str = ".") -> MergeConfig:
+    """Persist ``payload`` to ``.merge/config.yaml`` + ``.merge/.env`` and return the validated config.
+
+    Pure I/O — no ``input()``, no Rich prompts. Safe to call from the
+    Web UI WS handler and from the ``merge --ci`` first-run fallback in
+    ``build_default_payload`` → ``apply_setup_payload``.
+
+    Runtime-only hints on the payload (``dry_run`` / ``workflow`` /
+    ``init_forks_profile``) are *not* written to ``config.yaml``; the
+    caller (orchestrator launcher) consumes them separately so they
+    stay session-scoped.
+    """
+    ensure_merge_dir(repo_path)
+
+    if payload.api_keys:
+        env_path = get_project_merge_dir(repo_path) / ".env"
+        write_env_file(env_path, payload.api_keys)
+        for k, v in payload.api_keys.items():
+            os.environ.setdefault(k, v)
+
+    config_data = _default_config_data(payload, repo_path)
+
+    global_defaults = _load_global_defaults()
+    if global_defaults:
+        config_data = _deep_merge_dicts(config_data, global_defaults)
+
+    if payload.thresholds is not None:
+        explicit = {
+            k: v for k, v in payload.thresholds.model_dump().items() if v is not None
+        }
+        if explicit:
+            config_data.setdefault("thresholds", {}).update(explicit)
+
+    if "GITHUB_TOKEN" in payload.api_keys:
+        config_data["github"] = {"enabled": True, "token_env": "GITHUB_TOKEN"}
+
+    config_path = get_config_path(repo_path)
+    config_path.write_text(
+        yaml.dump(config_data, default_flow_style=False, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    return MergeConfig.model_validate(config_data)
+
+
+def detect_setup_context(repo_path: str = ".") -> SetupContext:
+    """Collect pre-fill data the Web UI's Setup view needs in one call.
+
+    All I/O is best-effort: git failures fall back to ``"origin/main"``
+    for the suggested target and ``0`` for the divergence count. The
+    wizard must never abort because a fresh clone lacks an upstream
+    remote — the user fills the missing pieces in the form.
+    """
+    current_branch = _auto_detect_fork_ref(repo_path)
+    suggested_target = _detect_upstream_default(repo_path)
+    api_key_hints = _build_api_key_hints(repo_path)
+
+    has_existing_config = get_config_path(repo_path).exists()
+    existing_config_summary: dict[str, Any] | None = None
+    if has_existing_config:
+        try:
+            raw = yaml.safe_load(get_config_path(repo_path).read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                existing_config_summary = {
+                    "upstream_ref": raw.get("upstream_ref"),
+                    "fork_ref": raw.get("fork_ref"),
+                    "project_context": raw.get("project_context", ""),
+                    "thresholds": raw.get("thresholds", {}),
+                }
+        except Exception:
+            existing_config_summary = None
+
+    divergence = _count_fork_deleted_files(suggested_target, current_branch, repo_path)
+
+    return SetupContext(
+        current_branch=current_branch,
+        suggested_target=suggested_target,
+        api_key_hints=api_key_hints,
+        fork_divergence_count=divergence,
+        has_existing_config=has_existing_config,
+        existing_config_summary=existing_config_summary,
+        forks_profile_threshold=FORKS_PROFILE_INIT_THRESHOLD,
+    )
+
+
+def build_default_payload(repo_path: str = ".") -> SetupPayload:
+    """Synthesise a SetupPayload for ``merge --ci`` first-run.
+
+    Used when the user runs ``merge --ci`` and no ``.merge/config.yaml``
+    exists yet: we cannot prompt, so we pick safe defaults from git +
+    env vars and let ``apply_setup_payload`` write them. The caller is
+    expected to print the resulting config path so the operator can
+    review/tweak before the next run.
+    """
+    current_branch = _auto_detect_fork_ref(repo_path)
+    suggested_target = _detect_upstream_default(repo_path)
+
+    api_keys: dict[str, str] = {}
+    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"):
+        val = os.environ.get(name)
+        if val:
+            api_keys[name] = val
+
+    return SetupPayload(
+        target_branch=suggested_target,
+        fork_ref=current_branch,
+        project_context="",
+        api_keys=api_keys,
+        thresholds=None,
+        dry_run=False,
+        workflow=None,
+        init_forks_profile=False,
+    )
+
+
+def _detect_upstream_default(repo_path: str) -> str:
+    """Return ``origin/<HEAD branch>`` from ``git remote show``, or ``origin/main``.
+
+    ``git remote show origin`` is the canonical place where the
+    remote's default branch (HEAD) is recorded; it survives renames of
+    ``main``/``master`` on the remote without requiring a local fetch.
+    On any failure (no remote, network-less env, parse error) the
+    fallback keeps the wizard moving — the user can edit the field.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "remote", "show", "origin"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+    except Exception:
+        return "origin/main"
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("HEAD branch:"):
+            branch = line.split(":", 1)[1].strip()
+            if branch and branch != "(unknown)":
+                return f"origin/{branch}"
+    return "origin/main"
+
+
+def _build_api_key_hints(repo_path: str) -> list[ApiKeyHint]:
+    """Return a masked hint per known API key env var.
+
+    Priority for the ``source`` label matches ``_resolve_api_keys``:
+    shell env beats project ``.env`` beats global ``.env``. The
+    masked value is built from whichever wins so the UI can show the
+    same string the run will actually pick up.
+    """
+    global_env = get_global_env_path()
+    global_entries = read_env_file(global_env) if global_env.exists() else {}
+
+    project_env = get_project_merge_dir(repo_path) / ".env"
+    project_entries = read_env_file(project_env) if project_env.exists() else {}
+
+    hints: list[ApiKeyHint] = []
+    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"):
+        if os.environ.get(name):
+            hints.append(
+                ApiKeyHint(
+                    name=name,
+                    masked=_mask_key(os.environ[name]),
+                    source="shell",
+                )
+            )
+        elif name in project_entries:
+            hints.append(
+                ApiKeyHint(
+                    name=name,
+                    masked=_mask_key(project_entries[name]),
+                    source="project_env",
+                )
+            )
+        elif name in global_entries:
+            hints.append(
+                ApiKeyHint(
+                    name=name,
+                    masked=_mask_key(global_entries[name]),
+                    source="global_env",
+                )
+            )
+        else:
+            hints.append(ApiKeyHint(name=name, masked="", source=""))
+    return hints
+
+
+def _count_fork_deleted_files(upstream_ref: str, fork_ref: str, repo_path: str) -> int:
+    """Cheap signal of fork divergence: # files the fork removed since merge-base.
+
+    Same query the post-wizard forks-profile prompt uses; lifted here
+    so the Web UI can decide upfront whether to surface the
+    "Initialize forks-profile" checkbox without a second round-trip.
+    """
+    try:
+        merge_base = subprocess.run(
+            ["git", "merge-base", upstream_ref, fork_ref],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        ).stdout.strip()
+        if not merge_base:
+            return 0
+        deleted = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--diff-filter=D",
+                "--name-only",
+                f"{merge_base}..{fork_ref}",
+            ],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        ).stdout.strip()
+    except Exception:
+        return 0
+    return sum(1 for line in deleted.splitlines() if line.strip())
+
+
 def _repeat_run_flow(
     target_branch: str,
     repo_path: str,
@@ -202,89 +500,23 @@ def _interactive_setup(target_branch: str, repo_path: str) -> MergeConfig:
         explicit_thresholds["risk_score_low"] = _prompt_float("risk_score_low", 0.30)
         explicit_thresholds["risk_score_high"] = _prompt_float("risk_score_high", 0.60)
 
-    ensure_merge_dir(repo_path)
+    payload = SetupPayload(
+        target_branch=target_branch,
+        fork_ref=fork_ref,
+        project_context=project_context,
+        api_keys=collected_keys,
+        thresholds=ThresholdsPayload(**explicit_thresholds)
+        if explicit_thresholds
+        else None,
+    )
+
+    merge_config = apply_setup_payload(payload, repo_path)
 
     if collected_keys:
         env_path = get_project_merge_dir(repo_path) / ".env"
-        write_env_file(env_path, collected_keys)
         console.print(f"\n  [green]API keys saved to:[/green] {env_path}")
-        for k, v in collected_keys.items():
-            os.environ.setdefault(k, v)
-
-    config_data: dict[str, Any] = {
-        "upstream_ref": target_branch,
-        "fork_ref": fork_ref,
-        "working_branch": "merge/auto-{timestamp}",
-        "enable_working_branch": False,
-        "repo_path": repo_path,
-        "project_context": project_context,
-        "max_files_per_run": 500,
-        "max_plan_revision_rounds": 2,
-        "agents": {
-            "planner": {
-                "provider": "anthropic",
-                "model": "claude-opus-4-6",
-                "api_key_env": "ANTHROPIC_API_KEY",
-            },
-            "planner_judge": {
-                "provider": "openai",
-                "model": "gpt-5.4",
-                "api_key_env": "OPENAI_API_KEY",
-            },
-            "conflict_analyst": {
-                "provider": "anthropic",
-                "model": "claude-opus-4-6",
-                "api_key_env": "ANTHROPIC_API_KEY",
-            },
-            "executor": {
-                "provider": "openai",
-                "model": "gpt-5.4",
-                "temperature": 0.1,
-                "api_key_env": "OPENAI_API_KEY",
-            },
-            "judge": {
-                "provider": "anthropic",
-                "model": "claude-opus-4-6",
-                "temperature": 0.1,
-                "api_key_env": "ANTHROPIC_API_KEY",
-            },
-            "human_interface": {
-                "provider": "anthropic",
-                "model": "claude-haiku-4-5-20251001",
-                "api_key_env": "ANTHROPIC_API_KEY",
-            },
-        },
-        "thresholds": {
-            "auto_merge_confidence": 0.85,
-            "human_escalation": 0.60,
-            "risk_score_low": 0.30,
-            "risk_score_high": 0.60,
-        },
-        "output": {
-            "directory": "./outputs",
-            "formats": ["json", "markdown"],
-        },
-    }
-
-    global_defaults = _load_global_defaults()
-    if global_defaults:
-        config_data = _deep_merge_dicts(config_data, global_defaults)
-
-    if explicit_thresholds:
-        thresholds_block = config_data.setdefault("thresholds", {})
-        thresholds_block.update(explicit_thresholds)
-
-    if "GITHUB_TOKEN" in collected_keys:
-        config_data["github"] = {"enabled": True, "token_env": "GITHUB_TOKEN"}
-
     config_path = get_config_path(repo_path)
-    config_path.write_text(
-        yaml.dump(config_data, default_flow_style=False, sort_keys=False),
-        encoding="utf-8",
-    )
     console.print(f"  [green]Config saved to:[/green] {config_path}")
-
-    merge_config = MergeConfig.model_validate(config_data)
 
     _offer_forks_profile_draft(target_branch, fork_ref, repo_path)
 

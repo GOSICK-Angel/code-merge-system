@@ -7,16 +7,20 @@ import hashlib
 import json
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 import websockets
 from websockets.asyncio.server import Server, ServerConnection
 
 from src.core.phases.base import ActivityEvent
+from src.models.config import MergeConfig
 from src.models.decision import MergeDecision
 from src.models.plan_review import PlanHumanDecision, PlanHumanReview
+from src.models.setup import SetupPayload
 from src.models.state import MergeState
 from src.web.serializers import serialize_state
+
+BridgeMode = Literal["run", "setup"]
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +31,27 @@ class MergeWSBridge:
     DEBOUNCE_SECONDS = 0.3
     ACTIVITY_BUFFER_MAX = 200
 
-    def __init__(self, state: MergeState) -> None:
-        self._state = state
+    def __init__(
+        self,
+        state: MergeState | None = None,
+        mode: BridgeMode = "run",
+        repo_path: str = ".",
+    ) -> None:
+        if mode == "run" and state is None:
+            raise ValueError("MergeWSBridge(mode='run') requires a MergeState")
+        self._state: MergeState | None = state
+        self._mode: BridgeMode = mode
+        self._repo_path: str = repo_path
         self._clients: set[ServerConnection] = set()
         self._server: Server | None = None
-        self._last_status: str = (
-            state.status.value if hasattr(state.status, "value") else str(state.status)
-        )
+        if state is not None:
+            self._last_status: str = (
+                state.status.value
+                if hasattr(state.status, "value")
+                else str(state.status)
+            )
+        else:
+            self._last_status = "setup"
         self._debounce_handle: asyncio.TimerHandle | None = None
         self._pending_broadcast: bool = False
         self._last_snapshot_hash: str = ""
@@ -42,8 +60,14 @@ class MergeWSBridge:
         self._human_decisions_received: asyncio.Event = asyncio.Event()
         self._judge_resolution_received: asyncio.Event = asyncio.Event()
         self._cancel_event: asyncio.Event = asyncio.Event()
+        self._setup_complete: asyncio.Event = asyncio.Event()
+        self._setup_result: MergeConfig | None = None
         self._activity_buffer: list[dict[str, Any]] = []
         self._loop: asyncio.AbstractEventLoop | None = None
+
+    @property
+    def mode(self) -> BridgeMode:
+        return self._mode
 
     async def start(self, host: str = "localhost", port: int = 8765) -> None:
         self._loop = asyncio.get_running_loop()
@@ -76,6 +100,41 @@ class MergeWSBridge:
         """Block until all pending conflict decisions are submitted from the TUI."""
         await self._human_decisions_received.wait()
         self._human_decisions_received.clear()
+
+    async def wait_for_setup(self) -> MergeConfig:
+        """Block until the Web UI submits a valid ``setup.submit`` payload.
+
+        Only meaningful when the bridge was constructed with
+        ``mode="setup"``. The returned ``MergeConfig`` has already been
+        written to ``.merge/config.yaml`` by ``apply_setup_payload``;
+        the caller is responsible for constructing a ``MergeState`` and
+        calling ``transition_to_run`` so connected clients flip from
+        the Setup view to the Dashboard.
+        """
+        if self._mode != "setup":
+            raise RuntimeError("wait_for_setup is only valid in setup mode")
+        await self._setup_complete.wait()
+        if self._setup_result is None:  # pragma: no cover - defensive
+            raise RuntimeError("setup_complete fired without a result")
+        return self._setup_result
+
+    async def transition_to_run(self, state: MergeState) -> None:
+        """Promote a setup-mode bridge to run mode and push the first snapshot.
+
+        Idempotent on the state slot — calling it twice with the same
+        state is a no-op beyond a second snapshot push (clients dedupe
+        via ``_last_snapshot_hash`` anyway). Raises if the bridge was
+        never in setup mode, since the run-mode startup path already
+        owns its own state.
+        """
+        if self._mode != "setup":
+            raise RuntimeError("transition_to_run only valid from setup mode")
+        self._state = state
+        self._mode = "run"
+        self._last_status = (
+            state.status.value if hasattr(state.status, "value") else str(state.status)
+        )
+        await self.broadcast_state_patch()
 
     async def wait_for_judge_resolution(self) -> None:
         """Block until an L4 judge resolution arrives from the Web UI.
@@ -111,6 +170,18 @@ class MergeWSBridge:
             logger.info("TUI client disconnected (%d remaining)", len(self._clients))
 
     async def _send_snapshot(self, ws: ServerConnection) -> None:
+        if self._mode == "setup":
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "setup_snapshot",
+                        "payload": self._serialize_setup_context(),
+                    },
+                    default=str,
+                )
+            )
+            return
+
         snapshot = self._serialize_state()
         await ws.send(
             json.dumps(
@@ -132,11 +203,51 @@ class MergeWSBridge:
             )
 
     def _serialize_state(self) -> dict[str, Any]:
+        assert self._state is not None, "run mode requires a state"
         return serialize_state(self._state)
+
+    def _serialize_setup_context(self) -> dict[str, Any]:
+        """Lazy import keeps ``cli.commands.setup`` out of bridge bootstrap.
+
+        ``setup.py`` pulls in Rich + git subprocesses; importing it at
+        module load would inflate WS bridge startup for every run mode
+        consumer too. The detect call itself runs git twice (current
+        branch + ``remote show origin``) so we keep it on the request
+        path — clients can re-fetch on reconnect to pick up changes."""
+        from src.cli.commands.setup import detect_setup_context
+
+        context = detect_setup_context(self._repo_path)
+        return context.model_dump()
 
     async def _handle_command(self, ws: ServerConnection, msg: dict[str, Any]) -> None:
         cmd_type = msg.get("type", "")
         payload = msg.get("payload", {})
+
+        if cmd_type == "setup.detect":
+            await self._handle_setup_detect(ws)
+            return
+
+        if cmd_type == "setup.submit":
+            await self._handle_setup_submit(ws, payload)
+            return
+
+        if self._mode == "setup":
+            # All other commands require a run-mode state. Reject loudly so
+            # a front-end that misroutes (e.g. submits a plan decision
+            # before setup completed) sees the error instead of a silent
+            # drop.
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "command_error",
+                        "payload": {
+                            "reason": "setup_required",
+                            "command": cmd_type,
+                        },
+                    }
+                )
+            )
+            return
 
         if cmd_type == "submit_decision":
             # Accept both camelCase ``filePath`` (legacy) and snake_case
@@ -176,12 +287,131 @@ class MergeWSBridge:
         elif cmd_type == "resume":
             logger.info("Resume requested by client")
 
+    async def _handle_setup_detect(self, ws: ServerConnection) -> None:
+        """Re-send the setup context (current branch, key hints, ...) on demand.
+
+        Clients also get this in the initial ``setup_snapshot``; the
+        explicit ``setup.detect`` round-trip exists so the UI can
+        refresh after the user changes the target branch field (which
+        in turn changes the fork-divergence count)."""
+        if self._mode != "setup":
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "command_error",
+                        "payload": {
+                            "reason": "not_in_setup_mode",
+                            "command": "setup.detect",
+                        },
+                    }
+                )
+            )
+            return
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "setup_snapshot",
+                    "payload": self._serialize_setup_context(),
+                }
+            )
+        )
+
+    async def _handle_setup_submit(
+        self, ws: ServerConnection, payload: dict[str, Any]
+    ) -> None:
+        """Validate + persist a setup form and signal ``wait_for_setup``.
+
+        Reject duplicates / wrong-mode invocations with a
+        ``setup_error`` frame so the UI can keep the form state and
+        let the user retry. A successful submit fires ``setup_ready``
+        carrying the resolved config path so the front-end can show
+        "config saved to …" while it waits for the orchestrator
+        launcher to flip the bridge into run mode."""
+        if self._mode != "setup":
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "setup_error",
+                        "payload": {"reason": "not_in_setup_mode"},
+                    }
+                )
+            )
+            return
+        if self._setup_complete.is_set():
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "setup_error",
+                        "payload": {"reason": "already_submitted"},
+                    }
+                )
+            )
+            return
+
+        try:
+            setup_payload = SetupPayload.model_validate(payload)
+        except Exception as e:  # pydantic ValidationError or unexpected
+            logger.warning("setup.submit validation failed: %s", e)
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "setup_error",
+                        "payload": {
+                            "reason": "invalid_payload",
+                            "details": str(e),
+                        },
+                    }
+                )
+            )
+            return
+
+        from src.cli.commands.setup import apply_setup_payload
+        from src.cli.paths import get_config_path
+
+        try:
+            config = apply_setup_payload(setup_payload, self._repo_path)
+        except Exception as e:
+            logger.exception("setup.submit apply failed")
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "setup_error",
+                        "payload": {
+                            "reason": "apply_failed",
+                            "details": str(e),
+                        },
+                    }
+                )
+            )
+            return
+
+        self._setup_result = config
+        self._setup_complete.set()
+
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "setup_ready",
+                    "payload": {
+                        "config_path": str(get_config_path(self._repo_path)),
+                        "dry_run": setup_payload.dry_run,
+                        "workflow": setup_payload.workflow,
+                        "init_forks_profile": setup_payload.init_forks_profile,
+                    },
+                }
+            )
+        )
+        logger.info(
+            "setup.submit applied — config persisted, awaiting orchestrator launch"
+        )
+
     async def _handle_cancel_run(self, ws: ServerConnection) -> None:
         """Cancel only takes effect when the run is parked at
         ``AWAITING_HUMAN`` — that's the only point where the orchestrator
         loop yields control back to ``_run_web``. Outside that gate we
         reply with a ``cancel_error`` frame so the UI can surface a
         tooltip / disabled-button state."""
+        assert self._state is not None, "cancel_run unreachable in setup mode"
         status = self._state.status
         status_val = status.value if hasattr(status, "value") else str(status)
         if status_val != "awaiting_human":
@@ -227,6 +457,7 @@ class MergeWSBridge:
         Missing values stay ``None`` for backwards compatibility with
         clients that only send ``{file_path, decision}``.
         """
+        assert self._state is not None, "submit_decision unreachable in setup mode"
         req = self._state.human_decision_requests.get(file_path)
         if req is None:
             return
@@ -256,6 +487,7 @@ class MergeWSBridge:
             )
 
     def _apply_conflict_decisions_batch(self, items: list[dict[str, Any]]) -> None:
+        assert self._state is not None, "batch decision unreachable in setup mode"
         applied = 0
         for entry in items:
             file_path = entry.get("file_path") or entry.get("filePath", "")
@@ -297,6 +529,7 @@ class MergeWSBridge:
             )
 
     def _apply_plan_review(self, payload: Any) -> None:
+        assert self._state is not None, "plan_review unreachable in setup mode"
         if isinstance(payload, str):
             decision_str = payload
             notes = None
@@ -324,6 +557,7 @@ class MergeWSBridge:
         logger.info("TUI plan review decision: %s", decision_str)
 
     def _apply_user_plan_decisions(self, items: list[dict[str, Any]]) -> None:
+        assert self._state is not None, "user_plan_decisions unreachable in setup mode"
         item_map = {item.item_id: item for item in self._state.pending_user_decisions}
         for item_data in items:
             item_id = item_data.get("item_id", "")
@@ -364,6 +598,7 @@ class MergeWSBridge:
         the three signals separate preserves the invariant that each
         ``wait_for_*`` corresponds to exactly one gate kind.
         """
+        assert self._state is not None, "judge_resolution unreachable in setup mode"
         if resolution not in {"accept", "abort", "rerun"}:
             logger.warning("Ignoring invalid judge resolution %r", resolution)
             return
@@ -374,6 +609,11 @@ class MergeWSBridge:
     async def broadcast_state_patch(self) -> None:
         """Send full state to all connected clients, skipping if unchanged."""
         if not self._clients:
+            return
+        if self._mode == "setup":
+            # No state to serialize yet — callers (orchestrator observers
+            # / activity hooks) fire blindly during the setup-mode window,
+            # so just no-op rather than crashing on a None state.
             return
         data = json.dumps(
             {
