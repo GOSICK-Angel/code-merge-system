@@ -1,4 +1,11 @@
-import type { AgentActivityEvent, MergeStateSnapshot } from "../types/state";
+import type {
+  AgentActivityEvent,
+  MergeStateSnapshot,
+  SetupContext,
+  SetupError,
+  SetupPayload,
+  SetupReady,
+} from "../types/state";
 
 export type InboundMessage =
   | { type: "state_snapshot"; payload: MergeStateSnapshot }
@@ -8,6 +15,13 @@ export type InboundMessage =
   | {
       type: "cancel_error";
       payload: { reason: string; current_status: string };
+    }
+  | { type: "setup_snapshot"; payload: SetupContext }
+  | { type: "setup_ready"; payload: SetupReady }
+  | { type: "setup_error"; payload: SetupError }
+  | {
+      type: "command_error";
+      payload: { reason: string; command: string };
     };
 
 export type OutboundMessage =
@@ -51,4 +65,6 @@ export type OutboundMessage =
     }
   | { type: "cancel_run"; payload: Record<string, never> }
   | { type: "pause"; payload: Record<string, never> }
-  | { type: "resume"; payload: Record<string, never> };
+  | { type: "resume"; payload: Record<string, never> }
+  | { type: "setup.detect"; payload: Record<string, never> }
+  | { type: "setup.submit"; payload: SetupPayload };

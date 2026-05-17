@@ -302,3 +302,58 @@ export interface AgentActivityEvent {
   event_type: "start" | "progress" | "complete" | "error";
   elapsed: number | null;
 }
+
+// ---- Setup wizard (PR-1 protocol) -----------------------------------------
+// Mirrors src/models/setup.py. The setup view is shown when the backend
+// reports `setup_snapshot` (i.e. no .merge/config.yaml exists yet, or the
+// run was launched with reconfigure intent). Submission flows through the
+// same WebSocket as run-mode commands; once the server emits `setup_ready`
+// + a `state_snapshot`, the store flips `mode` to "run" and rendering
+// auto-routes to the dashboard.
+
+export type ApiKeyHintSource = "shell" | "project_env" | "global_env" | "";
+
+export interface ApiKeyHint {
+  name: string;
+  masked: string;
+  source: ApiKeyHintSource;
+}
+
+export interface SetupContext {
+  current_branch: string;
+  suggested_target: string;
+  api_key_hints: ApiKeyHint[];
+  fork_divergence_count: number;
+  has_existing_config: boolean;
+  existing_config_summary: Record<string, unknown> | null;
+  forks_profile_threshold: number;
+}
+
+export interface ThresholdsPayload {
+  auto_merge_confidence?: number | null;
+  risk_score_low?: number | null;
+  risk_score_high?: number | null;
+}
+
+export interface SetupPayload {
+  target_branch: string;
+  fork_ref: string;
+  project_context: string;
+  api_keys: Record<string, string>;
+  thresholds: ThresholdsPayload | null;
+  dry_run: boolean;
+  workflow: string | null;
+  init_forks_profile: boolean;
+}
+
+export interface SetupReady {
+  config_path: string;
+  dry_run: boolean;
+  workflow: string | null;
+  init_forks_profile: boolean;
+}
+
+export interface SetupError {
+  reason: string;
+  details?: string;
+}

@@ -250,6 +250,7 @@ export function AppShell({
         </div>
 
         <div className="brut-work">
+          {activeView === "setup" ? null : (
           <aside className="brut-sidebar">
             <div className="sect">› VIEWS</div>
             {NAV.map((n) => {
@@ -361,6 +362,7 @@ export function AppShell({
               </div>
             </div>
           </aside>
+          )}
 
           <main className="brut-main">{children}</main>
         </div>

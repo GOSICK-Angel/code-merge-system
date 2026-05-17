@@ -8,14 +8,16 @@ import { ConflictResolution } from "./views/ConflictResolution";
 import { PlanReview } from "./views/PlanReview";
 import { JudgeVerdict } from "./views/JudgeVerdict";
 import { Report } from "./views/Report";
+import { Setup } from "./views/Setup";
 
 export function App(): JSX.Element {
   const clientRef = useWsClient();
   const conn = useRunStore((s) => s.conn);
   const snapshot = useRunStore((s) => s.snapshot);
+  const mode = useRunStore((s) => s.mode);
   const clearCancelError = useRunStore((s) => s.clearCancelError);
 
-  const activeView = classifyView(snapshot);
+  const activeView = classifyView(snapshot, mode);
   const [selectedView, setSelectedView] = useState<ActiveView>(activeView);
 
   // Auto-route to whatever view the snapshot indicates is the "live"
@@ -36,6 +38,7 @@ export function App(): JSX.Element {
   );
 
   const renderView = (): JSX.Element => {
+    if (selectedView === "setup") return <Setup clientRef={clientRef} />;
     if (selectedView === "report") return <Report />;
     if (selectedView === "plan_review")
       return <PlanReview clientRef={clientRef} />;

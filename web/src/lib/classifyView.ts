@@ -1,11 +1,14 @@
 import type { MergeStateSnapshot } from "../types/state";
 
 export type ActiveView =
+  | "setup"
   | "dashboard"
   | "plan_review"
   | "conflict_resolution"
   | "judge_verdict"
   | "report";
+
+export type StoreMode = "setup" | "run";
 
 /**
  * Derive the top-level view from the snapshot.
@@ -32,7 +35,13 @@ export type ActiveView =
  */
 export function classifyView(
   snapshot: MergeStateSnapshot | null,
+  mode: StoreMode = "run",
 ): ActiveView {
+  // Setup mode wins outright. The orchestrator hasn't started yet, so any
+  // snapshot lingering from a prior run is stale and must not drive
+  // routing — otherwise a reconfigure flow would briefly flash the old
+  // dashboard before the form mounts.
+  if (mode === "setup") return "setup";
   if (!snapshot) return "dashboard";
 
   if (snapshot.status === "completed" || snapshot.status === "failed") {

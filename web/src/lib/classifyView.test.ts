@@ -26,6 +26,13 @@ const base: MergeStateSnapshot = {
 };
 
 describe("classifyView", () => {
+  it("returns setup when mode='setup' regardless of snapshot", () => {
+    expect(classifyView(null, "setup")).toBe("setup");
+    expect(classifyView({ ...base, status: "completed" }, "setup")).toBe(
+      "setup",
+    );
+  });
+
   it("returns dashboard when snapshot is null", () => {
     expect(classifyView(null)).toBe("dashboard");
   });

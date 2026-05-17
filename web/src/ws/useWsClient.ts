@@ -21,6 +21,9 @@ export function useWsClient(): React.MutableRefObject<WsClient | null> {
   const appendActivity = useRunStore((s) => s.appendActivity);
   const replaceActivity = useRunStore((s) => s.replaceActivity);
   const setCancelError = useRunStore((s) => s.setCancelError);
+  const applySetupSnapshot = useRunStore((s) => s.applySetupSnapshot);
+  const applySetupReady = useRunStore((s) => s.applySetupReady);
+  const applySetupError = useRunStore((s) => s.applySetupError);
 
   const clientRef = useRef<WsClient | null>(null);
 
@@ -42,6 +45,27 @@ export function useWsClient(): React.MutableRefObject<WsClient | null> {
           case "cancel_error":
             setCancelError(msg.payload);
             break;
+          case "setup_snapshot":
+            applySetupSnapshot(msg.payload);
+            break;
+          case "setup_ready":
+            applySetupReady(msg.payload);
+            break;
+          case "setup_error":
+            applySetupError(msg.payload);
+            break;
+          case "command_error":
+            // Surface as a setup_error when reason matches, otherwise
+            // log — there is no general command-error toast yet.
+            if (msg.payload.reason === "setup_required") {
+              applySetupError({
+                reason: msg.payload.reason,
+                details: `command ${msg.payload.command} blocked`,
+              });
+            } else {
+              console.warn("Command error:", msg.payload);
+            }
+            break;
         }
       },
     });
@@ -50,7 +74,16 @@ export function useWsClient(): React.MutableRefObject<WsClient | null> {
       client.close();
       clientRef.current = null;
     };
-  }, [setConn, applySnapshot, appendActivity, replaceActivity, setCancelError]);
+  }, [
+    setConn,
+    applySnapshot,
+    appendActivity,
+    replaceActivity,
+    setCancelError,
+    applySetupSnapshot,
+    applySetupReady,
+    applySetupError,
+  ]);
 
   return clientRef;
 }
