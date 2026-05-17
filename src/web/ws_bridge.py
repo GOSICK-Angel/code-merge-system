@@ -62,12 +62,23 @@ class MergeWSBridge:
         self._cancel_event: asyncio.Event = asyncio.Event()
         self._setup_complete: asyncio.Event = asyncio.Event()
         self._setup_result: MergeConfig | None = None
+        self._setup_payload: SetupPayload | None = None
         self._activity_buffer: list[dict[str, Any]] = []
         self._loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def mode(self) -> BridgeMode:
         return self._mode
+
+    @property
+    def last_setup_payload(self) -> SetupPayload | None:
+        """The SetupPayload most recently accepted via ``setup.submit``.
+
+        The orchestrator launcher reads ``dry_run`` / ``workflow`` /
+        ``init_forks_profile`` off this payload — they're session-scoped
+        runtime hints that are *not* persisted to ``.merge/config.yaml``,
+        so the bridge is the only place they live after submit."""
+        return self._setup_payload
 
     async def start(self, host: str = "localhost", port: int = 8765) -> None:
         self._loop = asyncio.get_running_loop()
@@ -386,6 +397,7 @@ class MergeWSBridge:
             return
 
         self._setup_result = config
+        self._setup_payload = setup_payload
         self._setup_complete.set()
 
         await ws.send(

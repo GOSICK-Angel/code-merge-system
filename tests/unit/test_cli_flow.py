@@ -1,22 +1,23 @@
-"""Tests for CLI one-stop flow.
+"""Tests for the simplified CLI flow.
 
-Covers:
-- detect_or_setup: repeat-run path (config exists)
-- detect_or_setup: first-run path (interactive wizard)
-- _resolve_api_keys: three-tier resolution chain
-- _auto_detect_fork_ref: git branch detection + fallback
-- merge subcommand routing (web default / --no-web / --no-tui alias / --ci)
-- _DefaultGroup: unknown command forwarded to 'merge'
+Covers post-PR-3 entry surfaces:
+- ``_load_repo_env``: project-scoped ``.merge/.env`` must override
+  stale shell + global ``.env`` fallbacks before any LLM client is
+  constructed.
+- ``_auto_detect_fork_ref``: git branch detection + fallback.
+- ``merge`` (no args) routes to ``web_command_impl(repo_path='.')``.
+- ``merge --ci`` with existing config calls ``run_command_impl``.
+- ``merge --ci`` with no config synthesises one via
+  ``build_default_payload`` + ``apply_setup_payload``, prints the
+  path, and continues into the run.
 """
 
 from __future__ import annotations
 
 import os
-import warnings
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
 import yaml
 from click.testing import CliRunner
 
@@ -71,66 +72,6 @@ class TestLoadRepoEnv:
             assert os.environ["OPENAI_BASE_URL"] == "https://shell-only.example.com"
 
 
-class TestResolveApiKeys:
-    def test_env_var_takes_priority(self, tmp_path: Path) -> None:
-        from src.cli.commands.setup import _resolve_api_keys
-
-        project_env = tmp_path / ".merge" / ".env"
-        project_env.parent.mkdir(parents=True)
-        project_env.write_text('ANTHROPIC_API_KEY="from-file"\n', encoding="utf-8")
-
-        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "from-env"}, clear=False):
-            result = _resolve_api_keys(str(tmp_path))
-
-        assert result["ANTHROPIC_API_KEY"] == "from-env"
-
-    def test_project_env_overrides_global(self, tmp_path: Path) -> None:
-        from src.cli.commands.setup import _resolve_api_keys
-
-        global_env = tmp_path / "global.env"
-        global_env.write_text('ANTHROPIC_API_KEY="global"\n', encoding="utf-8")
-
-        project_dir = tmp_path / "project"
-        project_env = project_dir / ".merge" / ".env"
-        project_env.parent.mkdir(parents=True)
-        project_env.write_text('ANTHROPIC_API_KEY="project"\n', encoding="utf-8")
-
-        env_without_key = {
-            k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"
-        }
-        with (
-            patch(
-                "src.cli.commands.setup.get_global_env_path", return_value=global_env
-            ),
-            patch.dict(os.environ, env_without_key, clear=True),
-        ):
-            result = _resolve_api_keys(str(project_dir))
-
-        assert result["ANTHROPIC_API_KEY"] == "project"
-
-    def test_global_env_used_as_fallback(self, tmp_path: Path) -> None:
-        from src.cli.commands.setup import _resolve_api_keys
-
-        global_env = tmp_path / "global.env"
-        global_env.write_text('ANTHROPIC_API_KEY="global"\n', encoding="utf-8")
-
-        repo = tmp_path / "repo"
-        repo.mkdir()
-
-        env_without_key = {
-            k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"
-        }
-        with (
-            patch(
-                "src.cli.commands.setup.get_global_env_path", return_value=global_env
-            ),
-            patch.dict(os.environ, env_without_key, clear=True),
-        ):
-            result = _resolve_api_keys(str(repo))
-
-        assert result.get("ANTHROPIC_API_KEY") == "global"
-
-
 class TestAutoDetectForkRef:
     def test_returns_current_branch(self) -> None:
         from src.cli.commands.setup import _auto_detect_fork_ref
@@ -161,159 +102,107 @@ class TestAutoDetectForkRef:
         assert result == "origin/main"
 
 
-class TestDetectOrSetup:
-    def test_repeat_run_loads_existing_config(self, tmp_path: Path) -> None:
-        from src.cli.commands.setup import detect_or_setup
-
-        merge_dir = tmp_path / ".merge"
-        merge_dir.mkdir()
-        config_file = merge_dir / "config.yaml"
-        config_file.write_text(
-            _minimal_config_yaml(upstream="old/main", fork="feature/x"),
-            encoding="utf-8",
-        )
-
-        with patch("src.cli.commands.setup._ask", return_value=""):
-            result = detect_or_setup("new/upstream", repo_path=str(tmp_path))
-
-        assert isinstance(result, MergeConfig)
-        assert result.upstream_ref == "new/upstream"
-        assert result.fork_ref == "feature/x"
-
-    def test_repeat_run_reconfigure_flag_triggers_wizard(self, tmp_path: Path) -> None:
-        from src.cli.commands.setup import detect_or_setup
-
-        merge_dir = tmp_path / ".merge"
-        merge_dir.mkdir()
-        (merge_dir / "config.yaml").write_text(
-            _minimal_config_yaml(fork="feature/x"), encoding="utf-8"
-        )
-
-        wizard_config = MergeConfig(upstream_ref="up/main", fork_ref="new/branch")
-        with patch(
-            "src.cli.commands.setup._interactive_setup", return_value=wizard_config
-        ) as mock_wizard:
-            result = detect_or_setup(
-                "up/main", repo_path=str(tmp_path), reconfigure=True
-            )
-
-        mock_wizard.assert_called_once_with("up/main", str(tmp_path))
-        assert result is wizard_config
-
-    def test_first_run_calls_interactive_setup(self, tmp_path: Path) -> None:
-        from src.cli.commands.setup import detect_or_setup
-
-        wizard_config = MergeConfig(upstream_ref="up/main", fork_ref="feature/y")
-        with patch(
-            "src.cli.commands.setup._interactive_setup", return_value=wizard_config
-        ) as mock_wizard:
-            result = detect_or_setup("up/main", repo_path=str(tmp_path))
-
-        mock_wizard.assert_called_once_with("up/main", str(tmp_path))
-        assert result is wizard_config
-
-    def test_corrupt_config_falls_back_to_wizard(self, tmp_path: Path) -> None:
-        from src.cli.commands.setup import detect_or_setup
-
-        merge_dir = tmp_path / ".merge"
-        merge_dir.mkdir()
-        (merge_dir / "config.yaml").write_text("{ invalid yaml: [", encoding="utf-8")
-
-        wizard_config = MergeConfig(upstream_ref="up/main", fork_ref="feature/z")
-        with patch(
-            "src.cli.commands.setup._interactive_setup", return_value=wizard_config
-        ) as mock_wizard:
-            result = detect_or_setup("up/main", repo_path=str(tmp_path))
-
-        mock_wizard.assert_called_once()
-        assert result is wizard_config
-
-
 class TestMergeCommandRouting:
-    """Parametrized matrix covering the four CLI routing paths.
-
-    | flags                  | expected target             |
-    | ---------------------- | --------------------------- |
-    | (default, no flags)    | web_command_impl            |
-    | --no-web               | run_command_impl (ci=False) |
-    | --no-tui  (alias)      | run_command_impl (ci=False) |
-    | --ci                   | run_command_impl (ci=True)  |
-    """
-
-    def test_merge_subcommand_help(self) -> None:
+    def test_help_is_short_and_describes_two_modes(self) -> None:
         from src.cli.main import cli
 
         runner = CliRunner()
         result = runner.invoke(cli, ["merge", "--help"])
         assert result.exit_code == 0
-        assert "TARGET_BRANCH" in result.output
+        # No more target_branch positional argument
+        assert "TARGET_BRANCH" not in result.output
+        # Both invocations called out somewhere
+        assert "--ci" in result.output
 
-    @pytest.mark.parametrize(
-        "extra_args,target,expect_ci,expect_deprecation",
-        [
-            ([], "web", None, False),
-            (["--no-web"], "run", False, False),
-            (["--no-tui"], "run", False, True),
-            (["--ci"], "run", True, False),
-        ],
-        ids=["web-default", "no-web", "no-tui-alias", "ci"],
-    )
-    def test_merge_routes(
-        self,
-        extra_args: list[str],
-        target: str,
-        expect_ci: bool | None,
-        expect_deprecation: bool,
-    ) -> None:
+    def test_merge_with_no_args_opens_web_setup(self) -> None:
         from src.cli.main import cli
 
-        fake_config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/x")
         runner = CliRunner()
-        with (
-            patch("src.cli.commands.setup.detect_or_setup", return_value=fake_config),
-            patch("src.cli.commands.web.web_command_impl") as mock_web,
-            patch("src.cli.commands.run.run_command_impl") as mock_run,
-            warnings.catch_warnings(record=True) as caught,
-        ):
-            warnings.simplefilter("always")
-            result = runner.invoke(
-                cli, ["merge", "upstream/main", *extra_args], catch_exceptions=False
-            )
+        with patch("src.cli.commands.web.web_command_impl") as mock_web:
+            result = runner.invoke(cli, ["merge"], catch_exceptions=False)
 
         assert result.exit_code == 0, result.output
+        mock_web.assert_called_once_with(
+            repo_path=".",
+            ws_port=8765,
+            web_port=5173,
+            open_browser=True,
+        )
 
-        if target == "web":
-            mock_web.assert_called_once_with(
-                fake_config,
-                ws_port=8765,
-                web_port=5173,
-                dry_run=False,
-                open_browser=True,
-            )
-            mock_run.assert_not_called()
-        else:
-            mock_web.assert_not_called()
-            mock_run.assert_called_once_with(
-                fake_config, False, ci=expect_ci, auto_decisions=None
-            )
+    def test_merge_ci_with_existing_config_runs_directly(self, tmp_path: Path) -> None:
+        from src.cli.main import cli
 
-        if expect_deprecation:
-            assert any(
-                issubclass(w.category, DeprecationWarning)
-                and "--no-tui" in str(w.message)
-                for w in caught
-            ), [str(w.message) for w in caught]
-            assert "deprecation" in result.output.lower() or (
-                result.stderr_bytes and b"deprecation" in result.stderr_bytes.lower()
-            )
+        merge_dir = tmp_path / ".merge"
+        merge_dir.mkdir()
+        (merge_dir / "config.yaml").write_text(_minimal_config_yaml(), encoding="utf-8")
 
-    def test_merge_loads_repo_env_before_setup(self, tmp_path: Path) -> None:
+        runner = CliRunner()
+        with (
+            patch(
+                "src.cli.paths.get_config_path",
+                return_value=merge_dir / "config.yaml",
+            ),
+            patch("src.cli.commands.run.run_command_impl") as mock_run,
+            patch(
+                "src.cli.main.get_project_merge_dir",
+                return_value=merge_dir,
+            ),
+        ):
+            result = runner.invoke(cli, ["merge", "--ci"], catch_exceptions=False)
+
+        assert result.exit_code == 0, result.output
+        mock_run.assert_called_once()
+        args, kwargs = mock_run.call_args
+        config = args[0]
+        assert isinstance(config, MergeConfig)
+        assert config.upstream_ref == "upstream/main"
+        assert kwargs["ci"] is True
+
+    def test_merge_ci_without_config_synthesises_one(self, tmp_path: Path) -> None:
+        from src.cli.main import cli
+
+        merge_dir = tmp_path / ".merge"
+        # NOTE: do NOT pre-create — this is the first-run path
+        runner = CliRunner()
+        default_payload_mock = MagicMock()
+        default_payload_mock.target_branch = "origin/main"
+        default_payload_mock.fork_ref = "feature/x"
+        fake_config = MergeConfig(upstream_ref="origin/main", fork_ref="feature/x")
+
+        with (
+            patch(
+                "src.cli.paths.get_config_path",
+                return_value=merge_dir / "config.yaml",
+            ),
+            patch(
+                "src.cli.commands.setup.build_default_payload",
+                return_value=default_payload_mock,
+            ) as mock_build,
+            patch(
+                "src.cli.commands.setup.apply_setup_payload",
+                return_value=fake_config,
+            ) as mock_apply,
+            patch("src.cli.commands.run.run_command_impl") as mock_run,
+            patch(
+                "src.cli.main.get_project_merge_dir",
+                return_value=merge_dir,
+            ),
+        ):
+            result = runner.invoke(cli, ["merge", "--ci"], catch_exceptions=False)
+
+        assert result.exit_code == 0, result.output
+        mock_build.assert_called_once()
+        mock_apply.assert_called_once()
+        mock_run.assert_called_once()
+        # User-visible breadcrumb so operators know where the fresh
+        # config landed and can review it before the next --ci run.
+        assert "Generated default config" in result.output
+
+    def test_merge_loads_repo_env_before_routing(self, tmp_path: Path) -> None:
         # Regression: the dify-plugins planner_judge silently failed
         # because <repo>/.merge/.env was never loaded before LLM clients
-        # were constructed. ``merge_command`` must load it ahead of
-        # detect_or_setup so OPENAI_BASE_URL et al. land in os.environ.
-        import os as _os
-
+        # were constructed. ``merge_command`` must load it ahead of any
+        # downstream code path so OPENAI_BASE_URL lands in os.environ.
         from src.cli.main import cli
 
         sentinel_key = "MERGE_TEST_REPO_ENV_SENTINEL"
@@ -324,47 +213,19 @@ class TestMergeCommandRouting:
         env_file = merge_dir / ".env"
         env_file.write_text(f'{sentinel_key}="{sentinel_val}"\n', encoding="utf-8")
 
-        fake_config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/x")
         runner = CliRunner()
-        _os.environ.pop(sentinel_key, None)
-
+        os.environ.pop(sentinel_key, None)
         try:
             with (
-                patch(
-                    "src.cli.commands.setup.detect_or_setup", return_value=fake_config
-                ),
-                patch("src.cli.commands.run.run_command_impl"),
+                patch("src.cli.commands.web.web_command_impl"),
                 patch(
                     "src.cli.main.get_project_merge_dir",
-                    return_value=tmp_path / ".merge",
+                    return_value=merge_dir,
                 ),
             ):
-                result = runner.invoke(cli, ["merge", "upstream/main", "--no-web"])
+                result = runner.invoke(cli, ["merge"], catch_exceptions=False)
 
             assert result.exit_code == 0, result.output
-            assert _os.environ.get(sentinel_key) == sentinel_val
+            assert os.environ.get(sentinel_key) == sentinel_val
         finally:
-            _os.environ.pop(sentinel_key, None)
-
-
-class TestDefaultGroup:
-    def test_unknown_command_forwarded_to_merge(self) -> None:
-        from src.cli.main import cli
-
-        fake_config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/x")
-        runner = CliRunner()
-        with (
-            patch("src.cli.commands.setup.detect_or_setup", return_value=fake_config),
-            patch("src.cli.commands.web.web_command_impl"),
-        ):
-            result = runner.invoke(cli, ["upstream/main"])
-
-        assert result.exit_code == 0
-
-    def test_known_subcommand_not_affected(self) -> None:
-        from src.cli.main import cli
-
-        runner = CliRunner()
-        result = runner.invoke(cli, ["resume", "--help"])
-        assert result.exit_code == 0
-        assert "--run-id" in result.output
+            os.environ.pop(sentinel_key, None)

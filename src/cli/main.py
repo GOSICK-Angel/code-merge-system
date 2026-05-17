@@ -48,151 +48,110 @@ def _load_repo_env(repo_path: str) -> None:
 console = Console()
 
 
-class _DefaultGroup(click.Group):
-    """Forwards unrecognised first arguments to the 'merge' subcommand.
-
-    Lets users type `merge upstream/main` without the explicit 'merge'
-    token while keeping all named subcommands (resume, validate, …) unchanged.
-    """
-
-    def resolve_command(
-        self, ctx: click.Context, args: list[str]
-    ) -> tuple[str | None, click.Command | None, list[str]]:
-        try:
-            return super().resolve_command(ctx, args)
-        except click.UsageError:
-            merge_cmd = self.commands.get("merge")
-            if merge_cmd is not None:
-                return "merge", merge_cmd, args
-            raise
-
-
-@click.group(cls=_DefaultGroup)
+@click.group()
 def cli() -> None:
     load_env()
 
 
 @cli.command("merge")
-@click.argument("target_branch")
 @click.option(
-    "--ci", is_flag=True, help="CI mode: no interaction, JSON summary to stdout"
-)
-@click.option(
-    "--no-tui",
-    "no_tui",
+    "--ci",
     is_flag=True,
-    hidden=True,
-    help="(deprecated) alias of --no-web",
-)
-@click.option("--no-web", is_flag=True, help="Disable Web UI (plain-text output)")
-@click.option(
-    "--no-browser",
-    is_flag=True,
-    help="Skip opening browser, print URL only",
+    help=(
+        "CI mode: no browser, no prompts. Uses .merge/config.yaml if "
+        "present, otherwise synthesises one from env vars + git "
+        "(printing the path so you can review/tweak before next run)."
+    ),
 )
 @click.option(
     "--web-port",
     default=5173,
     type=int,
-    help="HTTP static port for Web UI",
+    help="HTTP static port for the Web UI",
 )
-@click.option("--dry-run", is_flag=True, help="Analyze only, do not merge")
 @click.option(
-    "--ws-port", default=8765, type=int, help="WebSocket port for the Web UI bridge"
-)
-@click.option("--reconfigure", "-r", is_flag=True, help="Force reconfiguration wizard")
-@click.option(
-    "--workflow",
-    "-w",
-    default=None,
-    help=(
-        "Named workflow preset from config/workflows.yaml "
-        "(standard|careful|fast|analysis-only). Overrides legacy flags where they overlap."
-    ),
+    "--ws-port",
+    default=8765,
+    type=int,
+    help="WebSocket port for the Web UI bridge",
 )
 @click.option(
     "--auto-decisions",
     default=None,
     type=click.Path(exists=True),
     help=(
-        "V2 decisions YAML pre-populated with rounds for every AWAITING_HUMAN "
-        "cycle (plan_review / conflict_marker / conflict_resolution / "
-        "judge_review). Drives the run end-to-end without operator "
-        "intervention; intended for CI."
+        "V2 decisions YAML pre-populated with rounds for every "
+        "AWAITING_HUMAN cycle. Drives the run end-to-end without "
+        "operator intervention; intended for --ci."
     ),
 )
 def merge_command(
-    target_branch: str,
     ci: bool,
-    no_tui: bool,
-    no_web: bool,
-    no_browser: bool,
     web_port: int,
-    dry_run: bool,
     ws_port: int,
-    reconfigure: bool,
-    workflow: str | None,
     auto_decisions: str | None,
 ) -> None:
-    """Merge TARGET_BRANCH into the current branch (one-stop flow)."""
-    import warnings
+    """Merge upstream into the current branch.
 
-    if no_tui:
-        warnings.warn(
-            "`--no-tui` is deprecated; use `--no-web` instead. "
-            "This alias will be removed in a future release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        click.echo(
-            "[deprecation] --no-tui is deprecated; use --no-web instead.",
-            err=True,
-        )
-        no_web = no_web or no_tui
+    Two invocations:
+      merge          interactive — opens the browser, walks Setup on first
+                     run, then drops into the dashboard.
+      merge --ci     non-interactive — uses .merge/config.yaml, or
+                     generates one from env vars + git state if missing.
 
+    The target branch, API keys, thresholds and dry-run / workflow
+    selections all live in .merge/config.yaml (created/edited via the
+    browser wizard or directly on disk for --ci).
+    """
     _load_repo_env(".")
 
-    from src.cli.commands.setup import detect_or_setup
+    if ci:
+        _run_ci(repo_path=".", auto_decisions=auto_decisions)
+        return
 
-    config = detect_or_setup(
-        target_branch,
+    from src.cli.commands.web import web_command_impl
+
+    web_command_impl(
         repo_path=".",
-        reconfigure=reconfigure,
-        non_interactive=ci,
+        ws_port=ws_port,
+        web_port=web_port,
+        open_browser=True,
     )
 
-    if workflow is not None:
-        from src.core.workflow_loader import apply_workflow_by_name, load_workflows
 
-        try:
-            catalog = load_workflows()
-            config = apply_workflow_by_name(config, workflow, catalog)
-            wf_def = catalog.workflows[workflow]
-            if wf_def.dry_run:
-                dry_run = True
-            console.print(
-                f"[cyan]Workflow applied:[/cyan] [bold]{workflow}[/bold] "
-                f"(review_mode={wf_def.review_mode}, dry_run={wf_def.dry_run})"
-            )
-        except (FileNotFoundError, KeyError, ValueError) as e:
-            console.print(f"[red]Workflow error: {e}[/red]")
-            sys.exit(2)
+def _run_ci(repo_path: str, auto_decisions: str | None) -> None:
+    """Non-interactive entry. Auto-generates config on first run.
 
-    if not ci and not no_web:
-        from src.cli.commands.web import web_command_impl
+    First-run behaviour: when no ``.merge/config.yaml`` exists yet,
+    synthesise one from env vars (ANTHROPIC_API_KEY / OPENAI_API_KEY /
+    GITHUB_TOKEN) and git state (current branch / ``origin/HEAD``).
+    The path is printed so the operator can review/tweak before the
+    next ``--ci`` run. This is the "no terminal wizard" promise: a
+    fresh checkout never blocks on prompts, even in CI.
+    """
+    from src.cli.commands.setup import (
+        apply_setup_payload,
+        build_default_payload,
+    )
+    from src.cli.paths import get_config_path
 
-        web_command_impl(
-            config,
-            ws_port=ws_port,
-            web_port=web_port,
-            dry_run=dry_run,
-            open_browser=not no_browser,
+    config_path = get_config_path(repo_path)
+    if config_path.exists():
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config = MergeConfig.model_validate(raw)
+    else:
+        payload = build_default_payload(repo_path)
+        config = apply_setup_payload(payload, repo_path)
+        console.print(
+            f"[cyan]Generated default config:[/cyan] {config_path}\n"
+            f"  target_branch: [bold]{payload.target_branch}[/bold] "
+            f"→ fork_ref: [bold]{payload.fork_ref}[/bold]\n"
+            f"  review and edit before the next `merge --ci` run."
         )
-        return
 
     from src.cli.commands.run import run_command_impl
 
-    run_command_impl(config, dry_run, ci=ci, auto_decisions=auto_decisions)
+    run_command_impl(config, dry_run=False, ci=True, auto_decisions=auto_decisions)
 
 
 @cli.command("resume")

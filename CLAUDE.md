@@ -21,14 +21,15 @@ cd web && npm run build        # tsc --noEmit + production build → web/dist/
 cd web && npm run lint         # tsc --noEmit only
 cd web && npm test             # vitest
 
-# One-stop flow
-merge <target-branch>            # default Web UI in browser — auto-setup on first run
-merge <target-branch> --no-web   # plain-text output (no browser)
-merge <target-branch> --no-tui   # deprecated alias of --no-web (emits warning, will be removed)
-merge <target-branch> --ci       # CI mode (no interaction, JSON summary to stdout)
-merge <target-branch> --dry-run  # analysis only, no merge
-merge <target-branch> -r         # force reconfiguration wizard
-merge <target-branch> --web-port 5173 --ws-port 8765   # override default ports
+# One-stop flow (two invocations — everything else lives in .merge/config.yaml)
+merge                                # opens browser; first run walks Setup wizard
+merge --ci                           # non-interactive; synthesises config from env+git on first run
+merge --ci --auto-decisions <yaml>   # CI with pre-canned AWAITING_HUMAN decisions
+merge --web-port 5173 --ws-port 8765 # override default ports (browser mode only)
+
+# Target branch / API keys / thresholds / dry-run / workflow all live in
+# <repo>/.merge/config.yaml — edit it directly to reconfigure, or `rm` it
+# to re-trigger the browser Setup wizard.
 
 # Utility subcommands
 merge resume --run-id <id>       # resume from checkpoint

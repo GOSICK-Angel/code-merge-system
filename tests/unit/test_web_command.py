@@ -1,34 +1,28 @@
-"""Phase 0 — Web UI command wiring tests.
+"""Tests for ``src.cli.commands.web`` post-PR-3.
 
-Covers the bootstrap path of ``src.cli.commands.web``:
-- missing ``web/dist/index.html`` → clean exit with EXIT_UNKNOWN_ERROR
-- ``open_browser=False`` skips ``webbrowser.open`` while still printing URL
-- ``--no-tui`` alias on ``merge`` keeps routing to the plain-text run path
-  and emits a ``DeprecationWarning`` (the deprecation surface added in
-  this phase).
+Two routing branches that the new ``web_command_impl(repo_path, ...)``
+makes — both must work without any browser open / network access:
+
+- ``web/dist/index.html`` missing → clean ``SystemExit`` with
+  ``EXIT_UNKNOWN_ERROR`` (and no bridge / server / browser
+  side-effects).
+- ``.merge/config.yaml`` already exists → fast path that constructs a
+  ``MergeState`` and goes straight into ``_serve_with_state``
+  (no setup bridge involved).
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from click.testing import CliRunner
 
 from src.cli.exit_codes import EXIT_UNKNOWN_ERROR
-from src.models.config import MergeConfig
-
-
-@pytest.fixture
-def fake_config() -> MergeConfig:
-    return MergeConfig(upstream_ref="upstream/main", fork_ref="feature/x")
 
 
 class TestWebDistMissing:
-    def test_exits_cleanly_when_index_html_missing(
-        self, tmp_path: Path, fake_config: MergeConfig
-    ) -> None:
+    def test_exits_cleanly_when_index_html_missing(self, tmp_path: Path) -> None:
         from src.cli.commands import web as web_mod
 
         missing_dir = tmp_path / "no_such_dist"
@@ -41,10 +35,9 @@ class TestWebDistMissing:
             pytest.raises(SystemExit) as excinfo,
         ):
             web_mod.web_command_impl(
-                fake_config,
+                repo_path=str(tmp_path),
                 ws_port=8765,
                 web_port=5173,
-                dry_run=False,
                 open_browser=True,
             )
 
@@ -54,9 +47,9 @@ class TestWebDistMissing:
         mock_browser.open.assert_not_called()
 
 
-class TestNoBrowserFlag:
-    def test_open_browser_false_skips_webbrowser_open(
-        self, tmp_path: Path, fake_config: MergeConfig
+class TestExistingConfigFastPath:
+    def test_existing_config_goes_straight_to_serve_with_state(
+        self, tmp_path: Path
     ) -> None:
         from src.cli.commands import web as web_mod
 
@@ -64,50 +57,33 @@ class TestNoBrowserFlag:
         dist.mkdir()
         (dist / "index.html").write_text("<html></html>", encoding="utf-8")
 
-        async def _fake_run(*_args, **_kwargs) -> None:
-            return None
+        merge_dir = tmp_path / ".merge"
+        merge_dir.mkdir()
+        (merge_dir / "config.yaml").write_text(
+            "upstream_ref: upstream/main\nfork_ref: feature/x\n",
+            encoding="utf-8",
+        )
 
+        serve_mock = AsyncMock(return_value=None)
         with (
             patch.object(web_mod, "_resolve_web_dist", return_value=dist),
-            patch.object(web_mod, "_run_web", side_effect=_fake_run) as mock_run,
+            patch.object(
+                web_mod,
+                "get_config_path",
+                return_value=merge_dir / "config.yaml",
+            ),
+            patch.object(web_mod, "_serve_with_state", side_effect=serve_mock),
         ):
             web_mod.web_command_impl(
-                fake_config,
+                repo_path=str(tmp_path),
                 ws_port=8765,
                 web_port=5173,
-                dry_run=False,
                 open_browser=False,
             )
 
-        mock_run.assert_called_once()
-        kwargs_or_args = mock_run.call_args
-        passed_open_browser = kwargs_or_args.args[4]
-        assert passed_open_browser is False
-
-
-class TestNoTuiAliasDeprecation:
-    def test_no_tui_alias_routes_to_run_with_deprecation_warning(
-        self, fake_config: MergeConfig
-    ) -> None:
-        import warnings
-
-        from src.cli.main import cli
-
-        runner = CliRunner()
-        with (
-            patch("src.cli.commands.setup.detect_or_setup", return_value=fake_config),
-            patch("src.cli.commands.run.run_command_impl") as mock_run,
-            warnings.catch_warnings(record=True) as caught,
-        ):
-            warnings.simplefilter("always")
-            result = runner.invoke(cli, ["merge", "upstream/main", "--no-tui"])
-
-        assert result.exit_code == 0, result.output
-        mock_run.assert_called_once_with(
-            fake_config, False, ci=False, auto_decisions=None
-        )
-        assert any(
-            issubclass(w.category, DeprecationWarning) and "--no-tui" in str(w.message)
-            for w in caught
-        )
-        assert "[deprecation] --no-tui" in result.output
+        serve_mock.assert_awaited_once()
+        call_kwargs = serve_mock.await_args.kwargs
+        # MergeConfig was constructed from the on-disk yaml and threaded
+        # through to the fast path.
+        assert call_kwargs["config"].upstream_ref == "upstream/main"
+        assert call_kwargs["open_browser"] is False

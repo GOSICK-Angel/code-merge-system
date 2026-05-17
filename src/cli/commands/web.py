@@ -1,4 +1,16 @@
-"""CLI command: merge web — launch interactive browser UI."""
+"""CLI command: merge — launch the Web UI for setup or an in-flight run.
+
+``web_command_impl`` is the single entry the top-level ``merge`` command
+uses. It detects whether ``.merge/config.yaml`` already exists and
+either:
+
+  - Boots the orchestrator immediately and renders the dashboard /
+    review gates as today, or
+  - Boots the bridge in ``setup`` mode (no MergeState yet), serves the
+    browser the Setup view, waits for ``setup.submit``, then constructs
+    a MergeState and transitions the bridge into run mode without
+    closing any sockets.
+"""
 
 from __future__ import annotations
 
@@ -13,9 +25,11 @@ import yaml
 from rich.console import Console
 
 from src.cli.exit_codes import EXIT_UNKNOWN_ERROR
+from src.cli.paths import get_config_path, get_project_merge_dir
 from src.core.orchestrator import Orchestrator
 from src.core.phases.base import ActivityEvent
 from src.models.config import MergeConfig
+from src.models.setup import SetupPayload
 from src.models.state import MergeState
 from src.web.static_server import StaticHTTPServer
 from src.web.ws_bridge import MergeWSBridge
@@ -40,22 +54,26 @@ def _resolve_web_dist() -> Path:
 
 
 def web_command_impl(
-    config_path_or_config: str | MergeConfig,
-    ws_port: int,
-    web_port: int,
-    dry_run: bool = False,
+    repo_path: str = ".",
+    ws_port: int = 8765,
+    web_port: int = 5173,
     open_browser: bool = True,
 ) -> None:
-    """Launch the Web UI alongside a fresh merge run."""
-    if isinstance(config_path_or_config, MergeConfig):
-        merge_config = config_path_or_config
-    else:
-        config_file = Path(config_path_or_config)
-        raw_config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-        merge_config = MergeConfig.model_validate(raw_config)
+    """Single entry for ``merge`` (non-``--ci``).
 
-    state = MergeState(config=merge_config, dry_run=dry_run)
-    asyncio.run(_run_web(state, merge_config, ws_port, web_port, open_browser))
+    Reads ``<repo_path>/.merge/config.yaml`` and either runs the
+    orchestrator immediately or first walks the user through the
+    browser-side Setup form to create one. The ``--ci`` path bypasses
+    this entirely and lives in ``src/cli/main.py``.
+    """
+    asyncio.run(
+        _serve(
+            repo_path=repo_path,
+            ws_port=ws_port,
+            web_port=web_port,
+            open_browser=open_browser,
+        )
+    )
 
 
 def web_resume_impl(
@@ -64,13 +82,20 @@ def web_resume_impl(
     web_port: int,
     open_browser: bool = True,
 ) -> None:
-    """Launch the Web UI against an already-loaded checkpoint state."""
-    asyncio.run(_run_web(state, state.config, ws_port, web_port, open_browser))
+    """Resume from an already-loaded checkpoint state — no setup wizard."""
+    asyncio.run(
+        _serve_with_state(
+            state=state,
+            config=state.config,
+            ws_port=ws_port,
+            web_port=web_port,
+            open_browser=open_browser,
+        )
+    )
 
 
-async def _run_web(
-    state: MergeState,
-    config: MergeConfig,
+async def _serve(
+    repo_path: str,
     ws_port: int,
     web_port: int,
     open_browser: bool,
@@ -82,16 +107,76 @@ async def _run_web(
             f"Expected: {web_dist}\n"
             "If you installed from source (`pip install -e .`), build the "
             "frontend first:\n"
-            "  [bold]cd web && npm ci && npm run build[/bold]\n"
-            "Or re-run with [bold]--no-web[/bold] for plain-text mode."
+            "  [bold]cd web && npm ci && npm run build[/bold]"
         )
         sys.exit(EXIT_UNKNOWN_ERROR)
 
+    config_path = get_config_path(repo_path)
+    if config_path.exists():
+        raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        merge_config = MergeConfig.model_validate(raw_config)
+        state = MergeState(config=merge_config, dry_run=False)
+        await _serve_with_state(
+            state=state,
+            config=merge_config,
+            ws_port=ws_port,
+            web_port=web_port,
+            open_browser=open_browser,
+        )
+        return
+
+    # First-run setup path — open the browser to a setup-mode bridge,
+    # wait for the user to submit the form, then keep the same sockets
+    # open while we promote the bridge into run mode and start the
+    # orchestrator. Reusing sockets is critical: tearing the WS down
+    # between modes would drop the just-rendered "Saving config…"
+    # screen and force a manual refresh.
+    bridge = MergeWSBridge(state=None, mode="setup", repo_path=repo_path)
+    await bridge.start("localhost", ws_port)
+
+    runs_root = get_project_merge_dir(repo_path) / "runs"
+    static_server = StaticHTTPServer(
+        web_dist, runs_root=runs_root if runs_root.exists() else None
+    )
+    await static_server.start("localhost", web_port)
+
+    url = f"http://localhost:{web_port}/?ws={ws_port}"
+    _open_browser_or_print(url, open_browser)
+    console.print(f"[bold green]Setup wizard:[/bold green] {url}")
+
+    try:
+        merge_config = await bridge.wait_for_setup()
+        runtime = bridge.last_setup_payload
+        _maybe_draft_forks_profile(runtime, merge_config, repo_path)
+        dry_run = bool(runtime and runtime.dry_run)
+        merge_config = _apply_workflow_from_setup(merge_config, runtime)
+
+        state = MergeState(config=merge_config, dry_run=dry_run)
+        await bridge.transition_to_run(state)
+
+        await _run_orchestrator(
+            bridge=bridge,
+            state=state,
+            config=merge_config,
+        )
+    except KeyboardInterrupt:
+        console.print("[yellow]Interrupted by user.[/yellow]")
+    finally:
+        await bridge.stop()
+        await static_server.stop()
+
+
+async def _serve_with_state(
+    state: MergeState,
+    config: MergeConfig,
+    ws_port: int,
+    web_port: int,
+    open_browser: bool,
+) -> None:
+    """Existing-config fast path: bridge starts in run mode immediately."""
+    web_dist = _resolve_web_dist()
     bridge = MergeWSBridge(state)
     await bridge.start("localhost", ws_port)
-    # L5 Report fetches markdown / checkpoint from this tree via the
-    # ``/runs/<run_id>/<file>`` URL prefix (see StaticHTTPServer).
-    from src.cli.paths import get_project_merge_dir
 
     runs_root = get_project_merge_dir(".") / "runs"
     static_server = StaticHTTPServer(
@@ -99,6 +184,31 @@ async def _run_web(
     )
     await static_server.start("localhost", web_port)
 
+    url = f"http://localhost:{web_port}/?ws={ws_port}"
+    _open_browser_or_print(url, open_browser)
+    console.print(f"[bold green]Web UI:[/bold green] {url}")
+
+    try:
+        await _run_orchestrator(bridge=bridge, state=state, config=config)
+    except KeyboardInterrupt:
+        console.print("[yellow]Interrupted by user.[/yellow]")
+    finally:
+        await bridge.stop()
+        await static_server.stop()
+
+
+async def _run_orchestrator(
+    bridge: MergeWSBridge,
+    state: MergeState,
+    config: MergeConfig,
+) -> None:
+    """Main orchestrator loop — shared by the setup and existing-config paths.
+
+    Identical to the pre-PR-3 ``_run_web`` body. Lifted into its own
+    function so the setup-mode launcher (which has to assemble the
+    state itself after submit) can reuse it without duplicating the
+    AWAITING_HUMAN dispatch table.
+    """
     orchestrator = Orchestrator(config)
 
     def _on_transition(_s: MergeState, _target: object, reason: str) -> None:
@@ -112,64 +222,114 @@ async def _run_web(
 
     orchestrator.set_activity_callback(_on_activity)
 
-    url = f"http://localhost:{web_port}/?ws={ws_port}"
-    if open_browser:
-        try:
-            webbrowser.open(url)
-        except (
-            webbrowser.Error,
-            OSError,
-        ) as exc:  # pragma: no cover - browser env quirks
-            logger.warning("Failed to open browser: %s", exc)
-    console.print(f"[bold green]Web UI:[/bold green] {url}")
+    connected = await bridge.wait_for_client(timeout=60.0)
+    if not connected:
+        console.print(
+            "[yellow]No browser client connected within 60s; "
+            "continuing in background.[/yellow]"
+        )
+
+    while True:
+        state = await orchestrator.run(state)
+        await bridge.broadcast_state_patch()
+
+        if state.status.value != "awaiting_human":
+            break
+
+        if _bridge_cancelled(bridge):
+            console.print("[yellow]Cancelled by user.[/yellow]")
+            break
+
+        # Three-way dispatch matching the three AWAITING_HUMAN gates:
+        #   1. Judge gate — judge_verdict produced, awaiting accept/abort/rerun
+        #   2. Conflict gate — at least one HumanDecisionRequest still pending
+        #   3. Plan-review gate — fallthrough (pending_user_decisions / overall plan)
+        awaiting_judge = (
+            state.judge_verdict is not None and state.judge_resolution is None
+        )
+        has_pending_conflicts = any(
+            req.human_decision is None for req in state.human_decision_requests.values()
+        )
+        if awaiting_judge:
+            await bridge.wait_for_judge_resolution()
+        elif has_pending_conflicts:
+            await bridge.wait_for_human_decisions()
+        else:
+            await bridge.wait_for_plan_review()
+
+        if _bridge_cancelled(bridge):
+            console.print("[yellow]Cancelled by user.[/yellow]")
+            break
+
+        await bridge.broadcast_state_patch()
+
+
+def _apply_workflow_from_setup(
+    config: MergeConfig, runtime: SetupPayload | None
+) -> MergeConfig:
+    """Overlay a named workflow preset onto the freshly-saved config.
+
+    The workflow choice is a session hint (lives only on the Setup form
+    submission), so we apply it after ``apply_setup_payload`` has
+    already written the base config.yaml. Failures here are surfaced
+    but non-fatal — the run continues with the saved config minus the
+    preset, matching the pre-PR-3 ``--workflow`` flag behaviour.
+    """
+    if runtime is None or not runtime.workflow:
+        return config
+    from src.core.workflow_loader import apply_workflow_by_name, load_workflows
 
     try:
-        connected = await bridge.wait_for_client(timeout=60.0)
-        if not connected:
-            console.print(
-                "[yellow]No browser client connected within 60s; "
-                "continuing in background.[/yellow]"
-            )
+        catalog = load_workflows()
+        config = apply_workflow_by_name(config, runtime.workflow, catalog)
+        wf_def = catalog.workflows[runtime.workflow]
+        console.print(
+            f"[cyan]Workflow applied:[/cyan] [bold]{runtime.workflow}[/bold] "
+            f"(review_mode={wf_def.review_mode}, dry_run={wf_def.dry_run})"
+        )
+    except (FileNotFoundError, KeyError, ValueError) as e:
+        console.print(
+            f"[yellow]Workflow '{runtime.workflow}' not applied: {e}[/yellow]"
+        )
+    return config
 
-        while True:
-            state = await orchestrator.run(state)
-            await bridge.broadcast_state_patch()
 
-            if state.status.value != "awaiting_human":
-                break
+def _maybe_draft_forks_profile(
+    runtime: SetupPayload | None, config: MergeConfig, repo_path: str
+) -> None:
+    """Non-interactive drafter — only fires when the form opted in.
 
-            if _bridge_cancelled(bridge):
-                console.print("[yellow]Cancelled by user.[/yellow]")
-                break
+    Mirrors the post-wizard prompt the old terminal flow used, minus
+    the ``$EDITOR`` launch (the browser is the editor now). Any draft
+    failure is logged and skipped so a transient git issue cannot
+    block the orchestrator launch.
+    """
+    if runtime is None or not runtime.init_forks_profile:
+        return
+    from src.cli.commands.setup import draft_forks_profile_file
 
-            # Three-way dispatch matching the three AWAITING_HUMAN gates:
-            #   1. Judge gate — judge_verdict produced, awaiting accept/abort/rerun
-            #   2. Conflict gate — at least one HumanDecisionRequest still pending
-            #   3. Plan-review gate — fallthrough (pending_user_decisions / overall plan)
-            awaiting_judge = (
-                state.judge_verdict is not None and state.judge_resolution is None
-            )
-            has_pending_conflicts = any(
-                req.human_decision is None
-                for req in state.human_decision_requests.values()
-            )
-            if awaiting_judge:
-                await bridge.wait_for_judge_resolution()
-            elif has_pending_conflicts:
-                await bridge.wait_for_human_decisions()
-            else:
-                await bridge.wait_for_plan_review()
+    try:
+        out_path = draft_forks_profile_file(
+            target_branch=config.upstream_ref,
+            fork_ref=config.fork_ref,
+            repo_path=repo_path,
+        )
+        if out_path is not None:
+            console.print(f"  [green]Drafted forks-profile:[/green] {out_path}")
+    except Exception as e:
+        console.print(f"  [yellow]forks-profile draft failed (skip): {e}[/yellow]")
 
-            if _bridge_cancelled(bridge):
-                console.print("[yellow]Cancelled by user.[/yellow]")
-                break
 
-            await bridge.broadcast_state_patch()
-    except KeyboardInterrupt:
-        console.print("[yellow]Interrupted by user.[/yellow]")
-    finally:
-        await bridge.stop()
-        await static_server.stop()
+def _open_browser_or_print(url: str, open_browser: bool) -> None:
+    if not open_browser:
+        return
+    try:
+        webbrowser.open(url)
+    except (
+        webbrowser.Error,
+        OSError,
+    ) as exc:  # pragma: no cover - browser env quirks
+        logger.warning("Failed to open browser: %s", exc)
 
 
 def _bridge_cancelled(bridge: MergeWSBridge) -> bool:

@@ -1,11 +1,23 @@
-"""Interactive setup wizard for the one-stop `merge <branch>` flow.
+"""Pure helpers backing the Web UI Setup view + ``merge --ci`` first-run.
 
-Entry point: detect_or_setup(target_branch, repo_path, reconfigure) -> MergeConfig
+Public entry points:
+- ``apply_setup_payload(payload, repo_path)`` — write ``.merge/config.yaml``
+  and ``.merge/.env`` from a validated ``SetupPayload`` (Web UI submit
+  or ``build_default_payload`` synthetic). Pure I/O — no prompts.
+- ``detect_setup_context(repo_path)`` — assemble the data the Web UI
+  needs to pre-fill its Setup form (current branch, suggested target,
+  masked existing API keys, fork-divergence count, existing config
+  summary).
+- ``build_default_payload(repo_path)`` — synthesise a ``SetupPayload``
+  for ``merge --ci`` when no ``.merge/config.yaml`` exists yet, so CI
+  never blocks on prompts.
+- ``draft_forks_profile_file(...)`` / ``migrate_merge_record(...)`` —
+  one-shot helpers reused by the launcher.
 
-First run:  guides the user through API keys + thresholds, writes
-            <repo>/.merge/config.yaml and <repo>/.merge/.env.
-Repeat run: loads existing config, shows a one-line summary, and asks
-            for confirmation (or 'c' to reconfigure).
+The previous terminal-interactive wizard (``_interactive_setup`` /
+``_repeat_run_flow`` / ``detect_or_setup``) was removed in PR-3 once
+the browser took over the first-run flow. ``_ask`` / ``_confirm``
+remain because ``init_context.py`` still needs them.
 """
 
 from __future__ import annotations
@@ -17,7 +29,6 @@ from typing import Any
 
 import yaml
 from rich.console import Console
-from rich.panel import Panel
 
 from src.cli.env import read_env_file, write_env_file
 from src.cli.paths import (
@@ -33,51 +44,9 @@ from src.models.setup import (
     ApiKeyHint,
     SetupContext,
     SetupPayload,
-    ThresholdsPayload,
 )
 
 console = Console()
-
-_ENV_KEYS = (
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_BASE_URL",
-    "OPENAI_API_KEY",
-    "OPENAI_BASE_URL",
-    "GITHUB_TOKEN",
-)
-
-
-def detect_or_setup(
-    target_branch: str,
-    repo_path: str = ".",
-    reconfigure: bool = False,
-    non_interactive: bool = False,
-) -> MergeConfig:
-    """Load existing config or run interactive wizard.
-
-    Returns a validated MergeConfig with upstream_ref = target_branch.
-    On first run, also migrates any existing MERGE_RECORD/ directory.
-
-    When ``non_interactive`` is true (set by ``merge --ci``), the function
-    refuses to enter the interactive wizard and the per-run "Press Enter"
-    prompt — config must already exist on disk.
-    """
-    config_path = get_config_path(repo_path)
-
-    if not reconfigure and config_path.exists():
-        return _repeat_run_flow(
-            target_branch, repo_path, config_path, non_interactive=non_interactive
-        )
-
-    if non_interactive:
-        raise RuntimeError(
-            f"--ci requires existing config at {config_path}; "
-            "run `merge <branch>` once interactively, or pass --reconfigure "
-            "with valid pre-set env vars."
-        )
-
-    migrate_merge_record(repo_path)
-    return _interactive_setup(target_branch, repo_path)
 
 
 def _auto_detect_fork_ref(repo_path: str) -> str:
@@ -96,31 +65,6 @@ def _auto_detect_fork_ref(repo_path: str) -> str:
     except Exception:
         pass
     return "origin/main"
-
-
-def _resolve_api_keys(repo_path: str) -> dict[str, str]:
-    """Merge API keys from all sources (lowest to highest priority):
-
-    1. ~/.config/code-merge-system/.env   (global fallback)
-    2. <repo>/.merge/.env                 (project-level)
-    3. Shell environment variables        (highest priority)
-    """
-    resolved: dict[str, str] = {}
-
-    global_env = get_global_env_path()
-    if global_env.exists():
-        resolved.update(read_env_file(global_env))
-
-    project_env = get_project_merge_dir(repo_path) / ".env"
-    if project_env.exists():
-        resolved.update(read_env_file(project_env))
-
-    for key in _ENV_KEYS:
-        val = os.environ.get(key)
-        if val:
-            resolved[key] = val
-
-    return resolved
 
 
 def _default_config_data(payload: SetupPayload, repo_path: str) -> dict[str, Any]:
@@ -415,132 +359,6 @@ def _count_fork_deleted_files(upstream_ref: str, fork_ref: str, repo_path: str) 
     return sum(1 for line in deleted.splitlines() if line.strip())
 
 
-def _repeat_run_flow(
-    target_branch: str,
-    repo_path: str,
-    config_path: Path,
-    non_interactive: bool = False,
-) -> MergeConfig:
-    """Show config summary and confirm before starting."""
-    try:
-        raw: dict[str, Any] = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        raw["upstream_ref"] = target_branch
-        config = MergeConfig.model_validate(raw)
-    except Exception as e:
-        if non_interactive:
-            raise RuntimeError(
-                f"--ci cannot recover from config load error: {e}"
-            ) from e
-        console.print(f"[yellow]Config load error: {e}. Re-running setup.[/yellow]")
-        return _interactive_setup(target_branch, repo_path)
-
-    console.print(
-        Panel(
-            f"[bold]Code Merge System[/bold]\n\n"
-            f"  Target:  [cyan]{target_branch}[/cyan] → [cyan]{config.fork_ref}[/cyan]\n"
-            f"  Repo:    {Path(repo_path).resolve()}\n"
-            f"  Config:  {config_path}",
-            title="merge",
-            border_style="cyan",
-        )
-    )
-    if non_interactive:
-        return config
-
-    console.print("\nPress Enter to start, or [bold]c[/bold] to reconfigure...")
-    choice = _ask("", default="", show_default=False)
-    if choice.lower() == "c":
-        return _interactive_setup(target_branch, repo_path)
-
-    return config
-
-
-def _interactive_setup(target_branch: str, repo_path: str) -> MergeConfig:
-    """Full interactive first-time wizard."""
-    resolved_keys = _resolve_api_keys(repo_path)
-    fork_ref = _auto_detect_fork_ref(repo_path)
-
-    console.print(
-        Panel(
-            f"[bold cyan]Code Merge System[/bold cyan]\n\n"
-            f"  Target: [cyan]{target_branch}[/cyan] → [cyan]{fork_ref}[/cyan]\n"
-            f"  Repo:   {Path(repo_path).resolve()}",
-            title="[1/3] Configuration",
-            border_style="cyan",
-        )
-    )
-
-    project_context = _ask(
-        "\nProject description (helps AI understand context)",
-        default="",
-    )
-
-    console.print("\n[bold yellow]API Keys[/bold yellow]")
-    collected_keys: dict[str, str] = {}
-
-    for name, required in [
-        ("ANTHROPIC_API_KEY", True),
-        ("OPENAI_API_KEY", True),
-        ("GITHUB_TOKEN", False),
-    ]:
-        val = _prompt_api_key(name, resolved_keys.get(name, ""), required=required)
-        if val:
-            collected_keys[name] = val
-
-    console.print("\n[bold yellow]Thresholds[/bold yellow]")
-    use_defaults = _confirm(
-        "Use defaults? (auto_merge=0.85, risk_low=0.3, risk_high=0.6)",
-        default=True,
-    )
-    explicit_thresholds: dict[str, float] = {}
-    if not use_defaults:
-        explicit_thresholds["auto_merge_confidence"] = _prompt_float(
-            "auto_merge_confidence", 0.85
-        )
-        explicit_thresholds["risk_score_low"] = _prompt_float("risk_score_low", 0.30)
-        explicit_thresholds["risk_score_high"] = _prompt_float("risk_score_high", 0.60)
-
-    payload = SetupPayload(
-        target_branch=target_branch,
-        fork_ref=fork_ref,
-        project_context=project_context,
-        api_keys=collected_keys,
-        thresholds=ThresholdsPayload(**explicit_thresholds)
-        if explicit_thresholds
-        else None,
-    )
-
-    merge_config = apply_setup_payload(payload, repo_path)
-
-    if collected_keys:
-        env_path = get_project_merge_dir(repo_path) / ".env"
-        console.print(f"\n  [green]API keys saved to:[/green] {env_path}")
-    config_path = get_config_path(repo_path)
-    console.print(f"  [green]Config saved to:[/green] {config_path}")
-
-    _offer_forks_profile_draft(target_branch, fork_ref, repo_path)
-
-    console.print(
-        Panel(
-            f"  API keys ........ [green]OK[/green]\n"
-            f"  Repository ...... {Path(repo_path).resolve()}",
-            title="[2/3] Validation",
-            border_style="green",
-        )
-    )
-    console.print(
-        Panel(
-            f"  [cyan]{target_branch}[/cyan] → [cyan]{fork_ref}[/cyan]\n\n"
-            "  Press Enter to start, or Ctrl+C to cancel...",
-            title="[3/3] Ready to merge",
-            border_style="green",
-        )
-    )
-    _ask("", default="", show_default=False)
-
-    return merge_config
-
-
 def _ask(prompt: str, default: str = "", show_default: bool = True) -> str:
     """Read a line via stdlib ``input()`` so readline tracks prompt width.
 
@@ -585,40 +403,10 @@ def _confirm(prompt: str, default: bool = True) -> bool:
             return False
 
 
-def _prompt_api_key(name: str, existing: str, required: bool) -> str:
-    source_hint = " (from env)" if os.environ.get(name) else ""
-    masked = _mask_key(existing) if existing else ""
-    hint = f" {masked}{source_hint}" if masked else ""
-    label = f"  {name}:{hint}"
-    if not required:
-        label += " [optional, Enter to skip]"
-
-    value = _ask(label, default="", show_default=False)
-    if not value and existing:
-        return existing
-    if not value and required and not existing:
-        console.print(
-            f"    [yellow]Warning: {name} not set — some agents will fail.[/yellow]"
-        )
-    return value
-
-
 def _mask_key(key: str) -> str:
     if len(key) <= 8:
         return "****"
     return key[:4] + "****" + key[-4:]
-
-
-def _prompt_float(label: str, default: float) -> float:
-    while True:
-        raw = _ask(f"  {label}", default=str(default))
-        try:
-            val = float(raw)
-            if 0.0 <= val <= 1.0:
-                return val
-            console.print("    [red]Must be between 0.0 and 1.0[/red]")
-        except ValueError:
-            console.print("    [red]Please enter a valid number[/red]")
 
 
 _GLOBAL_CONFIG_WHITELIST = frozenset(
@@ -701,90 +489,32 @@ just maintenance burden, so the wizard stays silent.
 """
 
 
-def _offer_forks_profile_draft(
-    target_branch: str, fork_ref: str, repo_path: str
-) -> None:
-    """Offer to draft `.merge/forks-profile.yaml` when the fork looks divergent.
+def draft_forks_profile_file(
+    target_branch: str,
+    fork_ref: str,
+    repo_path: str = ".",
+) -> Path | None:
+    """Non-interactive forks-profile drafter — used by the Web UI launcher.
 
-    Called once during the first-time wizard, after config has been
-    written but before "press Enter to start". The trigger is the
-    cheapest possible signal — number of files the fork deleted relative
-    to the upstream merge-base — so it never blocks setup on a slow
-    full-divergence scan. When the user accepts, we run the full
-    drafter and open the result in ``$EDITOR`` so they can review the
-    TODO-marked entries before they ever flow into a real run.
-
-    All git failures and IO errors silently skip; setup must never
-    abort on this best-effort prompt.
+    Same drafter as ``_draft_and_open_editor`` minus the ``$EDITOR``
+    prompt: we run the diff, render the yaml, and write it to
+    ``.merge/forks-profile.yaml``. Returns the output path on success,
+    ``None`` if a profile already exists (we never overwrite). Any
+    git / IO failure raises so the caller can decide whether to
+    surface it — the WebUI launcher catches and logs to keep the
+    merge run alive.
     """
-    profile_path = get_forks_profile_path(repo_path)
-    if profile_path.exists():
-        return
-
-    try:
-        merge_base = subprocess.run(
-            ["git", "merge-base", target_branch, fork_ref],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        if not merge_base:
-            return
-        deleted = subprocess.run(
-            [
-                "git",
-                "diff",
-                "--diff-filter=D",
-                "--name-only",
-                f"{merge_base}..{fork_ref}",
-            ],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-    except Exception:
-        return
-
-    deleted_count = sum(1 for line in deleted.splitlines() if line.strip())
-    if deleted_count < FORKS_PROFILE_INIT_THRESHOLD:
-        return
-
-    console.print(
-        f"\n[bold yellow]Fork divergence detected:[/bold yellow] "
-        f"{deleted_count} files deleted vs upstream merge-base."
-    )
-    console.print(
-        "  Generating a forks-profile.yaml draft helps the merge system "
-        "skip false-positive 'missing file' alerts and keep your "
-        "deliberate removals/rewrites out of the AI flow."
-    )
-    if not _confirm("  Draft forks-profile.yaml now?", default=True):
-        return
-
-    try:
-        _draft_and_open_editor(profile_path, target_branch, fork_ref, repo_path)
-    except Exception as e:
-        console.print(
-            f"  [yellow]forks-profile draft failed (run "
-            f"`merge forks-profile init` later): {e}[/yellow]"
-        )
-
-
-def _draft_and_open_editor(
-    profile_path: Path, target_branch: str, fork_ref: str, repo_path: str
-) -> None:
-    """Run the drafter, write the yaml, and open ``$EDITOR`` for review."""
     import datetime as _dt
-
-    import click
 
     from src.tools.forks_profile_drafter import (
         draft_profile,
         render_profile_yaml,
     )
     from src.tools.git_tool import GitTool
+
+    profile_path = get_forks_profile_path(repo_path)
+    if profile_path.exists():
+        return None
 
     git_tool = GitTool(repo_path)
     merge_base = git_tool.get_merge_base(target_branch, fork_ref)
@@ -798,17 +528,7 @@ def _draft_and_open_editor(
 
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(text, encoding="utf-8")
-    console.print(f"  [green]Draft written to:[/green] {profile_path}")
-    stats = ", ".join(f"{k}={v}" for k, v in drafted.stats.items())
-    console.print(f"  Stats: {stats}. Review every TODO before committing.")
-
-    try:
-        click.edit(filename=str(profile_path))
-    except Exception:
-        console.print(
-            f"  [yellow]Could not open editor; review the draft manually "
-            f"at {profile_path}.[/yellow]"
-        )
+    return profile_path
 
 
 def migrate_merge_record(repo_path: str = ".") -> None:
