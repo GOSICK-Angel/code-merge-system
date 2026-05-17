@@ -1,18 +1,13 @@
-"""R2 dataset sha256 lock helper (Phase B §B.4).
+"""R2/R3 dataset sha256 lock helper (Phase B §B.4, extended in Phase C).
 
-`scripts/eval/lock.py` TIER_LAYOUT only supports tiers 1/2/3; R2 lives in a
-separate `tests/eval/datasets/r2/samples/` tree that is not tier-indexed.
-Rather than extend the production lock helper (which would invalidate the
-tier1/2/3 lock semantics), R2 uses a parallel manual sha256 helper that
-reuses `scripts.eval.lock._sample_sha256` for hash compatibility.
+`scripts/eval/lock.py` TIER_LAYOUT only supports tiers 1/2/3; R2 and R3 live
+in separate `tests/eval/datasets/{r2,r3}/samples/` trees that are not
+tier-indexed. Rather than extend the production lock helper (which would
+invalidate the tier1/2/3 lock semantics), each target gets a parallel
+manual sha256 lock file reusing `scripts.eval.lock._sample_sha256`.
 
 CLI:
-    python -m tests.eval.manifests._r2_sha verify
-        Recompute sha256 for every R2 sample and compare to r2.lock.json.
-        Exit 0 on match, 1 on mismatch (prints diff to stderr).
-
-    python -m tests.eval.manifests._r2_sha update
-        Rebuild r2.lock.json from the current on-disk samples.
+    python -m tests.eval.manifests._r2_sha {verify,update} [--target r2|r3]
 """
 
 from __future__ import annotations
@@ -28,6 +23,13 @@ from scripts.eval.lock import EVAL_VERSION, _sample_sha256
 REPO_ROOT = Path(__file__).resolve().parents[3]
 R2_DATASETS_DIR = REPO_ROOT / "tests" / "eval" / "datasets" / "r2" / "samples"
 R2_LOCK_PATH = REPO_ROOT / "tests" / "eval" / "manifests" / "r2.lock.json"
+R3_DATASETS_DIR = REPO_ROOT / "tests" / "eval" / "datasets" / "r3" / "samples"
+R3_LOCK_PATH = REPO_ROOT / "tests" / "eval" / "manifests" / "r3.lock.json"
+
+_TARGETS: dict[str, tuple[Path, Path]] = {
+    "r2": (R2_DATASETS_DIR, R2_LOCK_PATH),
+    "r3": (R3_DATASETS_DIR, R3_LOCK_PATH),
+}
 
 
 def compute_sample_sha256(sample_dir: Path) -> str:
@@ -115,20 +117,27 @@ def verify_lock(
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tests.eval.manifests._r2_sha",
-        description="Manual sha256 lock for R2 dataset samples.",
+        description="Manual sha256 lock for R2/R3 dataset samples.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("verify", help="Recompute sha256 and diff against lock file.")
-    sub.add_parser("update", help="Rebuild r2.lock.json from on-disk samples.")
+    for cmd in ("verify", "update"):
+        sp = sub.add_parser(cmd)
+        sp.add_argument(
+            "--target",
+            choices=sorted(_TARGETS),
+            default="r2",
+            help="Dataset target (default: r2).",
+        )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+    datasets_dir, lock_path = _TARGETS[args.target]
     if args.cmd == "update":
-        return update_lock()
+        return update_lock(datasets_dir=datasets_dir, lock_path=lock_path)
     if args.cmd == "verify":
-        return verify_lock()
+        return verify_lock(datasets_dir=datasets_dir, lock_path=lock_path)
     raise AssertionError(f"unhandled cmd: {args.cmd}")
 
 
