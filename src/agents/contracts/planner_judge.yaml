@@ -1,4 +1,5 @@
 name: planner_judge
+version: 1
 inputs:
   - merge_plan
   - file_diffs

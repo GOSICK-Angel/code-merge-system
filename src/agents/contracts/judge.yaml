@@ -1,4 +1,5 @@
 name: judge
+version: 1
 inputs:
   - config
   - file_categories

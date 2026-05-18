@@ -27,6 +27,16 @@ class AgentContract(BaseModel):
     name: str = Field(
         ..., description="Must match the file name and AgentRegistry key."
     )
+    version: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Contract schema version. Bump when prompt/aggregation rules/IO "
+            "schema changes (see _schema.md Versioning). Default 0 allows "
+            "future yaml omissions to load without crash; the 7 shipped yaml "
+            "all declare version=1, so default is never consumed in practice."
+        ),
+    )
     inputs: list[str] = Field(
         ...,
         description=(

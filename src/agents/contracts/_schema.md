@@ -9,6 +9,7 @@ agent's behavioral contract.  The schema is defined and validated by
 | Field | Type | Purpose |
 |---|---|---|
 | `name` | str | Must equal the file stem and the `AgentRegistry` key. |
+| `version` | int | Contract schema revision (≥ 0). Must be bumped when prompt content, aggregation rules, or input/output schema change (see [Versioning](#versioning)). All 7 shipped yaml declare `version: 1`; default `0` is a forward-compat fallback for future yaml that omit the field. |
 | `inputs` | list[str] | Whitelist of `MergeState` attributes the agent may read. Access to fields outside this list raises `FieldNotInContract` when the agent runs against a restricted `ReadOnlyStateView`. |
 | `output_schema` | str | Name of the Pydantic model the agent's `run()` returns (or wraps in an `AgentMessage.payload`). |
 | `gates` | list[str] | Prompt gate IDs (registered in `src/llm/prompts/gate_registry.py`) that this agent is permitted to invoke. |
@@ -46,6 +47,34 @@ class PlannerJudgeAgent(BaseAgent):
 
 `BaseAgent.contract` is a lazily-loaded property.  Agents that do not declare
 `contract_name` behave exactly as before (backward compatible).
+
+## Versioning
+
+The `version` field is an integer revision counter that downstream consumers
+(cache keys, snapshot compatibility checks, telemetry) use to detect when an
+agent's effective behavior has changed.
+
+**Bump `version` (by +1) when any of the following changes**:
+
+1. **Prompt content** — the text or template registered under any `gates:` ID
+   for this agent is modified in a way that changes model output (whitespace
+   / typo fixes do not require a bump).
+2. **Aggregation rules** — internal reducers (e.g. `_aggregate_chunked_analyses`,
+   `_merge_batch_plans`) change their precedence, threshold, or penalty logic.
+3. **Input / output schema** — fields are added to / removed from `inputs`,
+   `output_schema` changes name or shape, or a new gate is registered that the
+   agent may invoke.
+
+**Do not bump for**:
+
+- Pure refactors that preserve I/O and prompt text.
+- Comment / docstring edits.
+- Adding tests.
+
+When bumping, update the `version: N` line in the yaml only; the loader
+accepts any `int >= 0`. Cross-run caches (introduced in U3) include the
+contract version in their key so a bump invalidates stale entries
+automatically.
 
 ## Adding a new contract
 

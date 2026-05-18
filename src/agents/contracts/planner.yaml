@@ -1,4 +1,5 @@
 name: planner
+version: 1
 inputs:
   - _merge_base
   - config

@@ -35,6 +35,23 @@ if TYPE_CHECKING:
     from src.tools.sentinel_scanner import SentinelHit
 
 
+class RunBudgetExceeded(Exception):
+    """Raised when a single run's cumulative LLM cost exceeds the configured cap.
+
+    Carries the per-run cost snapshot at the moment of the check so the
+    Orchestrator can persist a partial report and transition AWAITING_HUMAN.
+    Defined here (not raised) in Phase 0; consumers wire up in Phase 2.
+    """
+
+    def __init__(self, spent: float, limit: float, phase: str) -> None:
+        self.spent = spent
+        self.limit = limit
+        self.phase = phase
+        super().__init__(
+            f"Run budget exceeded in phase {phase!r}: spent={spent} limit={limit}"
+        )
+
+
 class SystemStatus(str, Enum):
     INITIALIZED = "initialized"
     PLANNING = "planning"
