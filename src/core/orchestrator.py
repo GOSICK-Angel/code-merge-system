@@ -241,7 +241,18 @@ class Orchestrator:
             branch = self.git_tool.create_working_branch(
                 self.config.working_branch, self.config.fork_ref
             )
-            state = state.model_copy(update={"active_branch": branch})
+            # In-place assignment is critical: the Web bridge captures
+            # ``state`` by reference in ``MergeWSBridge.__init__`` and
+            # observes mutations live. ``state.model_copy(update=...)``
+            # would swap the local variable to a new object — bridge
+            # would then forever serialize a stale "initialized" status
+            # because subsequent ``state.status = X`` mutations land on
+            # the new object the bridge can't see. The shared
+            # ``messages`` list (shallow-copied by model_copy) made the
+            # bug doubly confusing: messages stayed in sync, status did
+            # not. Direct attribute assignment keeps every observer's
+            # reference valid.
+            state.active_branch = branch
             logger.info(
                 "Working branch created: %s (fork_ref=%s)", branch, self.config.fork_ref
             )

@@ -199,6 +199,52 @@ async def test_orchestrator_creates_branch_when_enabled(tmp_path: Path):
     assert result.active_branch == "merge/auto-20260101-120000"
 
 
+async def test_orchestrator_active_branch_assignment_keeps_state_identity(
+    tmp_path: Path,
+):
+    """Fix 10: orchestrator must NOT replace ``state`` with a fresh
+    ``model_copy`` when injecting ``active_branch``. The Web bridge
+    captures ``state`` by reference in ``__init__`` and observes
+    mutations live; a model_copy leaks the WS snapshot to a frozen
+    "initialized" state forever — that's the bug behind the forgejo
+    run where the UI stayed on INITIALIZED for minutes while messages
+    list showed actual transitions (shared list reference).
+
+    The contract: ``id(input) == id(returned)`` AND
+    ``input.active_branch`` reflects the new branch in place.
+    """
+    repo = _make_repo(tmp_path)
+    cfg = _make_config(str(repo), enable=True)
+
+    from src.core.orchestrator import Orchestrator
+
+    orch = Orchestrator(cfg)
+    state = MergeState(config=cfg)
+    state_id = id(state)
+
+    with (
+        patch.object(orch, "_inject_memory"),
+        patch.object(orch, "_inject_hooks"),
+        patch.object(
+            orch.git_tool,
+            "create_working_branch",
+            return_value="merge/auto-fix10-test",
+        ),
+        patch.object(orch.checkpoint, "register_signal_handler"),
+        patch.object(orch.checkpoint, "save"),
+        patch("src.core.orchestrator.PHASE_MAP", {}),
+    ):
+        result = await orch.run(state)
+
+    # The state object passed in MUST be the one returned — bridge holds
+    # this reference and observes mutations live.
+    assert id(result) == state_id, (
+        "orchestrator replaced state object; bridge would lose sync"
+    )
+    # active_branch must be set on the in-place object the bridge sees.
+    assert state.active_branch == "merge/auto-fix10-test"
+
+
 async def test_orchestrator_skips_branch_creation_on_resume(tmp_path: Path):
     repo = _make_repo(tmp_path)
     cfg = _make_config(str(repo), enable=True)
