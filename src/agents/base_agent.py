@@ -147,6 +147,11 @@ class BaseAgent(ABC):
         self._current_phase: str = ""
         self._hooks: HookManager | None = None
         self._contract: Any | None = None
+        # U2 budget cap state.
+        self._budget_limit_usd: float | None = None
+        self._budget_warn_pct: float = 0.8
+        self._budget_warning_emitted: bool = False
+        self._on_activity: Any | None = None
         self._fallback_llm: LLMClient | None = (
             LLMClientFactory.create(llm_config.fallback)
             if llm_config.fallback is not None
@@ -236,6 +241,58 @@ class BaseAgent(ABC):
 
     def set_hooks(self, hooks: HookManager) -> None:
         self._hooks = hooks
+
+    def set_budget(self, limit_usd: float | None, warn_pct: float = 0.8) -> None:
+        """Configure U2 per-run budget. ``None`` disables the cap.
+
+        When set, ``_call_llm_with_retry`` checks ``cost_tracker.total_cost_usd``
+        before and after each LLM call and raises ``RunBudgetExceeded`` once
+        the cumulative spend reaches ``limit_usd``. The first crossing of
+        ``limit_usd * warn_pct`` emits a ``budget_warning`` activity event.
+        """
+        self._budget_limit_usd = limit_usd
+        self._budget_warn_pct = warn_pct
+        self._budget_warning_emitted = False
+
+    def set_activity_callback(self, cb: Any) -> None:
+        """Register the Orchestrator's activity callback so the agent can
+        emit ``budget_warning`` events directly (rather than only through
+        phase boundaries)."""
+        self._on_activity = cb
+
+    def _check_budget(self) -> None:
+        """U2: raise ``RunBudgetExceeded`` when cumulative cost meets limit;
+        emit a one-shot warning on first crossing of ``warn_pct``.
+
+        Called twice per LLM call (pre + post) so a single big call that
+        pushes spend over the cap is still detected promptly. The warning
+        is gated on ``_budget_warning_emitted`` to avoid flooding the event
+        stream when the agent stays in the warn band.
+        """
+        if self._budget_limit_usd is None or self._cost_tracker is None:
+            return
+        spent = self._cost_tracker.total_cost_usd
+        limit = self._budget_limit_usd
+        if spent >= limit:
+            from src.models.state import RunBudgetExceeded
+
+            raise RunBudgetExceeded(spent=spent, limit=limit, phase=self._current_phase)
+        warn_threshold = limit * self._budget_warn_pct
+        if spent >= warn_threshold and not self._budget_warning_emitted:
+            self._budget_warning_emitted = True
+            if self._on_activity is not None:
+                from src.core.phases.base import ActivityEvent
+
+                ratio = spent / limit if limit > 0 else 0.0
+                self._on_activity(
+                    ActivityEvent(
+                        agent=self.agent_type.value,
+                        action="budget_warning",
+                        phase=self._current_phase,
+                        event_type="progress",
+                        extra={"pct": ratio},
+                    )
+                )
 
     @property
     def consecutive_failures(self) -> int:
@@ -431,6 +488,10 @@ class BaseAgent(ABC):
         max_retries: int | None = None,
         json_mode: bool = False,
     ) -> str | BaseModel:
+        # U2: pre-call budget gate. Skipped when limit is None or no
+        # cost_tracker is wired (unit tests / standalone usage).
+        self._check_budget()
+
         if self._consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
             if self._fallback_llm is not None and not self._using_fallback:
                 self.logger.warning(
@@ -597,6 +658,11 @@ class BaseAgent(ABC):
                         attempt=retry_budget.attempt + 1,
                     )
                 model_override.__exit__(None, None, None)
+                # U2: post-call budget gate. The call we just made may have
+                # pushed cumulative spend over the cap; raise before returning
+                # so the orchestrator can transition AWAITING_HUMAN with a
+                # partial report rather than letting the next call slip in.
+                self._check_budget()
                 return llm_result
             except Exception as e:
                 last_error = e

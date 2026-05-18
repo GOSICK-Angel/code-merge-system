@@ -61,7 +61,7 @@ from src.memory.sqlite_store import SQLiteMemoryStore
 from src.memory.store import MemoryStore
 from src.memory.summarizer import PhaseSummarizer
 from src.models.config import MergeConfig
-from src.models.state import MergeState, SystemStatus
+from src.models.state import MergeState, RunBudgetExceeded, SystemStatus
 from src.tools.gate_runner import GateRunner
 from src.tools.git_tool import GitTool
 from src.core.hooks import HookManager
@@ -259,6 +259,15 @@ class Orchestrator:
                     self._finalize_log(state, run_start)
                     return state
 
+                # U2 double-transition guard: if BaseAgent already raised
+                # RunBudgetExceeded and we transitioned to AWAITING_HUMAN,
+                # the loop predicate already pulled us out — but defensive
+                # short-circuit here keeps the ceiling check from layering
+                # a second transition on a status that wraps the same fact.
+                if state.status == SystemStatus.AWAITING_HUMAN:
+                    self._finalize_log(state, run_start)
+                    return state
+
                 ceiling = state.config.max_cost_usd
                 if ceiling is not None:
                     # _prior_cost_summary holds spending from earlier processes
@@ -342,6 +351,28 @@ class Orchestrator:
                 if outcome.extra.get("paused"):
                     self._finalize_log(state, run_start)
                     return state
+
+        except RunBudgetExceeded as e:
+            logger.warning(
+                "Run budget exceeded: spent=$%.4f >= limit=$%.4f phase=%s",
+                e.spent,
+                e.limit,
+                e.phase,
+            )
+            self._snapshot_telemetry(state)
+            self._write_budget_exceeded_report(state, e)
+            try:
+                self.state_machine.transition(
+                    state,
+                    SystemStatus.AWAITING_HUMAN,
+                    f"run budget exceeded in phase {e.phase!r}: "
+                    f"spent=${e.spent:.4f} limit=${e.limit:.4f}",
+                )
+            except ValueError:
+                # Already in AWAITING_HUMAN (e.g. concurrent ceiling check) —
+                # the partial report + checkpoint tag still wins.
+                pass
+            self.checkpoint.save(state, "budget_exceeded")
 
         except Exception as e:
             logger.error("Orchestration failed: %s", e, exc_info=True)
@@ -492,6 +523,41 @@ class Orchestrator:
     def _inject_cost_tracker(self, phase: str = "") -> None:
         for agent in self._all_agents:
             agent.set_cost_tracker(self._cost_tracker, phase=phase)
+            # U2: every cost-tracked agent also gets the budget cap + the
+            # activity callback so it can emit a one-shot budget_warning
+            # the first time cumulative spend crosses warn_pct.
+            agent.set_budget(
+                self.config.max_cost_usd, self.config.per_run_cost_warn_pct
+            )
+            if self._on_activity is not None:
+                agent.set_activity_callback(self._on_activity)
+
+    def _write_budget_exceeded_report(
+        self, state: MergeState, exc: RunBudgetExceeded
+    ) -> None:
+        """U2: drop a partial-run report when the per-run budget trips.
+
+        Best-effort — write failures are logged but never re-raise so the
+        AWAITING_HUMAN transition itself always wins.
+        """
+        try:
+            run_dir = get_run_dir(self.config.repo_path, state.run_id)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            report_path = run_dir / "budget_exceeded_report.md"
+            report_path.write_text(
+                "# Run Budget Exceeded\n\n"
+                f"- run_id: `{state.run_id}`\n"
+                f"- phase: `{exc.phase}`\n"
+                f"- spent: ${exc.spent:.4f}\n"
+                f"- limit: ${exc.limit:.4f}\n\n"
+                "The orchestrator transitioned the run to "
+                "`AWAITING_HUMAN` once the cumulative LLM cost reached the "
+                "configured `max_cost_usd` ceiling. Resume after raising "
+                "the limit or accept partial results from the checkpoint.\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            logger.debug("budget_exceeded_report.md write failed", exc_info=True)
 
     def _snapshot_telemetry(self, state: MergeState) -> None:
         """Persist CostTracker / MemoryHitTracker summaries onto state.
