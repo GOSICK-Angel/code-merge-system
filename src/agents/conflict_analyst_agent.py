@@ -1,7 +1,10 @@
 from typing import Any
 
 from src.agents.base_agent import BaseAgent
-from src.core.parallel_file_runner import ParallelFileRunner
+from src.core.parallel_file_runner import (
+    ParallelFileRunner,
+    assert_disjoint_file_shards,
+)
 from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage, MessageType
 from src.models.plan import MergePhase
@@ -101,6 +104,9 @@ class ConflictAnalystAgent(BaseAgent):
                 min_chunked_confidence=min_chunked_confidence,
             )
 
+        # U5: each file gets its own shard; duplicates in ``high_risk_files``
+        # would cause double-analysis and waste an LLM call, so refuse early.
+        assert_disjoint_file_shards([[fp] for fp in high_risk_files])
         runner = ParallelFileRunner.from_api_key_env_list(
             self.llm_config.api_key_env_list,
             override=view.config.parallel_file_concurrency,
@@ -282,6 +288,12 @@ class ConflictAnalystAgent(BaseAgent):
             raw = await self._call_llm_with_retry(messages, system=ANALYST_SYSTEM)
             return parse_conflict_analysis(str(raw), file_path, self.llm_config.model)
 
+        # U5: chunks of a single file are tagged ``"<file>#<idx>"`` so the
+        # disjointness contract still applies (each chunk is its own shard);
+        # this keeps the assert form uniform across all 6 fan-out call sites.
+        assert_disjoint_file_shards(
+            [[f"{file_path}#{idx}"] for idx in range(len(pairs))]
+        )
         runner = ParallelFileRunner.from_api_key_env_list(
             self.llm_config.api_key_env_list
         )

@@ -33,7 +33,10 @@ from src.tools.file_classifier import _fork_deleted_skip_record, is_fork_deleted
 from src.tools.git_tool import GitTool
 from src.tools.diff_stasher import stash_upstream_diff
 from src.cli.paths import get_diff_stash_dir
-from src.core.parallel_file_runner import ParallelFileRunner
+from src.core.parallel_file_runner import (
+    ParallelFileRunner,
+    assert_disjoint_file_shards,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -826,6 +829,12 @@ class ExecutorAgent(BaseAgent):
                 chunks[idx], state.config.project_context
             )
 
+        # U5: ``_chunk_issues_by_file`` already groups issues by file so each
+        # chunk's file set should be disjoint from every other chunk's; the
+        # assert pins that invariant down as a regression net.
+        assert_disjoint_file_shards(
+            [[issue.file_path for issue in chunk] for chunk in chunks]
+        )
         runner = ParallelFileRunner.from_api_key_env_list(
             self.llm_config.api_key_env_list,
             override=state.config.parallel_file_concurrency,

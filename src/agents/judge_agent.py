@@ -2,7 +2,10 @@ import fnmatch
 import re
 from datetime import datetime
 from src.agents.base_agent import BaseAgent
-from src.core.parallel_file_runner import ParallelFileRunner
+from src.core.parallel_file_runner import (
+    ParallelFileRunner,
+    assert_disjoint_file_shards,
+)
 from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage, MessageType
 from src.models.plan import MergePhase
@@ -164,6 +167,10 @@ class JudgeAgent(BaseAgent):
                 prior_round_issues=prior_issues_by_file.get(file_path, []),
             )
 
+        # U5: per-file fan-out — dict.keys() is nominally disjoint, but
+        # asserting catches upstream callers that ever pass duplicate keys
+        # (which would double-bill the judge LLM for the same file).
+        assert_disjoint_file_shards([[fp] for fp in high_risk_records.keys()])
         runner = ParallelFileRunner.from_api_key_env_list(
             self.llm_config.api_key_env_list,
             override=state.config.parallel_file_concurrency,
@@ -1470,6 +1477,10 @@ class JudgeAgent(BaseAgent):
         async def _process_chunk(idx: int) -> list[JudgeIssue]:
             return await self._review_files_batch_llm(chunks[idx], state)
 
+        # U5: judge batches chunks risky_files by size, so each chunk's
+        # file_path set should be disjoint from every other chunk's; assert
+        # so a future chunking change can't silently introduce overlap.
+        assert_disjoint_file_shards([[entry[0] for entry in chunk] for chunk in chunks])
         chunk_runner = ParallelFileRunner.from_api_key_env_list(
             self.llm_config.api_key_env_list,
             override=state.config.parallel_file_concurrency,

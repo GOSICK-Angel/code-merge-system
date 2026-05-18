@@ -30,7 +30,10 @@ from src.models.plan_review import (
     PlanDiffEntry,
 )
 from src.tools.file_classifier import compute_risk_score, classify_file
-from src.core.parallel_file_runner import ParallelFileRunner
+from src.core.parallel_file_runner import (
+    ParallelFileRunner,
+    assert_disjoint_file_shards,
+)
 import fnmatch
 import json
 import json as json_lib
@@ -642,6 +645,12 @@ class PlannerAgent(BaseAgent):
                 scoped_renames,
             )
 
+        # U5: sub-chunks of ``_classify_batch`` partition the file list into
+        # disjoint groups; assert it explicitly so a future rewrite of the
+        # chunking heuristic can't silently produce overlap.
+        assert_disjoint_file_shards(
+            [[fd.file_path for fd in chunk] for chunk in chunks]
+        )
         runner = ParallelFileRunner.from_api_key_env_list(
             self.llm_config.api_key_env_list,
             override=None,

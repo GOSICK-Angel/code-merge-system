@@ -9,10 +9,36 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections import Counter
 from typing import Any, Callable, TypeVar, Awaitable
 
 K = TypeVar("K")
 T = TypeVar("T")
+
+
+class FileShardOverlap(ValueError):
+    """Raised by ``assert_disjoint_file_shards`` when two shards share a
+    file. The orchestrator's fan-out contract assumes disjoint shards so
+    duplicates would cause double-processing (and, for write-heavy paths,
+    last-writer-wins corruption).
+    """
+
+
+def assert_disjoint_file_shards(shards: list[list[str]]) -> None:
+    """U5: refuse to fan out across overlapping file shards.
+
+    Each call site that hands a list of shards to ``ParallelFileRunner``
+    must call this first so violations surface as a typed error close to
+    the bug, not as silent double-writes downstream. Pure function — does
+    not mutate ``shards`` and never reorders elements.
+    """
+    seen: Counter[str] = Counter()
+    for shard in shards:
+        for fp in shard:
+            seen[fp] += 1
+    duplicates = sorted(fp for fp, count in seen.items() if count > 1)
+    if duplicates:
+        raise FileShardOverlap(f"file shards overlap on: {duplicates}")
 
 
 class ParallelFileRunner:
