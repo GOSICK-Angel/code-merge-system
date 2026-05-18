@@ -56,6 +56,13 @@ def _check_python(content: str) -> SyntaxCheckResult:
 
 
 def _check_json(content: str) -> SyntaxCheckResult:
+    # Empty / whitespace-only input is "no content to check", not a
+    # syntax error. JSON's strict spec rejects empty strings, but in
+    # this codebase Judge feeds in worktree files (including SKIP'd
+    # ones that may be missing/empty) — treating them as critical
+    # syntax errors leaks placeholder HumanDecisionRequest entries.
+    if not content.strip():
+        return SyntaxCheckResult(valid=True, errors=[], language="json")
     try:
         json.loads(content)
         return SyntaxCheckResult(valid=True, errors=[], language="json")
@@ -65,6 +72,8 @@ def _check_json(content: str) -> SyntaxCheckResult:
 
 
 def _check_yaml(content: str) -> SyntaxCheckResult:
+    if not content.strip():
+        return SyntaxCheckResult(valid=True, errors=[], language="yaml")
     try:
         yaml_lib.safe_load(content)
         return SyntaxCheckResult(valid=True, errors=[], language="yaml")

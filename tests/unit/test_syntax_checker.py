@@ -47,8 +47,24 @@ class TestCheckSyntax:
         assert result.valid is True
 
     def test_empty_content_json(self) -> None:
+        # "no content" must not be a syntax error — otherwise Judge flags
+        # every SKIP-decision .json file (missing/empty worktree path) as
+        # critical, exhausting the dispute loop. See
+        # TestJudgeSkipFilterOnSkipDecision for the upstream guard.
         result = check_syntax("empty.json", "")
-        assert result.valid is False
+        assert result.valid is True
+
+    def test_whitespace_only_json(self) -> None:
+        result = check_syntax("empty.json", "   \n\t  \n")
+        assert result.valid is True
+
+    def test_empty_content_yaml(self) -> None:
+        result = check_syntax("empty.yaml", "")
+        assert result.valid is True
+
+    def test_whitespace_only_yaml(self) -> None:
+        result = check_syntax("empty.yaml", "   \n\n")
+        assert result.valid is True
 
     def test_python_complex_valid(self) -> None:
         code = """
