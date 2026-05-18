@@ -34,6 +34,7 @@ from src.core.parallel_file_runner import (
     ParallelFileRunner,
     assert_disjoint_file_shards,
 )
+import asyncio
 import fnmatch
 import json
 import json as json_lib
@@ -1239,26 +1240,35 @@ class PlannerAgent(BaseAgent):
 
         enhanced_diffs = list(file_diffs)
 
-        gray_paths = [
-            fd.file_path
-            for fd in enhanced_diffs
+        gray_indices = [
+            i
+            for i, fd in enumerate(enhanced_diffs)
             if gray_low <= fd.risk_score <= gray_high
         ]
-        memory_text = (
-            self.get_memory_context(self._current_phase, gray_paths)
-            if gray_paths
-            else ""
+        if not gray_indices:
+            return enhanced_diffs
+
+        gray_paths = [enhanced_diffs[i].file_path for i in gray_indices]
+        memory_text = self.get_memory_context(self._current_phase, gray_paths)
+
+        total = len(gray_indices)
+        self.logger.info(
+            "LLM risk rescore: fan-out %d gray-zone files [%.2f, %.2f]",
+            total,
+            gray_low,
+            gray_high,
         )
 
-        for i, fd in enumerate(enhanced_diffs):
-            if not (gray_low <= fd.risk_score <= gray_high):
-                continue
+        completed = 0
+        progress_lock = asyncio.Lock()
 
+        async def _rescore_one(idx: int) -> float | None:
+            fd = enhanced_diffs[idx]
             prompt = build_risk_scoring_prompt(fd, fd.risk_score)
             if memory_text:
                 prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
             messages = [{"role": "user", "content": prompt}]
-
+            llm_score: float | None
             try:
                 raw = await self._call_llm_with_retry(
                     messages, system=RISK_SCORING_SYSTEM
@@ -1274,16 +1284,69 @@ class PlannerAgent(BaseAgent):
                     0.0,
                     min(1.0, float(data.get("llm_risk_score", fd.risk_score))),
                 )
-            except Exception:
-                continue
+            except Exception as exc:
+                self.logger.debug("risk rescore failed for %s: %s", fd.file_path, exc)
+                llm_score = None
+            await self._emit_rescore_progress(
+                progress_lock, fd.file_path, total, llm_score is not None
+            )
+            nonlocal completed
+            return llm_score
 
-            blended = rule_weight * fd.risk_score + (1.0 - rule_weight) * llm_score
+        runner = ParallelFileRunner.from_api_key_env_list(
+            self.llm_config.api_key_env_list,
+            override=None,
+        )
+        results = await runner.run_files(gray_indices, _rescore_one)
+
+        for idx in gray_indices:
+            result = results.get(idx)
+            if isinstance(result, BaseException) or result is None:
+                continue
+            fd = enhanced_diffs[idx]
+            blended = rule_weight * fd.risk_score + (1.0 - rule_weight) * result
             blended = round(max(0.0, min(1.0, blended)), 3)
             new_fd = fd.model_copy(update={"risk_score": blended})
             new_level = classify_file(new_fd, config.file_classifier)
-            enhanced_diffs[i] = new_fd.model_copy(update={"risk_level": new_level})
+            enhanced_diffs[idx] = new_fd.model_copy(update={"risk_level": new_level})
 
         return enhanced_diffs
+
+    async def _emit_rescore_progress(
+        self,
+        lock: "asyncio.Lock",
+        file_path: str,
+        total: int,
+        ok: bool,
+    ) -> None:
+        """Notify any registered activity callback that one more gray-zone
+        rescore completed. Counter is incremented under a lock so the
+        ``completed`` field is monotonic in the face of the parallel
+        runner's concurrent callbacks.
+        """
+        if self._on_activity is None:
+            return
+        async with lock:
+            self._rescore_completed = getattr(self, "_rescore_completed", 0) + 1
+            done = self._rescore_completed
+            if done >= total:
+                self._rescore_completed = 0
+        from src.core.phases.base import ActivityEvent
+
+        self._on_activity(
+            ActivityEvent(
+                agent=self.agent_type.value,
+                action="llm_risk_rescore",
+                phase=self._current_phase,
+                event_type="progress",
+                extra={
+                    "completed": done,
+                    "total": total,
+                    "file_path": file_path,
+                    "ok": ok,
+                },
+            )
+        )
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus
