@@ -266,21 +266,83 @@ def test_register_dispute_exhaustion_creates_requests_and_tag():
     # c.py has no blocking issue → partial-consensus auto record.
     assert set(state.human_decision_requests.keys()) == {"a.py", "b.py"}
     assert "c.py" in state.file_decision_records
-    assert (
-        state.file_decision_records["c.py"].decision
-        == MergeDecision.SEMANTIC_MERGE
-    )
-    assert (
-        state.file_decision_records["c.py"].agent == "dispute_exhaustion"
-    )
+    assert state.file_decision_records["c.py"].decision == MergeDecision.SEMANTIC_MERGE
+    assert state.file_decision_records["c.py"].agent == "dispute_exhaustion"
     for req in state.human_decision_requests.values():
         assert req.analyst_recommendation == MergeDecision.ESCALATE_HUMAN
         option_keys = {opt.option_key for opt in req.options}
         assert option_keys == {"approve_merge", "take_target", "take_current"}
 
     a_req = state.human_decision_requests["a.py"]
-    # Preview includes at least the issue description.
-    assert "Conflict marker" in (a_req.options[0].preview_content or "")
+    # Judge issue text now lives in analyst_rationale (kept out of
+    # preview_content so options can carry real fork/upstream diffs).
+    assert "Conflict marker" in (a_req.analyst_rationale or "")
+
+
+def test_register_dispute_exhaustion_includes_fork_upstream_diff():
+    """Fix 3: when a git_tool is available the escalated request must carry
+    a real fork↔upstream unified diff in options[take_target/take_current],
+    real change-shape summaries (not the self-referential placeholder), and
+    the Judge issue text in analyst_rationale.
+    """
+    from src.core.phases.auto_merge import AutoMergePhase
+    from src.models.diff import FileDiff, RiskLevel
+
+    phase = AutoMergePhase()
+    state = _make_state_with_approved_plan()
+    state.file_diffs.append(
+        FileDiff(
+            file_path="pkg/x.go",
+            file_status=FileStatus.MODIFIED,
+            risk_level=RiskLevel.HUMAN_REQUIRED,
+            risk_score=0.7,
+            lines_added=10,
+            lines_deleted=2,
+        )
+    )
+    issues = [
+        JudgeIssue(
+            file_path="pkg/x.go",
+            issue_level=IssueSeverity.CRITICAL,
+            issue_type="missing_logic",
+            description="upstream removed the auth check fork relied on",
+            must_fix_before_merge=True,
+        )
+    ]
+    verdict = BatchVerdict(layer_id=1, approved=False, issues=issues)
+    git_tool = MagicMock()
+    git_tool.get_file_content.side_effect = lambda ref, _fp: (
+        "func auth() { return true }\nfunc main() {}\n"
+        if "upstream" in ref
+        else "func auth() { check(); return true }\nfunc main() {}\n"
+    )
+
+    phase._register_dispute_exhaustion(
+        state=state,
+        layer_id=1,
+        layer_files=["pkg/x.go"],
+        batch_verdict=verdict,
+        max_dispute=2,
+        git_tool=git_tool,
+    )
+
+    req = state.human_decision_requests["pkg/x.go"]
+    assert "see Judge issues summary" not in (req.upstream_change_summary or "")
+    assert "see Judge issues summary" not in (req.fork_change_summary or "")
+    assert "+10" in req.upstream_change_summary and "-2" in req.upstream_change_summary
+    # analyst_rationale carries the Judge issue text.
+    assert "upstream removed the auth check" in (req.analyst_rationale or "")
+    # Options carry real unified diffs (fork → upstream and reverse).
+    by_key = {opt.option_key: opt for opt in req.options}
+    take_target = by_key["take_target"].preview_content or ""
+    take_current = by_key["take_current"].preview_content or ""
+    assert "upstream:pkg/x.go" in take_target
+    assert "fork:pkg/x.go" in take_target
+    assert "upstream:pkg/x.go" in take_current
+    assert "fork:pkg/x.go" in take_current
+    assert take_target != take_current
+    # approve_merge option keeps preview empty — nothing to diff against.
+    assert by_key["approve_merge"].preview_content is None
 
 
 def test_register_dispute_exhaustion_preserves_existing_request():

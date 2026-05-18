@@ -6,8 +6,12 @@ import re
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from src.agents.base_agent import CIRCUIT_BREAKER_THRESHOLD
+
+if TYPE_CHECKING:
+    from src.tools.git_tool import GitTool
 from src.agents.executor_agent import ExecutorAgent
 from src.agents.judge_agent import JudgeAgent
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
@@ -965,6 +969,7 @@ class AutoMergePhase(Phase):
                         layer_files=layer_files,
                         batch_verdict=batch_verdict,
                         max_dispute=max_dispute,
+                        git_tool=ctx.git_tool,
                     )
                     ctx.state_machine.transition(
                         state,
@@ -1269,6 +1274,7 @@ class AutoMergePhase(Phase):
         layer_files: list[str],
         batch_verdict: BatchVerdict,
         max_dispute: int,
+        git_tool: "GitTool | None" = None,
     ) -> None:
         """O-L3: persist a proper AWAITING_HUMAN signal after batch judge
         dispute exhaustion so the run does not loop.
@@ -1351,11 +1357,14 @@ class AutoMergePhase(Phase):
             )
 
         now = datetime.now()
+        file_diffs_map = {fd.file_path: fd for fd in state.file_diffs}
+        upstream_ref = state.config.upstream_ref
+        fork_ref = state.config.fork_ref
         for file_path in sorted(blocking_files):
             if file_path in state.human_decision_requests:
                 continue
             issue_lines = issues_by_file.get(file_path, [])
-            summary_blob = (
+            issue_blob = (
                 "\n".join(issue_lines)
                 if issue_lines
                 else (
@@ -1363,6 +1372,21 @@ class AutoMergePhase(Phase):
                     f"{max_dispute} dispute rounds."
                 )
             )
+
+            take_target_preview, take_current_preview = "", ""
+            if git_tool is not None and upstream_ref and fork_ref:
+                from src.core.phases.conflict_analysis import _build_diff_preview
+
+                take_target_preview, take_current_preview = _build_diff_preview(
+                    file_path, upstream_ref, fork_ref, git_tool
+                )
+
+            fd = file_diffs_map.get(file_path)
+            if fd is not None:
+                shape = f"+{fd.lines_added}/-{fd.lines_deleted} lines"
+            else:
+                shape = "(diff metadata unavailable)"
+
             state.human_decision_requests[file_path] = HumanDecisionRequest(
                 file_path=file_path,
                 priority=5,
@@ -1373,17 +1397,16 @@ class AutoMergePhase(Phase):
                     f"(O-L3). Executor's repairs did not resolve all "
                     "remaining blocking issues."
                 ),
-                upstream_change_summary=(
-                    "(see Judge issues summary in options.preview_content)"
-                ),
+                upstream_change_summary=f"Upstream changed: {shape}",
                 fork_change_summary=(
-                    "(see Judge issues summary in options.preview_content)"
+                    f"Fork preserved; Judge flagged {len(issue_lines)} "
+                    f"blocking issue(s) after {max_dispute} dispute rounds"
                 ),
                 analyst_recommendation=MergeDecision.ESCALATE_HUMAN,
                 analyst_confidence=0.0,
                 analyst_rationale=(
                     f"{len(issue_lines)} remaining Judge issue(s) after "
-                    f"{max_dispute} dispute rounds"
+                    f"{max_dispute} dispute rounds:\n{issue_blob}"
                 ),
                 options=[
                     HumanDecisionOption(
@@ -1393,19 +1416,19 @@ class AutoMergePhase(Phase):
                             "Accept the current merged content as-is "
                             "(advisory issues only)."
                         ),
-                        preview_content=summary_blob,
+                        preview_content=None,
                     ),
                     HumanDecisionOption(
                         option_key="take_target",
                         decision=MergeDecision.TAKE_TARGET,
                         description="Replace with the upstream version as-is.",
-                        preview_content=summary_blob,
+                        preview_content=take_target_preview or None,
                     ),
                     HumanDecisionOption(
                         option_key="take_current",
                         decision=MergeDecision.TAKE_CURRENT,
                         description="Keep the fork version; drop upstream change.",
-                        preview_content=summary_blob,
+                        preview_content=take_current_preview or None,
                     ),
                 ],
                 created_at=now,
