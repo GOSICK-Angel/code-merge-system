@@ -389,14 +389,15 @@ class ExecutorAgent(BaseAgent):
                 state,
             )
 
-        enriched_context = state.config.project_context
-        builder = None
-        if self._memory_store:
-            from src.llm.prompt_builders import AgentPromptBuilder
+        # U1.A: build_staged_content runs regardless of memory_store
+        # availability. Only the memory-text injection remains gated.
+        from src.llm.prompt_builders import AgentPromptBuilder
 
-            builder = AgentPromptBuilder(
-                self.llm_config, self._memory_store, self._memory_hit_tracker
-            )
+        builder = AgentPromptBuilder(
+            self.llm_config, self._memory_store, self._memory_hit_tracker
+        )
+        enriched_context = state.config.project_context
+        if self._memory_store is not None:
             memory_text = builder.build_memory_context_text(
                 [file_diff.file_path], current_phase=self._current_phase
             )
@@ -407,24 +408,23 @@ class ExecutorAgent(BaseAgent):
                     else memory_text
                 )
 
-        if builder is not None:
-            diff_ranges = _extract_diff_ranges(file_diff)
-            content_budget = builder.compute_content_budget(
-                EXECUTOR_SYSTEM + enriched_context
-            )
-            budget_tokens = content_budget // 4
-            current_content = builder.build_staged_content(
-                current_content,
-                file_diff.file_path,
-                diff_ranges,
-                budget_tokens // 2,
-            )
-            target_content = builder.build_staged_content(
-                target_content,
-                file_diff.file_path,
-                diff_ranges,
-                budget_tokens // 2,
-            )
+        diff_ranges = _extract_diff_ranges(file_diff)
+        content_budget = builder.compute_content_budget(
+            EXECUTOR_SYSTEM + enriched_context
+        )
+        budget_tokens = content_budget // 4
+        current_content = builder.build_staged_content(
+            current_content,
+            file_diff.file_path,
+            diff_ranges,
+            budget_tokens // 2,
+        )
+        target_content = builder.build_staged_content(
+            target_content,
+            file_diff.file_path,
+            diff_ranges,
+            budget_tokens // 2,
+        )
 
         prompt = build_semantic_merge_prompt(
             file_diff,
