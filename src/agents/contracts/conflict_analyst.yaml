@@ -8,6 +8,7 @@ inputs:
   - forks_profile
   - merge_plan
   - status
+  - thresholds
 output_schema: ConflictAnalysis
 gates:
   - CA-SYSTEM

@@ -150,6 +150,18 @@ class ThresholdConfig(BaseModel):
     human_escalation: float = Field(default=0.60, ge=0.0, le=1.0)
     risk_score_low: float = Field(default=0.30, ge=0.0, le=1.0)
     risk_score_high: float = Field(default=0.60, ge=0.0, le=1.0)
+    chunked_aggregation_min_confidence: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "U1: minimum per-chunk confidence required for the chunked "
+            "ConflictAnalyst fast path (unanimous + min_conf >= threshold + "
+            "no security). Below threshold the reducer falls back to slow "
+            "path (precedence + 0.8 penalty). Calibrated against forgejo "
+            "1822-file run; tune via .merge/config.yaml."
+        ),
+    )
 
 
 class SecuritySensitiveConfig(BaseModel):
