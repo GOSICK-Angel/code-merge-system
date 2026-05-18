@@ -23,6 +23,8 @@ from src.agents.contract import (
     list_contract_names,
     load_contract,
 )
+from src.core.read_only_state_view import ReadOnlyStateView
+from src.llm.prompts.gate_registry import get_gate, registered_gate_ids
 
 
 # Resolve contracts dir from this test file's location (not cwd) so the
@@ -37,8 +39,6 @@ EXPECTED_CONTRACT_STEMS = {
     "planner",
     "planner_judge",
 }
-from src.core.read_only_state_view import ReadOnlyStateView
-from src.llm.prompts.gate_registry import get_gate, registered_gate_ids
 
 
 # ---------- contract loading & schema ----------
