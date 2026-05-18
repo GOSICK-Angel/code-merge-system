@@ -40,12 +40,22 @@ function shortValue(v: unknown): string {
 export function Report(): JSX.Element {
   const snapshot = useRunStore((s) => s.snapshot);
   const runId = snapshot?.runId ?? null;
+  const runStatus = snapshot?.status ?? null;
+  // Report markdown is written by ReportGeneration phase at run end —
+  // fetching before terminal status guarantees a 404 (or the SPA HTML
+  // fallback) and confuses the user with "report not found" while the
+  // run is genuinely in flight. Gate the fetch on terminal state.
+  const isTerminal = runStatus === "completed" || runStatus === "failed";
 
   const [markdown, setMarkdown] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!runId) return;
+    if (!runId || !isTerminal) {
+      setMarkdown(null);
+      setError(null);
+      return;
+    }
     let cancelled = false;
     setError(null);
     setMarkdown(null);
@@ -71,7 +81,7 @@ export function Report(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [runId]);
+  }, [runId, isTerminal]);
 
   const memory = useMemo(
     () => asMemorySnapshot(snapshot?.memory),
@@ -210,6 +220,14 @@ export function Report(): JSX.Element {
             >
               {renderMarkdown(markdown)}
             </article>
+          ) : !error && !isTerminal ? (
+            <div
+              className="dim"
+              style={{ padding: 16, fontSize: 11.5 }}
+            >
+              Report will be generated once the run completes — current
+              status: <code>{runStatus ?? "—"}</code>
+            </div>
           ) : !error ? (
             <div
               className="dim"
