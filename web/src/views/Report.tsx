@@ -49,9 +49,17 @@ export function Report(): JSX.Element {
     let cancelled = false;
     setError(null);
     setMarkdown(null);
-    fetch(`/runs/${runId}/merge_report.md`)
-      .then((res) => {
+    fetch(`/runs/${runId}/merge_report_${runId}.md`)
+      .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        // Defense in depth: if the static server quietly falls back
+        // to the SPA index.html for a missing artifact, the response
+        // is HTML — never markdown. Reject it explicitly so we don't
+        // render the page's own DOCTYPE as report content.
+        const ctype = res.headers.get("content-type") ?? "";
+        if (ctype.includes("text/html")) {
+          throw new Error("report not found (server returned HTML)");
+        }
         return res.text();
       })
       .then((text) => {
@@ -109,7 +117,7 @@ export function Report(): JSX.Element {
           {runId && (
             <>
               <a
-                href={`/runs/${runId}/merge_report.md`}
+                href={`/runs/${runId}/merge_report_${runId}.md`}
                 target="_blank"
                 rel="noopener"
                 className="btn"
@@ -117,7 +125,7 @@ export function Report(): JSX.Element {
                 ⬇ merge_report.md
               </a>
               <a
-                href={`/runs/${runId}/plan_review.md`}
+                href={`/runs/${runId}/plan_review_${runId}.md`}
                 target="_blank"
                 rel="noopener"
                 className="btn"
@@ -337,10 +345,10 @@ export function Report(): JSX.Element {
           {runId && (
             <Card title="› ARTIFACTS">
               {[
-                ["merge_report.md", "view"],
-                ["plan_review.md", "view"],
-                ["checkpoint.json", "download"],
-              ].map(([f, kind]) => (
+                [`merge_report_${runId}.md`, "merge_report.md", "view"],
+                [`plan_review_${runId}.md`, "plan_review.md", "view"],
+                ["checkpoint.json", "checkpoint.json", "download"],
+              ].map(([f, label, kind]) => (
                 <div
                   key={f}
                   style={{
@@ -353,7 +361,7 @@ export function Report(): JSX.Element {
                     fontSize: 11.5,
                   }}
                 >
-                  <code style={{ color: "var(--fg-0)" }}>{f}</code>
+                  <code style={{ color: "var(--fg-0)" }}>{label}</code>
                   <a
                     href={`/runs/${runId}/${f}`}
                     target={kind === "view" ? "_blank" : undefined}

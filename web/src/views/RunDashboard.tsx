@@ -1,7 +1,8 @@
 import { useMemo } from "react";
 import { useRunStore } from "../store/runStore";
 import type { WsClient } from "../ws/client";
-import type { MergeStateSnapshot } from "../types/state";
+import type { ActiveView } from "../lib/classifyView";
+import type { MergePlanPayload, MergeStateSnapshot } from "../types/state";
 import {
   AgentGraph,
   ActivityStream,
@@ -17,6 +18,9 @@ interface Props {
   // currently only reads from the store — keep the prop so the App shell
   // doesn't need a special case.
   clientRef: React.MutableRefObject<WsClient | null>;
+  // Optional: lets the Planner Summary card deep-link into the full Plan
+  // Review view. Omitted when rendered outside the App shell (e.g. tests).
+  onSelectView?: (v: ActiveView) => void;
 }
 
 const PHASE_ORDER: { id: string; label: string }[] = [
@@ -143,8 +147,168 @@ function deriveElapsed(snapshot: MergeStateSnapshot | null): string {
   return `${m}m ${String(s).padStart(2, "0")}s`;
 }
 
-export function RunDashboard(_props: Props): JSX.Element {
-  void _props;
+const PLANNER_BUCKETS: { key: string; field: keyof PlannerBucketCounts; color: string }[] = [
+  { key: "auto_safe", field: "auto_safe_count", color: "var(--green)" },
+  { key: "auto_risky", field: "auto_risky_count", color: "var(--orange)" },
+  { key: "human_required", field: "human_required_count", color: "var(--red)" },
+  { key: "deleted_only", field: "deleted_only_count", color: "var(--amber-dim)" },
+  { key: "binary", field: "binary_count", color: "var(--teal-dim)" },
+  { key: "excluded", field: "excluded_count", color: "var(--bg-hi)" },
+];
+
+interface PlannerBucketCounts {
+  auto_safe_count: number;
+  auto_risky_count: number;
+  human_required_count: number;
+  deleted_only_count: number;
+  binary_count: number;
+  excluded_count: number;
+}
+
+function PlannerSummaryStrip({
+  plan,
+  onOpenPlanReview,
+}: {
+  plan: MergePlanPayload;
+  onOpenPlanReview?: () => void;
+}): JSX.Element {
+  const r = plan.risk_summary;
+  const rate = Math.max(0, Math.min(1, r.estimated_auto_merge_rate ?? 0));
+  const ratePct = (rate * 100).toFixed(1);
+  const ctx = plan.project_context_summary?.trim() ?? "";
+  const instr = plan.special_instructions?.length ?? 0;
+
+  return (
+    <div className="hairline mb-2" style={{ padding: "10px 14px" }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "auto 1fr auto",
+          alignItems: "center",
+          gap: 18,
+        }}
+      >
+        <div
+          style={{
+            fontFamily: "var(--mono)",
+            fontSize: 10,
+            letterSpacing: "0.08em",
+            color: "var(--fg-3)",
+          }}
+        >
+          › PLANNER SUMMARY
+        </div>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 14,
+            justifyContent: "flex-start",
+            fontFamily: "var(--mono)",
+            fontSize: 11.5,
+          }}
+        >
+          {PLANNER_BUCKETS.map((b) => (
+            <div
+              key={b.key}
+              style={{ display: "flex", alignItems: "center", gap: 6 }}
+            >
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  background: b.color,
+                  display: "inline-block",
+                }}
+              />
+              <code style={{ color: "var(--fg-2)" }}>{b.key}</code>
+              <span
+                style={{
+                  color: "var(--fg-0)",
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {r[b.field].toLocaleString()}
+              </span>
+            </div>
+          ))}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              marginLeft: 6,
+            }}
+          >
+            <span className="dim" style={{ fontSize: 10 }}>
+              est. auto-merge
+            </span>
+            <div
+              style={{
+                width: 120,
+                height: 4,
+                background: "var(--bg-3)",
+                position: "relative",
+              }}
+            >
+              <div
+                style={{
+                  position: "absolute",
+                  inset: 0,
+                  width: `${ratePct}%`,
+                  background: "var(--green)",
+                }}
+              />
+            </div>
+            <span
+              style={{
+                color: "var(--fg-0)",
+                fontVariantNumeric: "tabular-nums",
+              }}
+            >
+              {ratePct}%
+            </span>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {instr > 0 && (
+            <span className="dim" style={{ fontSize: 10 }}>
+              {instr} special instr.
+            </span>
+          )}
+          {onOpenPlanReview && (
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={onOpenPlanReview}
+              style={{ fontSize: 10 }}
+            >
+              open plan review →
+            </button>
+          )}
+        </div>
+      </div>
+      {ctx && (
+        <div
+          className="dim"
+          title={ctx}
+          style={{
+            marginTop: 6,
+            fontSize: 11,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          context: {ctx}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function RunDashboard(props: Props): JSX.Element {
+  const { onSelectView } = props;
   const snapshot = useRunStore((s) => s.snapshot);
   const activity = useRunStore((s) => s.activity);
   const cancelError = useRunStore((s) => s.lastCancelError);
@@ -285,6 +449,15 @@ export function RunDashboard(_props: Props): JSX.Element {
           </div>
         </div>
       </div>
+
+      {snapshot?.mergePlan && (
+        <PlannerSummaryStrip
+          plan={snapshot.mergePlan}
+          onOpenPlanReview={
+            onSelectView ? () => onSelectView("plan_review") : undefined
+          }
+        />
+      )}
 
       <div className="dash-grid">
         <div className="col">

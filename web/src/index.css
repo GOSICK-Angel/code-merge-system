@@ -658,8 +658,8 @@
 .stream {
   font-family: var(--mono);
   font-size: 11.5px;
-  height: 100%;
-  overflow: hidden;
+  max-height: 360px;
+  overflow-y: auto;
   position: relative;
 }
 .stream .line {
@@ -731,6 +731,45 @@
 /* =============================================================
    PLAN REVIEW
    ============================================================= */
+.conclusion-banner {
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  background: var(--bg-2);
+  padding: 12px 14px;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.conclusion-banner.tone-amber { border-left-color: var(--amber); }
+.conclusion-banner.tone-red   { border-left-color: var(--red); }
+.conclusion-banner.tone-green { border-left-color: var(--green); }
+.conclusion-banner .headline {
+  color: var(--fg-0);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.conclusion-banner .body {
+  margin-top: 6px;
+  color: var(--fg-1);
+}
+.conclusion-banner .meta {
+  margin-top: 8px;
+  display: flex; flex-wrap: wrap; gap: 14px;
+  color: var(--fg-2);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.conclusion-banner .meta b {
+  color: var(--fg-0);
+  font-variant-numeric: tabular-nums;
+}
+.conclusion-banner .summary {
+  margin-top: 8px;
+  color: var(--fg-2);
+  font-size: 11px;
+  font-style: italic;
+  white-space: pre-wrap;
+}
+
 .plan-grid {
   display: grid;
   grid-template-columns: 1fr 380px;
@@ -812,7 +851,100 @@
   color: var(--fg-2);
 }
 .nego-round .who b { color: var(--fg-0); }
-.nego-round .msg { color: var(--fg-1); margin-top: 4px; }
+.nego-round .msg { color: var(--fg-1); margin-top: 4px; font-size: 11px; }
+
+.nego-counts {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-top: 8px;
+}
+.nego-counts .pill {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 2px 8px;
+  color: var(--fg-2);
+}
+.nego-counts .pill b {
+  color: var(--fg-0);
+  margin-left: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.nego-summary {
+  margin-top: 8px;
+  color: var(--fg-1);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.nego-revision {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--fg-1);
+  font-style: italic;
+}
+.nego-section-h {
+  margin-top: 10px;
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  color: var(--fg-3);
+  text-transform: uppercase;
+}
+.nego-issues, .nego-diff {
+  margin-top: 4px;
+  display: flex; flex-direction: column;
+  gap: 6px;
+}
+.nego-issue {
+  border-left: 2px solid var(--line);
+  padding: 4px 0 4px 10px;
+  font-size: 11px;
+}
+.nego-issue .fp,
+.nego-diff-row .fp {
+  font-family: var(--mono);
+  color: var(--fg-0);
+  font-size: 10.5px;
+  word-break: break-all;
+}
+.nego-issue .why {
+  margin-top: 3px;
+  color: var(--fg-2);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.nego-diff-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 3px 0;
+  font-size: 11px;
+}
+.risk-shift {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-2);
+}
+.risk-shift .arrow { color: var(--fg-3); }
+.risk-shift code { color: var(--fg-1); }
+.nego-issues .more, .nego-diff .more {
+  font-size: 10px;
+  padding-left: 10px;
+}
+.nego-raw {
+  margin-top: 10px;
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+}
+.nego-raw > summary {
+  cursor: pointer;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  user-select: none;
+}
+.nego-raw .msg {
+  margin-top: 4px;
+  padding-left: 14px;
+  border-left: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--fg-1);
+}
 
 .pending-item {
   border: 1px solid var(--line);
@@ -1161,13 +1293,31 @@
   letter-spacing: 0.10em;
 }
 .md p { margin: 0 0 10px; }
-.md ul { margin: 0 0 12px; padding-left: 20px; list-style: disc; }
+.md ul, .md ol { margin: 0 0 12px; padding-left: 20px; }
+.md ul { list-style: disc; }
+.md ol { list-style: decimal; }
 .md li { margin-bottom: 4px; }
+.md a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md a:hover { color: var(--fg-0); }
+.md strong { color: var(--fg-0); font-weight: 600; }
+.md em { font-style: italic; color: var(--fg-0); }
+.md .table-wrap {
+  overflow-x: auto;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+}
+.md .table-wrap table { margin: 0; border: none; }
 .md table { border-collapse: collapse; font-size: 11px; margin-bottom: 12px; }
 .md table th, .md table td {
   border: 1px solid var(--line);
   padding: 4px 8px;
   text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
 }
 .md table th {
   background: var(--bg-0);

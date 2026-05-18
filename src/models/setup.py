@@ -206,6 +206,14 @@ class SetupContext(BaseModel):
     has_existing_config: bool = False
     existing_config_summary: dict[str, Any] | None = None
     forks_profile_threshold: int = 30
+    # Whether the user has any global config under
+    # ``~/.config/code-merge-system/`` (specifically the ``.env`` file
+    # populated by past runs of the wizard). The Web UI keeps the
+    # provider sections fully blank when this is False *and* the
+    # project has no ``.merge/config.yaml`` yet — i.e. a truly
+    # untouched device + untouched project — so the reviewer is not
+    # tricked into thinking the form is already configured.
+    has_global_env: bool = False
 
     # Per-provider hints — replaces the old flat ``api_key_hints`` list
     # so the form can render two independent provider sections without

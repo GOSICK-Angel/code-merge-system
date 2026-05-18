@@ -3,10 +3,10 @@
 Covers the L5 Report artifact path:
 - Allow-listed suffixes (.md / .json / .yaml / .yml / .txt / .log) resolve
   to real files under ``runs_root``
-- Path traversal is blocked (``..`` escapes the runs_root → fallback to
-  SPA index.html)
-- Unknown suffixes (e.g. ``.py``) are blocked
-- Missing files fall through to SPA fallback
+- Path traversal is blocked (``..`` escapes the runs_root → 404)
+- Unknown suffixes (e.g. ``.py``) are blocked (404)
+- Missing files return 404 (NOT the SPA fallback — otherwise the L5
+  Report view renders ``index.html`` as markdown gibberish)
 - Without ``runs_root`` configured the route is a no-op (always SPA)
 """
 
@@ -81,27 +81,37 @@ class TestRunsRoute:
 
     def test_blocks_disallowed_suffix(self, server_with_runs) -> None:
         _server, _dist, _runs, port = server_with_runs
-        # ``.py`` is not in the allow-list → falls through to SPA
+        # ``.py`` is not in the allow-list → hard 404 so callers can
+        # tell the artifact is absent rather than getting the SPA
+        # HTML back as a 200.
         status, body = _get(port, "/runs/r1/secret.py")
-        assert status == 200
-        # Body should be the SPA index.html, not the .py contents
+        assert status == 404
         assert "should_not_be_served" not in body
-        assert "<html>" in body or "SPA" in body
 
     def test_blocks_path_traversal(self, server_with_runs, tmp_path: Path) -> None:
         _server, _dist, _runs, port = server_with_runs
-        # Try to escape runs_root via .. — the resolved path is outside,
-        # so the handler must fall through to SPA.
-        status, body = _get(port, "/runs/r1/../../dist/index.html")
-        # Result is *some* SPA content, never a 4xx leaking the layout
-        assert status == 200
-        assert "SPA" in body or "<html>" in body
+        # Escape via .. — resolved path is outside runs_root → 404.
+        status, _body = _get(port, "/runs/r1/../../dist/index.html")
+        assert status == 404
 
-    def test_missing_run_id_falls_through(self, server_with_runs) -> None:
+    def test_missing_run_id_returns_404(self, server_with_runs) -> None:
         _server, _dist, _runs, port = server_with_runs
-        status, body = _get(port, "/runs/no_such_run/merge_report.md")
-        assert status == 200
-        assert "SPA" in body or "<html>" in body
+        status, _body = _get(port, "/runs/no_such_run/merge_report.md")
+        assert status == 404
+
+    def test_missing_artifact_in_existing_run_returns_404(
+        self, server_with_runs
+    ) -> None:
+        """Regression: the L5 Report view used to render the SPA's
+        index.html as markdown when the artifact filename it
+        requested didn't exist. The route must return 404 so the
+        frontend can show a clear "report not available" error."""
+        _server, _dist, _runs, port = server_with_runs
+        # ``r1`` exists; this filename does not (the real one carries
+        # the run_id suffix: ``merge_report_<run_id>.md``).
+        status, body = _get(port, "/runs/r1/merge_report_does_not_exist.md")
+        assert status == 404
+        assert "SPA" not in body
 
 
 class TestRunsRouteDisabled:

@@ -16,18 +16,30 @@ function formatElapsed(elapsed: number | null): string {
 
 export function ActivityStream({ events }: Props): JSX.Element {
   const scroller = useRef<HTMLDivElement | null>(null);
+  // Track whether the user is "pinned to bottom" so we only auto-scroll on
+  // new events when they were already following the live tail. If they
+  // scrolled up to inspect older lines, leave them there.
+  const pinnedToBottom = useRef(true);
 
   useEffect(() => {
-    if (scroller.current) {
-      scroller.current.scrollTop = scroller.current.scrollHeight;
+    const el = scroller.current;
+    if (!el) return;
+    if (pinnedToBottom.current) {
+      el.scrollTop = el.scrollHeight;
     }
   }, [events.length]);
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>): void => {
+    const el = e.currentTarget;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    pinnedToBottom.current = distance < 24;
+  };
 
   return (
     <div
       className="stream"
       ref={scroller}
-      style={{ overflowY: "auto" }}
+      onScroll={handleScroll}
     >
       {events.length === 0 && (
         <div

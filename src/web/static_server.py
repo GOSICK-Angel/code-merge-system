@@ -16,7 +16,8 @@ import logging
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
-from typing import Any
+from typing import Any, BinaryIO
+from io import BytesIO
 
 logger = logging.getLogger(__name__)
 
@@ -31,13 +32,38 @@ class _SPAHandler(SimpleHTTPRequestHandler):
     root: Path = Path()
     runs_root: Path | None = None
 
+    def send_head(self) -> BytesIO | BinaryIO | None:
+        # Short-circuit the ``/runs/`` route with a hard 404 when the
+        # requested artifact is missing / disallowed / path-traversal,
+        # instead of returning the SPA index.html. The SPA fallback
+        # was confusing the L5 Report view: a missing report came
+        # back as 200 + HTML and rendered as markdown gibberish.
+        #
+        # ``send_error`` writes the status line + headers + body and
+        # marks the connection ``Connection: close``; returning
+        # ``None`` matches the stdlib pattern (``do_GET`` / ``do_HEAD``
+        # skip ``copyfile`` when the value is falsy) so the response
+        # is fully framed and the socket isn't reset.
+        path = (self.path or "").split("?", 1)[0].split("#", 1)[0]
+        if (
+            self.runs_root is not None
+            and path.startswith(_RUNS_URL_PREFIX)
+            and self._translate_runs_path(path) is None
+        ):
+            self.send_error(404, "Run artifact not found")
+            return None
+        return super().send_head()
+
     def translate_path(self, path: str) -> str:
         clean = path.split("?", 1)[0].split("#", 1)[0]
         if self.runs_root is not None and clean.startswith(_RUNS_URL_PREFIX):
             translated = self._translate_runs_path(clean)
             if translated is not None:
                 return translated
-            # Fallthrough to SPA (returns index.html for unknown / blocked paths)
+            # send_head already responded with 404 for the misses; this
+            # branch is only hit by callers bypassing send_head (none
+            # in production), so still return something safe.
+            return str(self.root.resolve() / "index.html")
         clean_path = clean.lstrip("/")
         root_resolved = self.root.resolve()
         target = (self.root / clean_path).resolve()

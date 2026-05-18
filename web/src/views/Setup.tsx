@@ -145,22 +145,29 @@ function deriveDefaults(ctx: SetupContext): FormState {
   // models textarea is pre-filled with the recommended list so a
   // first-run user only has to click submit; existing config (if
   // any) overrides below.
-  const anthropicHasKey = !!ctx.anthropic_key_hint.masked;
-  const openaiHasKey = !!ctx.openai_key_hint.masked;
+  //
+  // Exception — pristine device: when ``has_global_env`` is false
+  // AND no ``.merge/config.yaml`` exists yet, treat the form as a
+  // truly empty slate. Even if shell env happens to leak an
+  // ANTHROPIC_API_KEY into ``*_key_hint`` we keep the section blank
+  // so the reviewer sees they're configuring from scratch.
+  const pristineDevice = !ctx.has_global_env && !ctx.has_existing_config;
+  const anthropicHasKey = !pristineDevice && !!ctx.anthropic_key_hint.masked;
+  const openaiHasKey = !pristineDevice && !!ctx.openai_key_hint.masked;
   const recommendedAnthropic =
     ctx.provider_recommended_models.anthropic ?? [];
   const recommendedOpenai = ctx.provider_recommended_models.openai ?? [];
   const anthropic: ProviderFormState = {
     enabled: anthropicHasKey,
     api_key: "",
-    base_url: ctx.anthropic_base_url ?? "",
-    models_text: recommendedAnthropic.join("\n"),
+    base_url: pristineDevice ? "" : ctx.anthropic_base_url ?? "",
+    models_text: pristineDevice ? "" : recommendedAnthropic.join("\n"),
   };
   const openai: ProviderFormState = {
     enabled: openaiHasKey,
     api_key: "",
-    base_url: ctx.openai_base_url ?? "",
-    models_text: recommendedOpenai.join("\n"),
+    base_url: pristineDevice ? "" : ctx.openai_base_url ?? "",
+    models_text: pristineDevice ? "" : recommendedOpenai.join("\n"),
   };
 
   // Compute the default provider first — every agent row needs an
@@ -332,6 +339,11 @@ function validate(form: FormState, ctx: SetupContext): string | null {
   if (!form.target_branch.trim()) return "Target branch is required.";
   if (!form.fork_ref.trim()) return "Fork ref is required.";
 
+  // Pristine slate (no global env + no project config) — ignore any
+  // disk hints so the user is forced to type an API key explicitly,
+  // matching the blank-form UX.
+  const pristineDevice = !ctx.has_global_env && !ctx.has_existing_config;
+
   // At least one provider must be enabled AND have a key (in the form
   // OR already on disk per ctx) AND list ≥1 model.
   const enabledList: ProviderName[] = [];
@@ -353,13 +365,13 @@ function validate(form: FormState, ctx: SetupContext): string | null {
   const anthropicErr = providerOk(
     "anthropic",
     form.anthropic,
-    ctx.anthropic_key_hint.masked,
+    pristineDevice ? "" : ctx.anthropic_key_hint.masked,
   );
   if (anthropicErr) return anthropicErr;
   const openaiErr = providerOk(
     "openai",
     form.openai,
-    ctx.openai_key_hint.masked,
+    pristineDevice ? "" : ctx.openai_key_hint.masked,
   );
   if (openaiErr) return openaiErr;
   if (enabledList.length === 0) {
@@ -733,6 +745,11 @@ export function Setup({ clientRef }: Props): JSX.Element {
   if (form.openai.enabled) enabledProviders.push("openai");
   const needsDefaultPick = enabledProviders.length > 1;
 
+  // Pristine slate — see deriveDefaults. Suppress disk-hint badges so
+  // the section reads as "nothing configured yet" all the way through.
+  const pristineDevice = !context.has_global_env && !context.has_existing_config;
+  const blankHint = { masked: "", source: "" };
+
   return (
     <form
       onSubmit={handleSubmit}
@@ -802,10 +819,14 @@ export function Setup({ clientRef }: Props): JSX.Element {
       <ProviderSection
         provider="anthropic"
         state={form.anthropic}
-        hint={{
-          masked: context.anthropic_key_hint.masked,
-          source: context.anthropic_key_hint.source,
-        }}
+        hint={
+          pristineDevice
+            ? blankHint
+            : {
+                masked: context.anthropic_key_hint.masked,
+                source: context.anthropic_key_hint.source,
+              }
+        }
         recommendedModels={context.provider_recommended_models.anthropic ?? []}
         onChange={(next) => updateProvider("anthropic", next)}
         disabled={submitting}
@@ -814,10 +835,14 @@ export function Setup({ clientRef }: Props): JSX.Element {
       <ProviderSection
         provider="openai"
         state={form.openai}
-        hint={{
-          masked: context.openai_key_hint.masked,
-          source: context.openai_key_hint.source,
-        }}
+        hint={
+          pristineDevice
+            ? blankHint
+            : {
+                masked: context.openai_key_hint.masked,
+                source: context.openai_key_hint.source,
+              }
+        }
         recommendedModels={context.provider_recommended_models.openai ?? []}
         onChange={(next) => updateProvider("openai", next)}
         disabled={submitting}

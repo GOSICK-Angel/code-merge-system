@@ -43,6 +43,8 @@ def _clean_api_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "GITHUB_TOKEN",
         "ANTHROPIC_BASE_URL",
         "OPENAI_BASE_URL",
+        "ANTHROPIC_MODELS",
+        "OPENAI_MODELS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -185,8 +187,13 @@ class TestApplySetupPayload:
         env_text = env_path.read_text(encoding="utf-8")
         assert "ANTHROPIC_API_KEY" in env_text
         assert "ANTHROPIC_BASE_URL" in env_text
+        # Models list is also persisted to .env so the next setup run
+        # can prefill the textarea from the global resolution chain.
+        assert "ANTHROPIC_MODELS" in env_text
+        assert ",".join(_DEFAULT_ANTHROPIC_MODELS) in env_text
         # No openai key supplied → no env entry, no github block.
         assert "OPENAI_API_KEY" not in env_text
+        assert "OPENAI_MODELS" not in env_text
         assert "github" not in raw
 
     def test_github_block_set_when_token_supplied(self, tmp_path: Path) -> None:
@@ -328,9 +335,12 @@ class TestApplySetupPayload:
         assert raw["thresholds"]["risk_score_high"] == 0.5
         assert raw["thresholds"]["risk_score_low"] == 0.30
 
-    def test_no_api_keys_supplied_skips_env_file(self, tmp_path: Path) -> None:
-        # enabled=True but api_key="" means "keep what's on disk"; with
-        # no on-disk file either, no env writes happen.
+    def test_blank_api_key_still_persists_models(self, tmp_path: Path) -> None:
+        # ``api_key=""`` means "keep what's on disk", but the models
+        # list is its own state managed by the wizard — when the user
+        # supplies models without retyping the key we still want them
+        # persisted so the next setup can prefill the textarea from
+        # the env resolution chain.
         payload = SetupPayload.model_validate(
             {
                 "target_branch": "u",
@@ -343,7 +353,14 @@ class TestApplySetupPayload:
             }
         )
         apply_setup_payload(payload, str(tmp_path))
-        assert not (tmp_path / ".merge" / ".env").exists()
+        env_path = tmp_path / ".merge" / ".env"
+        assert env_path.exists()
+        env_text = env_path.read_text(encoding="utf-8")
+        assert "ANTHROPIC_MODELS" in env_text
+        assert "claude-opus-4-7" in env_text
+        # The empty key was NOT written — the on-disk key (if any) is
+        # preserved by ``write_env_file``'s merge semantics.
+        assert "ANTHROPIC_API_KEY" not in env_text
 
 
 class TestBuildDefaultPayload:
@@ -519,3 +536,71 @@ class TestDetectSetupContext:
         # An env var not set anywhere has empty masked + source
         assert ctx.github_token_hint.masked == ""
         assert ctx.github_token_hint.source == ""
+
+    def test_provider_models_env_overrides_hardcoded_recommendation(
+        self, tmp_path: Path
+    ) -> None:
+        """``ANTHROPIC_MODELS`` / ``OPENAI_MODELS`` from the env chain
+        seed the UI textarea instead of the hardcoded list."""
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "ANTHROPIC_MODELS": "claude-custom-a, claude-custom-b",
+                    "OPENAI_MODELS": "gpt-custom-x\ngpt-custom-y",
+                },
+                clear=False,
+            ),
+            patch(
+                "src.cli.commands.setup._auto_detect_fork_ref",
+                return_value="feat/x",
+            ),
+            patch(
+                "src.cli.commands.setup._detect_upstream_default",
+                return_value="origin/main",
+            ),
+            patch(
+                "src.cli.commands.setup._count_fork_deleted_files",
+                return_value=0,
+            ),
+        ):
+            ctx = detect_setup_context(str(tmp_path))
+
+        assert ctx.provider_recommended_models["anthropic"] == [
+            "claude-custom-a",
+            "claude-custom-b",
+        ]
+        assert ctx.provider_recommended_models["openai"] == [
+            "gpt-custom-x",
+            "gpt-custom-y",
+        ]
+
+    def test_provider_models_falls_back_to_hardcoded_when_env_unset(
+        self, tmp_path: Path
+    ) -> None:
+        """No ``*_MODELS`` env var → keeps the built-in recommendation
+        so existing first-run UX is unchanged."""
+        with (
+            patch(
+                "src.cli.commands.setup._auto_detect_fork_ref",
+                return_value="feat/x",
+            ),
+            patch(
+                "src.cli.commands.setup._detect_upstream_default",
+                return_value="origin/main",
+            ),
+            patch(
+                "src.cli.commands.setup._count_fork_deleted_files",
+                return_value=0,
+            ),
+        ):
+            ctx = detect_setup_context(str(tmp_path))
+
+        from src.cli.commands.setup import PROVIDER_RECOMMENDED_MODELS
+
+        assert ctx.provider_recommended_models["anthropic"] == list(
+            PROVIDER_RECOMMENDED_MODELS["anthropic"]
+        )
+        assert ctx.provider_recommended_models["openai"] == list(
+            PROVIDER_RECOMMENDED_MODELS["openai"]
+        )

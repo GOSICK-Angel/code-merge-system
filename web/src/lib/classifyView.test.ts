@@ -303,6 +303,47 @@ describe("classifyView", () => {
     expect(classifyView(snap)).toBe("plan_review");
   });
 
+  it("routes to plan_review when awaiting_human + reviewConclusion + no pending items", () => {
+    const snap: MergeStateSnapshot = {
+      ...base,
+      status: "awaiting_human",
+      reviewConclusion: {
+        reason: "max_rounds",
+        final_round: 2,
+        total_rounds: 3,
+        max_rounds: 2,
+        summary: "did not converge",
+        pending_decisions_count: 0,
+        rejection_details: [],
+      },
+    };
+    expect(classifyView(snap)).toBe("plan_review");
+  });
+
+  it("falls back to dashboard once planHumanReview is recorded", () => {
+    const snap: MergeStateSnapshot = {
+      ...base,
+      status: "awaiting_human",
+      reviewConclusion: {
+        reason: "max_rounds",
+        final_round: 2,
+        total_rounds: 3,
+        max_rounds: 2,
+        summary: "did not converge",
+        pending_decisions_count: 0,
+        rejection_details: [],
+      },
+      planHumanReview: {
+        decision: "approve",
+        reviewer_name: null,
+        reviewer_notes: null,
+        decided_at: null,
+        item_decisions_count: 0,
+      },
+    };
+    expect(classifyView(snap)).toBe("dashboard");
+  });
+
   it("report wins over judge_verdict when both are present (terminal status)", () => {
     const snap: MergeStateSnapshot = {
       ...base,

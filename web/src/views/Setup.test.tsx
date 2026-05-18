@@ -37,6 +37,10 @@ const baseContext: SetupContext = {
   has_existing_config: false,
   existing_config_summary: null,
   forks_profile_threshold: 30,
+  // Default the existing test suite to "has global config on this
+  // device" so disk-hint-driven prefilling continues to apply; the
+  // pristine-device path has its own dedicated test below.
+  has_global_env: true,
   anthropic_key_hint: { name: "ANTHROPIC_API_KEY", masked: "", source: "" },
   openai_key_hint: { name: "OPENAI_API_KEY", masked: "", source: "" },
   github_token_hint: { name: "GITHUB_TOKEN", masked: "", source: "" },
@@ -194,6 +198,54 @@ describe("Setup — flexible providers", () => {
   it("blocks submit when both providers disabled or missing keys", () => {
     // base context: no keys on disk, providers disabled by default
     const { getByText } = renderSetup();
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(getByText(/at least one provider/i)).toBeTruthy();
+  });
+
+  it("pristine device (no global env + no project config) renders blank provider sections even when shell hints exist", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        has_global_env: false,
+        has_existing_config: false,
+        // Shell env happens to leak keys — should still be ignored on
+        // a pristine device so the form reads as "configure from
+        // scratch".
+        anthropic_key_hint: {
+          name: "ANTHROPIC_API_KEY",
+          masked: "sk-ant-leak",
+          source: "shell",
+        },
+        openai_key_hint: {
+          name: "OPENAI_API_KEY",
+          masked: "sk-oai-leak",
+          source: "shell",
+        },
+        anthropic_base_url: "https://leaked.example",
+        openai_base_url: "https://leaked.example",
+      },
+    });
+    const { getByTestId, getByText, queryByText } = renderSetup();
+
+    // Models textareas are blank — recommended list is suppressed.
+    const anthropicModels = getByTestId(
+      "anthropic_models",
+    ) as HTMLTextAreaElement;
+    const openaiModels = getByTestId("openai_models") as HTMLTextAreaElement;
+    expect(anthropicModels.value).toBe("");
+    expect(openaiModels.value).toBe("");
+
+    // The "existing key:" hint copy must not leak the shell-derived
+    // masked value.
+    expect(queryByText(/sk-ant-leak/)).toBeNull();
+    expect(queryByText(/sk-oai-leak/)).toBeNull();
+
+    // With both providers blank the form blocks submit at validation
+    // (mirrors the "no key configured anywhere" message) — proves
+    // the shell hint is *not* unlocking submit on a pristine device.
     act(() => {
       fireEvent.click(getByText(/SAVE & START/));
     });

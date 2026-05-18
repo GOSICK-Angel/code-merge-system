@@ -33,6 +33,7 @@ interface Props {
   onSelectView: (v: ActiveView) => void;
   onCancel: () => void;
   cancelDisabled: boolean;
+  cancelTitle: string;
   children: ReactNode;
 }
 
@@ -104,6 +105,7 @@ export function AppShell({
   onSelectView,
   onCancel,
   cancelDisabled,
+  cancelTitle,
   children,
 }: Props): JSX.Element {
   const [clock, setClock] = useState<string>(() =>
@@ -215,11 +217,7 @@ export function AppShell({
                 className="btn danger"
                 onClick={onCancel}
                 disabled={cancelDisabled}
-                title={
-                  cancelDisabled
-                    ? "Cancel only enabled while awaiting human"
-                    : "Cancel the current run"
-                }
+                title={cancelTitle}
               >
                 ⌥ CANCEL
               </button>

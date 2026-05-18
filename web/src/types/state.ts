@@ -162,6 +162,22 @@ export interface PlanHumanReviewPayload {
   item_decisions_count: number;
 }
 
+// Mirror of src/models/state.py ReviewConclusion. Populated when the
+// plan_review phase finishes — either because planner/judge converged
+// (``reason="converged"``) or because the loop hit a terminal condition
+// (``max_rounds`` / ``stalled`` / ``llm_failure``). For non-converged
+// reasons, AWAITING_HUMAN is required even if no per-file decisions
+// exist; the UI uses this payload to surface that to the reviewer.
+export interface ReviewConclusionPayload {
+  reason: string;
+  final_round: number;
+  total_rounds: number;
+  max_rounds: number;
+  summary: string;
+  pending_decisions_count: number;
+  rejection_details: unknown[];
+}
+
 export interface PendingUserDecisionOption {
   key: string;
   label: string;
@@ -199,6 +215,33 @@ export interface PlanPhaseBatch {
   change_category: string | null;
 }
 
+// Mirror of src/models/plan.py RiskSummary / CategorySummary. Both are
+// emitted verbatim by serialize_plan() (model_dump mode="json"), so the
+// shape on the wire is stable. Keeping these typed (rather than a loose
+// Record<string, number>) lets the planner-summary cards consume
+// estimated_auto_merge_rate / top_risk_files without unsafe casts.
+export interface RiskSummaryPayload {
+  total_files: number;
+  auto_safe_count: number;
+  auto_risky_count: number;
+  human_required_count: number;
+  deleted_only_count: number;
+  binary_count: number;
+  excluded_count: number;
+  estimated_auto_merge_rate: number;
+  top_risk_files: string[];
+}
+
+export interface CategorySummaryPayload {
+  total_files: number;
+  a_unchanged: number;
+  b_upstream_only: number;
+  c_both_changed: number;
+  d_missing: number;
+  d_extra: number;
+  e_current_only: number;
+}
+
 export interface MergePlanPayload {
   plan_id: string;
   created_at: string | null;
@@ -206,11 +249,18 @@ export interface MergePlanPayload {
   fork_ref: string;
   merge_base_commit: string;
   phases: PlanPhaseBatch[];
-  risk_summary: Record<string, number>;
-  category_summary: Record<string, number> | null;
+  risk_summary: RiskSummaryPayload;
+  category_summary: CategorySummaryPayload | null;
   layers: PlanLayer[];
   project_context_summary: string;
   special_instructions: string[];
+}
+
+export interface PlanReviewIssue {
+  file_path: string;
+  reason: string;
+  current: string;
+  suggested: string;
 }
 
 export interface PlanReviewRoundPayload {
@@ -218,7 +268,9 @@ export interface PlanReviewRoundPayload {
   verdict_result: string;
   verdict_summary: string;
   issues_count: number;
-  issues_detail: Array<Record<string, unknown>>;
+  // Loose Record fallback for forward compatibility — judge may add new
+  // fields, and older snapshots may omit current/suggested.
+  issues_detail: Array<Partial<PlanReviewIssue> & Record<string, unknown>>;
   planner_revision_summary: string | null;
   planner_responses: Array<{
     issue_id: string;
@@ -277,7 +329,7 @@ export interface MergeStateSnapshot {
   judgeVerdict: JudgeVerdict | null;
   judgeRepairRounds: number;
   planReviewLog: PlanReviewRoundPayload[];
-  reviewConclusion: unknown | null;
+  reviewConclusion: ReviewConclusionPayload | null;
   pendingUserDecisions: PendingUserDecision[];
   gateHistory: unknown[];
   errors: Array<{ message?: string }>;
@@ -348,6 +400,11 @@ export interface SetupContext {
   has_existing_config: boolean;
   existing_config_summary: Record<string, unknown> | null;
   forks_profile_threshold: number;
+  // True when ~/.config/code-merge-system/.env exists. Used by the
+  // Setup view: when both this flag and ``has_existing_config`` are
+  // false the provider sections render with empty key/base_url/models
+  // so a fresh device + fresh project doesn't show preset values.
+  has_global_env: boolean;
 
   // Per-provider key/base-url hints + the recommended-model dropdown
   // source. ``agent_inventory`` is the ordered list of agent roles to

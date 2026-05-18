@@ -16,9 +16,14 @@ export type StoreMode = "setup" | "run";
  * Routing rules (highest priority first):
  *   1. Terminal status (``completed`` / ``failed``) → L5 report
  *   2. ``awaiting_human`` + pending plan-review items → L2 plan_review
- *   3. ``awaiting_human`` + pending conflict requests → L3 conflict_resolution
- *   4. ``awaiting_human`` + judge_verdict present + no resolution → L4 judge_verdict
- *   5. Everything else → L1 dashboard
+ *   3. ``awaiting_human`` + reviewConclusion present + planHumanReview
+ *      not yet recorded → L2 plan_review (plan-level sign-off — the
+ *      planner/judge loop terminated without converging, so per-file
+ *      pendingUserDecisions may be empty but the reviewer still has to
+ *      approve / modify / reject the last revised plan)
+ *   4. ``awaiting_human`` + pending conflict requests → L3 conflict_resolution
+ *   5. ``awaiting_human`` + judge_verdict present + no resolution → L4 judge_verdict
+ *   6. Everything else → L1 dashboard
  *
  * Why this order:
  *   - Terminal states win regardless of any in-flight state — once the
@@ -54,6 +59,17 @@ export function classifyView(
     (item) => item.user_choice === null,
   );
   if (planPending) return "plan_review";
+
+  // Plan-level sign-off path: planner/judge finished (review_conclusion
+  // set) but the human hasn't approved/modified/rejected yet. Without
+  // this branch a non-converged plan with zero per-file pending items
+  // falls through to dashboard and the reviewer has nowhere to act.
+  if (
+    snapshot.reviewConclusion != null &&
+    (snapshot.planHumanReview ?? null) == null
+  ) {
+    return "plan_review";
+  }
 
   const conflictPending = Object.values(snapshot.humanDecisionRequests).some(
     (r) => r.human_decision === null,

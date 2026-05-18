@@ -74,6 +74,17 @@ PROVIDER_BASE_URL_ENV: dict[ProviderName, str] = {
     "anthropic": "ANTHROPIC_BASE_URL",
     "openai": "OPENAI_BASE_URL",
 }
+# Env var holding a comma-separated list of models the user previously
+# saved for each provider. Same resolution chain as API keys (shell >
+# project .env > global .env); when present, ``detect_setup_context``
+# uses it to seed the UI's "available models" textarea so a
+# device-level edit to ``~/.config/code-merge-system/.env`` propagates
+# to every project. Falls back to ``PROVIDER_RECOMMENDED_MODELS`` when
+# unset.
+PROVIDER_MODELS_ENV: dict[ProviderName, str] = {
+    "anthropic": "ANTHROPIC_MODELS",
+    "openai": "OPENAI_MODELS",
+}
 
 # Suggested model dropdown source for each provider — populated into
 # ``SetupContext.provider_recommended_models``. Users can also type a
@@ -262,9 +273,37 @@ def _collect_env_writes(payload: SetupPayload) -> dict[str, str]:
             out[PROVIDER_API_KEY_ENV[provider]] = cfg.api_key
         if cfg.base_url:
             out[PROVIDER_BASE_URL_ENV[provider]] = cfg.base_url
+        # Persist the user's models list under the same .env chain.
+        # Comma-joined so the value stays single-line for plain `.env`
+        # parsers; ``detect_setup_context`` splits on both comma and
+        # whitespace when reading it back.
+        if cfg.models:
+            out[PROVIDER_MODELS_ENV[provider]] = ",".join(cfg.models)
     if payload.github_token:
         out["GITHUB_TOKEN"] = payload.github_token
     return out
+
+
+def _resolve_env_models(provider: ProviderName, repo_path: str) -> list[str] | None:
+    """Read ``<PROVIDER>_MODELS`` from the env chain, if set.
+
+    Returns the parsed list (comma- or whitespace-separated, dedup
+    preserved-order) when the env var resolves to a non-empty value;
+    returns ``None`` otherwise so the caller can fall back to the
+    hardcoded ``PROVIDER_RECOMMENDED_MODELS``.
+    """
+    raw = _resolve_env_value(PROVIDER_MODELS_ENV[provider], repo_path)
+    if not raw:
+        return None
+    seen: set[str] = set()
+    parsed: list[str] = []
+    for token in raw.replace("\n", ",").split(","):
+        name = token.strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        parsed.append(name)
+    return parsed or None
 
 
 def apply_setup_payload(payload: SetupPayload, repo_path: str = ".") -> MergeConfig:
@@ -352,6 +391,20 @@ def detect_setup_context(repo_path: str = ".") -> SetupContext:
             existing_config_summary = None
 
     divergence = _count_fork_deleted_files(suggested_target, current_branch, repo_path)
+    has_global_env = get_global_env_path().exists()
+
+    # Models follow the same resolution chain as keys / base URLs: when
+    # the user has previously saved a list (or hand-edited it into
+    # ``~/.config/code-merge-system/.env``) that wins over the
+    # hardcoded recommendation so a device-level edit propagates.
+    recommended_models: dict[str, list[str]] = {}
+    for provider in ("anthropic", "openai"):
+        env_models = _resolve_env_models(provider, repo_path)
+        recommended_models[provider] = (
+            env_models
+            if env_models is not None
+            else list(PROVIDER_RECOMMENDED_MODELS[provider])
+        )
 
     return SetupContext(
         current_branch=current_branch,
@@ -361,15 +414,14 @@ def detect_setup_context(repo_path: str = ".") -> SetupContext:
         github_token_hint=github_hint,
         anthropic_base_url=anthropic_base,
         openai_base_url=openai_base,
-        provider_recommended_models={
-            k: list(v) for k, v in PROVIDER_RECOMMENDED_MODELS.items()
-        },
+        provider_recommended_models=recommended_models,
         agent_inventory=[dict(entry) for entry in AGENT_INVENTORY],
         recommended_agent_models=_build_recommended_agent_models(),
         fork_divergence_count=divergence,
         has_existing_config=has_existing_config,
         existing_config_summary=existing_config_summary,
         forks_profile_threshold=FORKS_PROFILE_INIT_THRESHOLD,
+        has_global_env=has_global_env,
     )
 
 

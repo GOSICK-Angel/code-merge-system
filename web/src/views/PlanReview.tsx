@@ -9,11 +9,14 @@ import {
   usePlanReviewDraftStore,
 } from "../store/planReviewDraftStore";
 import type {
+  CategorySummaryPayload,
   MergePlanPayload,
   PendingUserDecision,
   PlanLayer,
   PlanPhaseBatch,
   PlanReviewRoundPayload,
+  ReviewConclusionPayload,
+  RiskSummaryPayload,
 } from "../types/state";
 import { Card, Pill } from "../components/brutalist";
 import type { PillTone } from "../components/brutalist";
@@ -38,6 +41,587 @@ function batchesForLayer(
   return plan.phases.filter((b) => b.layer_id === layerId);
 }
 
+const PHASE_LAYER_LABELS: Record<string, string> = {
+  auto_merge: "Auto merge",
+  conflict_analysis: "Conflict analysis",
+};
+
+// When the planner emits phases without a layer breakdown (layer_id=None on
+// every batch), fall back to grouping by `phase` so the MERGE PLAN card
+// still renders something useful instead of "no merge plan available yet".
+function syntheticLayers(plan: MergePlanPayload | null): {
+  layers: PlanLayer[];
+  batchesById: Map<number, PlanPhaseBatch[]>;
+} {
+  if (!plan) return { layers: [], batchesById: new Map() };
+  const groups = new Map<string, PlanPhaseBatch[]>();
+  for (const b of plan.phases) {
+    const key = b.phase || "unknown";
+    const arr = groups.get(key) ?? [];
+    arr.push(b);
+    groups.set(key, arr);
+  }
+  const layers: PlanLayer[] = [];
+  const batchesById = new Map<number, PlanPhaseBatch[]>();
+  let id = 0;
+  for (const [phase, batches] of groups) {
+    layers.push({
+      layer_id: id,
+      name: PHASE_LAYER_LABELS[phase] ?? phase,
+      description: "",
+      depends_on: [],
+    });
+    batchesById.set(id, batches);
+    id += 1;
+  }
+  return { layers, batchesById };
+}
+
+const RISK_BUCKETS: {
+  key: string;
+  field: keyof RiskSummaryPayload;
+  color: string;
+  tone: PillTone;
+}[] = [
+  { key: "auto_safe", field: "auto_safe_count", color: "var(--green)", tone: "green" },
+  { key: "auto_risky", field: "auto_risky_count", color: "var(--orange)", tone: "orange" },
+  { key: "human_required", field: "human_required_count", color: "var(--red)", tone: "red" },
+  { key: "deleted_only", field: "deleted_only_count", color: "var(--amber-dim)", tone: "amber" },
+  { key: "binary", field: "binary_count", color: "var(--teal-dim)", tone: "teal" },
+  { key: "excluded", field: "excluded_count", color: "var(--bg-hi)", tone: "" },
+];
+
+const CATEGORY_BUCKETS: {
+  key: string;
+  field: keyof CategorySummaryPayload;
+  color: string;
+}[] = [
+  { key: "A · unchanged", field: "a_unchanged", color: "var(--fg-3)" },
+  { key: "B · upstream only", field: "b_upstream_only", color: "var(--green)" },
+  { key: "C · both changed", field: "c_both_changed", color: "var(--orange)" },
+  { key: "D · missing", field: "d_missing", color: "var(--red)" },
+  { key: "D · extra", field: "d_extra", color: "var(--amber)" },
+  { key: "E · current only", field: "e_current_only", color: "var(--teal)" },
+];
+
+function PlannerSummary({
+  plan,
+  pending,
+  onFocusFile,
+}: {
+  plan: MergePlanPayload;
+  pending: PendingUserDecision[];
+  onFocusFile: (filePath: string) => void;
+}): JSX.Element {
+  const r = plan.risk_summary;
+  const c = plan.category_summary;
+  const rate = Math.max(0, Math.min(1, r.estimated_auto_merge_rate ?? 0));
+  const ratePct = (rate * 100).toFixed(1);
+  const total = r.total_files ?? 0;
+  const ctx = plan.project_context_summary?.trim() ?? "";
+  const instructions = plan.special_instructions ?? [];
+  const pendingByPath = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const p of pending) m.set(p.file_path, p.item_id);
+    return m;
+  }, [pending]);
+  const top = (r.top_risk_files ?? []).slice(0, 8);
+
+  return (
+    <Card
+      title="› PLANNER SUMMARY"
+      hint={`${total.toLocaleString()} files · est. auto-merge ${ratePct}%`}
+    >
+      <div className="risk-grid">
+        {RISK_BUCKETS.map((b) => {
+          const n = (r[b.field] as number) ?? 0;
+          const pct = total > 0 ? (100 * n) / total : 0;
+          return (
+            <div key={b.key} className="risk-row">
+              <div className="lbl">
+                <span
+                  className="swatch"
+                  style={{ background: b.color }}
+                />
+                <code>{b.key}</code>
+              </div>
+              <div
+                style={{
+                  height: 4,
+                  background: "var(--bg-3)",
+                  position: "relative",
+                }}
+              >
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    width: `${pct}%`,
+                    background: b.color,
+                  }}
+                />
+              </div>
+              <div className="num">{n.toLocaleString()}</div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div
+        style={{
+          marginTop: 10,
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+        }}
+      >
+        <span className="dim" style={{ fontSize: 10, minWidth: 110 }}>
+          estimated auto-merge
+        </span>
+        <div
+          style={{
+            flex: 1,
+            height: 6,
+            background: "var(--bg-3)",
+            position: "relative",
+          }}
+        >
+          <div
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: `${ratePct}%`,
+              background: "var(--green)",
+            }}
+          />
+        </div>
+        <span
+          style={{
+            color: "var(--fg-0)",
+            fontFamily: "var(--mono)",
+            fontSize: 11,
+            fontVariantNumeric: "tabular-nums",
+            minWidth: 56,
+            textAlign: "right",
+          }}
+        >
+          {ratePct}%
+        </span>
+      </div>
+
+      {c && (
+        <div
+          style={{
+            marginTop: 12,
+            paddingTop: 10,
+            borderTop: "1px dashed var(--line)",
+          }}
+        >
+          <div
+            className="dim"
+            style={{ fontSize: 10, marginBottom: 6, letterSpacing: "0.06em" }}
+          >
+            CHANGE CATEGORY
+          </div>
+          <div
+            style={{ display: "flex", flexWrap: "wrap", gap: 8, fontSize: 11 }}
+          >
+            {CATEGORY_BUCKETS.map((b) => {
+              const n = (c[b.field] as number) ?? 0;
+              if (n === 0) return null;
+              return (
+                <span
+                  key={b.key}
+                  className="pill"
+                  style={{
+                    borderColor: b.color,
+                    color: "var(--fg-1)",
+                    fontFamily: "var(--mono)",
+                    fontSize: 10,
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 6,
+                      height: 6,
+                      background: b.color,
+                      display: "inline-block",
+                      marginRight: 6,
+                    }}
+                  />
+                  {b.key}{" "}
+                  <span
+                    style={{
+                      color: "var(--fg-0)",
+                      marginLeft: 4,
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {n.toLocaleString()}
+                  </span>
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {top.length > 0 && (
+        <div
+          style={{
+            marginTop: 12,
+            paddingTop: 10,
+            borderTop: "1px dashed var(--line)",
+          }}
+        >
+          <div
+            className="dim"
+            style={{ fontSize: 10, marginBottom: 6, letterSpacing: "0.06em" }}
+          >
+            TOP RISK FILES
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {top.map((fp) => {
+              const isPending = pendingByPath.has(fp);
+              return (
+                <button
+                  key={fp}
+                  type="button"
+                  onClick={() => onFocusFile(fp)}
+                  className="btn ghost"
+                  style={{
+                    textAlign: "left",
+                    fontFamily: "var(--mono)",
+                    fontSize: 11,
+                    padding: "4px 8px",
+                    color: isPending ? "var(--fg-0)" : "var(--fg-2)",
+                    cursor: isPending ? "pointer" : "default",
+                  }}
+                  disabled={!isPending}
+                  title={
+                    isPending
+                      ? "focus this file in HUMAN_REQUIRED"
+                      : "not pending — view-only"
+                  }
+                >
+                  {fp}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {ctx && (
+        <div
+          style={{
+            marginTop: 12,
+            paddingTop: 10,
+            borderTop: "1px dashed var(--line)",
+          }}
+        >
+          <div
+            className="dim"
+            style={{ fontSize: 10, marginBottom: 6, letterSpacing: "0.06em" }}
+          >
+            PROJECT CONTEXT
+          </div>
+          <div
+            style={{
+              fontSize: 11.5,
+              color: "var(--fg-1)",
+              whiteSpace: "pre-wrap",
+              lineHeight: 1.5,
+            }}
+          >
+            {ctx}
+          </div>
+        </div>
+      )}
+
+      {instructions.length > 0 && (
+        <details
+          style={{
+            marginTop: 12,
+            paddingTop: 10,
+            borderTop: "1px dashed var(--line)",
+          }}
+        >
+          <summary
+            className="dim"
+            style={{
+              fontSize: 10,
+              letterSpacing: "0.06em",
+              cursor: "pointer",
+              userSelect: "none",
+            }}
+          >
+            SPECIAL INSTRUCTIONS · {instructions.length}
+          </summary>
+          <ul
+            style={{
+              marginTop: 6,
+              paddingLeft: 18,
+              fontSize: 11.5,
+              color: "var(--fg-1)",
+              lineHeight: 1.6,
+            }}
+          >
+            {instructions.map((line, i) => (
+              <li key={i} style={{ fontFamily: "var(--mono)" }}>
+                {line}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </Card>
+  );
+}
+
+// Drop the "[seg1: revision_needed(2 issues); ...]" tail that planner_judge
+// appends to verdict_summary — readable in JSON, noise in the UI. Keep the
+// short lead sentence ("Reviewed 23 segments covering 1782 files. ...").
+function trimVerdictSummary(s: string): string {
+  if (!s) return "";
+  const idx = s.indexOf("[seg");
+  return (idx >= 0 ? s.slice(0, idx) : s).trim();
+}
+
+function verdictTone(verdict: string): PillTone {
+  const v = verdict.toLowerCase();
+  if (v === "approved") return "green";
+  if (v === "revised" || v === "needs_revision" || v === "revision_needed")
+    return "amber";
+  return "";
+}
+
+function NegotiationRound({
+  r,
+}: {
+  r: PlanReviewRoundPayload;
+}): JSX.Element {
+  const verdict = r.verdict_result.toLowerCase();
+  const cls =
+    verdict === "approved"
+      ? "approved"
+      : verdict === "revised" ||
+          verdict === "needs_revision" ||
+          verdict === "revision_needed"
+        ? "revised"
+        : "";
+
+  const accepted = r.planner_responses.filter(
+    (p) => p.action.toLowerCase() === "accept",
+  ).length;
+  const rejected = r.planner_responses.filter(
+    (p) => p.action.toLowerCase() === "reject",
+  ).length;
+  const discussed = Math.max(
+    0,
+    r.planner_responses.length - accepted - rejected,
+  );
+  const diffCount = r.plan_diff.length;
+  const summary = trimVerdictSummary(r.verdict_summary);
+  const topIssues = r.issues_detail.slice(0, 5);
+  const moreIssues = Math.max(0, r.issues_detail.length - topIssues.length);
+  const topDiffs = r.plan_diff.slice(0, 5);
+  const moreDiffs = Math.max(0, diffCount - topDiffs.length);
+
+  return (
+    <div className={`nego-round ${cls}`}>
+      <div className="who">
+        ROUND {r.round_number} · <b>planner_judge</b>{" "}
+        <span style={{ marginLeft: 6 }}>
+          <Pill tone={verdictTone(r.verdict_result)}>{r.verdict_result}</Pill>
+        </span>
+      </div>
+
+      <div className="nego-counts">
+        <span className="pill" title="judge-flagged issues this round">
+          issues <b>{r.issues_count}</b>
+        </span>
+        {r.planner_responses.length > 0 && (
+          <>
+            <span
+              className="pill"
+              style={{ borderColor: "var(--green)", color: "var(--fg-1)" }}
+              title="planner accepted these issues"
+            >
+              accepted <b>{accepted}</b>
+            </span>
+            <span
+              className="pill"
+              style={{ borderColor: "var(--red)", color: "var(--fg-1)" }}
+              title="planner rejected these issues"
+            >
+              rejected <b>{rejected}</b>
+            </span>
+            {discussed > 0 && (
+              <span className="pill" title="still under discussion">
+                discussing <b>{discussed}</b>
+              </span>
+            )}
+          </>
+        )}
+        {diffCount > 0 && (
+          <span
+            className="pill"
+            style={{ borderColor: "var(--amber)", color: "var(--fg-1)" }}
+            title="files whose risk class was changed in this round"
+          >
+            risk changes <b>{diffCount}</b>
+          </span>
+        )}
+      </div>
+
+      {summary && <div className="nego-summary">{summary}</div>}
+
+      {r.planner_revision_summary && (
+        <div className="nego-revision">
+          <span className="dim">PLANNER › </span>
+          {r.planner_revision_summary}
+        </div>
+      )}
+
+      {topIssues.length > 0 && (
+        <div className="nego-issues">
+          <div className="nego-section-h">JUDGE ISSUES</div>
+          {topIssues.map((it, j) => {
+            const fp = (it.file_path as string) ?? "(file?)";
+            const cur = (it.current as string) ?? "";
+            const sug = (it.suggested as string) ?? "";
+            const reason = (it.reason as string) ?? "";
+            return (
+              <div key={j} className="nego-issue">
+                <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
+                  <code className="fp">{fp}</code>
+                  {cur && sug && (
+                    <span className="risk-shift">
+                      <code>{cur}</code>
+                      <span className="arrow"> → </span>
+                      <code>{sug}</code>
+                    </span>
+                  )}
+                </div>
+                {reason && <div className="why">{reason}</div>}
+              </div>
+            );
+          })}
+          {moreIssues > 0 && (
+            <div className="dim more">+ {moreIssues} more issues</div>
+          )}
+        </div>
+      )}
+
+      {topDiffs.length > 0 && (
+        <div className="nego-diff">
+          <div className="nego-section-h">RISK CHANGES APPLIED</div>
+          {topDiffs.map((d, j) => (
+            <div key={j} className="nego-diff-row">
+              <code className="fp">{d.file_path}</code>
+              <span className="risk-shift">
+                <code>{d.old_risk}</code>
+                <span className="arrow"> → </span>
+                <code>{d.new_risk}</code>
+              </span>
+            </div>
+          ))}
+          {moreDiffs > 0 && (
+            <div className="dim more">+ {moreDiffs} more changes</div>
+          )}
+        </div>
+      )}
+
+      {r.negotiation_messages.length > 0 && (
+        <details className="nego-raw">
+          <summary className="dim">
+            raw negotiation_messages · {r.negotiation_messages.length}
+          </summary>
+          {r.negotiation_messages.map((mm, j) => (
+            <div key={j} className="msg">
+              <span className="dim" style={{ fontSize: 10 }}>
+                {mm.sender}
+              </span>
+              {" · "}
+              {mm.content}
+            </div>
+          ))}
+        </details>
+      )}
+    </div>
+  );
+}
+
+const CONCLUSION_COPY: Record<
+  string,
+  { tone: PillTone; headline: string; body: string }
+> = {
+  max_rounds: {
+    tone: "amber",
+    headline: "Plan did not converge — max revision rounds reached",
+    body: "Planner and judge could not agree within the configured budget. Approving keeps the last revised plan; modify to give the planner more guidance; reject to abort this run.",
+  },
+  stalled: {
+    tone: "amber",
+    headline: "Plan revision stalled",
+    body: "Two consecutive judge rounds raised the same issues — the planner is not making progress. Your sign-off is required before the run can move on.",
+  },
+  llm_failure: {
+    tone: "red",
+    headline: "LLM error during plan revision",
+    body: "The planner/judge loop terminated because of an LLM error. Inspect the negotiation log below before approving.",
+  },
+  converged: {
+    tone: "green",
+    headline: "Plan converged",
+    body: "Planner and judge agreed on the plan. Confirm to proceed to auto_merge.",
+  },
+};
+
+function ConclusionBanner({
+  conclusion,
+}: {
+  conclusion: ReviewConclusionPayload;
+}): JSX.Element {
+  const reason = (conclusion.reason || "").toLowerCase();
+  const copy =
+    CONCLUSION_COPY[reason] ?? {
+      tone: "amber" as PillTone,
+      headline: `Plan review ended: ${conclusion.reason || "unknown"}`,
+      body:
+        conclusion.summary ||
+        "The planner/judge loop terminated. Your sign-off is required before the run can move on.",
+    };
+  return (
+    <div className={`conclusion-banner mb-2 tone-${copy.tone || "neutral"}`}>
+      <div className="row" style={{ gap: 10, alignItems: "center" }}>
+        <Pill tone={copy.tone}>{conclusion.reason || "concluded"}</Pill>
+        <div className="headline">{copy.headline}</div>
+      </div>
+      <div className="body">{copy.body}</div>
+      <div className="meta">
+        <span>
+          round <b>{conclusion.final_round}</b> / max{" "}
+          <b>{conclusion.max_rounds}</b>
+        </span>
+        <span>
+          total <b>{conclusion.total_rounds}</b>
+        </span>
+        {conclusion.pending_decisions_count > 0 && (
+          <span>
+            pending decisions <b>{conclusion.pending_decisions_count}</b>
+          </span>
+        )}
+      </div>
+      {conclusion.summary &&
+        conclusion.summary.trim() !== copy.body.trim() && (
+          <div className="summary">{conclusion.summary}</div>
+        )}
+    </div>
+  );
+}
+
 function NegotiationTimeline({
   rounds,
 }: {
@@ -52,56 +636,9 @@ function NegotiationTimeline({
   }
   return (
     <div className="negotiation">
-      {rounds.map((r, i) => {
-        const verdict = r.verdict_result.toLowerCase();
-        const cls =
-          verdict === "approved"
-            ? "approved"
-            : verdict === "revised" || verdict === "needs_revision"
-              ? "revised"
-              : "";
-        return (
-          <div key={i} className={`nego-round ${cls}`}>
-            <div className="who">
-              ROUND {r.round_number} ·{" "}
-              <b>planner_judge</b>{" "}
-              <span
-                style={{
-                  marginLeft: 4,
-                  color:
-                    cls === "approved"
-                      ? "var(--green)"
-                      : cls === "revised"
-                        ? "var(--amber)"
-                        : "var(--fg-2)",
-                }}
-              >
-                {r.verdict_result}
-              </span>
-              <span className="dim" style={{ marginLeft: 8 }}>
-                — {r.verdict_summary}
-              </span>
-            </div>
-            {r.negotiation_messages.slice(0, 3).map((mm, j) => (
-              <div
-                key={j}
-                className="msg"
-                style={{
-                  marginTop: 6,
-                  paddingLeft: 14,
-                  borderLeft: "1px solid var(--line)",
-                }}
-              >
-                <span className="dim" style={{ fontSize: 10 }}>
-                  {mm.sender}
-                </span>
-                {" · "}
-                {mm.content}
-              </div>
-            ))}
-          </div>
-        );
-      })}
+      {rounds.map((r, i) => (
+        <NegotiationRound key={i} r={r} />
+      ))}
     </div>
   );
 }
@@ -252,6 +789,13 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
   );
 
   const serverDecided = snapshot?.planHumanReview != null;
+  // Bridge `_apply_plan_review` only takes effect while the orchestrator
+  // is parked in HUMAN_REVIEW awaiting our signal — if the run already
+  // moved on to AUTO_MERGING / JUDGE_REVIEWING / ... a REJECT click sets
+  // `state.plan_human_review` into a phase that no longer reads it, so
+  // patches keep landing on fork_ref. Gate every batch action on the
+  // status the bridge can actually act on.
+  const inAwaitingHuman = snapshot?.status === "awaiting_human";
 
   useEffect(() => {
     if (selectedId && items.some((i) => i.item_id === selectedId)) return;
@@ -260,9 +804,21 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
   }, [items, pending, selectedId]);
 
   const plan = snapshot?.mergePlan ?? null;
-  const layers: PlanLayer[] = plan?.layers ?? [];
+  const rawLayers: PlanLayer[] = plan?.layers ?? [];
+  const synthetic = useMemo(() => syntheticLayers(plan), [plan]);
+  const usingSynthetic = rawLayers.length === 0 && (plan?.phases.length ?? 0) > 0;
+  const layers: PlanLayer[] = usingSynthetic ? synthetic.layers : rawLayers;
   const totalBatches = plan?.phases.length ?? 0;
   const rounds = snapshot?.planReviewLog ?? [];
+  const conclusion = snapshot?.reviewConclusion ?? null;
+  // Plan-level sign-off mode: planner/judge loop terminated (conclusion
+  // recorded) but the human hasn't responded yet. APPROVE / MODIFY /
+  // REJECT should be live even when there are zero per-file pending
+  // items — the reviewer is signing off on the plan as a whole.
+  const awaitingPlanSignoff =
+    !serverDecided && conclusion != null && inAwaitingHuman;
+  const canSubmit =
+    !serverDecided && inAwaitingHuman && (pending.length > 0 || awaitingPlanSignoff);
 
   const send = (msg: OutboundMessage) => clientRef.current?.send(msg);
 
@@ -297,6 +853,10 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
             <Pill tone="green">
               {snapshot?.planHumanReview?.decision ?? "DECIDED"}
             </Pill>
+          ) : awaitingPlanSignoff ? (
+            <Pill tone="orange" live>
+              AWAITING_HUMAN · plan sign-off
+            </Pill>
           ) : (
             <Pill tone="orange" live>
               AWAITING_HUMAN · {pending.length}
@@ -304,6 +864,23 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
           )}
         </div>
       </div>
+
+      {awaitingPlanSignoff && conclusion && (
+        <ConclusionBanner conclusion={conclusion} />
+      )}
+
+      {plan && (
+        <div className="mb-2">
+          <PlannerSummary
+            plan={plan}
+            pending={pending}
+            onFocusFile={(fp) => {
+              const match = pending.find((p) => p.file_path === fp);
+              if (match) setSelectedId(match.item_id);
+            }}
+          />
+        </div>
+      )}
 
       <div className="plan-grid">
         <div className="col">
@@ -317,7 +894,9 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
               </div>
             ) : (
               layers.map((layer) => {
-                const batches = batchesForLayer(plan, layer.layer_id);
+                const batches = usingSynthetic
+                  ? synthetic.batchesById.get(layer.layer_id) ?? []
+                  : batchesForLayer(plan, layer.layer_id);
                 return (
                   <div key={layer.layer_id} className="layer-block">
                     <div className="lhead">
@@ -402,9 +981,22 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
             {items.length === 0 ? (
               <div
                 className="dim"
-                style={{ fontSize: 11, padding: "12px 0" }}
+                style={{ fontSize: 11, padding: "12px 0", lineHeight: 1.6 }}
               >
-                no pending plan items
+                {awaitingPlanSignoff ? (
+                  <>
+                    no per-file decisions required — planner classified every
+                    file as <code>auto_safe</code> / <code>auto_risky</code>.
+                    Use the actions below to{" "}
+                    <b style={{ color: "var(--fg-1)" }}>approve</b>,{" "}
+                    <b style={{ color: "var(--fg-1)" }}>modify</b> (re-run the
+                    planner with notes) or{" "}
+                    <b style={{ color: "var(--fg-1)" }}>reject</b> the plan as
+                    a whole.
+                  </>
+                ) : (
+                  "no pending plan items"
+                )}
               </div>
             ) : (
               items.map((u) => {
@@ -455,7 +1047,12 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
                 type="button"
                 className="btn"
                 onClick={onApplyRecommended}
-                disabled={serverDecided || pending.length === 0}
+                disabled={serverDecided || pending.length === 0 || !inAwaitingHuman}
+                title={
+                  !inAwaitingHuman
+                    ? `run is ${snapshot?.status ?? "—"} — orchestrator is not waiting on plan review`
+                    : undefined
+                }
                 style={{ flex: 1, justifyContent: "center" }}
               >
                 APPLY DEFAULT
@@ -464,16 +1061,30 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
                 type="button"
                 className="btn primary"
                 onClick={onApproveAll}
-                disabled={serverDecided || pending.length === 0}
+                disabled={!canSubmit}
                 style={{ flex: 1, justifyContent: "center" }}
+                title={
+                  !inAwaitingHuman && !serverDecided
+                    ? `run is ${snapshot?.status ?? "—"} — orchestrator is not waiting on plan review`
+                    : awaitingPlanSignoff && pending.length === 0
+                      ? "approve the non-converged plan as-is"
+                      : undefined
+                }
               >
-                APPROVE ALL
+                {awaitingPlanSignoff && pending.length === 0
+                  ? "APPROVE PLAN"
+                  : "APPROVE ALL"}
               </button>
               <button
                 type="button"
                 className="btn"
                 onClick={onModify}
-                disabled={serverDecided}
+                disabled={serverDecided || !inAwaitingHuman}
+                title={
+                  !inAwaitingHuman
+                    ? `run is ${snapshot?.status ?? "—"} — orchestrator is not waiting on plan review`
+                    : undefined
+                }
                 style={{ flex: 1, justifyContent: "center" }}
               >
                 MODIFY
@@ -482,7 +1093,12 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
                 type="button"
                 className="btn danger"
                 onClick={onReject}
-                disabled={serverDecided}
+                disabled={serverDecided || !inAwaitingHuman}
+                title={
+                  !inAwaitingHuman
+                    ? `run is ${snapshot?.status ?? "—"} — orchestrator is not waiting on plan review`
+                    : undefined
+                }
                 style={{ flex: 1, justifyContent: "center" }}
               >
                 REJECT
