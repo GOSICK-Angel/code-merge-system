@@ -217,3 +217,54 @@ describe("ConflictResolution submit payload (H3)", () => {
     expect(bItem.custom_content).toBeNull();
   });
 });
+
+describe("ConflictResolution status pill (Fix 8)", () => {
+  it("shows AWAITING_HUMAN suffix when status === 'awaiting_human'", () => {
+    useRunStore.setState({ snapshot: { ...baseSnapshot, status: "awaiting_human" } });
+    const ref = makeClientRef();
+    const { container } = render(
+      <ConflictResolution
+        clientRef={
+          ref as unknown as React.MutableRefObject<
+            ReturnType<typeof useWsClient>["current"]
+          >
+        }
+      />,
+    );
+    expect(container.textContent).toContain("AWAITING_HUMAN");
+  });
+
+  it("pill reflects judge_reviewing when stale snapshot lingers past plan_review", () => {
+    useRunStore.setState({ snapshot: { ...baseSnapshot, status: "judge_reviewing" } });
+    const ref = makeClientRef();
+    const { container } = render(
+      <ConflictResolution
+        clientRef={
+          ref as unknown as React.MutableRefObject<
+            ReturnType<typeof useWsClient>["current"]
+          >
+        }
+      />,
+    );
+    expect(container.textContent).toContain("JUDGE_REVIEWING");
+    const pillCandidates = Array.from(
+      container.querySelectorAll<HTMLElement>("[class*='pill']"),
+    ).map((el) => el.textContent ?? "");
+    expect(pillCandidates.some((t) => /AWAITING_HUMAN/.test(t))).toBe(false);
+  });
+
+  it("pill reflects auto_merging when orchestrator is mid-merge", () => {
+    useRunStore.setState({ snapshot: { ...baseSnapshot, status: "auto_merging" } });
+    const ref = makeClientRef();
+    const { container } = render(
+      <ConflictResolution
+        clientRef={
+          ref as unknown as React.MutableRefObject<
+            ReturnType<typeof useWsClient>["current"]
+          >
+        }
+      />,
+    );
+    expect(container.textContent).toContain("AUTO_MERGING");
+  });
+});

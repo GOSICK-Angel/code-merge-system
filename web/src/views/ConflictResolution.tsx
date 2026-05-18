@@ -247,9 +247,22 @@ export function ConflictResolution({ clientRef }: Props): JSX.Element {
           </div>
         </div>
         <div className="row">
-          <Pill tone="red" live>
-            AWAITING_HUMAN · {pending.length}
-          </Pill>
+          {(() => {
+            // Pill tracks ``snapshot.status`` so a stale snapshot
+            // lingering after the orchestrator advanced doesn't keep
+            // claiming AWAITING_HUMAN. The pending-count suffix is only
+            // meaningful inside the awaiting_human branch.
+            const status = (snapshot?.status ?? "—").toUpperCase();
+            const inAwaitingHuman = snapshot?.status === "awaiting_human";
+            if (!inAwaitingHuman) {
+              return <Pill tone="">{status}</Pill>;
+            }
+            return (
+              <Pill tone="red" live>
+                {status} · {pending.length}
+              </Pill>
+            );
+          })()}
           {current && (
             <Pill tone="amber">PRIORITY {current.priority}</Pill>
           )}
