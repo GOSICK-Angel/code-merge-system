@@ -1371,6 +1371,233 @@ class TestPlannerAgent:
         assert self.agent.can_handle(state) is False
 
 
+class TestPlannerClassifyChunking:
+    """Forgejo regression: 500 files in one classification prompt (~125KB
+    input + ~25KB output) skirted the long-request envelope. The fix
+    sub-chunks each outer batch at ``_CLASSIFY_FILE_CHUNK_SIZE=100`` and
+    runs the chunks concurrently, then re-uses ``_merge_batch_plans``.
+    No file is ever dropped — every file is classified by some LLM call.
+    """
+
+    def setup_method(self):
+        with patch.dict("os.environ", {"TEST_KEY": "fake-key"}):
+            from src.agents.planner_agent import PlannerAgent
+
+            self.agent = PlannerAgent(
+                _make_llm_config(provider="anthropic", key_env="TEST_KEY")
+            )
+
+    @staticmethod
+    def _make_chunk_response(file_diffs: list[FileDiff]) -> str:
+        return json.dumps(
+            {
+                "phases": [
+                    {
+                        "batch_id": "b",
+                        "phase": "auto_merge",
+                        "file_paths": [fd.file_path for fd in file_diffs],
+                        "risk_level": "auto_safe",
+                        "can_parallelize": True,
+                    }
+                ],
+                "risk_summary": {
+                    "total_files": len(file_diffs),
+                    "auto_safe_count": len(file_diffs),
+                    "auto_risky_count": 0,
+                    "human_required_count": 0,
+                    "deleted_only_count": 0,
+                    "binary_count": 0,
+                    "excluded_count": 0,
+                    "estimated_auto_merge_rate": 1.0,
+                    "top_risk_files": [],
+                },
+                "project_context_summary": "",
+                "special_instructions": [],
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_classify_small_batch_keeps_single_call(self):
+        from src.agents.planner_agent import _CLASSIFY_FILE_CHUNK_SIZE
+
+        file_diffs = [
+            _make_file_diff(f"src/f{i}.py", RiskLevel.AUTO_SAFE)
+            for i in range(_CLASSIFY_FILE_CHUNK_SIZE)
+        ]
+        response = self._make_chunk_response(file_diffs)
+
+        with patch.object(
+            self.agent,
+            "_call_llm_with_retry",
+            new=AsyncMock(return_value=response),
+        ) as mocked:
+            await self.agent._classify_batch(
+                file_diffs,
+                project_context="",
+                system_prompt="sys",
+                batch_index=0,
+                total_batches=1,
+            )
+        assert mocked.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_classify_large_batch_sub_chunks_and_covers_every_file(self):
+        from src.agents.planner_agent import _CLASSIFY_FILE_CHUNK_SIZE
+
+        total = _CLASSIFY_FILE_CHUNK_SIZE * 2 + 50  # 250 with default 100
+        file_diffs = [
+            _make_file_diff(f"src/f{i}.py", RiskLevel.AUTO_SAFE) for i in range(total)
+        ]
+
+        seen_paths: list[str] = []
+
+        async def fake_call(messages, system=None):
+            prompt = messages[0]["content"]
+            chunk_paths = [
+                line.split("|")[0].strip("- ").strip()
+                for line in prompt.splitlines()
+                if line.startswith("- src/f")
+            ]
+            seen_paths.extend(chunk_paths)
+            chunk_diffs = [_make_file_diff(p, RiskLevel.AUTO_SAFE) for p in chunk_paths]
+            return self._make_chunk_response(chunk_diffs)
+
+        with patch.object(
+            self.agent,
+            "_call_llm_with_retry",
+            new=AsyncMock(side_effect=fake_call),
+        ) as mocked:
+            result = await self.agent._classify_batch(
+                file_diffs,
+                project_context="",
+                system_prompt="sys",
+                batch_index=0,
+                total_batches=1,
+            )
+
+        expected_chunks = (
+            total + _CLASSIFY_FILE_CHUNK_SIZE - 1
+        ) // _CLASSIFY_FILE_CHUNK_SIZE
+        assert mocked.call_count == expected_chunks, (
+            f"expected exactly {expected_chunks} chunked LLM calls, got {mocked.call_count}"
+        )
+        assert set(seen_paths) == {fd.file_path for fd in file_diffs}, (
+            "every file must be routed to exactly one chunk"
+        )
+        merged_paths: set[str] = set()
+        for phase in result["phases"]:
+            merged_paths.update(phase["file_paths"])
+        assert merged_paths == {fd.file_path for fd in file_diffs}
+        assert result["risk_summary"]["total_files"] == total
+
+    @pytest.mark.asyncio
+    async def test_classify_sub_chunk_fallback_does_not_drop_files(self):
+        """If a single sub-chunk's LLM call fails, fallback fills its slot —
+        all other chunks still produce real classifications and merged
+        output still covers every input file."""
+        from src.agents.planner_agent import _CLASSIFY_FILE_CHUNK_SIZE
+
+        total = _CLASSIFY_FILE_CHUNK_SIZE * 2
+        file_diffs = [
+            _make_file_diff(f"src/f{i}.py", RiskLevel.AUTO_SAFE) for i in range(total)
+        ]
+
+        call_count = {"n": 0}
+
+        async def fake_call(messages, system=None):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("simulated LLM transport error")
+            prompt = messages[0]["content"]
+            chunk_paths = [
+                line.split("|")[0].strip("- ").strip()
+                for line in prompt.splitlines()
+                if line.startswith("- src/f")
+            ]
+            chunk_diffs = [_make_file_diff(p, RiskLevel.AUTO_SAFE) for p in chunk_paths]
+            return self._make_chunk_response(chunk_diffs)
+
+        with patch.object(
+            self.agent,
+            "_call_llm_with_retry",
+            new=AsyncMock(side_effect=fake_call),
+        ):
+            result = await self.agent._classify_batch(
+                file_diffs,
+                project_context="",
+                system_prompt="sys",
+                batch_index=0,
+                total_batches=1,
+            )
+
+        merged_paths: set[str] = set()
+        for phase in result["phases"]:
+            merged_paths.update(phase["file_paths"])
+        assert merged_paths == {fd.file_path for fd in file_diffs}, (
+            "fallback path must still produce classifications for files in the failed chunk"
+        )
+
+    @pytest.mark.asyncio
+    async def test_classify_sub_chunk_filters_rename_pairs_per_chunk(self):
+        """When sub-chunking, each chunk's LLM prompt should only reference
+        renames whose old or new path lives in that chunk — not the full
+        outer batch's rename list, which would balloon the prompt and
+        defeat the point."""
+        from src.agents.planner_agent import _CLASSIFY_FILE_CHUNK_SIZE
+
+        chunk_size = _CLASSIFY_FILE_CHUNK_SIZE
+        file_diffs = [
+            _make_file_diff(f"src/f{i}.py", RiskLevel.AUTO_SAFE)
+            for i in range(chunk_size * 2)
+        ]
+        rename_pairs = [
+            (f"src/f{i}_old.py", f"src/f{i}.py") for i in range(chunk_size * 2)
+        ]
+
+        rename_chars_per_call: list[int] = []
+
+        async def fake_call(messages, system=None):
+            prompt = messages[0]["content"]
+            rename_section_marker = "## Detected File Renames"
+            if rename_section_marker in prompt:
+                section = prompt.split(rename_section_marker, 1)[1]
+                end = section.find("\n##")
+                if end != -1:
+                    section = section[:end]
+                rename_chars_per_call.append(section.count("→"))
+            else:
+                rename_chars_per_call.append(0)
+            chunk_paths = [
+                line.split("|")[0].strip("- ").strip()
+                for line in prompt.splitlines()
+                if line.startswith("- src/f")
+            ]
+            chunk_diffs = [_make_file_diff(p, RiskLevel.AUTO_SAFE) for p in chunk_paths]
+            return self._make_chunk_response(chunk_diffs)
+
+        with patch.object(
+            self.agent,
+            "_call_llm_with_retry",
+            new=AsyncMock(side_effect=fake_call),
+        ):
+            await self.agent._classify_batch(
+                file_diffs,
+                project_context="",
+                system_prompt="sys",
+                batch_index=0,
+                total_batches=1,
+                rename_pairs=rename_pairs,
+            )
+
+        assert all(count <= chunk_size for count in rename_chars_per_call), (
+            f"per-chunk renames should be ≤chunk_size ({chunk_size}); "
+            f"got {rename_chars_per_call}"
+        )
+        assert sum(rename_chars_per_call) == len(rename_pairs), (
+            "every rename pair must surface in exactly one chunk's prompt"
+        )
+
+
 class TestJudgeAgent:
     def setup_method(self):
         with patch.dict("os.environ", {"TEST_KEY": "fake-key"}):

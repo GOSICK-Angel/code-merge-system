@@ -30,9 +30,20 @@ from src.models.plan_review import (
     PlanDiffEntry,
 )
 from src.tools.file_classifier import compute_risk_score, classify_file
+from src.core.parallel_file_runner import ParallelFileRunner
 import fnmatch
 import json
 import json as json_lib
+
+
+# Sub-chunk size for one classification LLM call. ``max_files_per_run``
+# (config, default 500) is the OUTER batch size; this constant slices each
+# outer batch further so a single LLM call never carries more than ~100
+# file lines. Calibrated against the forgejo case where one 500-file
+# classification prompt serialised to ~125KB input + ~25KB JSON output
+# and skirted the model's long-request envelope. 100 keeps a single call
+# at ~25KB / ~5KB respectively with comfortable headroom.
+_CLASSIFY_FILE_CHUNK_SIZE = 100
 
 
 class PlannerAgent(BaseAgent):
@@ -575,6 +586,86 @@ class PlannerAgent(BaseAgent):
         )
 
     async def _classify_batch(
+        self,
+        file_diffs: list[FileDiff],
+        project_context: str,
+        system_prompt: str,
+        batch_index: int,
+        total_batches: int,
+        rename_pairs: list[tuple[str, str]] | None = None,
+    ) -> dict[str, Any]:
+        if len(file_diffs) <= _CLASSIFY_FILE_CHUNK_SIZE:
+            return await self._run_single_classify(
+                file_diffs,
+                project_context,
+                system_prompt,
+                batch_index,
+                total_batches,
+                rename_pairs,
+            )
+
+        # Sub-chunked path: outer batch is too big for one LLM call. Slice
+        # into ``_CLASSIFY_FILE_CHUNK_SIZE`` groups, run them concurrently,
+        # then re-use ``_merge_batch_plans`` (already capable of stitching
+        # multiple per-file classification JSONs without loss).
+        chunks = [
+            file_diffs[i : i + _CLASSIFY_FILE_CHUNK_SIZE]
+            for i in range(0, len(file_diffs), _CLASSIFY_FILE_CHUNK_SIZE)
+        ]
+        self.logger.info(
+            "Classify batch %d/%d: %d files → sub-chunking into %d × ≤%d",
+            batch_index + 1,
+            total_batches,
+            len(file_diffs),
+            len(chunks),
+            _CLASSIFY_FILE_CHUNK_SIZE,
+        )
+
+        async def _process(idx: int) -> dict[str, Any]:
+            chunk = chunks[idx]
+            chunk_paths = {fd.file_path for fd in chunk}
+            scoped_renames = (
+                [
+                    (old, new)
+                    for old, new in rename_pairs
+                    if old in chunk_paths or new in chunk_paths
+                ]
+                if rename_pairs
+                else None
+            )
+            return await self._run_single_classify(
+                chunk,
+                project_context,
+                system_prompt,
+                batch_index,
+                total_batches,
+                scoped_renames,
+            )
+
+        runner = ParallelFileRunner.from_api_key_env_list(
+            self.llm_config.api_key_env_list,
+            override=None,
+        )
+        results = await runner.run_files(list(range(len(chunks))), _process)
+
+        sub_plans: list[dict[str, Any]] = []
+        for idx in range(len(chunks)):
+            result = results.get(idx)
+            if isinstance(result, BaseException):
+                self.logger.warning(
+                    "Classify sub-chunk %d/%d crashed in runner: %s — using fallback",
+                    idx + 1,
+                    len(chunks),
+                    result,
+                )
+                sub_plans.append(self._create_fallback_plan_data(chunks[idx]))
+            else:
+                assert isinstance(result, dict)
+                sub_plans.append(result)
+
+        return self._merge_batch_plans(sub_plans, file_diffs)
+
+    async def _run_single_classify(
         self,
         file_diffs: list[FileDiff],
         project_context: str,
