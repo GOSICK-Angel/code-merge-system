@@ -122,8 +122,23 @@ class TestTelemetrySnapshot:
 class TestCostCeiling:
     """Verify max_cost_usd halts the orchestrator when threshold exceeded."""
 
-    def test_max_cost_usd_field_defaults_none(self, tmp_path):
+    def test_max_cost_usd_defaults_to_five_dollars(self, tmp_path):
         config = _make_config(tmp_path)
+        assert config.max_cost_usd == 5.0
+        assert isinstance(config.max_cost_usd, float)
+
+    def test_max_cost_usd_can_be_disabled_with_none(self, tmp_path):
+        """Explicit None still legal — backwards-compatible disable path
+        (plan §3.1 Q1; orchestrator ceiling check short-circuits on None)."""
+        if not (tmp_path / ".git").exists():
+            _git.Repo.init(str(tmp_path))
+        config = MergeConfig(
+            upstream_ref="upstream/main",
+            fork_ref="fork/main",
+            repo_path=str(tmp_path),
+            output=OutputConfig(directory=str(tmp_path / "outputs")),
+            max_cost_usd=None,
+        )
         assert config.max_cost_usd is None
 
     async def test_orchestrator_halts_when_cost_ceiling_exceeded(self, tmp_path):

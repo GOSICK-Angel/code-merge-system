@@ -959,11 +959,24 @@ class MergeConfig(BaseModel):
         "None = auto-detect from the number of active API keys for each agent.",
     )
     max_cost_usd: float | None = Field(
-        default=None,
+        default=5.0,
         gt=0,
-        description="7.7: If set, the orchestrator halts with AWAITING_HUMAN when "
-        "the cumulative LLM cost for this run exceeds this threshold (USD). "
-        "Prevents runaway spend on large repos. None = no ceiling.",
+        description="U2 per-run budget cap (USD). Default 5.0 is a safety net "
+        "for runaway spend on large repos; set to None to disable. Two layers "
+        "enforce it: BaseAgent._call_llm_with_retry raises RunBudgetExceeded "
+        "before/after each LLM call (fine-grained), and Orchestrator checks "
+        "between phases as a coarse-grained ceiling fallback. Both transition "
+        "the run to AWAITING_HUMAN with a partial budget report. None = "
+        "no ceiling (legacy compatibility).",
+    )
+    per_run_cost_warn_pct: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="U2: emit a `budget_warning` activity event the first time "
+        "cumulative cost crosses this fraction of max_cost_usd. Default 0.8 "
+        "(80%) gives reviewers ~20% headroom before the hard cap trips. "
+        "Has no effect when max_cost_usd is None.",
     )
     enable_working_branch: bool = Field(
         default=False,
