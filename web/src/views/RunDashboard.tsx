@@ -307,6 +307,54 @@ function PlannerSummaryStrip({
   );
 }
 
+interface BudgetBarProps {
+  spent: number;
+  limit: number | null;
+  warnPct: number;
+}
+
+function BudgetBar({ spent, limit, warnPct }: BudgetBarProps): JSX.Element | null {
+  if (limit === null || limit <= 0) {
+    return null;
+  }
+  const ratio = Math.min(1, spent / limit);
+  const widthPct = ratio * 100;
+  let state: "ok" | "warn" | "exceeded" = "ok";
+  let color = "var(--green)";
+  if (ratio >= 1) {
+    state = "exceeded";
+    color = "var(--red)";
+  } else if (ratio >= warnPct) {
+    state = "warn";
+    color = "var(--orange)";
+  }
+  return (
+    <div
+      data-testid="budget-bar"
+      data-state={state}
+      style={{
+        marginTop: 6,
+        height: 4,
+        background: "var(--bg-2)",
+        position: "relative",
+      }}
+      role="progressbar"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(widthPct)}
+    >
+      <div
+        style={{
+          width: `${widthPct}%`,
+          height: "100%",
+          background: color,
+          transition: "width 240ms ease",
+        }}
+      />
+    </div>
+  );
+}
+
 export function RunDashboard(props: Props): JSX.Element {
   const { onSelectView } = props;
   const snapshot = useRunStore((s) => s.snapshot);
@@ -320,6 +368,10 @@ export function RunDashboard(props: Props): JSX.Element {
 
   const totalCost = snapshot?.costSummary?.total_cost_usd ?? 0;
   const totalTokens = snapshot?.costSummary?.total_tokens ?? 0;
+  // U2 budget progress bar inputs — null limit means the cap is disabled,
+  // in which case BudgetBar renders nothing.
+  const budgetLimit = snapshot?.costSummary?.limit_usd ?? null;
+  const budgetWarnPct = snapshot?.costSummary?.warn_pct ?? 0.8;
 
   const merged = Object.values(snapshot?.fileDecisionRecords ?? {}).filter(
     (r) => r.success,
@@ -447,6 +499,11 @@ export function RunDashboard(props: Props): JSX.Element {
           <div className="sub">
             {(totalTokens / 1000).toFixed(0)}K tokens · {agents.length} agents
           </div>
+          <BudgetBar
+            spent={totalCost}
+            limit={budgetLimit}
+            warnPct={budgetWarnPct}
+          />
         </div>
       </div>
 

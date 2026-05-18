@@ -297,6 +297,10 @@ export interface CostSummary {
   total_cost_usd?: number;
   total_tokens?: number;
   by_agent?: Record<string, { cost_usd?: number; tokens?: number }>;
+  // U2 per-run budget knobs surfaced by serializers._serialize_cost_summary.
+  // ``limit_usd === null`` means the cap is disabled (no progress bar).
+  limit_usd?: number | null;
+  warn_pct?: number;
   [k: string]: unknown;
 }
 

@@ -127,16 +127,34 @@ class TestSerializeStateAdditiveFields:
         assert snap["phaseElapsed"] == {}
         assert snap["decisionRecordCounts"] == {}
 
-    def test_cost_summary_passthrough(self, minimal_state: MergeState) -> None:
+    def test_cost_summary_enriched_with_budget_knobs(
+        self, minimal_state: MergeState
+    ) -> None:
+        """U-P2.11: cost_summary serialization adds limit_usd + warn_pct
+        from config so the dashboard can render the budget progress bar."""
         minimal_state.cost_summary = {
             "total_cost_usd": 1.23,
             "total_tokens": 4567,
         }
         snap = serialize_state(minimal_state)
-        assert snap["costSummary"] == {
-            "total_cost_usd": 1.23,
-            "total_tokens": 4567,
-        }
+        assert snap["costSummary"]["total_cost_usd"] == 1.23
+        assert snap["costSummary"]["total_tokens"] == 4567
+        # config defaults: max_cost_usd=5.0, per_run_cost_warn_pct=0.8.
+        assert snap["costSummary"]["limit_usd"] == 5.0
+        assert snap["costSummary"]["warn_pct"] == 0.8
+
+    def test_cost_summary_limit_usd_none_when_disabled(
+        self, minimal_state: MergeState
+    ) -> None:
+        """Disabled cap (max_cost_usd=None) propagates as limit_usd=None
+        so the front-end can hide the progress bar."""
+        minimal_state.cost_summary = {"total_cost_usd": 0.5}
+        minimal_state.config = minimal_state.config.model_copy(
+            update={"max_cost_usd": None}
+        )
+        snap = serialize_state(minimal_state)
+        assert snap["costSummary"]["limit_usd"] is None
+        assert snap["costSummary"]["warn_pct"] == 0.8
 
     def test_phase_elapsed_computes_seconds(self, minimal_state: MergeState) -> None:
         start = datetime(2026, 5, 14, 12, 0, 0)

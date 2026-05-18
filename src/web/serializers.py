@@ -369,6 +369,24 @@ def _phase_elapsed(state: MergeState) -> dict[str, float | None]:
     return out
 
 
+def _serialize_cost_summary(state: MergeState) -> dict[str, Any] | None:
+    """Enrich ``state.cost_summary`` with the U2 budget knobs the dashboard
+    renders as a progress bar (green / amber / red).
+
+    Returns ``None`` when no LLM activity has been recorded yet, matching
+    the pre-existing front-end expectation. When activity exists, the
+    payload always includes ``limit_usd`` (None when disabled) and
+    ``warn_pct``; the dashboard hides the bar when ``limit_usd is None``.
+    """
+    summary = state.cost_summary
+    if summary is None:
+        return None
+    enriched: dict[str, Any] = dict(summary)
+    enriched["limit_usd"] = state.config.max_cost_usd
+    enriched["warn_pct"] = state.config.per_run_cost_warn_pct
+    return enriched
+
+
 def _decision_record_counts(state: MergeState) -> dict[str, int]:
     """Aggregate ``file_decision_records`` by ``decision_source.value``.
 
@@ -474,7 +492,7 @@ def serialize_state(state: MergeState) -> dict[str, Any]:
         "createdAt": state.created_at.isoformat()
         if state.created_at
         else datetime.now().isoformat(),
-        "costSummary": state.cost_summary,
+        "costSummary": _serialize_cost_summary(state),
         "phaseElapsed": _phase_elapsed(state),
         "decisionRecordCounts": _decision_record_counts(state),
     }
