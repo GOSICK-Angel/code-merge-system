@@ -853,14 +853,28 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
             <Pill tone="green">
               {snapshot?.planHumanReview?.decision ?? "DECIDED"}
             </Pill>
-          ) : awaitingPlanSignoff ? (
-            <Pill tone="orange" live>
-              AWAITING_HUMAN · plan sign-off
-            </Pill>
           ) : (
-            <Pill tone="orange" live>
-              AWAITING_HUMAN · {pending.length}
-            </Pill>
+            (() => {
+              // Pill always tracks ``snapshot.status`` — never assume
+              // the view is mounted only during awaiting_human. A stale
+              // WS snapshot can leave this page rendered after the
+              // orchestrator already advanced; the suffix (plan sign-off
+              // / pending count) only applies inside the awaiting_human
+              // branch.
+              const status = (snapshot?.status ?? "—").toUpperCase();
+              if (!inAwaitingHuman) {
+                return <Pill tone="">{status}</Pill>;
+              }
+              const suffix = awaitingPlanSignoff
+                ? " · plan sign-off"
+                : ` · ${pending.length}`;
+              return (
+                <Pill tone="orange" live>
+                  {status}
+                  {suffix}
+                </Pill>
+              );
+            })()
           )}
         </div>
       </div>
