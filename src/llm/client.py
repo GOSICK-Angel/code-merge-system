@@ -16,14 +16,18 @@ from src.models.config import AgentLLMConfig
 
 
 def _build_httpx_timeout(total_seconds: float) -> httpx.Timeout:
-    """Explicit per-phase timeout so the client surfaces upstream stalls
-    before Cloudflare's 120s proxy_read_timeout returns a 524. read is
-    capped at min(total, 90) so we re-enter the agent retry layer ~30s
-    earlier than the proxy; connect/write/pool are short on purpose so
-    a dead pool entry doesn't hang the request.
+    """Explicit per-phase timeout. ``read`` honors the full
+    ``request_timeout_seconds`` from config — operators behind a slow
+    proxy / on a slow Opus path need to be able to wait it out, and
+    upstreams (Cloudflare 524 at 120s, etc.) will still surface their
+    own error before our cap if applicable. Users who want to fail
+    fast just set a small ``request_timeout_seconds``.
+    Previously this was ``min(total, 90)``, which silently truncated
+    user config — a 300s setting produced only a 90s read timeout.
+    ``connect``/``write``/``pool`` stay short on purpose so a dead pool
+    entry doesn't hang the request.
     """
-    read = min(float(total_seconds), 90.0)
-    return httpx.Timeout(connect=10.0, read=read, write=30.0, pool=10.0)
+    return httpx.Timeout(connect=10.0, read=float(total_seconds), write=30.0, pool=10.0)
 
 
 class ParseError(Exception):

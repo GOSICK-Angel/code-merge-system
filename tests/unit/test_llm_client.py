@@ -8,6 +8,7 @@ from src.llm.client import (
     ModelOutputError,
     OpenAIClient,
     ParseError,
+    _build_httpx_timeout,
 )
 from src.llm.prompt_caching import CacheStrategy
 from src.models.config import AgentLLMConfig
@@ -41,6 +42,35 @@ def _make_openai_client() -> OpenAIClient:
             max_tokens=1024,
             max_retries=3,
         )
+
+
+class TestBuildHttpxTimeout:
+    """Fix 6: ``request_timeout_seconds`` must drive the httpx ``read``
+    timeout end-to-end. The previous ``min(total, 90)`` cap silently
+    truncated user config — a 300s setting only ever produced a 90s
+    read timeout, which is why planner_judge on Opus timed out for the
+    forgejo run even though config said 300s."""
+
+    def test_read_timeout_honors_full_request_timeout(self):
+        timeout = _build_httpx_timeout(300.0)
+        assert timeout.read == 300.0, (
+            "read timeout must equal the full request_timeout_seconds, "
+            "not the legacy 90s cap"
+        )
+
+    def test_short_timeout_passes_through(self):
+        # Users who want to fail fast (CI, behind Cloudflare with 120s
+        # proxy timeout) can still set a small value and have it honored.
+        timeout = _build_httpx_timeout(45.0)
+        assert timeout.read == 45.0
+
+    def test_connect_write_pool_unchanged(self):
+        # Only ``read`` was capped — the other phases stay at the values
+        # tuned for "dead pool entry shouldn't hang the request".
+        timeout = _build_httpx_timeout(300.0)
+        assert timeout.connect == 10.0
+        assert timeout.write == 30.0
+        assert timeout.pool == 10.0
 
 
 class TestAnthropicClientInit:
