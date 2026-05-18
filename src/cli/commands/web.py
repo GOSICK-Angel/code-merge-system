@@ -15,6 +15,7 @@ either:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import sys
 import webbrowser
@@ -159,11 +160,10 @@ async def _serve(
             state=state,
             config=merge_config,
         )
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         console.print("[yellow]Interrupted by user.[/yellow]")
     finally:
-        await bridge.stop()
-        await static_server.stop()
+        await _shutdown_servers(bridge, static_server)
 
 
 async def _serve_with_state(
@@ -190,10 +190,26 @@ async def _serve_with_state(
 
     try:
         await _run_orchestrator(bridge=bridge, state=state, config=config)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         console.print("[yellow]Interrupted by user.[/yellow]")
     finally:
+        await _shutdown_servers(bridge, static_server)
+
+
+async def _shutdown_servers(
+    bridge: MergeWSBridge,
+    static_server: StaticHTTPServer,
+) -> None:
+    """Best-effort teardown: a failure tearing down one server must not
+    block (or mask) teardown of the other. The signal handler in
+    ``Checkpoint.register_signal_handler`` already restored SIG_DFL, so a
+    second ^C here is a clean SIGINT, but we still suppress so a wedged
+    socket doesn't leak an exception out of the asyncio runner's
+    ``_cancel_all_tasks`` cleanup pass.
+    """
+    with contextlib.suppress(Exception):
         await bridge.stop()
+    with contextlib.suppress(Exception):
         await static_server.stop()
 
 

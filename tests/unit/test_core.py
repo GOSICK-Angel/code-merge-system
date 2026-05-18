@@ -409,6 +409,52 @@ class TestCheckpoint:
         state = _make_state(_make_config(str(tmp_path)))
         cp.register_signal_handler(state)
 
+    def test_signal_handler_restores_default_after_first_fire(self, tmp_path):
+        """Re-entrant Ctrl-C during cleanup must not cascade. After the
+        first SIGINT fires the handler, SIGINT/SIGTERM must be restored
+        to SIG_DFL so a second ^C is a clean kernel SIGINT rather than
+        another SystemExit raised inside whatever blocking call
+        (threading.Event.wait, socket close) is mid-flight.
+        """
+        import signal as _signal
+
+        cp = Checkpoint(tmp_path)
+        state = _make_state(_make_config(str(tmp_path)))
+        original_int = _signal.getsignal(_signal.SIGINT)
+        original_term = _signal.getsignal(_signal.SIGTERM)
+        try:
+            cp.register_signal_handler(state)
+            installed = _signal.getsignal(_signal.SIGINT)
+            assert callable(installed)
+            with pytest.raises(SystemExit):
+                installed(_signal.SIGINT, None)
+            assert _signal.getsignal(_signal.SIGINT) is _signal.SIG_DFL
+            assert _signal.getsignal(_signal.SIGTERM) is _signal.SIG_DFL
+        finally:
+            _signal.signal(_signal.SIGINT, original_int)
+            _signal.signal(_signal.SIGTERM, original_term)
+
+    def test_signal_handler_swallows_save_errors_then_exits(self, tmp_path):
+        """A broken `save()` (e.g. read-only fs during shutdown) must not
+        mask SystemExit — the process should still exit cleanly."""
+        import signal as _signal
+        from unittest.mock import patch
+
+        cp = Checkpoint(tmp_path)
+        state = _make_state(_make_config(str(tmp_path)))
+        original_int = _signal.getsignal(_signal.SIGINT)
+        original_term = _signal.getsignal(_signal.SIGTERM)
+        try:
+            cp.register_signal_handler(state)
+            installed = _signal.getsignal(_signal.SIGINT)
+            with patch.object(cp, "save", side_effect=OSError("disk full")):
+                with pytest.raises(SystemExit):
+                    installed(_signal.SIGINT, None)
+            assert _signal.getsignal(_signal.SIGINT) is _signal.SIG_DFL
+        finally:
+            _signal.signal(_signal.SIGINT, original_int)
+            _signal.signal(_signal.SIGTERM, original_term)
+
 
 class TestMessageBus:
     def test_publish_stores_message(self):
