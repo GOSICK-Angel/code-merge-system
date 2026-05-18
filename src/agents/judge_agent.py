@@ -1453,6 +1453,15 @@ class JudgeAgent(BaseAgent):
             if fd is None or record is None:
                 continue
 
+            # SKIP means Executor intentionally left the worktree path
+            # untouched — running deterministic syntax checks on the
+            # (often empty / missing) file produces false-positive
+            # critical issues (e.g. _check_json("") → "Expecting value"
+            # at line 1 col 1) that exhaust the dispute loop and leak
+            # placeholder HumanDecisionRequest entries to the user.
+            if record.decision == MergeDecision.SKIP:
+                continue
+
             merged_content = ""
             if self.git_tool is not None:
                 abs_path = self.git_tool.repo_path / file_path
