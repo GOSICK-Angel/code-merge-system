@@ -979,13 +979,14 @@ class MergeConfig(BaseModel):
         "Has no effect when max_cost_usd is None.",
     )
     enable_working_branch: bool = Field(
-        default=False,
+        default=True,
         description="When True, the orchestrator creates a new branch from fork_ref "
         "at run start (using the working_branch name template) and operates on it "
         "instead of modifying fork_ref HEAD directly. The branch name supports a "
         "{timestamp} placeholder (e.g. 'merge/auto-{timestamp}'). On resume, the "
-        "existing branch is reused via active_branch in the checkpoint. Default "
-        "False preserves the original behavior of operating directly on fork_ref.",
+        "existing branch is reused via active_branch in the checkpoint. U7: "
+        "default flipped to True so a half-finished run never pollutes fork_ref "
+        "HEAD; set to False explicitly to restore the legacy in-place behavior.",
     )
 
     @field_validator("upstream_ref", "fork_ref")

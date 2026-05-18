@@ -220,6 +220,12 @@ def _build_agents_block(payload: SetupPayload) -> dict[str, dict[str, Any]]:
     return out
 
 
+ENABLE_WORKING_BRANCH_HINT: str = (
+    "推荐：每 run 隔离写入，避免 fork_ref 被半完成状态污染"
+    " (worktree isolation; matches MergeConfig.enable_working_branch default)"
+)
+
+
 def _default_config_data(payload: SetupPayload, repo_path: str) -> dict[str, Any]:
     """Build the ``.merge/config.yaml`` dict from a validated payload.
 
@@ -232,7 +238,10 @@ def _default_config_data(payload: SetupPayload, repo_path: str) -> dict[str, Any
         "upstream_ref": payload.target_branch,
         "fork_ref": payload.fork_ref,
         "working_branch": "merge/auto-{timestamp}",
-        "enable_working_branch": False,
+        # U7: worktree isolation defaults on so a half-finished run never
+        # pollutes fork_ref HEAD. Matches MergeConfig.enable_working_branch
+        # default; see ENABLE_WORKING_BRANCH_HINT for the user-facing rationale.
+        "enable_working_branch": True,
         "repo_path": repo_path,
         "project_context": payload.project_context,
         "max_files_per_run": 500,

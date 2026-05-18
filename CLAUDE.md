@@ -144,6 +144,8 @@ Config is YAML-driven. Each agent has its own `AgentLLMConfig` (provider, model,
 
 Key config thresholds: `risk_score_low=0.3`, `risk_score_high=0.6`, `auto_merge_confidence=0.85`. Files matching `security_sensitive.patterns` are forced to `HUMAN_REQUIRED`.
 
+`enable_working_branch` defaults to `True` (U7): each run creates a fresh `merge/auto-{timestamp}` branch from `fork_ref` and operates there, so a half-finished run never pollutes `fork_ref` HEAD. Set to `False` explicitly in `.merge/config.yaml` to restore the legacy in-place behavior.
+
 ### `.merge/` Directory (production mode)
 
 When run inside a target project (pip-installed), all artifacts are written under `<repo>/.merge/`:
