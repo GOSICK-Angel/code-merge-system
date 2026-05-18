@@ -163,44 +163,152 @@ class TestPlannerSubChunkFanOut:
         assert len(seen) == 220
 
 
-class TestJudgePerFileFanOut:
-    """U-P3.5: ``judge_agent.py:167`` — per-file high-risk fan-out."""
+def _build_judge_state(tmp_path, file_paths, *, risky_count=None):
+    """Build a real MergeState that lets JudgeAgent.run reach the per-file
+    fan-out branch at judge_agent.py:170-173. Each file gets an AUTO_RISKY
+    FileDiff + a TAKE_CURRENT FileDecisionRecord with a low confidence so
+    the O-J1 / O-J3 short-circuits don't strip them out.
+    """
+    import git as _git
 
-    async def test_judge_per_file_fan_out_passes_disjoint_assert(self):
+    from src.models.config import MergeConfig, OutputConfig
+    from src.models.decision import (
+        DecisionSource,
+        FileDecisionRecord,
+        MergeDecision,
+    )
+    from src.models.diff import FileDiff, FileStatus, RiskLevel
+    from src.models.state import MergeState
+
+    if not (tmp_path / ".git").exists():
+        _git.Repo.init(str(tmp_path))
+    cfg = MergeConfig(
+        upstream_ref="upstream/main",
+        fork_ref="fork/main",
+        repo_path=str(tmp_path),
+        output=OutputConfig(directory=str(tmp_path / "outputs")),
+        judge_skip_high_confidence=False,
+        judge_skip_take_decisions=False,
+    )
+    state = MergeState(config=cfg)
+    risky_count = risky_count if risky_count is not None else len(file_paths)
+    for i, fp in enumerate(file_paths):
+        risk = RiskLevel.AUTO_RISKY if i < risky_count else RiskLevel.AUTO_SAFE
+        state.file_diffs.append(
+            FileDiff(
+                file_path=fp,
+                file_status=FileStatus.MODIFIED,
+                risk_level=risk,
+                risk_score=0.5,
+            )
+        )
+        state.file_decision_records[fp] = FileDecisionRecord(
+            file_path=fp,
+            file_status=FileStatus.MODIFIED,
+            decision=MergeDecision.SEMANTIC_MERGE,
+            decision_source=DecisionSource.AUTO_PLANNER,
+            confidence=0.3,
+            rationale="r",
+        )
+    return state
+
+
+class TestJudgePerFileFanOut:
+    """U-P3.5: ``judge_agent.py:170-173`` — per-file high-risk fan-out.
+
+    Drives ``JudgeAgent.run`` end-to-end with a real MergeState so the
+    assert call lands inside the production fan-out branch — deleting the
+    assert line in src/ must surface here as ``spy.call_count == 0``.
+    """
+
+    async def test_judge_per_file_fan_out_passes_disjoint_assert(self, tmp_path):
         from src.agents import judge_agent
+        from src.agents.judge_agent import JudgeAgent
+        from src.models.config import AgentLLMConfig
+
+        agent = JudgeAgent(
+            llm_config=AgentLLMConfig(api_key_env="ANTHROPIC_API_KEY"),
+            git_tool=None,
+        )
+        state = _build_judge_state(tmp_path, ["a.py", "b.py", "c.py"])
 
         spy = MagicMock(wraps=assert_disjoint_file_shards)
-        keys = ["a.py", "b.py", "c.py"]
-        with patch.object(judge_agent, "assert_disjoint_file_shards", spy):
-            # Drive the assert directly with the shape the agent uses at :167.
-            judge_agent.assert_disjoint_file_shards([[fp] for fp in keys])
+        with (
+            patch.object(judge_agent, "assert_disjoint_file_shards", spy),
+            patch.object(
+                JudgeAgent,
+                "_run_deterministic_pipeline",
+                return_value=[],
+            ),
+            patch.object(
+                JudgeAgent,
+                "review_file",
+                new=AsyncMock(return_value=[]),
+            ),
+        ):
+            await agent.run(state)
 
-        assert spy.call_count == 1
+        assert spy.call_count >= 1
         shards = spy.call_args.args[0]
-        assert shards == [["a.py"], ["b.py"], ["c.py"]]
+        # Three high-risk files → three single-element shards.
+        assert sorted(s[0] for s in shards) == ["a.py", "b.py", "c.py"]
+        assert all(len(s) == 1 for s in shards)
 
 
 class TestJudgeChunkRunnerFanOut:
-    """U-P3.6: ``judge_agent.py:1473`` — chunked judge runner."""
+    """U-P3.6: ``judge_agent.py:1480-1483`` — chunked judge runner.
 
-    async def test_judge_chunk_runner_passes_disjoint_assert(self):
+    Drives ``JudgeAgent.review_batch`` with >_BATCH_SIZE (=8) risky files so
+    the chunking branch actually fires; spy must capture the assert that
+    sits between ``chunks = [...]`` and ``chunk_runner.run_files(...)``.
+    """
+
+    async def test_judge_chunk_runner_passes_disjoint_assert(self, tmp_path):
         from src.agents import judge_agent
+        from src.agents.judge_agent import JudgeAgent
+        from src.models.config import AgentLLMConfig
+
+        agent = JudgeAgent(
+            llm_config=AgentLLMConfig(api_key_env="ANTHROPIC_API_KEY"),
+            git_tool=None,
+        )
+        # 10 risky files → 2 chunks of size 8 + 2 (since _BATCH_SIZE=8).
+        file_paths = [f"f{i}.py" for i in range(10)]
+        state = _build_judge_state(tmp_path, file_paths)
 
         spy = MagicMock(wraps=assert_disjoint_file_shards)
-        # Mirror the (file_path, merged_content, record, fd) tuple shape the
-        # real call site stores in each chunk.
-        chunks = [
-            [("a.py", "ca", None, None), ("b.py", "cb", None, None)],
-            [("c.py", "cc", None, None)],
-        ]
-        with patch.object(judge_agent, "assert_disjoint_file_shards", spy):
-            judge_agent.assert_disjoint_file_shards(
-                [[entry[0] for entry in chunk] for chunk in chunks]
-            )
+        with (
+            patch.object(judge_agent, "assert_disjoint_file_shards", spy),
+            patch.object(
+                JudgeAgent,
+                "_review_files_batch_llm",
+                new=AsyncMock(return_value=[]),
+            ),
+        ):
+            await agent.review_batch(layer_id=None, file_paths=file_paths, state=state)
 
-        assert spy.call_count == 1
-        shards = spy.call_args.args[0]
-        assert shards == [["a.py", "b.py"], ["c.py"]]
+        assert spy.call_count >= 1
+        # Find the call site shape that matches review_batch's chunking
+        # (list-of-list with ≥2 chunks, each elem a file path string).
+        for call in spy.call_args_list:
+            shards = call.args[0]
+            if (
+                isinstance(shards, list)
+                and len(shards) >= 2
+                and all(
+                    isinstance(s, list) and all(isinstance(fp, str) for fp in s)
+                    for s in shards
+                )
+            ):
+                flat = [fp for shard in shards for fp in shard]
+                assert len(set(flat)) == len(flat)
+                assert set(flat) == set(file_paths)
+                break
+        else:
+            raise AssertionError(
+                "review_batch chunk runner did not invoke "
+                "assert_disjoint_file_shards with the expected shape"
+            )
 
 
 class TestConflictAnalystChunkedPath:
@@ -278,35 +386,131 @@ class TestConflictAnalystChunkedPath:
         assert isinstance(result, ConflictAnalysis)
 
 
-class TestConflictAnalystMultiFileFanOut:
-    """U-P3.8: ``conflict_analyst_agent.py:81`` — multi-file fan-out.
+def _build_conflict_state(tmp_path, file_paths):
+    """Build a real MergeState that lets ConflictAnalystAgent.run reach the
+    multi-file fan-out at conflict_analyst_agent.py:109. AUTO_RISKY plan
+    phase + matching FileDiffs is enough; the agent's own restricted_view
+    handles the rest.
+    """
+    from datetime import datetime
 
-    Two sub-tests:
+    import git as _git
+
+    from src.models.config import MergeConfig, OutputConfig
+    from src.models.diff import FileDiff, FileStatus, RiskLevel
+    from src.models.plan import (
+        MergePhase,
+        MergePlan,
+        PhaseFileBatch,
+        RiskSummary,
+    )
+    from src.models.state import MergeState
+
+    if not (tmp_path / ".git").exists():
+        _git.Repo.init(str(tmp_path))
+    cfg = MergeConfig(
+        upstream_ref="upstream/main",
+        fork_ref="fork/main",
+        repo_path=str(tmp_path),
+        output=OutputConfig(directory=str(tmp_path / "outputs")),
+    )
+    state = MergeState(config=cfg)
+    state.thresholds = cfg.thresholds.model_copy()
+    state.merge_plan = MergePlan(
+        created_at=datetime.now(),
+        upstream_ref="upstream/main",
+        fork_ref="fork/main",
+        merge_base_commit="abc123",
+        phases=[
+            PhaseFileBatch(
+                batch_id="b1",
+                phase=MergePhase.ANALYSIS,
+                risk_level=RiskLevel.AUTO_RISKY,
+                file_paths=list(file_paths),
+            )
+        ],
+        risk_summary=RiskSummary(
+            total_files=len(file_paths),
+            auto_safe_count=0,
+            auto_risky_count=len(file_paths),
+            human_required_count=0,
+            deleted_only_count=0,
+            binary_count=0,
+            excluded_count=0,
+            estimated_auto_merge_rate=1.0,
+        ),
+        project_context_summary="",
+    )
+    for fp in file_paths:
+        state.file_diffs.append(
+            FileDiff(
+                file_path=fp,
+                file_status=FileStatus.MODIFIED,
+                risk_level=RiskLevel.AUTO_RISKY,
+                risk_score=0.5,
+            )
+        )
+    return state
+
+
+class TestConflictAnalystMultiFileFanOut:
+    """U-P3.8: ``conflict_analyst_agent.py:107-109`` — multi-file fan-out.
+
+    Drives ``ConflictAnalystAgent.run`` end-to-end with a real MergeState
+    so the assert call lands inside the production fan-out branch (delete
+    the assert in src/ → ``spy.call_count == 0``). Two sub-tests:
       (a) clean keys → helper called, no raise
-      (b) duplicate key → helper called, FileShardOverlap raised
+      (b) duplicate key in the plan phase → helper called, raise FileShardOverlap
     """
 
-    async def test_clean_keys_pass(self):
+    async def test_clean_keys_pass(self, tmp_path):
         from src.agents import conflict_analyst_agent
+        from src.agents.conflict_analyst_agent import ConflictAnalystAgent
+        from src.models.config import AgentLLMConfig
+
+        agent = ConflictAnalystAgent(
+            llm_config=AgentLLMConfig(api_key_env="ANTHROPIC_API_KEY"),
+            git_tool=None,
+        )
+        state = _build_conflict_state(tmp_path, ["a.py", "b.py", "c.py"])
 
         spy = MagicMock(wraps=assert_disjoint_file_shards)
-        file_keys = ["a.py", "b.py", "c.py"]
-        with patch.object(conflict_analyst_agent, "assert_disjoint_file_shards", spy):
-            conflict_analyst_agent.assert_disjoint_file_shards(
-                [[fp] for fp in file_keys]
-            )
-        assert spy.call_count == 1
-        assert spy.call_args.args[0] == [["a.py"], ["b.py"], ["c.py"]]
+        with (
+            patch.object(conflict_analyst_agent, "assert_disjoint_file_shards", spy),
+            patch.object(
+                ConflictAnalystAgent,
+                "analyze_file",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            await agent.run(state)
 
-    async def test_duplicate_key_raises(self):
+        assert spy.call_count >= 1
+        shards = spy.call_args.args[0]
+        assert sorted(s[0] for s in shards) == ["a.py", "b.py", "c.py"]
+        assert all(len(s) == 1 for s in shards)
+
+    async def test_duplicate_key_raises(self, tmp_path):
         from src.agents import conflict_analyst_agent
+        from src.agents.conflict_analyst_agent import ConflictAnalystAgent
+        from src.models.config import AgentLLMConfig
+
+        agent = ConflictAnalystAgent(
+            llm_config=AgentLLMConfig(api_key_env="ANTHROPIC_API_KEY"),
+            git_tool=None,
+        )
+        # ``file_paths`` carries duplicates → the assert in run() must trip
+        # before any LLM fan-out fires.
+        state = _build_conflict_state(tmp_path, ["a.py", "a.py", "b.py"])
 
         spy = MagicMock(wraps=assert_disjoint_file_shards)
-        file_keys = ["a.py", "a.py", "b.py"]
-        with patch.object(conflict_analyst_agent, "assert_disjoint_file_shards", spy):
+        analyze_mock = AsyncMock(return_value=None)
+        with (
+            patch.object(conflict_analyst_agent, "assert_disjoint_file_shards", spy),
+            patch.object(ConflictAnalystAgent, "analyze_file", new=analyze_mock),
+        ):
             with pytest.raises(FileShardOverlap) as exc:
-                conflict_analyst_agent.assert_disjoint_file_shards(
-                    [[fp] for fp in file_keys]
-                )
+                await agent.run(state)
         assert spy.call_count == 1
         assert "a.py" in str(exc.value)
+        analyze_mock.assert_not_called()

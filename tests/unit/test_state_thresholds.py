@@ -174,3 +174,89 @@ class TestConflictAnalystDrivesThresholdsFromState:
 
         assert captured["min_chunked_confidence"] == pytest.approx(0.91)
         assert captured["chunk_size_chars"] == config.chunk_size_chars
+
+    async def test_run_reads_state_thresholds_not_config_thresholds(self, tmp_path):
+        """P2-2 (Phase 2 review-v1 P2): the snapshot must be the source of
+        truth — mutating ``state.config.thresholds`` after init must NOT
+        leak through to ``analyze_file``. Locks ``view.thresholds`` (run-
+        time snapshot) as the authoritative path, not ``view.config.thresholds``.
+        """
+        config = _make_config(tmp_path)
+        state = MergeState(config=config)
+        # Init-phase snapshot at 0.91 (config's value at init time).
+        state.thresholds = config.thresholds.model_copy()
+        # Then mutate config.thresholds to a wildly different value. If the
+        # agent ever reaches into config.thresholds, analyze_file will see
+        # 0.5; if it reads state.thresholds (correct), it sees 0.91.
+        state.config = state.config.model_copy(
+            update={
+                "thresholds": config.thresholds.model_copy(
+                    update={"chunked_aggregation_min_confidence": 0.5}
+                )
+            }
+        )
+        assert (
+            state.thresholds.chunked_aggregation_min_confidence
+            != state.config.thresholds.chunked_aggregation_min_confidence
+        )
+
+        state.merge_plan = MergePlan(
+            created_at=datetime.now(),
+            upstream_ref="upstream/main",
+            fork_ref="fork/main",
+            merge_base_commit="abc123",
+            phases=[
+                PhaseFileBatch(
+                    batch_id="b1",
+                    phase=MergePhase.ANALYSIS,
+                    risk_level=RiskLevel.AUTO_RISKY,
+                    file_paths=["a.py"],
+                )
+            ],
+            risk_summary=RiskSummary(
+                total_files=1,
+                auto_safe_count=0,
+                auto_risky_count=1,
+                human_required_count=0,
+                deleted_only_count=0,
+                binary_count=0,
+                excluded_count=0,
+                estimated_auto_merge_rate=1.0,
+            ),
+            project_context_summary="",
+        )
+        state.file_diffs = [
+            FileDiff(
+                file_path="a.py",
+                file_status=FileStatus.MODIFIED,
+                risk_level=RiskLevel.AUTO_RISKY,
+                risk_score=0.5,
+                hunks=[],
+            )
+        ]
+
+        agent = ConflictAnalystAgent(
+            llm_config=AgentLLMConfig(api_key_env="ANTHROPIC_API_KEY"),
+            git_tool=None,
+        )
+
+        captured: dict[str, object] = {}
+
+        async def fake_analyze_file(
+            file_diff,
+            *,
+            base_content,
+            current_content,
+            target_content,
+            project_context="",
+            forks_profile=None,
+            chunk_size_chars=None,
+            min_chunked_confidence=None,
+        ):
+            captured["min_chunked_confidence"] = min_chunked_confidence
+            return None
+
+        agent.analyze_file = AsyncMock(side_effect=fake_analyze_file)  # type: ignore[method-assign]
+        await agent.run(state)
+
+        assert captured["min_chunked_confidence"] == pytest.approx(0.91)
