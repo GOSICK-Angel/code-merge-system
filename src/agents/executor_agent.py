@@ -33,8 +33,18 @@ from src.tools.file_classifier import _fork_deleted_skip_record, is_fork_deleted
 from src.tools.git_tool import GitTool
 from src.tools.diff_stasher import stash_upstream_diff
 from src.cli.paths import get_diff_stash_dir
+from src.core.parallel_file_runner import ParallelFileRunner
 
 logger = logging.getLogger(__name__)
+
+# Cap on how many JudgeIssues feed one rebuttal LLM call. Each issue
+# contributes ~250-400 chars of input AND must produce a JSON decision
+# entry in the output (~50 chars). Calibrated against forgejo where a
+# 222-issue single-shot rebuttal serialised to 54KB input and pushed
+# the model past the long-request timeout (272s). Past ~30 the output
+# also bumps the 8K max_tokens ceiling. 25 keeps both well under the
+# danger zone with comfortable headroom for verbose judge descriptions.
+_REBUTTAL_CHUNK_SIZE = 25
 
 
 class ExecutorAgent(BaseAgent):
@@ -800,13 +810,82 @@ class ExecutorAgent(BaseAgent):
         if not issues:
             return ExecutorRebuttal(accepts_all=True)
 
+        if len(issues) <= _REBUTTAL_CHUNK_SIZE:
+            return await self._run_rebuttal_chunk(issues, state.config.project_context)
+
+        chunks = _chunk_issues_by_file(issues, _REBUTTAL_CHUNK_SIZE)
+        logger.info(
+            "build_rebuttal: chunking %d issues across %d files into %d chunks",
+            len(issues),
+            len({i.file_path for i in issues}),
+            len(chunks),
+        )
+
+        async def _process(idx: int) -> ExecutorRebuttal:
+            return await self._run_rebuttal_chunk(
+                chunks[idx], state.config.project_context
+            )
+
+        runner = ParallelFileRunner.from_api_key_env_list(
+            self.llm_config.api_key_env_list,
+            override=state.config.parallel_file_concurrency,
+        )
+        results = await runner.run_files(list(range(len(chunks))), _process)
+
+        merged_accepts_all = True
+        merged_disputes: list[DisputePoint] = []
+        merged_repairs: list[RepairInstruction] = []
+        rationales: list[str] = []
+        for idx in range(len(chunks)):
+            result = results.get(idx)
+            if isinstance(result, BaseException):
+                # ParallelFileRunner swallows exceptions; _run_rebuttal_chunk
+                # already has its own try/except + accept-all fallback, so
+                # reaching here means runner-side cancellation — degrade
+                # to accept-all for this chunk so the dispute loop keeps
+                # moving instead of stalling the whole layer.
+                logger.warning("rebuttal chunk %d crashed in runner: %s", idx, result)
+                merged_repairs.extend(
+                    RepairInstruction(
+                        file_path=i.file_path,
+                        instruction=i.description,
+                        severity=i.issue_level,
+                        is_repairable=True,
+                    )
+                    for i in chunks[idx]
+                    if i.must_fix_before_merge
+                )
+                continue
+            assert isinstance(result, ExecutorRebuttal)
+            if not result.accepts_all:
+                merged_accepts_all = False
+            merged_disputes.extend(result.dispute_points)
+            merged_repairs.extend(result.repair_instructions)
+            if result.overall_rationale:
+                rationales.append(result.overall_rationale)
+
+        merged_rationale = (
+            f"chunked rebuttal: {len(chunks)} chunks · " + " | ".join(rationales)
+            if rationales
+            else f"chunked rebuttal: {len(chunks)} chunks"
+        )
+        return ExecutorRebuttal(
+            accepts_all=merged_accepts_all or not merged_disputes,
+            dispute_points=merged_disputes,
+            repair_instructions=merged_repairs,
+            overall_rationale=merged_rationale,
+        )
+
+    async def _run_rebuttal_chunk(
+        self,
+        issues: list[JudgeIssue],
+        project_context: str,
+    ) -> ExecutorRebuttal:
         issues_summary = "\n".join(
             f"- [{i.issue_id}] {i.issue_level.value}: {i.description}" for i in issues
         )
         file_paths = list({i.file_path for i in issues})
-        prompt = build_rebuttal_prompt(
-            issues_summary, file_paths, state.config.project_context
-        )
+        prompt = build_rebuttal_prompt(issues_summary, file_paths, project_context)
         memory_text = self.get_memory_context(self._current_phase, file_paths)
         if memory_text:
             prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
@@ -878,6 +957,34 @@ class ExecutorAgent(BaseAgent):
             SystemStatus.AUTO_MERGING,
             SystemStatus.ANALYZING_CONFLICTS,
         )
+
+
+def _chunk_issues_by_file(
+    issues: list[JudgeIssue], chunk_size: int
+) -> list[list[JudgeIssue]]:
+    """Pack issues into chunks of at most ``chunk_size`` items while keeping
+    all issues for a single file in the same chunk.
+
+    Splitting one file across two rebuttal calls would let the LLM disagree
+    with itself on shared context (same diff, two verdicts). Keep file groups
+    intact. A single file with more issues than ``chunk_size`` still lands
+    in one over-sized chunk — that's rare and still smaller than the
+    "everything in one prompt" failure mode this function exists to fix.
+    """
+    by_file: dict[str, list[JudgeIssue]] = {}
+    for issue in issues:
+        by_file.setdefault(issue.file_path, []).append(issue)
+
+    chunks: list[list[JudgeIssue]] = []
+    current: list[JudgeIssue] = []
+    for group in by_file.values():
+        if current and len(current) + len(group) > chunk_size:
+            chunks.append(current)
+            current = []
+        current.extend(group)
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def _extract_diff_ranges(file_diff: FileDiff) -> list[tuple[int, int]]:
