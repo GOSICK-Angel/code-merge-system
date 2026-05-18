@@ -69,18 +69,36 @@ def _make_config(repo_path: str, enable: bool = False) -> MergeConfig:
 # ---------------------------------------------------------------------------
 
 
-def test_enable_working_branch_defaults_false():
+def test_enable_working_branch_defaults_true():
+    """U7 / U-P4.1: ``enable_working_branch`` flipped from False to True so a
+    half-finished run never pollutes ``fork_ref`` HEAD. Renamed from the
+    legacy ``test_enable_working_branch_defaults_false``; assertion
+    migrated ``is False → is True``."""
     cfg = MergeConfig(upstream_ref="upstream/main", fork_ref="main")
-    assert cfg.enable_working_branch is False
+    assert cfg.enable_working_branch is True
 
 
 def test_enable_working_branch_can_be_set():
+    """U-P4.2: explicit ``True`` still works (no-op vs. new default)."""
     cfg = MergeConfig(
         upstream_ref="upstream/main",
         fork_ref="main",
         enable_working_branch=True,
     )
     assert cfg.enable_working_branch is True
+
+
+def test_enable_working_branch_can_be_disabled_with_explicit_false():
+    """U-P4.3: explicit ``False`` is NOT silently overridden by the new
+    default — backward-compat path for users who pinned the legacy
+    in-place behavior."""
+    cfg = MergeConfig(
+        upstream_ref="upstream/main",
+        fork_ref="main",
+        enable_working_branch=False,
+    )
+    assert cfg.enable_working_branch is False
+    assert isinstance(cfg.enable_working_branch, bool)
 
 
 def test_active_branch_defaults_none():
