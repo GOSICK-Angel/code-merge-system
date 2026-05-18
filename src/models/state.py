@@ -5,7 +5,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 from pydantic import BaseModel, Field
-from src.models.config import MergeConfig
+from src.models.config import MergeConfig, ThresholdConfig
 from src.models.plan import MergePlan, MergePhase
 from src.models.diff import FileDiff, RiskLevel, FileChangeCategory
 from src.models.decision import MergeDecision, FileDecisionRecord
@@ -82,6 +82,16 @@ class MergeState(BaseModel):
     status: SystemStatus = SystemStatus.INITIALIZED
     current_phase: MergePhase = MergePhase.ANALYSIS
     phase_results: dict[str, PhaseResult] = Field(default_factory=dict)
+
+    thresholds: ThresholdConfig = Field(
+        default_factory=ThresholdConfig,
+        description=(
+            "U2/lock #27 path A: per-run snapshot of config.thresholds copied "
+            "by InitializePhase. Agents read thresholds via restricted_view "
+            "instead of reaching into config, so the value is stable for the "
+            "lifetime of a run even if config is mutated mid-flight."
+        ),
+    )
 
     merge_plan: MergePlan | None = None
     file_classifications: dict[str, RiskLevel] = Field(default_factory=dict)

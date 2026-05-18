@@ -69,6 +69,12 @@ class ConflictAnalystAgent(BaseAgent):
             file_diffs_map[fd.file_path] = fd
 
         forks_profile: ForksProfile | None = getattr(view, "forks_profile", None)
+        # lock #27 path A: drive chunked thresholds from MergeState.thresholds
+        # snapshot populated by InitializePhase. analyze_file falls back to
+        # its own defaults when these are None, preserving call-site freedom.
+        thresholds = view.thresholds
+        chunk_size = view.config.chunk_size_chars
+        min_chunked_confidence = thresholds.chunked_aggregation_min_confidence
 
         async def _analyze_one(file_path: str) -> ConflictAnalysis | None:
             fd = file_diffs_map.get(file_path)
@@ -91,6 +97,8 @@ class ConflictAnalystAgent(BaseAgent):
                 target_content=target_content,
                 project_context=view.config.project_context,
                 forks_profile=forks_profile,
+                chunk_size_chars=chunk_size,
+                min_chunked_confidence=min_chunked_confidence,
             )
 
         runner = ParallelFileRunner.from_api_key_env_list(

@@ -291,6 +291,11 @@ class InitializePhase(Phase):
         )
 
     def _run_sync(self, state: MergeState, ctx: PhaseContext) -> None:
+        # U2/lock #27 path A: snapshot config.thresholds onto state.thresholds
+        # so agents (e.g. ConflictAnalystAgent) can read a stable per-run
+        # view via restricted_view without reaching into config mid-flight.
+        state.thresholds = state.config.thresholds.model_copy()
+
         self._resolve_project_context(state, ctx)
         self._check_untracked_files(state, ctx)
         ctx.notify("orchestrator", "Computing merge base")
