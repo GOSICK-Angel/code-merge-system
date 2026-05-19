@@ -862,10 +862,14 @@ class PlanReviewPhase(Phase):
                     truncated += 1
                     continue
                 context = self._build_risk_context(fp, batch.risk_level, {}, diff_map)
-                options = self._build_decision_options(fp, batch.risk_level, context)
+                options = self._build_decision_options(
+                    fp, batch.risk_level, context, diff_map.get(fp)
+                )
                 description = (
                     "Plan Judge LLM was unavailable; human approval required. "
-                    + self._build_description(fp, batch.risk_level, context)
+                    + self._build_description(
+                        fp, batch.risk_level, context, diff_map.get(fp)
+                    )
                 )
                 items.append(
                     UserDecisionItem(
@@ -906,8 +910,12 @@ class PlanReviewPhase(Phase):
                 context = self._build_risk_context(
                     fp, batch.risk_level, issue_reasons, diff_map
                 )
-                options = self._build_decision_options(fp, batch.risk_level, context)
-                description = self._build_description(fp, batch.risk_level, context)
+                options = self._build_decision_options(
+                    fp, batch.risk_level, context, diff_map.get(fp)
+                )
+                description = self._build_description(
+                    fp, batch.risk_level, context, diff_map.get(fp)
+                )
                 conflict_preview = self._build_conflict_preview(fp, diff_map)
 
                 items.append(
@@ -948,12 +956,76 @@ class PlanReviewPhase(Phase):
                 "risk_score": fd.risk_score,
                 "lines_added": fd.lines_added,
                 "lines_deleted": fd.lines_deleted,
+                "upstream_lines_added": fd.upstream_lines_added,
+                "upstream_lines_deleted": fd.upstream_lines_deleted,
+                "conflict_count": fd.conflict_count,
+                "change_category": (
+                    fd.change_category.value if fd.change_category is not None else None
+                ),
                 "is_security_sensitive": fd.is_security_sensitive,
                 "language": fd.language,
                 "raw_diff": fd.raw_diff,
                 "risk_factors": fd.risk_factors,
             }
         return result
+
+    @staticmethod
+    def _classify_human_required_reason(
+        diff_info: dict[str, Any] | None,
+    ) -> tuple[str, str]:
+        """Return ``(kind, human-readable explanation)`` describing why a
+        file landed in HUMAN_REQUIRED. The three buckets are:
+
+        * ``policy`` — file matched ``security_sensitive.patterns`` and
+          was floored to ``risk_score >= 0.8`` regardless of conflict
+          severity. The hand-off is a policy gate, not a diff complexity
+          signal.
+        * ``conflict`` — ``conflict_count > 0``: actual merge-conflict
+          markers exist in the working tree, so automatic resolution
+          would silently drop one side.
+        * ``large_diff`` — neither of the above, but the file is C-class
+          (both_changed) with a non-trivial diff that the classifier
+          could not auto-approve.
+
+        When ``diff_info`` is missing (file not in ``state.file_diffs``),
+        fall back to the legacy generic wording.
+        """
+        if not diff_info:
+            return (
+                "unknown",
+                "Both upstream and fork modified this file — "
+                "automatic resolution requires human judgment.",
+            )
+
+        if diff_info.get("conflict_count", 0) > 0:
+            return (
+                "conflict",
+                "Both upstream and fork modified the same regions — "
+                "real three-way conflict markers are present.",
+            )
+
+        if diff_info.get("is_security_sensitive"):
+            return (
+                "policy",
+                "Security policy requires manual sign-off — this path "
+                "matched `security_sensitive.patterns`. The diff itself "
+                "may be straightforward; review is mandated by policy, "
+                "not by content complexity.",
+            )
+
+        if diff_info.get("change_category") == "both_changed":
+            return (
+                "large_diff",
+                "Both sides modified this file. Diff exceeds the "
+                "auto-merge confidence threshold — eyeball needed before "
+                "the executor can commit.",
+            )
+
+        return (
+            "unknown",
+            "Both upstream and fork modified this file — "
+            "automatic resolution requires human judgment.",
+        )
 
     def _build_conflict_preview(
         self,
@@ -1019,9 +1091,11 @@ class PlanReviewPhase(Phase):
         file_path: str,
         risk_level: RiskLevel,
         context: str,
+        diff_info: dict[str, Any] | None = None,
     ) -> str:
         if risk_level == RiskLevel.HUMAN_REQUIRED:
-            return f"This file cannot be auto-merged safely. {context}"
+            _, explanation = self._classify_human_required_reason(diff_info)
+            return f"{explanation} {context}".strip()
         return f"This file can be auto-merged but has elevated risk. {context}"
 
     def _build_decision_options(
@@ -1029,51 +1103,79 @@ class PlanReviewPhase(Phase):
         file_path: str,
         risk_level: RiskLevel,
         context: str,
+        diff_info: dict[str, Any] | None = None,
     ) -> list[DecisionOption]:
         is_security = "security-sensitive" in context
         security_warning = (
             " (⚠ security-sensitive — review carefully)" if is_security else ""
         )
 
-        if risk_level == RiskLevel.HUMAN_REQUIRED:
-            return [
-                DecisionOption(
-                    key="keep_head",
-                    label="Keep current branch (HEAD)",
-                    description="Use the fork branch file as-is; all upstream changes are discarded",
-                ),
-                DecisionOption(
-                    key="take_target",
-                    label="Use target branch version",
-                    description="Use the upstream branch file as-is; all fork changes are discarded"
-                    + security_warning,
-                ),
-                DecisionOption(
-                    key="llm_auto_merge",
-                    label="LLM auto-merge with verification",
-                    description="LLM merges both sides intelligently, then quality gates verify the result"
-                    + (
-                        " (not recommended: security-sensitive file)"
-                        if is_security
-                        else ""
-                    ),
-                ),
-            ]
-
-        return [
+        base: list[DecisionOption] = [
             DecisionOption(
                 key="keep_head",
                 label="Keep current branch (HEAD)",
                 description="Use the fork branch file as-is; all upstream changes are discarded",
+                kind="keep_head",
             ),
             DecisionOption(
                 key="take_target",
                 label="Use target branch version",
-                description="Use the upstream branch file as-is; all fork changes are discarded",
+                description="Use the upstream branch file as-is; all fork changes are discarded"
+                + (security_warning if risk_level == RiskLevel.HUMAN_REQUIRED else ""),
+                kind="take_target",
             ),
             DecisionOption(
                 key="llm_auto_merge",
                 label="LLM auto-merge with verification",
-                description="LLM merges both sides intelligently, then quality gates verify the result",
+                description="LLM merges both sides intelligently, then quality gates verify the result"
+                + (
+                    " (not recommended: security-sensitive file)"
+                    if is_security and risk_level == RiskLevel.HUMAN_REQUIRED
+                    else ""
+                ),
+                kind="llm_default",
             ),
         ]
+
+        if risk_level != RiskLevel.HUMAN_REQUIRED:
+            return base
+
+        # File-specific extensions. Emit union_additions only when both
+        # sides are pure additions on this file — the classic "both
+        # added different fields to the same struct" pattern that the
+        # three default options cannot resolve without losing one side.
+        extras: list[DecisionOption] = []
+        if diff_info is not None:
+            fork_del = diff_info.get("lines_deleted", 0) or 0
+            up_del = diff_info.get("upstream_lines_deleted", 0) or 0
+            fork_add = diff_info.get("lines_added", 0) or 0
+            up_add = diff_info.get("upstream_lines_added", 0) or 0
+            if fork_del == 0 and up_del == 0 and fork_add > 0 and up_add > 0:
+                extras.append(
+                    DecisionOption(
+                        key="union_additions",
+                        label="Keep both sides' additions (union)",
+                        description=(
+                            "Both fork and upstream only added lines to this "
+                            f"file (fork: +{fork_add}, upstream: +{up_add}). "
+                            "Apply a union merge so all new lines from both "
+                            "sides are preserved."
+                        ),
+                        kind="union_additions",
+                    )
+                )
+
+        extras.append(
+            DecisionOption(
+                key="llm_with_instruction",
+                label="LLM merge with my instruction",
+                description=(
+                    "Provide a free-text instruction in the textarea below; "
+                    "the LLM merges per your intent (e.g. \"keep fork's audit "
+                    "logging and upstream's validation order\")."
+                ),
+                kind="llm_with_instruction",
+            )
+        )
+
+        return base + extras

@@ -84,6 +84,7 @@ async def _analyze_round_with_bisect(
     file_languages: dict[str, str],
     project_context: str,
     *,
+    per_file_instructions: dict[str, str] | None = None,
     max_depth: int = 2,
     _depth: int = 0,
 ) -> dict[str, ConflictAnalysis]:
@@ -96,6 +97,7 @@ async def _analyze_round_with_bisect(
         round_llm_files,
         file_languages,
         project_context=project_context,
+        per_file_instructions=per_file_instructions,
     )
 
     can_bisect = _depth < max_depth and len(round_commits) >= 2
@@ -129,6 +131,7 @@ async def _analyze_round_with_bisect(
             sub_files,
             sub_languages,
             project_context,
+            per_file_instructions=per_file_instructions,
             max_depth=max_depth,
             _depth=_depth + 1,
         )
@@ -657,12 +660,19 @@ class ConflictAnalysisPhase(Phase):
                     )
                     for fp in round_llm_files
                 }
+                per_file_instructions = {
+                    it.file_path: it.custom_instruction
+                    for it in state.pending_user_decisions
+                    if it.user_choice == "llm_with_instruction"
+                    and it.custom_instruction
+                }
                 analyses = await _analyze_round_with_bisect(
                     conflict_analyst,
                     round_commits,
                     round_llm_files,
                     file_languages,
                     project_context=state.config.project_context,
+                    per_file_instructions=per_file_instructions or None,
                 )
                 parsed_count = len(analyses)
                 requested_count = len(round_llm_files)

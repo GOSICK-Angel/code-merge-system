@@ -137,6 +137,60 @@ class GitTool:
             return None
         return text
 
+    def three_way_merge_file_union(
+        self,
+        base_ref: str,
+        ours_ref: str,
+        theirs_ref: str,
+        file_path: str,
+    ) -> str | None:
+        """Union merge: keep all changes from BOTH sides, ordered by
+        position. Drives the ``union_additions`` user decision — both
+        fork and upstream only added lines, so concatenation in place
+        of conflict markers is what the reviewer wants.
+
+        Returns the merged content, or ``None`` if any input ref is
+        missing or git refuses to merge (e.g. binary).
+        """
+        import tempfile
+
+        base_content = self.get_file_content(base_ref, file_path)
+        ours_content = self.get_file_content(ours_ref, file_path)
+        theirs_content = self.get_file_content(theirs_ref, file_path)
+        if base_content is None or ours_content is None or theirs_content is None:
+            return None
+
+        with tempfile.TemporaryDirectory() as td:
+            base_p = Path(td) / "base"
+            ours_p = Path(td) / "ours"
+            theirs_p = Path(td) / "theirs"
+            base_p.write_text(base_content, encoding="utf-8")
+            ours_p.write_text(ours_content, encoding="utf-8")
+            theirs_p.write_text(theirs_content, encoding="utf-8")
+            try:
+                output = self.repo.git.merge_file(
+                    "--union",
+                    "--stdout",
+                    "-L",
+                    "fork",
+                    "-L",
+                    "base",
+                    "-L",
+                    "upstream",
+                    str(ours_p),
+                    str(base_p),
+                    str(theirs_p),
+                    strip_newline_in_stdout=False,
+                )
+            except git.GitCommandError:
+                return None
+
+        return (
+            output
+            if isinstance(output, str)
+            else output.decode("utf-8", errors="surrogateescape")
+        )
+
     def create_working_branch(self, branch_name: str, base_ref: str) -> str:
         from datetime import datetime
 

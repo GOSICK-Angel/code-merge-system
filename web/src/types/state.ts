@@ -178,10 +178,21 @@ export interface ReviewConclusionPayload {
   rejection_details: unknown[];
 }
 
+// Stable identifiers; mirrors DecisionOptionKind in src/models/plan_review.py.
+// String values double as Executor dispatch keys, so renames are breaking.
+export type DecisionOptionKind =
+  | "keep_head"
+  | "take_target"
+  | "llm_default"
+  | "llm_with_instruction"
+  | "union_additions";
+
 export interface PendingUserDecisionOption {
   key: string;
   label: string;
   description: string;
+  kind?: DecisionOptionKind;
+  preview?: string | null;
 }
 
 export interface PendingUserDecision {
@@ -194,6 +205,7 @@ export interface PendingUserDecision {
   options: PendingUserDecisionOption[];
   user_choice: string | null;
   user_input: string | null;
+  custom_instruction?: string | null;
 }
 
 // L2 plan/layer/log payload — mirror of src/web/serializers.py

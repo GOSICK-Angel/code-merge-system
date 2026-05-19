@@ -374,6 +374,16 @@ class PlannerAgent(BaseAgent):
         for pattern in patterns:
             if fnmatch.fnmatch(file_path, pattern):
                 return True
+            # `**/foo` is meant to mean "foo at any depth, including
+            # the repo root". Python's stdlib fnmatch treats `**` as a
+            # plain `*` and additionally requires the literal `/` to
+            # match — so `**/go.mod` matches `sub/go.mod` but NOT the
+            # root-level `go.mod`. Re-try the pattern's trailing tail
+            # (after the leading `**/`) directly against the file path
+            # so root-level lockfiles / manifests land in L1 instead of
+            # falling through to the L2 catch-all.
+            if pattern.startswith("**/") and fnmatch.fnmatch(file_path, pattern[3:]):
+                return True
             parts = file_path.split("/")
             for i in range(len(parts)):
                 partial = "/".join(parts[: i + 1])

@@ -1,7 +1,22 @@
 from datetime import datetime
 from enum import Enum
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
 from src.models.plan_judge import PlanJudgeResult
+
+
+# Stable identifiers for decision-option kinds. The string values
+# double as Executor dispatch keys, so renaming any of them is a
+# breaking change. Add new kinds at the end of the literal.
+DecisionOptionKind = Literal[
+    "keep_head",
+    "take_target",
+    "llm_default",
+    "llm_with_instruction",
+    "union_additions",
+]
 
 
 class PlanHumanDecision(str, Enum):
@@ -41,6 +56,15 @@ class DecisionOption(BaseModel):
     key: str
     label: str
     description: str = ""
+    kind: DecisionOptionKind = "llm_default"
+    preview: str | None = Field(
+        default=None,
+        description=(
+            "Optional summary of what the merged file is expected to "
+            "look like if this option is chosen — used by the UI to "
+            "let reviewers compare alternatives before committing."
+        ),
+    )
 
 
 class UserDecisionItem(BaseModel):
@@ -53,6 +77,15 @@ class UserDecisionItem(BaseModel):
     options: list[DecisionOption] = Field(default_factory=list)
     user_choice: str | None = None
     user_input: str | None = None
+    custom_instruction: str | None = Field(
+        default=None,
+        description=(
+            "Reviewer-supplied free-text instruction. When non-empty AND "
+            "the selected option's kind is ``llm_with_instruction``, the "
+            "Executor prepends it as a system message to ConflictAnalyst "
+            "so the LLM merges the file per the reviewer's intent."
+        ),
+    )
 
 
 class SegmentTelemetrySummary(BaseModel):

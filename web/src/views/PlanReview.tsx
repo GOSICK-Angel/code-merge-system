@@ -710,6 +710,66 @@ function PendingDecisionCard({
           {item.description}
         </div>
       )}
+      {item.conflict_preview && (
+        <details
+          open
+          style={{
+            marginTop: 8,
+            border: "1px solid var(--line)",
+            borderRadius: 4,
+            background: "var(--bg-0)",
+          }}
+        >
+          <summary
+            style={{
+              padding: "6px 8px",
+              cursor: "pointer",
+              fontSize: 10.5,
+              color: "var(--fg-2)",
+              fontFamily: "var(--mono)",
+              userSelect: "none",
+            }}
+          >
+            ▾ DIFF PREVIEW
+          </summary>
+          <pre
+            style={{
+              margin: 0,
+              padding: "8px 10px",
+              borderTop: "1px solid var(--line)",
+              fontFamily: "var(--mono)",
+              fontSize: 10.5,
+              lineHeight: 1.5,
+              overflowX: "auto",
+              maxHeight: 360,
+              overflowY: "auto",
+              whiteSpace: "pre",
+            }}
+          >
+            {item.conflict_preview.split("\n").map((ln, i) => {
+              let color = "var(--fg-2)";
+              if (ln.startsWith("+") && !ln.startsWith("+++"))
+                color = "var(--green, #4ade80)";
+              else if (ln.startsWith("-") && !ln.startsWith("---"))
+                color = "var(--red, #f87171)";
+              else if (ln.startsWith("@@"))
+                color = "var(--accent, #60a5fa)";
+              else if (
+                ln.startsWith("diff ") ||
+                ln.startsWith("index ") ||
+                ln.startsWith("+++") ||
+                ln.startsWith("---")
+              )
+                color = "var(--fg-3, #94a3b8)";
+              return (
+                <div key={i} style={{ color }}>
+                  {ln || " "}
+                </div>
+              );
+            })}
+          </pre>
+        </details>
+      )}
       {item.options.length > 0 && (
         <div
           className="row mt-1"
@@ -745,24 +805,75 @@ function PendingDecisionCard({
           ))}
         </div>
       )}
-      <textarea
-        value={draftInput ?? ""}
-        onChange={(e) => onSetInput(e.target.value)}
-        disabled={decidedServerSide}
-        placeholder="optional reviewer note for this item ..."
-        style={{
-          marginTop: 8,
-          width: "100%",
-          minHeight: 44,
-          background: "var(--bg-0)",
-          border: "1px solid var(--line)",
-          color: "var(--fg-1)",
-          fontFamily: "var(--mono)",
-          fontSize: 11,
-          padding: 8,
-          resize: "vertical",
-        }}
-      />
+      {(() => {
+        const selectedOpt = item.options.find((o) => o.key === draftChoice);
+        const isInstruction = selectedOpt?.kind === "llm_with_instruction";
+        return (
+          <>
+            {selectedOpt?.description && (
+              <div
+                className="dimmer"
+                style={{ marginTop: 6, fontSize: 10.5 }}
+              >
+                {selectedOpt.description}
+              </div>
+            )}
+            {selectedOpt?.preview && (
+              <pre
+                style={{
+                  marginTop: 6,
+                  padding: "6px 8px",
+                  background: "var(--bg-0)",
+                  border: "1px dashed var(--line)",
+                  borderRadius: 4,
+                  fontFamily: "var(--mono)",
+                  fontSize: 10.5,
+                  whiteSpace: "pre-wrap",
+                  overflowX: "auto",
+                }}
+              >
+                {selectedOpt.preview}
+              </pre>
+            )}
+            {isInstruction && (
+              <div
+                style={{
+                  marginTop: 6,
+                  fontSize: 10.5,
+                  color: "var(--accent)",
+                  fontFamily: "var(--mono)",
+                }}
+              >
+                ▸ Instruction below will be sent to the LLM for this file.
+              </div>
+            )}
+            <textarea
+              value={draftInput ?? ""}
+              onChange={(e) => onSetInput(e.target.value)}
+              disabled={decidedServerSide}
+              placeholder={
+                isInstruction
+                  ? 'Instruction for LLM (e.g. "keep fork\'s audit logging and upstream\'s validation order; preserve the new CreatedUnix field") ...'
+                  : "optional reviewer note for this item ..."
+              }
+              style={{
+                marginTop: 6,
+                width: "100%",
+                minHeight: isInstruction ? 64 : 44,
+                background: "var(--bg-0)",
+                border: `1px solid ${
+                  isInstruction ? "var(--accent)" : "var(--line)"
+                }`,
+                color: "var(--fg-1)",
+                fontFamily: "var(--mono)",
+                fontSize: 11,
+                padding: 8,
+                resize: "vertical",
+              }}
+            />
+          </>
+        );
+      })()}
       <div className="actions">
         {draftChoice && !decidedServerSide && (
           <button

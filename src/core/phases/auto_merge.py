@@ -648,29 +648,114 @@ class AutoMergePhase(Phase):
                 memory_phase="auto_merge",
             )
 
-        # O-L5: execute UserDecisionItem take_target / take_current choices.
-        # Previously these user selections updated state but never wrote any
-        # file — downstream pipelines saw the ESCALATE_HUMAN record that O-M1
-        # / O-B3 seeded and the working tree was never updated. We now
-        # actualize the choice here, overwrite file_decision_records, and
-        # remove the file from future batches.
+        # O-L5: execute UserDecisionItem take_target / take_current /
+        # union_additions choices. Previously these user selections
+        # updated state but never wrote any file — downstream pipelines
+        # saw the ESCALATE_HUMAN record that O-M1 / O-B3 seeded and the
+        # working tree was never updated. We now actualize the choice
+        # here, overwrite file_decision_records, and remove the file
+        # from future batches.
         _l5_take_target_keys = {"take_target"}
         _l5_take_current_keys = {"take_current", "keep_head"}
+        _l5_union_keys = {"union_additions"}
         _l5_applied: set[str] = set()
         for item in state.pending_user_decisions:
-            if item.user_choice not in _l5_take_target_keys | _l5_take_current_keys:
+            choice = item.user_choice
+            if (
+                choice
+                not in _l5_take_target_keys | _l5_take_current_keys | _l5_union_keys
+            ):
                 continue
             fp = item.file_path
             if fp in _l5_applied:
                 continue
+
+            if choice in _l5_union_keys:
+                # git merge-file --union keeps both sides' additions
+                # in-place rather than emitting conflict markers. Only
+                # safe for files where both fork and upstream added
+                # lines (the option is gated on this in plan_review).
+                base_ref = state.merge_base_commit or ""
+                union_content = (
+                    ctx.git_tool.three_way_merge_file_union(
+                        base_ref,
+                        state.config.fork_ref,
+                        state.config.upstream_ref,
+                        fp,
+                    )
+                    if base_ref
+                    else None
+                )
+                if union_content is None:
+                    logger.warning(
+                        "O-L5 union_additions: cannot compute union for %s "
+                        "(missing base_ref or input refs); leaving ESCALATE_HUMAN",
+                        fp,
+                    )
+                    state.file_decision_records[fp] = FileDecisionRecord(
+                        file_path=fp,
+                        file_status=FileStatus.MODIFIED,
+                        decision=MergeDecision.ESCALATE_HUMAN,
+                        decision_source=DecisionSource.HUMAN,
+                        confidence=0.0,
+                        rationale=(
+                            "O-L5 union_additions: git merge-file --union "
+                            "returned None (missing base or invalid input); "
+                            "keeping ESCALATE_HUMAN."
+                        ),
+                        phase="auto_merge",
+                        agent="user_choice_executor",
+                    )
+                    _l5_applied.add(fp)
+                    continue
+                try:
+                    from src.tools.patch_applier import apply_with_snapshot
+
+                    record = await apply_with_snapshot(
+                        fp,
+                        union_content,
+                        ctx.git_tool,
+                        state,
+                        phase="auto_merge",
+                        agent="user_choice_executor",
+                        decision=MergeDecision.SEMANTIC_MERGE,
+                        rationale=(
+                            "O-L5 union_additions: applied git merge-file --union "
+                            "per user choice — keeps additions from both fork "
+                            "and upstream sides."
+                        ),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "O-L5 union_additions: failed to apply union for %s: %s",
+                        fp,
+                        exc,
+                    )
+                    record = FileDecisionRecord(
+                        file_path=fp,
+                        file_status=FileStatus.MODIFIED,
+                        decision=MergeDecision.ESCALATE_HUMAN,
+                        decision_source=DecisionSource.HUMAN,
+                        confidence=0.0,
+                        rationale=(
+                            f"O-L5 union_additions apply failed ({exc!r}); "
+                            "keeping ESCALATE_HUMAN."
+                        ),
+                        phase="auto_merge",
+                        agent="user_choice_executor",
+                    )
+                state.file_decision_records[fp] = record
+                _l5_applied.add(fp)
+                continue
+
             ref = (
                 state.config.upstream_ref
-                if item.user_choice in _l5_take_target_keys
+                if choice in _l5_take_target_keys
                 else state.config.fork_ref
             )
             decision_value = (
                 MergeDecision.TAKE_TARGET
-                if item.user_choice in _l5_take_target_keys
+                if choice in _l5_take_target_keys
                 else MergeDecision.TAKE_CURRENT
             )
             try:

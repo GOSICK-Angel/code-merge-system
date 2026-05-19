@@ -576,10 +576,26 @@ class MergeWSBridge:
             if item_id not in item_map:
                 continue
             existing = item_map[item_id]
+            user_choice = item_data.get("user_choice")
+            user_input = item_data.get("user_input")
+            # Reviewer's free-text travels in two slots: ``user_input``
+            # stays a passive note unless the chosen option's kind is
+            # ``llm_with_instruction``, in which case the same text is
+            # also surfaced as ``custom_instruction`` for the LLM merge
+            # pipeline to pick up (per-file system-message override).
+            custom_instruction = item_data.get("custom_instruction")
+            if (
+                custom_instruction is None
+                and user_choice == "llm_with_instruction"
+                and isinstance(user_input, str)
+                and user_input.strip()
+            ):
+                custom_instruction = user_input
             updated = existing.model_copy(
                 update={
-                    "user_choice": item_data.get("user_choice"),
-                    "user_input": item_data.get("user_input"),
+                    "user_choice": user_choice,
+                    "user_input": user_input,
+                    "custom_instruction": custom_instruction,
                 }
             )
             idx = next(

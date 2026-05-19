@@ -385,6 +385,7 @@ class ConflictAnalystAgent(BaseAgent):
         file_three_way: dict[str, tuple[str | None, str | None, str | None]],
         file_languages: dict[str, str],
         project_context: str = "",
+        per_file_instructions: dict[str, str] | None = None,
     ) -> dict[str, "ConflictAnalysis"]:
         if not file_three_way:
             return {}
@@ -393,6 +394,24 @@ class ConflictAnalystAgent(BaseAgent):
             round_commits, file_three_way, file_languages, project_context
         )
         file_paths = list(file_three_way.keys())
+
+        # Reviewer-supplied free-text instructions (one per file) — when
+        # the user picks the ``llm_with_instruction`` decision option and
+        # writes guidance like "keep fork's audit logging and upstream's
+        # validation order", that text lands here and gets prepended to
+        # the LLM payload so the merge respects the reviewer's intent.
+        if per_file_instructions:
+            relevant = {
+                fp: per_file_instructions[fp]
+                for fp in file_paths
+                if per_file_instructions.get(fp)
+            }
+            if relevant:
+                lines = ["# Reviewer Instructions (per file)"]
+                for fp, inst in relevant.items():
+                    lines.append(f"- `{fp}`: {inst}")
+                prompt = f"{prompt}\n\n" + "\n".join(lines)
+
         memory_text = self.get_memory_context(self._current_phase, file_paths)
         if memory_text:
             prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"

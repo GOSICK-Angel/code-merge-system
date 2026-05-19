@@ -477,11 +477,14 @@ def serialize_state(state: MergeState) -> dict[str, Any]:
                         "key": opt.key,
                         "label": opt.label,
                         "description": opt.description,
+                        "kind": opt.kind,
+                        "preview": opt.preview,
                     }
                     for opt in item.options
                 ],
                 "user_choice": item.user_choice,
                 "user_input": item.user_input,
+                "custom_instruction": item.custom_instruction,
             }
             for item in state.pending_user_decisions
         ],
