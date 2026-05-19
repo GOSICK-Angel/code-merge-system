@@ -485,6 +485,7 @@ def serialize_state(state: MergeState) -> dict[str, Any]:
                 "user_choice": item.user_choice,
                 "user_input": item.user_input,
                 "custom_instruction": item.custom_instruction,
+                "manual_resolution": item.manual_resolution,
             }
             for item in state.pending_user_decisions
         ],

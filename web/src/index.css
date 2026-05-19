@@ -1287,7 +1287,7 @@
 
 .plan-grid {
   display: grid;
-  grid-template-columns: 1fr 380px;
+  grid-template-columns: minmax(0, 58%) minmax(0, 42%);
   gap: 14px;
   min-height: 600px;
 }
@@ -1299,6 +1299,35 @@
   margin-bottom: 14px;
 }
 
+details.layer-block>summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+details.layer-block>summary::-webkit-details-marker {
+  display: none;
+}
+
+details.layer-block>summary::marker {
+  display: none;
+}
+
+.layer-chevron {
+  width: 14px;
+  flex-shrink: 0;
+  color: var(--fg-3);
+  font-size: 9px;
+}
+
+.layer-chevron::before {
+  content: '▸';
+}
+
+details.layer-block[open] .layer-chevron::before {
+  content: '▾';
+}
+
 .layer-block .lhead {
   display: flex;
   align-items: center;
@@ -1307,6 +1336,10 @@
   border-bottom: 1px solid var(--line);
   background: var(--bg-0);
   font-size: 11.5px;
+}
+
+details.layer-block:not([open]) .lhead {
+  border-bottom: none;
 }
 
 .layer-block .lhead .left {
@@ -1587,6 +1620,90 @@
   font-size: 10.5px;
   flex: 1;
   justify-content: center;
+}
+
+.option-btn {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+}
+
+.option-btn.selected {
+  background: color-mix(in oklch, var(--accent), transparent 82%);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.option-btn.selected:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+/* HUMAN_REQUIRED master-detail layout */
+.pending-master-detail {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  border: 1px solid var(--line);
+  min-height: 800px;
+  max-height: 72vh;
+  overflow: hidden;
+}
+
+.pending-file-list {
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  background: var(--bg-1);
+  min-height: 0;
+}
+
+.pending-file-row {
+  padding: 8px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+  border-left: 2px solid transparent;
+  transition: background 0.08s;
+}
+
+.pending-file-row:hover {
+  background: var(--bg-3);
+}
+
+.pending-file-row.active {
+  background: color-mix(in oklch, var(--accent), transparent 90%);
+  border-left-color: var(--accent);
+}
+
+.pending-file-row .fp-dir {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--fg-3);
+  line-height: 1.3;
+  word-break: break-all;
+}
+
+.pending-file-row .fp-base {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-0);
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.pending-detail-panel {
+  overflow-y: auto;
+  background: var(--bg-2);
+  min-height: 0;
+}
+
+.pending-detail-panel .pending-item {
+  border: none;
+  background: transparent;
+  padding: 14px 16px;
+  margin-bottom: 0;
+}
+
+.pending-detail-panel .pending-item.active {
+  border: none;
+  background: transparent;
 }
 
 /* =============================================================

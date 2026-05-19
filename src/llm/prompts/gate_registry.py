@@ -23,6 +23,7 @@ from src.llm.prompts.analyst_prompts import (
     ANALYST_SYSTEM,
     build_commit_round_prompt,
     build_conflict_analysis_prompt,
+    build_decision_proposal_prompt,
 )
 from src.llm.prompts.executor_prompts import (
     EXECUTOR_SYSTEM,
@@ -175,6 +176,13 @@ register_gate(
     "CA-COMMIT-ROUND",
     build_commit_round_prompt,
     "ConflictAnalyst per-commit reasoning round prompt.",
+)
+register_gate(
+    "CA-DECISION-PROPOSAL",
+    build_decision_proposal_prompt,
+    "ConflictAnalyst per-file decision-option proposal prompt — produces "
+    "file-specific actionable options surfaced as UI buttons for "
+    "HUMAN_REQUIRED files (opt-in via plan_review config flag).",
 )
 
 # Executor (E-)

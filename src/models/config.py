@@ -776,6 +776,17 @@ class PlanReviewConfig(BaseModel):
         "cap for everyone. Only ever raises the bound — never "
         "lowers a higher ``max_plan_revision_rounds``.",
     )
+    analyst_decision_options_enabled: bool = Field(
+        default=False,
+        description="Opt-in: when True, ConflictAnalyst proposes 1–3 "
+        "file-specific decision options for every HUMAN_REQUIRED file "
+        "right before they're surfaced to the reviewer. Costs roughly "
+        "one extra LLM call per HUMAN_REQUIRED file. Default off so "
+        "small / cost-sensitive runs keep the deterministic base "
+        "ladder unchanged; turn on for large fork-vs-upstream merges "
+        "where the reviewer would benefit from concrete pre-thought "
+        "strategies beyond keep_head / take_target / llm_auto_merge.",
+    )
 
 
 class CoordinatorConfig(BaseModel):

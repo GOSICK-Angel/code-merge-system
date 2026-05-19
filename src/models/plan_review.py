@@ -16,6 +16,9 @@ DecisionOptionKind = Literal[
     "llm_default",
     "llm_with_instruction",
     "union_additions",
+    "manual_paste",
+    "skip",
+    "analyst_proposed",
 ]
 
 
@@ -84,6 +87,16 @@ class UserDecisionItem(BaseModel):
             "the selected option's kind is ``llm_with_instruction``, the "
             "Executor prepends it as a system message to ConflictAnalyst "
             "so the LLM merges the file per the reviewer's intent."
+        ),
+    )
+    manual_resolution: str | None = Field(
+        default=None,
+        description=(
+            "Reviewer-supplied final file content. When non-empty AND "
+            "the selected option's kind is ``manual_paste``, the L5 "
+            "dispatch writes this directly to the working tree as the "
+            "resolved file (decision=MANUAL_PATCH, source=HUMAN) — "
+            "bypassing both the LLM merge and git's 3-way merge."
         ),
     )
 

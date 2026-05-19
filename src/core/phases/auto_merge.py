@@ -658,16 +658,107 @@ class AutoMergePhase(Phase):
         _l5_take_target_keys = {"take_target"}
         _l5_take_current_keys = {"take_current", "keep_head"}
         _l5_union_keys = {"union_additions"}
+        _l5_manual_paste_keys = {"manual_paste"}
+        _l5_skip_keys = {"skip"}
         _l5_applied: set[str] = set()
         for item in state.pending_user_decisions:
             choice = item.user_choice
-            if (
-                choice
-                not in _l5_take_target_keys | _l5_take_current_keys | _l5_union_keys
+            if choice not in (
+                _l5_take_target_keys
+                | _l5_take_current_keys
+                | _l5_union_keys
+                | _l5_manual_paste_keys
+                | _l5_skip_keys
             ):
                 continue
             fp = item.file_path
             if fp in _l5_applied:
+                continue
+
+            if choice in _l5_skip_keys:
+                # User deferred this file to a follow-up PR. Record SKIP
+                # (HUMAN source) so downstream batches exclude the file
+                # without touching the working tree. fork content is
+                # preserved untouched on fork_ref.
+                state.file_decision_records[fp] = FileDecisionRecord(
+                    file_path=fp,
+                    file_status=FileStatus.MODIFIED,
+                    decision=MergeDecision.SKIP,
+                    decision_source=DecisionSource.HUMAN,
+                    confidence=1.0,
+                    rationale=(
+                        "O-L5 skip: reviewer deferred this file to a "
+                        "follow-up PR — fork content preserved untouched, "
+                        "no working-tree write."
+                    ),
+                    phase="auto_merge",
+                    agent="user_choice_executor",
+                )
+                _l5_applied.add(fp)
+                continue
+
+            if choice in _l5_manual_paste_keys:
+                # User supplied the resolved file content directly via
+                # textarea. The Executor writes it verbatim — bypasses
+                # both LLM merge and git's 3-way merge. ws_bridge
+                # populates manual_resolution from user_input when the
+                # selected option's kind is manual_paste.
+                manual_content = item.manual_resolution
+                if not manual_content:
+                    logger.warning(
+                        "O-L5 manual_paste: %s selected manual_paste but "
+                        "no manual_resolution provided; keeping ESCALATE_HUMAN",
+                        fp,
+                    )
+                    state.file_decision_records[fp] = FileDecisionRecord(
+                        file_path=fp,
+                        file_status=FileStatus.MODIFIED,
+                        decision=MergeDecision.ESCALATE_HUMAN,
+                        decision_source=DecisionSource.HUMAN,
+                        confidence=0.0,
+                        rationale=(
+                            "O-L5 manual_paste selected without "
+                            "manual_resolution content; keeping ESCALATE_HUMAN."
+                        ),
+                        phase="auto_merge",
+                        agent="user_choice_executor",
+                    )
+                    _l5_applied.add(fp)
+                    continue
+                try:
+                    from src.tools.patch_applier import apply_with_snapshot
+
+                    record = await apply_with_snapshot(
+                        fp,
+                        manual_content,
+                        ctx.git_tool,
+                        state,
+                        phase="auto_merge",
+                        agent="user_choice_executor",
+                        decision=MergeDecision.MANUAL_PATCH,
+                        rationale=(
+                            "O-L5 manual_paste: reviewer supplied the "
+                            "resolved file content verbatim — written "
+                            "bypassing LLM merge and 3-way merge."
+                        ),
+                    )
+                except Exception as exc:
+                    logger.warning("O-L5 manual_paste: failed to write %s: %s", fp, exc)
+                    record = FileDecisionRecord(
+                        file_path=fp,
+                        file_status=FileStatus.MODIFIED,
+                        decision=MergeDecision.ESCALATE_HUMAN,
+                        decision_source=DecisionSource.HUMAN,
+                        confidence=0.0,
+                        rationale=(
+                            f"O-L5 manual_paste apply failed ({exc!r}); "
+                            "keeping ESCALATE_HUMAN."
+                        ),
+                        phase="auto_merge",
+                        agent="user_choice_executor",
+                    )
+                state.file_decision_records[fp] = record
+                _l5_applied.add(fp)
                 continue
 
             if choice in _l5_union_keys:

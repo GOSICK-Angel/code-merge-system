@@ -17,6 +17,8 @@ from src.llm.prompts.analyst_prompts import (
     ANALYST_SYSTEM,
     build_commit_round_prompt,
     build_conflict_analysis_prompt,
+    build_decision_proposal_prompt,
+    parse_decision_proposals,
 )
 from src.llm.response_parser import parse_commit_round_analyses, parse_conflict_analysis
 from src.models.forks_profile import ForksProfile
@@ -452,6 +454,44 @@ class ConflictAnalystAgent(BaseAgent):
             )
 
         return analyses
+
+    async def propose_decision_options(
+        self,
+        file_path: str,
+        base_content: str | None,
+        fork_content: str | None,
+        upstream_content: str | None,
+        language: str = "",
+        project_context: str = "",
+        max_options: int = 3,
+    ) -> list[dict[str, str]]:
+        """Ask the LLM for 1–``max_options`` file-specific decision
+        proposals on a HUMAN_REQUIRED file. Returns a list of dicts
+        with keys ``key`` / ``label`` / ``description`` / ``preview``.
+
+        Graceful degrade: any LLM failure, parse failure, or empty
+        response yields ``[]`` — callers fall back to the base decision
+        ladder. This method never raises.
+        """
+        prompt = build_decision_proposal_prompt(
+            file_path,
+            base_content,
+            fork_content,
+            upstream_content,
+            language=language,
+            project_context=project_context,
+            max_options=max_options,
+        )
+        try:
+            raw = await self._call_llm_with_retry(
+                [{"role": "user", "content": prompt}], system=ANALYST_SYSTEM
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "propose_decision_options failed for %s: %s", file_path, exc
+            )
+            return []
+        return parse_decision_proposals(str(raw))
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus

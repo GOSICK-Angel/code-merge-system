@@ -773,32 +773,16 @@ function PendingDecisionCard({
       {item.options.length > 0 && (
         <div
           className="row mt-1"
-          style={{ flexWrap: "wrap", gap: 6 }}
+          style={{ flexWrap: "wrap", gap: 8 }}
         >
           {item.options.map((opt) => (
             <button
               key={opt.key}
               type="button"
+              className={`btn option-btn${draftChoice === opt.key ? " selected" : ""}`}
               onClick={() => onSetChoice(opt.key)}
               disabled={decidedServerSide}
               title={opt.description}
-              style={{
-                fontSize: 10.5,
-                padding: "3px 7px",
-                background:
-                  draftChoice === opt.key
-                    ? "color-mix(in oklch, var(--accent), transparent 85%)"
-                    : "var(--bg-0)",
-                border: `1px solid ${
-                  draftChoice === opt.key ? "var(--accent)" : "var(--line)"
-                }`,
-                color:
-                  draftChoice === opt.key
-                    ? "var(--accent)"
-                    : "var(--fg-2)",
-                cursor: decidedServerSide ? "not-allowed" : "pointer",
-                fontFamily: "var(--mono)",
-              }}
             >
               {opt.label}
             </button>
@@ -807,7 +791,20 @@ function PendingDecisionCard({
       )}
       {(() => {
         const selectedOpt = item.options.find((o) => o.key === draftChoice);
-        const isInstruction = selectedOpt?.kind === "llm_with_instruction";
+        const kind = selectedOpt?.kind;
+        const isInstruction = kind === "llm_with_instruction";
+        const isPaste = kind === "manual_paste";
+        const isSkip = kind === "skip";
+        let placeholder = "optional reviewer note for this item ...";
+        if (isInstruction) {
+          placeholder =
+            'Instruction for LLM (e.g. "keep fork\'s audit logging and upstream\'s validation order; preserve the new CreatedUnix field") ...';
+        } else if (isPaste) {
+          placeholder =
+            "Paste the FINAL resolved file content here. The Executor will write it verbatim — bypasses LLM merge and 3-way merge.";
+        }
+        const borderColor = isInstruction || isPaste ? "var(--accent)" : "var(--line)";
+        const minHeight = isPaste ? 200 : isInstruction ? 64 : 44;
         return (
           <>
             {selectedOpt?.description && (
@@ -847,30 +844,56 @@ function PendingDecisionCard({
                 ▸ Instruction below will be sent to the LLM for this file.
               </div>
             )}
-            <textarea
-              value={draftInput ?? ""}
-              onChange={(e) => onSetInput(e.target.value)}
-              disabled={decidedServerSide}
-              placeholder={
-                isInstruction
-                  ? 'Instruction for LLM (e.g. "keep fork\'s audit logging and upstream\'s validation order; preserve the new CreatedUnix field") ...'
-                  : "optional reviewer note for this item ..."
-              }
-              style={{
-                marginTop: 6,
-                width: "100%",
-                minHeight: isInstruction ? 64 : 44,
-                background: "var(--bg-0)",
-                border: `1px solid ${
-                  isInstruction ? "var(--accent)" : "var(--line)"
-                }`,
-                color: "var(--fg-1)",
-                fontFamily: "var(--mono)",
-                fontSize: 11,
-                padding: 8,
-                resize: "vertical",
-              }}
-            />
+            {isPaste && (
+              <div
+                style={{
+                  marginTop: 6,
+                  fontSize: 10.5,
+                  color: "var(--accent)",
+                  fontFamily: "var(--mono)",
+                }}
+              >
+                ▸ Content below will be written verbatim to the working tree.
+              </div>
+            )}
+            {isSkip && (
+              <div
+                style={{
+                  marginTop: 6,
+                  padding: "6px 8px",
+                  fontSize: 10.5,
+                  background:
+                    "color-mix(in oklch, var(--amber, #f59e0b), transparent 88%)",
+                  border: "1px solid var(--amber, #f59e0b)",
+                  borderRadius: 4,
+                  fontFamily: "var(--mono)",
+                  color: "var(--amber, #f59e0b)",
+                }}
+              >
+                ⚠ SKIP: this file will be left untouched on fork_ref. Resolve in
+                a follow-up PR. No working-tree write happens for this file.
+              </div>
+            )}
+            {!isSkip && (
+              <textarea
+                value={draftInput ?? ""}
+                onChange={(e) => onSetInput(e.target.value)}
+                disabled={decidedServerSide}
+                placeholder={placeholder}
+                style={{
+                  marginTop: 6,
+                  width: "100%",
+                  minHeight,
+                  background: "var(--bg-0)",
+                  border: `1px solid ${borderColor}`,
+                  color: "var(--fg-1)",
+                  fontFamily: "var(--mono)",
+                  fontSize: 11,
+                  padding: 8,
+                  resize: "vertical",
+                }}
+              />
+            )}
           </>
         );
       })()}
@@ -1026,96 +1049,7 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
       )}
 
       <div className="plan-grid">
-        <div className="col">
-          <Card title="› MERGE PLAN — LAYERS" hint={`${totalBatches} batches`}>
-            {layers.length === 0 ? (
-              <div
-                className="dim"
-                style={{ fontSize: 11, padding: "12px 0" }}
-              >
-                no merge plan available yet
-              </div>
-            ) : (
-              layers.map((layer) => {
-                const batches = usingSynthetic
-                  ? synthetic.batchesById.get(layer.layer_id) ?? []
-                  : batchesForLayer(plan, layer.layer_id);
-                return (
-                  <div key={layer.layer_id} className="layer-block">
-                    <div className="lhead">
-                      <div className="left">
-                        <span className="layer-id">L{layer.layer_id}</span>
-                        <span style={{ color: "var(--fg-0)" }}>
-                          {layer.name}
-                        </span>
-                        <span className="dim">
-                          · {batches.length} batches
-                        </span>
-                      </div>
-                      <div className="dim" style={{ fontSize: 11 }}>
-                        {layer.depends_on.length === 0
-                          ? "no deps"
-                          : `depends_on: [${layer.depends_on.join(", ")}]`}
-                      </div>
-                    </div>
-                    <div className="batches">
-                      {batches.slice(0, 12).map((b) => {
-                        const head = b.file_paths[0] ?? "(no files)";
-                        const more = Math.max(0, b.file_paths.length - 1);
-                        return (
-                          <div key={b.batch_id} className="batch">
-                            <div>
-                              <div className="id">{b.batch_id}</div>
-                              <div className="name">
-                                {head}
-                                {more > 0 && (
-                                  <span className="dim">
-                                    {" "}
-                                    + {more} more
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                            <div className="meta">
-                              <Pill tone={riskTone(b.risk_level)}>
-                                {b.risk_level}
-                              </Pill>
-                            </div>
-                            <div
-                              className="meta"
-                              style={{ fontFamily: "var(--mono)" }}
-                            >
-                              {b.file_paths.length}{" "}
-                              <span className="dim">
-                                file{b.file_paths.length === 1 ? "" : "s"}
-                              </span>
-                            </div>
-                          </div>
-                        );
-                      })}
-                      {batches.length > 12 && (
-                        <div
-                          className="dim"
-                          style={{ fontSize: 10, padding: "4px 10px" }}
-                        >
-                          + {batches.length - 12} more batches
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </Card>
-
-          <Card
-            title="› PLANNER ↔ JUDGE NEGOTIATION"
-            hint={`${rounds.length} round${rounds.length === 1 ? "" : "s"}`}
-          >
-            <NegotiationTimeline rounds={rounds} />
-          </Card>
-        </div>
-
+        {/* LEFT col — primary action area (wider) */}
         <div className="col">
           <Card
             title={`› HUMAN_REQUIRED · ${pending.length}`}
@@ -1142,24 +1076,76 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
                 )}
               </div>
             ) : (
-              items.map((u) => {
-                const active = u.item_id === selectedId;
-                const d = drafts[u.item_id];
-                return (
-                  <PendingDecisionCard
-                    key={u.item_id}
-                    item={u}
-                    active={active}
-                    draftChoice={d?.user_choice}
-                    draftInput={d?.user_input}
-                    onSelect={() => setSelectedId(u.item_id)}
-                    onSetChoice={(k) => setDraft(u.item_id, k)}
-                    onSetInput={(v) => setDraftInput(u.item_id, v)}
-                    onClear={() => clearDraft(u.item_id)}
-                    decidedServerSide={serverDecided}
-                  />
-                );
-              })
+              <div className="pending-master-detail">
+                {/* file list — left panel */}
+                <div className="pending-file-list">
+                  {items.map((u) => {
+                    const active = u.item_id === selectedId;
+                    const d = drafts[u.item_id];
+                    const fp = u.file_path;
+                    const slashIdx = fp.lastIndexOf("/");
+                    const base = slashIdx >= 0 ? fp.slice(slashIdx + 1) : fp;
+                    const dir = slashIdx >= 0 ? fp.slice(0, slashIdx + 1) : "";
+                    const pillCls =
+                      u.current_classification === "human_required"
+                        ? "red"
+                        : "amber";
+                    return (
+                      <div
+                        key={u.item_id}
+                        className={`pending-file-row ${active ? "active" : ""}`}
+                        onClick={() => setSelectedId(u.item_id)}
+                      >
+                        {dir && <div className="fp-dir">{dir}</div>}
+                        <div className="fp-base">{base}</div>
+                        <div
+                          className="row"
+                          style={{ marginTop: 4, gap: 4, flexWrap: "wrap" }}
+                        >
+                          <Pill tone={pillCls as PillTone}>
+                            {u.current_classification ?? "pending"}
+                          </Pill>
+                          {d?.user_choice && (
+                            <Pill tone="amber">{d.user_choice}</Pill>
+                          )}
+                          {u.user_choice && (
+                            <Pill tone="green">{u.user_choice}</Pill>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* detail panel — right panel */}
+                <div className="pending-detail-panel">
+                  {(() => {
+                    const u = items.find((i) => i.item_id === selectedId);
+                    if (!u)
+                      return (
+                        <div
+                          className="dim"
+                          style={{ fontSize: 11, padding: 16 }}
+                        >
+                          select a file from the list
+                        </div>
+                      );
+                    const d = drafts[u.item_id];
+                    return (
+                      <PendingDecisionCard
+                        item={u}
+                        active={true}
+                        draftChoice={d?.user_choice}
+                        draftInput={d?.user_input}
+                        onSelect={() => {}}
+                        onSetChoice={(k) => setDraft(u.item_id, k)}
+                        onSetInput={(v) => setDraftInput(u.item_id, v)}
+                        onClear={() => clearDraft(u.item_id)}
+                        decidedServerSide={serverDecided}
+                      />
+                    );
+                  })()}
+                </div>
+              </div>
             )}
           </Card>
 
@@ -1182,15 +1168,14 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
                 resize: "vertical",
               }}
             />
-            <div
-              className="row"
-              style={{ flexWrap: "wrap", gap: 8 }}
-            >
+            <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               <button
                 type="button"
                 className="btn"
                 onClick={onApplyRecommended}
-                disabled={serverDecided || pending.length === 0 || !inAwaitingHuman}
+                disabled={
+                  serverDecided || pending.length === 0 || !inAwaitingHuman
+                }
                 title={
                   !inAwaitingHuman
                     ? `run is ${snapshot?.status ?? "—"} — orchestrator is not waiting on plan review`
@@ -1247,14 +1232,126 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
                 REJECT
               </button>
             </div>
-            <div
-              className="dim mt-2"
-              style={{ fontSize: 10.5, lineHeight: 1.6 }}
-            >
+            <div className="dim mt-2" style={{ fontSize: 10.5, lineHeight: 1.6 }}>
               <code>submit_user_plan_decisions</code> +{" "}
               <code>submit_plan_review</code> · two-step protocol per plan
               v1.1 §P1-3
             </div>
+          </Card>
+        </div>
+
+        {/* RIGHT col — reference info */}
+        <div className="col">
+          <Card title="› MERGE PLAN — LAYERS" hint={`${totalBatches} batches`}>
+            {layers.length === 0 ? (
+              <div
+                className="dim"
+                style={{ fontSize: 11, padding: "12px 0" }}
+              >
+                no merge plan available yet
+              </div>
+            ) : (
+              layers.map((layer) => {
+                const batches = usingSynthetic
+                  ? synthetic.batchesById.get(layer.layer_id) ?? []
+                  : batchesForLayer(plan, layer.layer_id);
+                const hrCount = batches.filter(
+                  (b) => b.risk_level === "human_required",
+                ).length;
+                const riskyCount = batches.filter(
+                  (b) => b.risk_level === "auto_risky",
+                ).length;
+                return (
+                  <details key={layer.layer_id} className="layer-block" open>
+                    <summary className="lhead">
+                      <div className="left">
+                        <span className="layer-chevron" />
+                        <span className="layer-id">L{layer.layer_id}</span>
+                        <span style={{ color: "var(--fg-0)" }}>
+                          {layer.name}
+                        </span>
+                        <span className="dim">· {batches.length} batches</span>
+                        {hrCount > 0 && (
+                          <span
+                            style={{
+                              fontFamily: "var(--mono)",
+                              fontSize: 10,
+                              color: "var(--red)",
+                            }}
+                          >
+                            ▲ {hrCount}
+                          </span>
+                        )}
+                        {riskyCount > 0 && (
+                          <span
+                            style={{
+                              fontFamily: "var(--mono)",
+                              fontSize: 10,
+                              color: "var(--orange)",
+                            }}
+                          >
+                            ⚠ {riskyCount}
+                          </span>
+                        )}
+                      </div>
+                      <div className="dim" style={{ fontSize: 11 }}>
+                        {layer.depends_on.length === 0
+                          ? "no deps"
+                          : `→ [${layer.depends_on.join(", ")}]`}
+                      </div>
+                    </summary>
+                    <div className="batches">
+                      {batches.slice(0, 12).map((b) => {
+                        const head = b.file_paths[0] ?? "(no files)";
+                        const more = Math.max(0, b.file_paths.length - 1);
+                        return (
+                          <div key={b.batch_id} className="batch">
+                            <div>
+                              <div className="id">{b.batch_id}</div>
+                              <div className="name">
+                                {head}
+                                {more > 0 && (
+                                  <span className="dim"> + {more} more</span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="meta">
+                              <Pill tone={riskTone(b.risk_level)}>
+                                {b.risk_level}
+                              </Pill>
+                            </div>
+                            <div
+                              className="meta"
+                              style={{ fontFamily: "var(--mono)" }}
+                            >
+                              {b.file_paths.length}{" "}
+                              <span className="dim">
+                                file{b.file_paths.length === 1 ? "" : "s"}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {batches.length > 12 && (
+                        <div
+                          className="dim"
+                          style={{ fontSize: 10, padding: "4px 10px" }}
+                        >
+                          + {batches.length - 12} more batches
+                        </div>
+                      )}
+                    </div>
+                  </details>
+                );
+              })
+            )}
+          </Card>
+
+          <Card
+            title="› PLANNER ↔ JUDGE NEGOTIATION"
+            hint={`${rounds.length} round${rounds.length === 1 ? "" : "s"}`}
+          >
+            <NegotiationTimeline rounds={rounds} />
           </Card>
         </div>
       </div>

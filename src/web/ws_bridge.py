@@ -578,11 +578,16 @@ class MergeWSBridge:
             existing = item_map[item_id]
             user_choice = item_data.get("user_choice")
             user_input = item_data.get("user_input")
-            # Reviewer's free-text travels in two slots: ``user_input``
-            # stays a passive note unless the chosen option's kind is
-            # ``llm_with_instruction``, in which case the same text is
-            # also surfaced as ``custom_instruction`` for the LLM merge
-            # pipeline to pick up (per-file system-message override).
+            # Reviewer's free-text travels in three slots depending on
+            # the chosen option's kind:
+            #   * ``llm_with_instruction`` → also surfaced as
+            #     ``custom_instruction`` (per-file LLM hint).
+            #   * ``manual_paste`` → also surfaced as
+            #     ``manual_resolution`` (verbatim final file content).
+            #   * any other kind → ``user_input`` stays a passive note.
+            # The frontend can fill these slots explicitly; when it
+            # doesn't, the bridge infers from user_input + the chosen
+            # option key.
             custom_instruction = item_data.get("custom_instruction")
             if (
                 custom_instruction is None
@@ -591,11 +596,20 @@ class MergeWSBridge:
                 and user_input.strip()
             ):
                 custom_instruction = user_input
+            manual_resolution = item_data.get("manual_resolution")
+            if (
+                manual_resolution is None
+                and user_choice == "manual_paste"
+                and isinstance(user_input, str)
+                and user_input.strip()
+            ):
+                manual_resolution = user_input
             updated = existing.model_copy(
                 update={
                     "user_choice": user_choice,
                     "user_input": user_input,
                     "custom_instruction": custom_instruction,
+                    "manual_resolution": manual_resolution,
                 }
             )
             idx = next(

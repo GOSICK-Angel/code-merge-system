@@ -586,21 +586,25 @@ class TestPlanReviewConvergence:
         assert state.pending_user_decisions[0].file_path == "b.py"
         option_keys = {o.key for o in state.pending_user_decisions[0].options}
         # Base ladder (keep_head / take_target / llm_auto_merge) plus
-        # the always-emitted llm_with_instruction extension. The
-        # union_additions extra is data-driven (requires both sides to
-        # be pure additions); absent here because the synthetic plan
-        # carries no FileDiff entries.
+        # always-emitted Round-2/3 extras: llm_with_instruction,
+        # manual_paste, skip. The union_additions extra is data-driven
+        # (requires both sides to be pure additions); absent here
+        # because the synthetic plan carries no FileDiff entries.
         assert option_keys == {
             "keep_head",
             "take_target",
             "llm_auto_merge",
             "llm_with_instruction",
+            "manual_paste",
+            "skip",
         }
         kinds_by_key = {o.key: o.kind for o in state.pending_user_decisions[0].options}
         assert kinds_by_key["keep_head"] == "keep_head"
         assert kinds_by_key["take_target"] == "take_target"
         assert kinds_by_key["llm_auto_merge"] == "llm_default"
         assert kinds_by_key["llm_with_instruction"] == "llm_with_instruction"
+        assert kinds_by_key["manual_paste"] == "manual_paste"
+        assert kinds_by_key["skip"] == "skip"
 
 
 class TestClassifyPriorIssues:

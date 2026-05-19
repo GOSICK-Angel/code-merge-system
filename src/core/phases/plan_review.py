@@ -434,7 +434,7 @@ class PlanReviewPhase(Phase):
                     segment_telemetry=round_telemetry,
                 )
                 state.plan_review_log.append(round_log)
-                user_items = self._build_user_decision_items(state)
+                user_items = await self._build_user_decision_items(state, ctx)
                 state.pending_user_decisions = user_items
                 state.review_conclusion = ReviewConclusion(
                     reason=ReviewConclusionReason.SOURCE_CONFLICT,
@@ -477,7 +477,7 @@ class PlanReviewPhase(Phase):
                 )
                 state.plan_review_log.append(round_log)
 
-                user_items = self._build_user_decision_items(state)
+                user_items = await self._build_user_decision_items(state, ctx)
                 state.pending_user_decisions = user_items
                 state.review_conclusion = ReviewConclusion(
                     reason=ReviewConclusionReason.APPROVED,
@@ -644,7 +644,7 @@ class PlanReviewPhase(Phase):
                         "no pending discussions, stopping review loop",
                         round_num,
                     )
-                    user_items = self._build_user_decision_items(state)
+                    user_items = await self._build_user_decision_items(state, ctx)
                     state.pending_user_decisions = user_items
 
                     rej_details = [
@@ -705,7 +705,7 @@ class PlanReviewPhase(Phase):
                 )
                 state.plan_review_log.append(round_log)
 
-                user_items = self._build_user_decision_items(state)
+                user_items = await self._build_user_decision_items(state, ctx)
                 state.pending_user_decisions = user_items
                 state.review_conclusion = ReviewConclusion(
                     reason=ReviewConclusionReason.MAX_ROUNDS,
@@ -894,12 +894,27 @@ class PlanReviewPhase(Phase):
 
     _CONFLICT_PREVIEW_MAX_LINES = 50
 
-    def _build_user_decision_items(self, state: MergeState) -> list[UserDecisionItem]:
+    async def _build_user_decision_items(
+        self,
+        state: MergeState,
+        ctx: PhaseContext | None = None,
+    ) -> list[UserDecisionItem]:
         if state.merge_plan is None:
             return []
 
         issue_reasons = self._collect_issue_reasons(state)
         diff_map = self._collect_file_diff_info(state)
+
+        # Opt-in: ConflictAnalyst proposes file-specific decision options
+        # for HUMAN_REQUIRED files. Off by default — costs ~1 LLM call
+        # per HR file.
+        proposals_by_file: dict[str, list[DecisionOption]] = {}
+        if (
+            ctx is not None
+            and state.config.plan_review.analyst_decision_options_enabled
+            and "conflict_analyst" in ctx.agents
+        ):
+            proposals_by_file = await self._collect_analyst_proposals(state, ctx)
 
         items: list[UserDecisionItem] = []
         for batch in state.merge_plan.phases:
@@ -913,6 +928,12 @@ class PlanReviewPhase(Phase):
                 options = self._build_decision_options(
                     fp, batch.risk_level, context, diff_map.get(fp)
                 )
+                analyst_options = proposals_by_file.get(fp, [])
+                if analyst_options:
+                    # Surface analyst proposals BEFORE the base ladder so
+                    # they read as "what the system thinks", with the
+                    # generic ladder as a fallback below.
+                    options = analyst_options + options
                 description = self._build_description(
                     fp, batch.risk_level, context, diff_map.get(fp)
                 )
@@ -931,6 +952,88 @@ class PlanReviewPhase(Phase):
                 )
 
         return items
+
+    async def _collect_analyst_proposals(
+        self,
+        state: MergeState,
+        ctx: PhaseContext,
+    ) -> dict[str, list[DecisionOption]]:
+        """Run ConflictAnalyst.propose_decision_options on every
+        HUMAN_REQUIRED file in the plan. Per-file failures swallowed so
+        one bad LLM call cannot stall the phase — reviewer still sees
+        the base ladder."""
+        import asyncio
+
+        if state.merge_plan is None or ctx.git_tool is None:
+            return {}
+        analyst = ctx.agents.get("conflict_analyst")
+        if analyst is None:
+            return {}
+
+        hr_files: list[str] = []
+        for batch in state.merge_plan.phases:
+            if batch.risk_level != RiskLevel.HUMAN_REQUIRED:
+                continue
+            hr_files.extend(batch.file_paths)
+        if not hr_files:
+            return {}
+
+        diffs_by_path = {fd.file_path: fd for fd in state.file_diffs}
+        base_ref = state.merge_base_commit or ""
+
+        async def _propose_one(fp: str) -> tuple[str, list[DecisionOption]]:
+            try:
+                base_c, fork_c, up_c = ctx.git_tool.get_three_way_diff(
+                    base_ref, state.config.fork_ref, state.config.upstream_ref, fp
+                )
+            except Exception as exc:
+                logger.warning(
+                    "analyst proposal: three-way fetch failed for %s: %s", fp, exc
+                )
+                return fp, []
+            fd = diffs_by_path.get(fp)
+            language = (fd.language or "") if fd is not None else ""
+            try:
+                raw = await analyst.propose_decision_options(
+                    fp,
+                    base_c,
+                    fork_c,
+                    up_c,
+                    language=language,
+                    project_context=state.config.project_context,
+                    max_options=3,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "analyst proposal: propose_decision_options crashed for %s: %s",
+                    fp,
+                    exc,
+                )
+                return fp, []
+            opts: list[DecisionOption] = []
+            for p in raw:
+                key = p.get("key") or ""
+                label = p.get("label") or ""
+                if not key or not label:
+                    continue
+                opts.append(
+                    DecisionOption(
+                        key=f"analyst::{key}",
+                        label=label,
+                        description=p.get("description") or "",
+                        kind="analyst_proposed",
+                        preview=p.get("preview") or None,
+                    )
+                )
+            return fp, opts
+
+        try:
+            results = await asyncio.gather(*(_propose_one(fp) for fp in hr_files))
+        except Exception as exc:
+            logger.warning("analyst proposal: gather failed: %s", exc)
+            return {}
+
+        return {fp: opts for fp, opts in results if opts}
 
     def _collect_issue_reasons(self, state: MergeState) -> dict[str, list[str]]:
         reasons: dict[str, list[str]] = {}
@@ -1175,6 +1278,33 @@ class PlanReviewPhase(Phase):
                     "logging and upstream's validation order\")."
                 ),
                 kind="llm_with_instruction",
+            )
+        )
+        extras.append(
+            DecisionOption(
+                key="manual_paste",
+                label="Paste resolved content",
+                description=(
+                    "Paste the final file content into the textarea below — "
+                    "the Executor writes it verbatim and bypasses both the "
+                    "LLM merge and git's 3-way merge. Use when you've already "
+                    "resolved the conflict locally and want to surrender the "
+                    "exact bytes."
+                ),
+                kind="manual_paste",
+            )
+        )
+        extras.append(
+            DecisionOption(
+                key="skip",
+                label="Skip for now (resolve later)",
+                description=(
+                    "Leave this file untouched on fork_ref and resolve it "
+                    "in a follow-up PR. The Executor records SKIP and the "
+                    "file is excluded from subsequent auto-merge batches; "
+                    "no working-tree write happens here."
+                ),
+                kind="skip",
             )
         )
 

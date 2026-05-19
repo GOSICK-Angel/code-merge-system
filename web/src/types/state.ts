@@ -185,7 +185,10 @@ export type DecisionOptionKind =
   | "take_target"
   | "llm_default"
   | "llm_with_instruction"
-  | "union_additions";
+  | "union_additions"
+  | "manual_paste"
+  | "skip"
+  | "analyst_proposed";
 
 export interface PendingUserDecisionOption {
   key: string;
@@ -206,6 +209,7 @@ export interface PendingUserDecision {
   user_choice: string | null;
   user_input: string | null;
   custom_instruction?: string | null;
+  manual_resolution?: string | null;
 }
 
 // L2 plan/layer/log payload — mirror of src/web/serializers.py

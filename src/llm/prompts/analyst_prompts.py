@@ -187,3 +187,116 @@ Return JSON:
   "rationale": "Detailed explanation of the analysis and recommendation",
   "is_security_sensitive": false
 }}"""
+
+
+def build_decision_proposal_prompt(
+    file_path: str,
+    base_content: str | None,
+    fork_content: str | None,
+    upstream_content: str | None,
+    language: str = "",
+    project_context: str = "",
+    max_options: int = 3,
+) -> str:
+    """Build a prompt that asks the analyst to propose 1–``max_options``
+    file-specific decision options for a HUMAN_REQUIRED file.
+
+    Each option must be concrete and actionable — not "review carefully"
+    — and the analyst should ground each proposal in the actual fork /
+    upstream / base content.  Returned JSON is consumed by
+    ``parse_decision_proposals`` below.
+    """
+    context_section = (
+        f"\n## Project Context\n{project_context}\n" if project_context else ""
+    )
+
+    return f"""You are proposing concrete merge-resolution options for a file that
+landed in HUMAN_REQUIRED. The reviewer will see these proposals as
+clickable buttons; each option must be actionable, file-specific, and
+grounded in the actual three-way content below — not a generic
+"review carefully" advisory.
+{context_section}
+## File
+`{file_path}` (language={language or "unknown"})
+
+## Base (common ancestor)
+{_fmt_version(base_content, language)}
+
+## Fork side (HEAD)
+{_fmt_version(fork_content, language)}
+
+## Upstream side (target)
+{_fmt_version(upstream_content, language)}
+
+## Your Task
+Propose 1 to {max_options} concrete merge strategies for this file. Each
+strategy should describe a SPECIFIC way to combine fork and upstream
+changes — naming the actual fields, functions, or regions involved.
+
+Avoid these generic non-actions:
+- "review and merge manually"
+- "take both sides"  (be specific about WHICH parts of each side)
+- "ask the team"
+
+Return JSON:
+{{
+  "proposals": [
+    {{
+      "key": "short-kebab-id",
+      "label": "Short button label (≤60 chars)",
+      "description": "1–2 sentences explaining WHAT this option does for this file",
+      "preview": "Optional short snippet showing the expected merged region (may be empty)"
+    }}
+  ]
+}}
+
+Respond with ONLY the JSON object. No markdown, no extra prose."""
+
+
+def parse_decision_proposals(raw: str) -> list[dict[str, str]]:
+    """Best-effort parser for ``build_decision_proposal_prompt`` output.
+
+    Returns a list of ``{key, label, description, preview}`` dicts. Any
+    parse failure yields an empty list — the caller treats that as
+    "analyst could not propose anything" and falls back to the base
+    decision ladder. Never raises.
+    """
+    import json
+    import re
+
+    text = (raw or "").strip()
+    # Strip code fences if the model added them despite the instruction.
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text)
+
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    raw_props = obj.get("proposals") if isinstance(obj, dict) else None
+    if not isinstance(raw_props, list):
+        return []
+
+    out: list[dict[str, str]] = []
+    for p in raw_props:
+        if not isinstance(p, dict):
+            continue
+        key = str(p.get("key", "")).strip()
+        label = str(p.get("label", "")).strip()
+        description = str(p.get("description", "")).strip()
+        preview = p.get("preview")
+        preview_str = (
+            str(preview).strip() if isinstance(preview, str) and preview.strip() else ""
+        )
+        if not key or not label:
+            continue
+        out.append(
+            {
+                "key": key,
+                "label": label[:80],
+                "description": description,
+                "preview": preview_str,
+            }
+        )
+    return out
