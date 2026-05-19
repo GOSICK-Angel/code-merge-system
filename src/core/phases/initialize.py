@@ -5,6 +5,7 @@ import fnmatch
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.models.decision import (
@@ -138,6 +139,26 @@ def _parse_file_status(status_char: str) -> FileStatus:
         "R": FileStatus.RENAMED,
     }
     return mapping.get(status_char.upper(), FileStatus.MODIFIED)
+
+
+def _log_security_summary(
+    file_diffs: list[Any],
+    fc_config: Any,
+    log: Any,
+) -> None:
+    patterns = fc_config.security_sensitive.patterns
+    log.info(
+        "Security patterns loaded: %d — first: %s",
+        len(patterns),
+        patterns[0] if patterns else "none",
+    )
+    sensitive = sum(1 for fd in file_diffs if fd.is_security_sensitive)
+    conflict = sum(1 for fd in file_diffs if fd.conflict_count > 0)
+    log.info(
+        "is_security_sensitive=True: %d file(s); conflict_count>0: %d file(s)",
+        sensitive,
+        conflict,
+    )
 
 
 def _count_diff_lines(
@@ -510,6 +531,8 @@ class InitializePhase(Phase):
             )
 
         state.file_diffs = file_diffs
+
+        _log_security_summary(file_diffs, state.config.file_classifier, logger)
 
         upstream_renames = ctx.git_tool.detect_renames(
             merge_base, state.config.upstream_ref

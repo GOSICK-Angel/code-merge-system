@@ -41,6 +41,7 @@ const baseContext: SetupContext = {
   // device" so disk-hint-driven prefilling continues to apply; the
   // pristine-device path has its own dedicated test below.
   has_global_env: true,
+  has_project_env: false,
   anthropic_key_hint: { name: "ANTHROPIC_API_KEY", masked: "", source: "" },
   openai_key_hint: { name: "OPENAI_API_KEY", masked: "", source: "" },
   github_token_hint: { name: "GITHUB_TOKEN", masked: "", source: "" },

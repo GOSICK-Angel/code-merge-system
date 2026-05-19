@@ -122,7 +122,7 @@ def serialize_plan(state: MergeState) -> dict[str, Any] | None:
         "project_context_summary": truncate_project_summary(
             plan.project_context_summary
         ),
-        "special_instructions": truncate_instructions(plan.special_instructions),
+        "special_instructions": plan.special_instructions,
     }
 
 

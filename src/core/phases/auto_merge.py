@@ -42,7 +42,7 @@ from src.models.plan_review import DecisionOption, UserDecisionItem
 from src.models.state import MergeState, PhaseResult, SystemStatus
 from src.tools.binary_assets import is_binary_asset
 from src.tools.commit_replayer import CommitReplayer
-from src.tools.conflict_markers import file_has_conflict_markers
+from src.tools.conflict_markers import extract_conflict_info, file_has_conflict_markers
 from src.tools.file_classifier import _fork_deleted_skip_record, is_fork_deleted
 from src.tools.git_committer import GitCommitter
 from src.tools.patch_applier import create_escalate_record
@@ -235,6 +235,26 @@ class AutoMergePhase(Phase):
                 + (" ..." if len(files_with_markers) > 10 else ""),
             )
             marker_set = set(files_with_markers)
+
+            # Extract per-file conflict info once so both the decision record
+            # and the UserDecisionItem can reuse it without re-reading.
+            conflict_info: dict[str, tuple[int, str]] = {
+                fp: extract_conflict_info(repo_path, fp) for fp in files_with_markers
+            }
+
+            # Back-fill conflict_count on the FileDiff objects so the
+            # checkpoint accurately reflects the discovered conflicts (the
+            # initialize-phase count was 0 because no working-tree simulation
+            # was run at that point).
+            fp_to_count = {fp: cnt for fp, (cnt, _) in conflict_info.items() if cnt > 0}
+            if fp_to_count:
+                state.file_diffs = [
+                    fd.model_copy(update={"conflict_count": fp_to_count[fd.file_path]})
+                    if fd.file_path in fp_to_count
+                    else fd
+                    for fd in state.file_diffs
+                ]
+
             for fp in files_with_markers:
                 fd_item = file_diffs_map.get(fp)
                 state.file_decision_records[fp] = FileDecisionRecord(
@@ -268,16 +288,23 @@ class AutoMergePhase(Phase):
             for fp in files_with_markers:
                 if fp in existing_plan_paths:
                     continue
+                cnt, preview = conflict_info.get(fp, (0, ""))
+                conflict_summary = (
+                    f" ({cnt} conflict block{'s' if cnt != 1 else ''} detected)"
+                    if cnt > 0
+                    else ""
+                )
                 state.pending_user_decisions.append(
                     UserDecisionItem(
                         item_id=f"conflict_markers_{fp}",
                         file_path=fp,
                         description=(
                             f"File '{fp}' contains unresolved git conflict "
-                            "markers from cherry-pick fall-back. Needs human "
-                            "resolution before merge can proceed."
+                            f"markers from cherry-pick fall-back{conflict_summary}. "
+                            "Needs human resolution before merge can proceed."
                         ),
                         risk_context="unresolved_conflict_markers",
+                        conflict_preview=preview,
                         current_classification=RiskLevel.HUMAN_REQUIRED.value,
                         options=[
                             DecisionOption(

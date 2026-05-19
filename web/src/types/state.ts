@@ -404,11 +404,10 @@ export interface SetupContext {
   has_existing_config: boolean;
   existing_config_summary: Record<string, unknown> | null;
   forks_profile_threshold: number;
-  // True when ~/.config/code-merge-system/.env exists. Used by the
-  // Setup view: when both this flag and ``has_existing_config`` are
-  // false the provider sections render with empty key/base_url/models
-  // so a fresh device + fresh project doesn't show preset values.
+  // True when ~/.config/code-merge-system/.env exists.
   has_global_env: boolean;
+  // True when .merge/.env exists in the project directory.
+  has_project_env: boolean;
 
   // Per-provider key/base-url hints + the recommended-model dropdown
   // source. ``agent_inventory`` is the ordered list of agent roles to
@@ -442,6 +441,7 @@ export interface SetupPayload {
   default_provider: ProviderName | null;
   agent_choices: Record<string, AgentChoice>;
   thresholds: ThresholdsPayload | null;
+  request_timeout_seconds: number | null;
   dry_run: boolean;
   workflow: string | null;
   init_forks_profile: boolean;

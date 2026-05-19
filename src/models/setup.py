@@ -119,6 +119,7 @@ class SetupPayload(BaseModel):
     agent_choices: dict[str, AgentChoice] = Field(default_factory=dict)
 
     thresholds: ThresholdsPayload | None = None
+    request_timeout_seconds: int | None = None
     dry_run: bool = False
     workflow: str | None = None
     init_forks_profile: bool = False
@@ -214,6 +215,7 @@ class SetupContext(BaseModel):
     # untouched device + untouched project — so the reviewer is not
     # tricked into thinking the form is already configured.
     has_global_env: bool = False
+    has_project_env: bool = False
 
     # Per-provider hints — replaces the old flat ``api_key_hints`` list
     # so the form can render two independent provider sections without

@@ -29,6 +29,7 @@ from src.llm.prompts.planner_judge_prompts import (
     classify_prior_issues,
     precheck_plan_integrity,
 )
+from src.tools.merge_plan_report import write_merge_plan_report
 from src.tools.report_writer import write_plan_review_report
 
 logger = logging.getLogger(__name__)
@@ -147,9 +148,12 @@ def _aggregate_segment_telemetry(
     segment_results: dict[int, SegmentReviewSnapshot],
 ) -> SegmentTelemetrySummary | None:
     """P3-10: roll up the segment-level telemetry recorded by
-    PlannerJudgeAgent into a per-round summary. Returns None when no
-    LLM segment fired this round (cache-only / safelist-only / empty
-    plan) — the report renderer drops empty rows."""
+    PlannerJudgeAgent into a per-round summary. Returns None only when
+    no segments ran at all. A round where every segment short-circuited
+    (cache- or safelist-only) still gets a summary so the audit log
+    explicitly records that the LLM was skipped — previously this case
+    produced an empty Review Log entry indistinguishable from "Judge
+    never ran"."""
     if not segment_results:
         return None
     summary = SegmentTelemetrySummary()
@@ -166,8 +170,6 @@ def _aggregate_segment_telemetry(
                 summary.total_tokens_in += snap.tokens_in
             if snap.tokens_out is not None:
                 summary.total_tokens_out += snap.tokens_out
-    if summary.llm_segments == 0:
-        return None
     return summary
 
 
@@ -771,6 +773,7 @@ class PlanReviewPhase(Phase):
                     "suggested": issue.suggested_classification.value
                     if hasattr(issue.suggested_classification, "value")
                     else str(issue.suggested_classification),
+                    "source": issue.source,
                 }
                 for issue in verdict.issues
             ],
@@ -812,6 +815,14 @@ class PlanReviewPhase(Phase):
                 )
             ),
         )
+
+        try:
+            write_merge_plan_report(state)
+        except Exception as exc:
+            logger.warning(
+                "Failed to regenerate MERGE_PLAN report after plan review: %s",
+                exc,
+            )
 
     # When LLM is unavailable we still need explicit user approval, but we
     # cap how many decision items we surface. A 1500-file plan would

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { WsClient } from "../ws/client";
 import type { OutboundMessage } from "../ws/messages";
 import { useRunStore } from "../store/runStore";
@@ -39,6 +39,7 @@ function groupByFile(
 
 export function JudgeVerdict({ clientRef }: Props): JSX.Element {
   const snapshot = useRunStore((s) => s.snapshot);
+  const conn = useRunStore((s) => s.conn);
   const verdict: JudgeVerdictType | null = snapshot?.judgeVerdict ?? null;
   const resolution: JudgeResolution | null = snapshot?.judgeResolution ?? null;
   const rerunRound = snapshot?.rerunRound ?? 0;
@@ -47,10 +48,24 @@ export function JudgeVerdict({ clientRef }: Props): JSX.Element {
   const [pendingAction, setPendingAction] = useState<JudgeResolution | null>(
     null,
   );
+  const [wsWarning, setWsWarning] = useState(false);
+
+  // When WS reconnects and server hasn't confirmed our action, allow retry
+  useEffect(() => {
+    if (conn === "open" && resolution === null) {
+      setPendingAction(null);
+      setWsWarning(false);
+    }
+  }, [conn, resolution]);
 
   const send = (msg: OutboundMessage) => clientRef.current?.send(msg);
   const submit = (r: JudgeResolution) => {
     if (resolution !== null) return;
+    if (conn !== "open") {
+      setWsWarning(true);
+      return;
+    }
+    setWsWarning(false);
     setPendingAction(r);
     send({ type: "submit_judge_resolution", payload: { resolution: r } });
   };
@@ -185,6 +200,22 @@ export function JudgeVerdict({ clientRef }: Props): JSX.Element {
         </div>
       </div>
 
+      {wsWarning && (
+        <div
+          style={{
+            marginBottom: 12,
+            padding: "8px 14px",
+            background: "color-mix(in oklch, var(--red), transparent 85%)",
+            border: "1px solid var(--red)",
+            fontSize: 11.5,
+            color: "var(--fg-1)",
+          }}
+        >
+          ⚠ WebSocket is not connected — action was not sent. The merge
+          backend may not be running. Retrying connection…
+        </div>
+      )}
+
       <Card title="› REPAIR ROUNDS" hint={`max ${maxRerunRounds || "∞"}`}>
         <div className="rounds">
           {rounds.map((r) => (
@@ -220,11 +251,18 @@ export function JudgeVerdict({ clientRef }: Props): JSX.Element {
       </Card>
 
       <div className="judge-grid mt-2">
-        <div>
+        <div style={{ minWidth: 0 }}>
           <Card
             title="› ISSUES BY SEVERITY"
             hint={`${issuesByCount.critical}C · ${issuesByCount.high}H · ${issuesByCount.medium}M · ${issuesByCount.low}L`}
+            style={{ overflow: "hidden" }}
           >
+            <div
+              className="dim"
+              style={{ fontSize: 10, marginBottom: 8, letterSpacing: "0.06em" }}
+            >
+              Read-only analysis — use ACCEPT / RERUN / ABORT above to act.
+            </div>
             <div className="row mb-2" style={{ gap: 8 }}>
               <Pill tone="red">CRITICAL · {issuesByCount.critical}</Pill>
               <Pill tone="orange">HIGH · {issuesByCount.high}</Pill>
@@ -293,8 +331,17 @@ export function JudgeVerdict({ clientRef }: Props): JSX.Element {
         <div className="col">
           <Card
             title="› FAILED FILES"
-            hint={`${verdict.failed_files.length}`}
+            hint={`${verdict.failed_files.length + verdict.conditional_files.length} files`}
+            style={{ minWidth: 0, overflow: "hidden" }}
           >
+            <div
+              className="dim"
+              style={{ fontSize: 10, marginBottom: 8, letterSpacing: "0.06em" }}
+            >
+              {verdict.failed_files.length > 0
+                ? "RERUN to retry auto-merge; ACCEPT to force-merge as-is."
+                : "CONDITIONAL files passed with caveats — ACCEPT to proceed."}
+            </div>
             {verdict.failed_files.length === 0 &&
             verdict.conditional_files.length === 0 ? (
               <div
@@ -304,7 +351,9 @@ export function JudgeVerdict({ clientRef }: Props): JSX.Element {
                 no failed or conditional files
               </div>
             ) : (
-              <>
+              <div
+                style={{ maxHeight: 340, overflowY: "auto", overflowX: "hidden" }}
+              >
                 {verdict.failed_files.map((f) => (
                   <div
                     key={`fail-${f}`}
@@ -316,7 +365,16 @@ export function JudgeVerdict({ clientRef }: Props): JSX.Element {
                     }}
                   >
                     <div className="row between">
-                      <span style={{ color: "var(--fg-0)" }}>{f}</span>
+                      <span
+                        style={{
+                          color: "var(--fg-0)",
+                          wordBreak: "break-all",
+                          minWidth: 0,
+                          flex: 1,
+                        }}
+                      >
+                        {f}
+                      </span>
                       <Pill tone="red">FAILED</Pill>
                     </div>
                   </div>
@@ -332,12 +390,21 @@ export function JudgeVerdict({ clientRef }: Props): JSX.Element {
                     }}
                   >
                     <div className="row between">
-                      <span style={{ color: "var(--fg-0)" }}>{f}</span>
+                      <span
+                        style={{
+                          color: "var(--fg-0)",
+                          wordBreak: "break-all",
+                          minWidth: 0,
+                          flex: 1,
+                        }}
+                      >
+                        {f}
+                      </span>
                       <Pill tone="amber">CONDITIONAL</Pill>
                     </div>
                   </div>
                 ))}
-              </>
+              </div>
             )}
           </Card>
 
@@ -345,6 +412,7 @@ export function JudgeVerdict({ clientRef }: Props): JSX.Element {
             <Card
               title="› REPAIR INSTRUCTIONS"
               hint={`${verdict.repair_instructions.length}`}
+              style={{ minWidth: 0, overflow: "hidden" }}
             >
               {verdict.repair_instructions.map((r, idx) => (
                 <div

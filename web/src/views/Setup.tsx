@@ -54,6 +54,7 @@ interface FormState {
   threshold_auto: string;
   threshold_low: string;
   threshold_high: string;
+  request_timeout_seconds: string;
   dry_run: boolean;
   workflow: string;
   init_forks_profile: boolean;
@@ -151,7 +152,8 @@ function deriveDefaults(ctx: SetupContext): FormState {
   // truly empty slate. Even if shell env happens to leak an
   // ANTHROPIC_API_KEY into ``*_key_hint`` we keep the section blank
   // so the reviewer sees they're configuring from scratch.
-  const pristineDevice = !ctx.has_global_env && !ctx.has_existing_config;
+  const pristineDevice =
+    !ctx.has_global_env && !ctx.has_existing_config && !ctx.has_project_env;
   const anthropicHasKey = !pristineDevice && !!ctx.anthropic_key_hint.masked;
   const openaiHasKey = !pristineDevice && !!ctx.openai_key_hint.masked;
   const recommendedAnthropic =
@@ -257,6 +259,10 @@ function deriveDefaults(ctx: SetupContext): FormState {
       thresholds.risk_score_high === undefined
         ? ""
         : String(thresholds.risk_score_high),
+    request_timeout_seconds:
+      typeof summary.request_timeout_seconds === "number"
+        ? String(summary.request_timeout_seconds)
+        : "",
     dry_run: false,
     workflow: "",
     init_forks_profile: false,
@@ -277,6 +283,12 @@ function buildThresholds(form: FormState): ThresholdsPayload | null {
   if (low !== null) result.risk_score_low = low;
   if (high !== null) result.risk_score_high = high;
   return Object.keys(result).length === 0 ? null : result;
+}
+
+function parseTimeout(s: string): number | null {
+  if (s.trim() === "") return null;
+  const n = parseInt(s, 10);
+  return Number.isFinite(n) && n >= 5 ? n : null;
 }
 
 function parseModels(text: string): string[] {
@@ -324,6 +336,7 @@ function buildPayload(form: FormState): SetupPayload {
       form.default_provider === "" ? null : form.default_provider,
     agent_choices,
     thresholds: buildThresholds(form),
+    request_timeout_seconds: parseTimeout(form.request_timeout_seconds),
     dry_run: form.dry_run,
     workflow: form.workflow.trim() === "" ? null : form.workflow,
     init_forks_profile: form.init_forks_profile,
@@ -339,10 +352,9 @@ function validate(form: FormState, ctx: SetupContext): string | null {
   if (!form.target_branch.trim()) return "Target branch is required.";
   if (!form.fork_ref.trim()) return "Fork ref is required.";
 
-  // Pristine slate (no global env + no project config) — ignore any
-  // disk hints so the user is forced to type an API key explicitly,
-  // matching the blank-form UX.
-  const pristineDevice = !ctx.has_global_env && !ctx.has_existing_config;
+  // Pristine slate — no global env, no project config, no project .env.
+  const pristineDevice =
+    !ctx.has_global_env && !ctx.has_existing_config && !ctx.has_project_env;
 
   // At least one provider must be enabled AND have a key (in the form
   // OR already on disk per ctx) AND list ≥1 model.
@@ -404,6 +416,12 @@ function validate(form: FormState, ctx: SetupContext): string | null {
     const n = Number(raw);
     if (!Number.isFinite(n) || n < 0 || n > 1) {
       return `${key} must be between 0.0 and 1.0`;
+    }
+  }
+  if (form.request_timeout_seconds.trim() !== "") {
+    const n = parseInt(form.request_timeout_seconds, 10);
+    if (!Number.isFinite(n) || n < 5) {
+      return "request_timeout_seconds must be an integer ≥ 5";
     }
   }
   return null;
@@ -745,9 +763,11 @@ export function Setup({ clientRef }: Props): JSX.Element {
   if (form.openai.enabled) enabledProviders.push("openai");
   const needsDefaultPick = enabledProviders.length > 1;
 
-  // Pristine slate — see deriveDefaults. Suppress disk-hint badges so
-  // the section reads as "nothing configured yet" all the way through.
-  const pristineDevice = !context.has_global_env && !context.has_existing_config;
+  // Pristine slate — see deriveDefaults.
+  const pristineDevice =
+    !context.has_global_env &&
+    !context.has_existing_config &&
+    !context.has_project_env;
   const blankHint = { masked: "", source: "" };
 
   return (
@@ -984,7 +1004,7 @@ export function Setup({ clientRef }: Props): JSX.Element {
         }
         hint={
           advancedOpen
-            ? "github / thresholds / dry-run / workflow"
+            ? "github / thresholds / timeout / dry-run / workflow"
             : "click to expand"
         }
       >
@@ -1073,6 +1093,26 @@ export function Setup({ clientRef }: Props): JSX.Element {
                   onChange={(e) => updateField("threshold_high", e.target.value)}
                   placeholder="0.60"
                 />
+              </div>
+            </div>
+            <div>
+              <label style={labelStyle} htmlFor="request_timeout_seconds">
+                request_timeout_seconds (≥ 5, default 300)
+              </label>
+              <input
+                id="request_timeout_seconds"
+                style={{ ...inputStyle, width: 160 }}
+                type="number"
+                min={5}
+                step={1}
+                value={form.request_timeout_seconds}
+                onChange={(e) =>
+                  updateField("request_timeout_seconds", e.target.value)
+                }
+                placeholder="300"
+              />
+              <div className="dim" style={{ fontSize: 10, marginTop: 4 }}>
+                per-request HTTP timeout in seconds passed to the LLM SDK
               </div>
             </div>
             {showForksProfile && (

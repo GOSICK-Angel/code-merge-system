@@ -224,9 +224,28 @@ def compute_risk_score(file_diff: FileDiff, config: FileClassifierConfig) -> flo
         )
     ):
         bumped = raw_score + config.security_sensitive.risk_hint_bump
-        return float(round(min(1.0, bumped), 3))
+        return float(
+            round(min(1.0, _apply_c_class_floor(bumped, file_diff, config)), 3)
+        )
 
-    return float(round(raw_score, 3))
+    return float(round(_apply_c_class_floor(raw_score, file_diff, config), 3))
+
+
+def _apply_c_class_floor(
+    score: float, file_diff: FileDiff, config: FileClassifierConfig
+) -> float:
+    """Lift C-class (both_changed) files above the auto_safe band when
+    no stronger path-based signal already escalated. Pre-merge there are
+    no conflict markers yet, so the conflict_density dimension is always
+    0 for C-class — a structural three-way conflict can otherwise score
+    as low as ~0.3 and slip into the auto_safe batch. Files with no
+    content change are excluded so renames don't get spuriously bumped.
+    """
+    if file_diff.change_category != FileChangeCategory.C:
+        return score
+    if file_diff.lines_added == 0 and file_diff.lines_deleted == 0:
+        return score
+    return max(score, config.c_class_risk_floor)
 
 
 async def compute_llm_risk_score(
@@ -290,6 +309,12 @@ def classify_file(
 
     if file_diff.file_status == FileStatus.DELETED and file_diff.lines_added == 0:
         return RiskLevel.DELETED_ONLY
+
+    # Committed conflict markers (<<<<<<< in the diff) are always a human concern:
+    # the executor cannot resolve them automatically and any auto-apply would embed
+    # the raw markers into the working tree.
+    if file_diff.conflict_count > 0:
+        return RiskLevel.HUMAN_REQUIRED
 
     force_safe_patterns = getattr(config, "force_auto_safe_patterns", [])
     if force_safe_patterns and not file_diff.is_security_sensitive:

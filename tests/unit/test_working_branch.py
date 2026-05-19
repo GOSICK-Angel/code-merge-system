@@ -266,3 +266,59 @@ async def test_orchestrator_skips_branch_creation_on_resume(tmp_path: Path):
 
     mock_create.assert_not_called()
     assert result.active_branch == "merge/auto-20260101-120000"
+
+
+def test_create_working_branch_resets_dirty_index(tmp_path: Path):
+    """When the git index has unresolved merge conflicts (ls-files --unmerged
+    returns output), create_working_branch must reset --hard before checking out
+    the base_ref so a subsequent run is not blocked by stale conflict markers."""
+    import subprocess
+
+    repo = _make_repo(tmp_path)
+
+    # Create a second branch with a conflicting file so we can stage a conflict.
+    subprocess.run(
+        ["git", "checkout", "-b", "other"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+    (repo / "README.md").write_text("branch-other content")
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=str(repo), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "other"], cwd=str(repo), check=True, capture_output=True
+    )
+
+    subprocess.run(
+        ["git", "checkout", "main"], cwd=str(repo), check=True, capture_output=True
+    )
+    (repo / "README.md").write_text("main content")
+    subprocess.run(
+        ["git", "add", "README.md"], cwd=str(repo), check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "commit", "-m", "main2"], cwd=str(repo), check=True, capture_output=True
+    )
+
+    # Produce a merge conflict in the index (merge will fail but leave markers staged).
+    subprocess.run(["git", "merge", "other"], cwd=str(repo), capture_output=True)
+
+    # Verify the index is dirty with unmerged files.
+    result = subprocess.run(
+        ["git", "ls-files", "--unmerged"], cwd=str(repo), capture_output=True, text=True
+    )
+    assert result.stdout.strip(), "pre-condition: index must have unmerged files"
+
+    git_tool = GitTool(str(repo))
+    branch_name = git_tool.create_working_branch("merge/clean-start", "main")
+
+    assert branch_name == "merge/clean-start"
+    assert _current_branch(repo) == "merge/clean-start"
+
+    # After reset --hard the unmerged state must be gone.
+    ls = subprocess.run(
+        ["git", "ls-files", "--unmerged"], cwd=str(repo), capture_output=True, text=True
+    )
+    assert ls.stdout.strip() == ""

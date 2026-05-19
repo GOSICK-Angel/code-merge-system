@@ -316,6 +316,13 @@ class PlannerAgent(BaseAgent):
                 f"(treat old/new paths as related): {rename_lines}"
             )
 
+        migration_dep = _build_migration_dependency_hint(
+            file_diffs,
+            migration_dir_patterns=state.config.file_classifier.migration_dir_patterns,
+        )
+        if migration_dep:
+            special_instructions.append(migration_dep)
+
         return MergePlan(
             created_at=datetime.now(),
             upstream_ref=state.config.upstream_ref,
@@ -325,7 +332,7 @@ class PlannerAgent(BaseAgent):
             risk_summary=risk_summary,
             category_summary=cat_summary,
             layers=layers,
-            project_context_summary=state.config.project_context or "",
+            project_context_summary=state.user_project_context or "",
             special_instructions=special_instructions,
         )
 
@@ -959,7 +966,7 @@ class PlannerAgent(BaseAgent):
         }
 
         responses = await self._evaluate_judge_issues(
-            state.merge_plan, judge_issues, lang
+            state.merge_plan, judge_issues, lang, file_diffs=state.file_diffs
         )
 
         accepted_issues = [
@@ -1023,11 +1030,14 @@ class PlannerAgent(BaseAgent):
         plan: MergePlan,
         judge_issues: list[PlanIssue],
         lang: str = "en",
+        file_diffs: list[FileDiff] | None = None,
     ) -> list[PlannerIssueResponse]:
         if not judge_issues:
             return []
 
-        prompt = build_evaluation_prompt(plan, judge_issues, lang)
+        prompt = build_evaluation_prompt(
+            plan, judge_issues, lang, file_diffs=file_diffs
+        )
         messages = [{"role": "user", "content": prompt}]
 
         try:
@@ -1404,6 +1414,56 @@ def _parse_meta_review_json(raw: str) -> dict[str, str]:
         }
     except Exception:
         return {"assessment": raw[:200], "recommendation": ""}
+
+
+def _build_migration_dependency_hint(
+    file_diffs: list[FileDiff],
+    migration_dir_patterns: list[str] | None = None,
+) -> str:
+    """Return a special_instruction when migration files and both_changed
+    model files share a common directory prefix.
+
+    DB migrations must be applied before the model code that references the
+    new schema columns.  When the plan contains upstream-new migration files
+    (D-missing) alongside fork-conflicted model files (C-class) in the same
+    top-level package directory, an explicit ordering reminder is emitted so
+    the Executor and human reviewers know to merge migrations first.
+
+    ``migration_dir_patterns`` is a list of path substrings (case-insensitive)
+    that identify migration directories.  Defaults come from
+    ``FileClassifierConfig.migration_dir_patterns``; callers pass
+    ``state.config.file_classifier.migration_dir_patterns`` so projects can
+    extend the list via config.yaml without touching production code.
+    """
+    patterns = [
+        p.lower() for p in (migration_dir_patterns or ["migrations/", "alembic/"])
+    ]
+
+    migration_dirs: set[str] = set()
+    conflict_dirs: set[str] = set()
+
+    for fd in file_diffs:
+        parts = fd.file_path.split("/")
+        top_dir = parts[0] if len(parts) > 1 else ""
+        path_lower = fd.file_path.lower()
+        if fd.change_category == FileChangeCategory.D_MISSING and any(
+            pat in path_lower for pat in patterns
+        ):
+            migration_dirs.add(top_dir)
+        elif fd.change_category == FileChangeCategory.C:
+            conflict_dirs.add(top_dir)
+
+    overlapping = migration_dirs & conflict_dirs
+    if not overlapping:
+        return ""
+
+    dirs_str = ", ".join(sorted(overlapping))
+    return (
+        f"ORDERING DEPENDENCY: upstream-new migration file(s) and fork-conflicted "
+        f"model file(s) share the same top-level package(s): [{dirs_str}]. "
+        "Apply migration batches BEFORE merging the conflicted model files — "
+        "the migrations introduce DB schema changes that the model code depends on."
+    )
 
 
 from src.agents.registry import AgentRegistry  # noqa: E402

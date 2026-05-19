@@ -143,6 +143,9 @@ class GitTool:
         resolved = branch_name.replace(
             "{timestamp}", datetime.now().strftime("%Y%m%d-%H%M%S")
         )
+        unmerged = self.repo.git.ls_files("--unmerged")
+        if unmerged.strip():
+            self.repo.git.reset("--hard", "HEAD")
         self.repo.git.checkout(base_ref)
         self.repo.git.checkout("-b", resolved)
         return resolved

@@ -85,13 +85,6 @@ Changed files ({len(file_diffs)} total):
 **human_required** — Use ONLY when at least ONE of:
   - conflicts > 0  (actual merge conflict markers present)
   - security_sensitive = true  (auth, crypto, secrets, permissions)
-  - Path obviously implements an authentication / verification / OTP / 2FA / MFA /
-    OAuth / signin / signout / signature / permission / API-key flow — even when
-    `security_sensitive=false`, prefer `human_required` for these. Examples:
-    `auth.py`, `*verify*.py`, `*otp*.py`, `oauth_*`, `signin_*`, `*signature*`,
-    `*permission*`, `*api_key*`. Env-template files (`.env.example`,
-    `.env.sample`, `.env.template`) are placeholders; classify them
-    `auto_risky`, NOT `human_required`.
   - Core business logic with both sides making semantic changes
 
 **deleted_only** — file_status is deleted, no conflicts
@@ -196,6 +189,8 @@ PLANNER_EVALUATION_SYSTEM = """You are a code merge planning expert evaluating r
 For each issue raised by the reviewer, you must independently assess whether it is valid based on
 the file's actual characteristics (diff size, conflict count, security sensitivity, language).
 You are allowed to REJECT suggestions you disagree with — provide a clear technical reason.
+If a file has conflict_count=0 AND is_security_sensitive=false, path-name alone is NOT a valid reason
+to upgrade its risk level — REJECT such suggestions.
 Respond with ONLY a JSON object. No markdown, no extra text."""
 
 
@@ -203,8 +198,13 @@ def build_evaluation_prompt(
     plan: MergePlan,
     judge_issues: list[PlanIssue],
     lang: str = "en",
+    file_diffs: list[FileDiff] | None = None,
 ) -> str:
     capped = judge_issues[:MAX_REVISION_ISSUES]
+
+    file_meta: dict[str, FileDiff] = {}
+    if file_diffs:
+        file_meta = {fd.file_path: fd for fd in file_diffs}
 
     def _render_curr(issue: PlanIssue) -> str:
         return (
@@ -213,9 +213,20 @@ def build_evaluation_prompt(
             else "(not in plan)"
         )
 
+    def _render_meta(issue: PlanIssue) -> str:
+        fd = file_meta.get(issue.file_path)
+        if fd is None:
+            return ""
+        return (
+            f"  conflict_count: {fd.conflict_count}\n"
+            f"  is_security_sensitive: {fd.is_security_sensitive}\n"
+            f"  lines_changed: +{fd.lines_added}/-{fd.lines_deleted}\n"
+        )
+
     issues_text = "\n".join(
         f"- issue_id: {issue.issue_id}\n"
         f"  file_path: {issue.file_path}\n"
+        f"{_render_meta(issue)}"
         f"  current_classification: {_render_curr(issue)}\n"
         f"  suggested_classification: {issue.suggested_classification.value}\n"
         f"  reason: {issue.reason}\n"
@@ -254,6 +265,19 @@ For EACH issue, decide:
 - "accept": You agree the file should be reclassified as suggested. State why you agree.
 - "reject": You disagree and want to keep the current classification. Give a clear technical reason.
 - "discuss": You partially agree or need clarification. Propose an alternative.
+
+REJECT CRITERIA — you MAY reject (but are NOT required to) when ALL of the following hold:
+- conflict_count = 0 (no merge conflicts)
+- is_security_sensitive = false (not in the security-sensitive config)
+- The reviewer's reason cites ONLY the file's path/name (e.g. "the path contains auth", "this is a credential file") and does NOT cite any concrete evidence from the diff.
+
+EVIDENCE-BACKED REASONS must NOT be auto-rejected. A reviewer reason that cites any of the following is evidence-backed:
+- Specific line numbers, hunk regions, or `regions=L-L` flags from the manifest
+- Specific function names, struct field names, identifier names
+- Concrete fork=+A/-D vs upstream=+A/-D deltas showing both sides touched non-trivial line counts
+- C-class (`category=both_changed`) with non-trivial deltas on BOTH sides — even if conflict_count=0, the file is a real three-way conflict candidate.
+
+When in doubt between reject and discuss, prefer DISCUSS with a counter-proposal — it keeps the negotiation going. Auto-rejecting an evidence-backed concern wastes the Judge's signal.
 
 Return JSON:
 {{

@@ -736,6 +736,13 @@ def write_plan_review_report(state: MergeState, output_dir: str) -> Path:
                     f"(avg {avg_tokens} tokens / "
                     f"{avg_latency:.2f}s per LLM segment)"
                 )
+            elif tele is not None:
+                lines.append(
+                    "- **Segment cost (this round)**: 0 LLM segment(s) — "
+                    f"{tele.cache_hit_segments} cache, "
+                    f"{tele.safelist_segments} safelist "
+                    "(skipped LLM entirely)"
+                )
             lines.append("")
 
     lines += [

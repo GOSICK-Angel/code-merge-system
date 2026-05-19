@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 
 from src.models.plan import MergePlan
-from src.models.diff import FileDiff, RiskLevel
+from src.models.diff import FileDiff, FileChangeCategory, RiskLevel
 from src.models.plan_judge import PlanIssue
 from src.models.plan_review import PlannerIssueResponse, IssueResponseAction
 from src.tools.file_classifier import matches_any_pattern
@@ -62,13 +62,37 @@ SAFELIST_PATTERNS: list[str] = [
 ]
 
 
-def is_segment_obviously_safe(
-    segment: list[FileDiff],
+_SAFELIST_RISK_KEYWORDS: tuple[str, ...] = (
+    "auth",
+    "otp",
+    "verify",
+    "secret",
+    "credential",
+    "password",
+    "token",
+    "login",
+    "permission",
+    "signature",
+    "oauth",
+    "signin",
+    "signup",
+)
+
+_SAFELIST_SAFE_EXTS: frozenset[str] = frozenset(
+    {".yaml", ".yml", ".toml", ".json", ".md", ".txt", ".lock"}
+)
+
+
+def file_is_obviously_safe(
+    fd: FileDiff,
     batch_risk_map: dict[str, str],
     extra_safelist_patterns: list[str] | None = None,
     lockfile_max_lines: int = 1000,
 ) -> bool:
-    """Return True iff EVERY file in the segment is trivially safe.
+    """Return True iff this single file is trivially safe — same rules
+    as is_segment_obviously_safe but on one file. Extracted so a future
+    split-send pass can pre-filter a segment without sending the safe
+    portion to the LLM.
 
     A file is trivially safe when:
       - conflict_count == 0
@@ -83,64 +107,81 @@ def is_segment_obviously_safe(
             (per-repo extension supplied by caller), OR
           * lines_added + lines_deleted < 50 AND extension in
             {.yaml, .toml, .json, .md, .txt, .lock} AND file_path
-            does NOT contain any risk-keyword substring (auth, otp,
-            verify, secret, credential, password, token, login,
-            permission, signature)
+            does NOT contain any risk-keyword substring.
     """
+    if fd.conflict_count > 0:
+        return False
+    if fd.is_security_sensitive:
+        return False
+
+    batch_rl = batch_risk_map.get(fd.file_path)
+    if batch_rl is None:
+        return False
+    if fd.risk_level in _MISMATCH_TRACKED_LEVELS and batch_rl != fd.risk_level.value:
+        return False
+
+    if matches_any_pattern(fd.file_path, LOCKFILE_PATTERNS):
+        return fd.lines_added + fd.lines_deleted < lockfile_max_lines
+    if matches_any_pattern(fd.file_path, SAFELIST_PATTERNS):
+        return True
     extra = extra_safelist_patterns or []
-    risk_keywords = (
-        "auth",
-        "otp",
-        "verify",
-        "secret",
-        "credential",
-        "password",
-        "token",
-        "login",
-        "permission",
-        "signature",
-        "oauth",
-        "signin",
-        "signup",
-    )
-    safe_exts = {".yaml", ".yml", ".toml", ".json", ".md", ".txt", ".lock"}
+    if extra and matches_any_pattern(fd.file_path, extra):
+        return True
 
-    for fd in segment:
-        if fd.conflict_count > 0:
-            return False
-        if fd.is_security_sensitive:
-            return False
+    ext = Path(fd.file_path).suffix.lower()
+    if ext not in _SAFELIST_SAFE_EXTS:
+        return False
 
-        batch_rl = batch_risk_map.get(fd.file_path)
-        if batch_rl is None:
-            return False
-        if (
-            fd.risk_level in _MISMATCH_TRACKED_LEVELS
-            and batch_rl != fd.risk_level.value
-        ):
-            return False
+    if fd.lines_added + fd.lines_deleted >= 50:
+        return False
 
-        if matches_any_pattern(fd.file_path, LOCKFILE_PATTERNS):
-            if fd.lines_added + fd.lines_deleted >= lockfile_max_lines:
-                return False
-            continue
-        if matches_any_pattern(fd.file_path, SAFELIST_PATTERNS):
-            continue
-        if extra and matches_any_pattern(fd.file_path, extra):
-            continue
-
-        ext = Path(fd.file_path).suffix.lower()
-        if ext not in safe_exts:
-            return False
-
-        if fd.lines_added + fd.lines_deleted >= 50:
-            return False
-
-        path_lower = fd.file_path.lower()
-        if any(kw in path_lower for kw in risk_keywords):
-            return False
+    path_lower = fd.file_path.lower()
+    if any(kw in path_lower for kw in _SAFELIST_RISK_KEYWORDS):
+        return False
 
     return True
+
+
+def filter_obviously_safe_files(
+    file_diffs: list[FileDiff],
+    batch_risk_map: dict[str, str],
+    extra_safelist_patterns: list[str] | None = None,
+    lockfile_max_lines: int = 1000,
+) -> tuple[list[FileDiff], list[FileDiff]]:
+    """Partition ``file_diffs`` into (safe, needs_llm) using the same
+    rules as ``is_segment_obviously_safe`` but per-file. Order is
+    preserved within each partition so the LLM still sees the original
+    file ordering — important for batch-ordering heuristics in the
+    review prompt."""
+    safe: list[FileDiff] = []
+    needs_llm: list[FileDiff] = []
+    for fd in file_diffs:
+        if file_is_obviously_safe(
+            fd, batch_risk_map, extra_safelist_patterns, lockfile_max_lines
+        ):
+            safe.append(fd)
+        else:
+            needs_llm.append(fd)
+    return safe, needs_llm
+
+
+def is_segment_obviously_safe(
+    segment: list[FileDiff],
+    batch_risk_map: dict[str, str],
+    extra_safelist_patterns: list[str] | None = None,
+    lockfile_max_lines: int = 1000,
+) -> bool:
+    """Return True iff EVERY file in the segment is trivially safe.
+
+    Delegates to ``file_is_obviously_safe`` for the per-file decision so
+    a future split-send pass can share the same predicate.
+    """
+    return all(
+        file_is_obviously_safe(
+            fd, batch_risk_map, extra_safelist_patterns, lockfile_max_lines
+        )
+        for fd in segment
+    )
 
 
 def compute_segment_signature(
@@ -289,9 +330,27 @@ def _build_file_manifest(
         flags: list[str] = []
         if fd.is_security_sensitive:
             flags.append("SEC")
-        if fd.conflict_count > 0:
-            flags.append(f"conflicts={fd.conflict_count}")
-        if fd.lines_added + fd.lines_deleted > 100:
+        is_c_class = fd.change_category == FileChangeCategory.C
+        if is_c_class:
+            flags.append("C")
+        flags.append(f"conflicts={fd.conflict_count}")
+        if is_c_class:
+            # Pre-merge there are no conflict markers, so conflict_count
+            # is always 0 for C-class — surface both-side line deltas and
+            # fork-side hunk regions so Judge has semantic signal beyond
+            # path name. Without this, Rule 6 ("flag C-class auto_risky
+            # in auth dirs") had nothing but the path string to lean on.
+            flags.append(f"fork=+{fd.lines_added}/-{fd.lines_deleted}")
+            flags.append(
+                f"upstream=+{fd.upstream_lines_added}/-{fd.upstream_lines_deleted}"
+            )
+            if fd.hunks:
+                regions = [
+                    f"{h.start_line_current}-{h.end_line_current}" for h in fd.hunks[:3]
+                ]
+                suffix = "" if len(fd.hunks) <= 3 else f";+{len(fd.hunks) - 3}"
+                flags.append(f"regions={';'.join(regions)}{suffix}")
+        elif fd.lines_added + fd.lines_deleted > 100:
             flags.append(f"+{fd.lines_added}/-{fd.lines_deleted}")
         if batch_risk_map is not None and fd.risk_level in _MISMATCH_TRACKED_LEVELS:
             batch_rl = batch_risk_map.get(fd.file_path)
@@ -504,10 +563,11 @@ def build_plan_review_prompt(
 ## Your Review Tasks (raise issues ONLY with concrete evidence)
 1. Files where `is_security_sensitive=true` but classified below `auto_risky` → flag
 2. Files where `conflict_count > 0` but NOT classified `human_required` → flag
-3. Files that are obviously security-critical by name/path but classified `auto_safe` → flag
+3. Files that are obviously security-critical by name/path, classified `auto_safe`, AND show `[SEC]` or `conflicts>0` in the manifest → flag. Path name alone is NOT sufficient when `conflicts=0` and no `[SEC]` flag is present.
 4. Dangerous batch ordering that would break a dependency → flag (name both files)
-5. Files with `conflict_count=0` and `is_security_sensitive=false` → do NOT flag regardless of diff size
-{"6. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
+5. Files with `conflict_count=0` and `is_security_sensitive=false` → do NOT flag regardless of diff size, UNLESS rule 6 applies
+6. C-class files (marked `[C]` in the manifest) classified `auto_risky` whose path contains any of {{auth, token, user, permission, session, oauth, credential, password, signin, signup, login, otp, secret, signature}} as a path segment — flag to confirm the classification is intentional and not the result of a missing `security_sensitive` pattern. Use the manifest's `fork=+A/-D`, `upstream=+A/-D`, and `regions=...` flags as evidence: if fork and upstream both touched non-trivial line counts in overlapping regions, suggest `human_required`. Pure path-name match without supporting hunk evidence is NOT sufficient.
+{"7. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
 
 Note: MISMATCH / NOT-BATCHED divergence between the classifier and the
 batch is verified deterministically before this prompt is built; you
@@ -605,10 +665,11 @@ def build_segment_plan_review_prompt(
 ## Your Review Tasks (raise issues ONLY with concrete evidence)
 1. Files where `is_security_sensitive=true` but classified below `auto_risky` → flag
 2. Files where `conflict_count > 0` but NOT classified `human_required` → flag
-3. Files that are obviously security-critical by name/path but classified `auto_safe` → flag
+3. Files that are obviously security-critical by name/path, classified `auto_safe`, AND show `[SEC]` or `conflicts>0` in the manifest → flag. Path name alone is NOT sufficient when `conflicts=0` and no `[SEC]` flag is present.
 4. Dangerous batch ordering that would break a dependency → flag (name both files)
-5. Files with `conflict_count=0` and `is_security_sensitive=false` → do NOT flag regardless of diff size
-{"6. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
+5. Files with `conflict_count=0` and `is_security_sensitive=false` → do NOT flag regardless of diff size, UNLESS rule 6 applies
+6. C-class files (marked `[C]` in the manifest) classified `auto_risky` whose path contains any of {{auth, token, user, permission, session, oauth, credential, password, signin, signup, login, otp, secret, signature}} as a path segment — flag to confirm the classification is intentional and not the result of a missing `security_sensitive` pattern. Use the manifest's `fork=+A/-D`, `upstream=+A/-D`, and `regions=...` flags as evidence: if fork and upstream both touched non-trivial line counts in overlapping regions, suggest `human_required`. Pure path-name match without supporting hunk evidence is NOT sufficient.
+{"7. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
 
 Note: MISMATCH / NOT-BATCHED divergence between the classifier and the
 batch is verified deterministically before this prompt is built; you

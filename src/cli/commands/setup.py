@@ -234,7 +234,7 @@ def _default_config_data(payload: SetupPayload, repo_path: str) -> dict[str, Any
     merged in (otherwise the global defaults would silently beat a
     user-supplied override).
     """
-    return {
+    data: dict[str, Any] = {
         "upstream_ref": payload.target_branch,
         "fork_ref": payload.fork_ref,
         "working_branch": "merge/auto-{timestamp}",
@@ -258,6 +258,9 @@ def _default_config_data(payload: SetupPayload, repo_path: str) -> dict[str, Any
             "formats": ["json", "markdown"],
         },
     }
+    if payload.request_timeout_seconds is not None:
+        data["request_timeout_seconds"] = payload.request_timeout_seconds
+    return data
 
 
 def _collect_env_writes(payload: SetupPayload) -> dict[str, str]:
@@ -381,6 +384,7 @@ def detect_setup_context(repo_path: str = ".") -> SetupContext:
     openai_base = _resolve_env_value("OPENAI_BASE_URL", repo_path)
 
     has_existing_config = get_config_path(repo_path).exists()
+    has_project_env = (get_project_merge_dir(repo_path) / ".env").exists()
     existing_config_summary: dict[str, Any] | None = None
     if has_existing_config:
         try:
@@ -391,10 +395,8 @@ def detect_setup_context(repo_path: str = ".") -> SetupContext:
                     "fork_ref": raw.get("fork_ref"),
                     "project_context": raw.get("project_context", ""),
                     "thresholds": raw.get("thresholds", {}),
-                    # Surface the existing per-agent provider/model so
-                    # the form's AGENT OVERRIDES table can pre-fill on
-                    # reconfigure runs.
                     "agents": raw.get("agents", {}),
+                    "request_timeout_seconds": raw.get("request_timeout_seconds"),
                 }
         except Exception:
             existing_config_summary = None
@@ -431,6 +433,7 @@ def detect_setup_context(repo_path: str = ".") -> SetupContext:
         existing_config_summary=existing_config_summary,
         forks_profile_threshold=FORKS_PROFILE_INIT_THRESHOLD,
         has_global_env=has_global_env,
+        has_project_env=has_project_env,
     )
 
 

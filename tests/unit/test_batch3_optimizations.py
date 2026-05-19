@@ -112,6 +112,8 @@ class TestOD1DMissingFastTrack:
         state.merge_base_commit = "abc123"
         state.pollution_audit = None
         state.config_drifts = None
+        state.user_project_context = ""
+        state.rename_pairs = []
         plan = planner._build_layered_plan([fd_d], state)
         fast_track = [b for b in plan.phases if b.layer_id is None]
         assert fast_track, "expected a fast-track batch"

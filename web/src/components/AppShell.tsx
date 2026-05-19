@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import type { ActiveView } from "../lib/classifyView";
 import type { MergeStateSnapshot } from "../types/state";
 import type { ConnState } from "../ws/client";
+import { resolveWsUrl } from "../ws/client";
 import { BgFx, AsciiBar, Pill } from "./brutalist";
 
 interface NavEntry {
@@ -256,8 +257,17 @@ export function AppShell({
               <span style={{ color: "var(--fg-0)" }}>{elapsed}</span>
             </span>
           </div>
-          <span className="dim">
-            ws://localhost:8765{" "}
+          <span
+            className="dim"
+            title={
+              conn === "closed"
+                ? "Connection lost — waiting for the merge process to start. Retrying…"
+                : conn === "connecting"
+                  ? "Connecting to the merge backend…"
+                  : undefined
+            }
+          >
+            {resolveWsUrl()}{" "}
             <span
               style={{
                 color:
@@ -268,7 +278,7 @@ export function AppShell({
                       : "var(--red)",
               }}
             >
-              ● {conn}
+              ● {conn === "closed" ? "closed — retrying" : conn}
             </span>
           </span>
         </div>

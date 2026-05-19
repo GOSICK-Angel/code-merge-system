@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class CompressionConfig(BaseModel):
@@ -383,6 +383,33 @@ class FileClassifierConfig(BaseModel):
         "Empty by default — opt in per repo to teach the agent about "
         "structured-config files whose individual keys carry risk "
         "(e.g. plugin manifests with OAuth scopes / permissions).",
+    )
+    migration_dir_patterns: list[str] = Field(
+        default_factory=lambda: ["migrations/", "alembic/"],
+        description=(
+            "Path substrings that identify DB-schema migration directories. "
+            "Used to detect ordering dependencies between upstream-new migration "
+            "files and fork-conflicted model files in the same top-level package. "
+            "Add project-specific patterns (e.g. 'forgejo_migrations/') via "
+            "file_classifier.migration_dir_patterns in config.yaml."
+        ),
+    )
+    c_class_risk_floor: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum risk_score applied to category=both_changed (C-class) "
+            "files. Pre-merge, conflict markers do not exist yet, so the "
+            "conflict_density dimension of compute_risk_score is always 0 "
+            "for C-class — a fork-side rewrite of the same function as "
+            "upstream can score as low as ~0.3 with no other signal. "
+            "Flooring to 0.4 (default) lifts C-class above auto_safe band "
+            "without forcing human_required (≥0.6), giving ConflictAnalyst "
+            "a guaranteed look. Strong path-based escalations "
+            "(security_sensitive.patterns → 0.8, always_take_target → 0.1) "
+            "still take precedence over this floor."
+        ),
     )
 
 
@@ -787,6 +814,19 @@ class CoordinatorConfig(BaseModel):
             "overflows that the file-count heuristic alone misses."
         ),
     )
+    group_batches_by_directory: bool = Field(
+        default=True,
+        description=(
+            "When True, enforce_batch_limits regroups each batch by "
+            "top-level directory before applying the file-count cap. "
+            "Produces tighter, more cohesive batches — e.g. all "
+            "models/auth/* files land in one sub-batch instead of being "
+            "interleaved with tests/ and templates/ in the alphabetic "
+            "split. Reduces Executor rollback blast radius when a single "
+            "file in a large batch fails. Set False to restore the legacy "
+            "flat split."
+        ),
+    )
     meta_review_enabled: bool = True
 
 
@@ -988,6 +1028,33 @@ class MergeConfig(BaseModel):
         "default flipped to True so a half-finished run never pollutes fork_ref "
         "HEAD; set to False explicitly to restore the legacy in-place behavior.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _hoist_top_level_security_sensitive(cls, data: object) -> object:
+        """Allow ``security_sensitive:`` at the top level of config.yaml.
+
+        Pydantic ignores unknown top-level keys, so users who write::
+
+            security_sensitive:
+              patterns: [...]
+
+        at the root of their config get no error and no effect.  This
+        validator intercepts the raw dict *before* field assignment and
+        moves the value into ``file_classifier.security_sensitive`` so
+        both the top-level shorthand and the fully-qualified form work.
+        The fully-qualified form always wins when both are present.
+        """
+        if not isinstance(data, dict):
+            return data
+        sec = data.pop("security_sensitive", None)
+        if sec and isinstance(sec, dict):
+            fc = data.get("file_classifier")
+            if fc is None:
+                data["file_classifier"] = {"security_sensitive": sec}
+            elif isinstance(fc, dict):
+                fc.setdefault("security_sensitive", sec)
+        return data
 
     @field_validator("upstream_ref", "fork_ref")
     @classmethod

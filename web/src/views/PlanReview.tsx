@@ -367,11 +367,29 @@ function PlannerSummary({
               lineHeight: 1.6,
             }}
           >
-            {instructions.map((line, i) => (
-              <li key={i} style={{ fontFamily: "var(--mono)" }}>
-                {line}
-              </li>
-            ))}
+            {instructions.map((line, i) => {
+              const lines = line.split("\n");
+              const isLong = lines.length > 4 || line.length > 300;
+              const preview = lines.slice(0, 3).join("\n");
+              const rest = lines.slice(3).join("\n");
+              return (
+                <li key={i} style={{ fontFamily: "var(--mono)" }}>
+                  {!isLong ? (
+                    line
+                  ) : (
+                    <details>
+                      <summary
+                        style={{ cursor: "pointer", userSelect: "none" }}
+                      >
+                        {preview}
+                        <span className="dim"> …</span>
+                      </summary>
+                      <span style={{ whiteSpace: "pre-wrap" }}>{rest}</span>
+                    </details>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </details>
       )}

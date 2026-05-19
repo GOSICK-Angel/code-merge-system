@@ -1,8 +1,12 @@
 import pytest
 
 from src.models.diff import FileChangeCategory, FileDiff, FileStatus, RiskLevel
-from src.models.config import FileClassifierConfig, SecuritySensitiveConfig
-from src.tools.file_classifier import compute_risk_score, matches_any_pattern
+from src.models.config import FileClassifierConfig, MergeConfig, SecuritySensitiveConfig
+from src.tools.file_classifier import (
+    classify_file,
+    compute_risk_score,
+    matches_any_pattern,
+)
 
 
 def _make_file_diff(
@@ -14,6 +18,7 @@ def _make_file_diff(
     is_security_sensitive: bool = False,
     hunks: list | None = None,
     file_status: FileStatus = FileStatus.MODIFIED,
+    change_category: FileChangeCategory | None = None,
 ) -> FileDiff:
     return FileDiff(
         file_path=file_path,
@@ -26,6 +31,7 @@ def _make_file_diff(
         conflict_count=conflict_count,
         hunks=hunks or [],
         is_security_sensitive=is_security_sensitive,
+        change_category=change_category,
     )
 
 
@@ -136,6 +142,99 @@ def test_strict_security_pattern_still_floors_to_human_required():
         )
 
 
+class TestCClassRiskFloor:
+    """Pre-merge, conflict markers do not exist yet so the
+    conflict_density dimension of compute_risk_score is always 0 for
+    C-class files. The c_class_risk_floor guard lifts these scores into
+    the auto_risky band (>= 0.3) so ConflictAnalyst still gets a look.
+    """
+
+    def test_c_class_score_floored_to_default(self):
+        config = FileClassifierConfig()
+        fd = _make_file_diff(
+            file_path="models/user/user.go",
+            lines_added=5,
+            lines_deleted=3,
+            lines_changed=8,
+            change_category=FileChangeCategory.C,
+        )
+        score = compute_risk_score(fd, config)
+        assert score >= config.c_class_risk_floor, (
+            f"C-class file must floor to {config.c_class_risk_floor}, got {score}"
+        )
+
+    def test_b_class_not_floored(self):
+        config = FileClassifierConfig()
+        fd = _make_file_diff(
+            file_path="docs/README.md",
+            lines_added=5,
+            lines_deleted=3,
+            lines_changed=8,
+            change_category=FileChangeCategory.B,
+        )
+        score = compute_risk_score(fd, config)
+        assert score < config.c_class_risk_floor, (
+            f"B-class file must NOT be floored, got {score}"
+        )
+
+    def test_c_class_floor_does_not_lower_higher_score(self):
+        # If raw score already exceeds the floor (e.g. large diff in .go),
+        # the floor must not lower it.
+        config = FileClassifierConfig(c_class_risk_floor=0.4)
+        fd = _make_file_diff(
+            file_path="src/core/big_refactor.py",
+            lines_added=400,
+            lines_deleted=400,
+            lines_changed=400,
+            change_category=FileChangeCategory.C,
+        )
+        score = compute_risk_score(fd, config)
+        assert score > 0.4
+
+    def test_security_pattern_still_dominates_c_class_floor(self):
+        # security_sensitive.patterns floor (0.8) must still win over the
+        # C-class floor (0.4) — auth/** paths route to human_required.
+        config = FileClassifierConfig(
+            security_sensitive=SecuritySensitiveConfig(patterns=["**/auth/**"]),
+        )
+        fd = _make_file_diff(
+            file_path="models/auth/auth_token.go",
+            lines_added=5,
+            lines_deleted=3,
+            change_category=FileChangeCategory.C,
+        )
+        score = compute_risk_score(fd, config)
+        assert score >= 0.8
+
+    def test_always_take_target_dominates_c_class_floor(self):
+        config = FileClassifierConfig(
+            always_take_target_patterns=["**/*.lock"],
+            c_class_risk_floor=0.5,
+        )
+        fd = _make_file_diff(
+            file_path="poetry.lock",
+            lines_added=100,
+            lines_deleted=50,
+            change_category=FileChangeCategory.C,
+        )
+        score = compute_risk_score(fd, config)
+        assert score == 0.1
+
+    def test_c_class_with_no_content_change_not_floored(self):
+        # A C-class entry with no line-level change (pure rename, etc.)
+        # should not be artificially escalated.
+        config = FileClassifierConfig()
+        fd = _make_file_diff(
+            file_path="src/util.py",
+            lines_added=0,
+            lines_deleted=0,
+            lines_changed=0,
+            change_category=FileChangeCategory.C,
+        )
+        score = compute_risk_score(fd, config)
+        assert score < config.c_class_risk_floor
+
+
 # ---------------------------------------------------------------------------
 # matches_any_pattern — anchored glob semantics
 # ---------------------------------------------------------------------------
@@ -211,3 +310,105 @@ class TestMatchesAnyPattern:
         assert matches_any_pattern("a/b+c.txt", ["a/b+c.txt"])
         assert not matches_any_pattern("a/bc.txt", ["a/b+c.txt"])
         assert matches_any_pattern("a/(brackets).txt", ["a/(brackets).txt"])
+
+
+# ---------------------------------------------------------------------------
+# classify_file — conflict_count > 0 → HUMAN_REQUIRED (P0 fix)
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyFileConflictEscalation:
+    def _fd(self, conflict_count: int = 0, risk_score: float = 0.3) -> FileDiff:
+        return FileDiff(
+            file_path="models/auth/auth_token.go",
+            file_status=FileStatus.MODIFIED,
+            risk_level=RiskLevel.AUTO_SAFE,
+            risk_score=risk_score,
+            lines_added=9,
+            lines_deleted=0,
+            lines_changed=9,
+            conflict_count=conflict_count,
+            hunks=[],
+        )
+
+    def test_conflict_count_zero_uses_risk_score(self):
+        config = FileClassifierConfig()
+        fd = self._fd(conflict_count=0, risk_score=0.2)
+        assert classify_file(fd, config) == RiskLevel.AUTO_SAFE
+
+    def test_conflict_count_nonzero_forces_human_required(self):
+        config = FileClassifierConfig()
+        fd = self._fd(conflict_count=1, risk_score=0.2)
+        assert classify_file(fd, config) == RiskLevel.HUMAN_REQUIRED
+
+    def test_conflict_count_nonzero_overrides_low_risk_score(self):
+        config = FileClassifierConfig()
+        fd = self._fd(conflict_count=2, risk_score=0.1)
+        assert classify_file(fd, config) == RiskLevel.HUMAN_REQUIRED
+
+    def test_excluded_file_stays_excluded_despite_conflict(self):
+        config = FileClassifierConfig(excluded_patterns=["models/auth/**"])
+        fd = self._fd(conflict_count=1)
+        assert classify_file(fd, config) == RiskLevel.EXCLUDED
+
+
+# ---------------------------------------------------------------------------
+# _hoist_top_level_security_sensitive — file_classifier: null edge case (P0 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_hoist_validator_hoists_when_no_file_classifier():
+    import os
+
+    os.environ.setdefault("ANTHROPIC_API_KEY", "test")
+    os.environ.setdefault("OPENAI_API_KEY", "test")
+
+    cfg = MergeConfig.model_validate(
+        {
+            "upstream_ref": "origin/main",
+            "fork_ref": "origin/fork",
+            "security_sensitive": {
+                "patterns": ["models/auth/**", "routers/web/auth/**"]
+            },
+        }
+    )
+    assert cfg.file_classifier.security_sensitive.patterns == [
+        "models/auth/**",
+        "routers/web/auth/**",
+    ]
+
+
+def test_hoist_validator_hoists_when_file_classifier_is_null():
+    import os
+
+    os.environ.setdefault("ANTHROPIC_API_KEY", "test")
+    os.environ.setdefault("OPENAI_API_KEY", "test")
+
+    cfg = MergeConfig.model_validate(
+        {
+            "upstream_ref": "origin/main",
+            "fork_ref": "origin/fork",
+            "file_classifier": None,
+            "security_sensitive": {"patterns": ["services/auth/**"]},
+        }
+    )
+    assert "services/auth/**" in cfg.file_classifier.security_sensitive.patterns
+
+
+def test_hoist_validator_fully_qualified_wins_over_top_level():
+    import os
+
+    os.environ.setdefault("ANTHROPIC_API_KEY", "test")
+    os.environ.setdefault("OPENAI_API_KEY", "test")
+
+    cfg = MergeConfig.model_validate(
+        {
+            "upstream_ref": "origin/main",
+            "fork_ref": "origin/fork",
+            "file_classifier": {
+                "security_sensitive": {"patterns": ["explicit/path/**"]}
+            },
+            "security_sensitive": {"patterns": ["top_level/**"]},
+        }
+    )
+    assert cfg.file_classifier.security_sensitive.patterns == ["explicit/path/**"]

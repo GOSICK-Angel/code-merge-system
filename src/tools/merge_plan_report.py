@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from src.cli.paths import get_plans_dir
-from src.models.diff import FileDiff, RiskLevel
+from src.models.diff import FileChangeCategory, FileDiff, RiskLevel
 from src.models.state import MergeState
 
 logger = logging.getLogger(__name__)
+
+_MAX_CTX_CHARS = 500
 
 
 def write_merge_plan_report(state: MergeState) -> Path:
@@ -22,6 +24,15 @@ def write_merge_plan_report(state: MergeState) -> Path:
     mode (running against any external repo) or ``MERGE_RECORD/`` in dev
     mode (running against the CodeMergeSystem source tree itself).
 
+    The filename is keyed on ``run_id`` so calls within a single run
+    always target the same file — PlanningPhase writes an initial
+    version with empty plan_review_log, then PlanReviewPhase
+    overwrites it with the same path once the Judge round(s) have
+    landed. Earlier behaviour added a timestamp suffix on the second
+    write, leaving a stale "no review rounds recorded" sibling
+    alongside the real report — auditors then had to diff two files
+    to find the current view.
+
     Returns the path of the generated file.
     """
     record_dir = get_plans_dir(state.config.repo_path)
@@ -30,11 +41,6 @@ def write_merge_plan_report(state: MergeState) -> Path:
     upstream = state.config.upstream_ref.replace("/", "_")
     filename = f"MERGE_PLAN_{upstream}_{state.run_id[:8]}.md"
     report_path = record_dir / filename
-
-    if report_path.exists():
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"MERGE_PLAN_{upstream}_{state.run_id[:8]}_{ts}.md"
-        report_path = record_dir / filename
 
     lang = state.config.output.language
     lines = _build_report(state, lang)
@@ -58,6 +64,7 @@ def _build_report(state: MergeState, lang: str) -> list[str]:
     _risk_files(lines, file_diffs, plan, zh)
     _batch_plan(lines, plan, zh)
     _layer_dependencies(lines, plan, zh)
+    _precheck_issues_section(lines, state, zh)
     _planner_judge_log(lines, state, zh)
     _forks_profile_drift_section(lines, state, zh)
 
@@ -82,6 +89,8 @@ def _header(lines: list[str], state: MergeState, zh: bool) -> None:
     user_ctx = (state.user_project_context or "").strip()
     if not user_ctx:
         user_ctx = state.config.project_context.strip()
+    if len(user_ctx) > _MAX_CTX_CHARS:
+        user_ctx = user_ctx[:_MAX_CTX_CHARS].rstrip() + "…"
     if user_ctx:
         ctx_label = "项目背景" if zh else "Project Context"
         lines += [
@@ -93,6 +102,7 @@ def _header(lines: list[str], state: MergeState, zh: bool) -> None:
         rs = plan.risk_summary
         total = rs.total_files
         rate_label = "自动合并率" if zh else "Auto-merge rate"
+        sensitive_count = sum(1 for fd in state.file_diffs if fd.is_security_sensitive)
         lines += [
             "",
             f"| {'指标' if zh else 'Metric'} | {'值' if zh else 'Value'} |",
@@ -101,6 +111,7 @@ def _header(lines: list[str], state: MergeState, zh: bool) -> None:
             f"| {'安全自动合并' if zh else 'Auto-safe'} | {rs.auto_safe_count} |",
             f"| {'风险自动合并' if zh else 'Auto-risky'} | {rs.auto_risky_count} |",
             f"| {'需人工审查' if zh else 'Human required'} | {rs.human_required_count} |",
+            f"| {'安全敏感' if zh else 'Security sensitive'} | {sensitive_count} |",
             f"| {rate_label} | {rs.estimated_auto_merge_rate:.1%} |",
         ]
 
@@ -230,7 +241,10 @@ def _directory_matrix(lines: list[str], state: MergeState, zh: bool) -> None:
     dir_counts: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for fp, cat in cats.items():
         parts = fp.split("/")
-        dir_key = "/".join(parts[:2]) if len(parts) > 1 else parts[0]
+        if len(parts) == 1:
+            dir_key = "(root)"
+        else:
+            dir_key = "/".join(parts[:-1][:2])
         dir_counts[dir_key][cat.value] += 1
 
     actionable_dirs = {
@@ -346,9 +360,12 @@ def _batch_plan(lines: list[str], plan: Any, zh: bool) -> None:
 
         batch_title = "批次" if zh else "Batch"
         files_label = "文件" if zh else "files"
+        conflict_prefix = ""
+        if batch.change_category == FileChangeCategory.C:
+            conflict_prefix = "⚠️ 三方冲突 — " if zh else "⚠️ THREE-WAY CONFLICT — "
         lines += [
-            f"### {batch_title} `{batch.batch_id}` — {risk}{cat}",
-            f"Layer: {batch.layer_id} | {len(batch.file_paths)} {files_label}",
+            f"### {conflict_prefix}{batch_title} `{batch.batch_id}` — {risk}{cat}",
+            f"Layer: {'pre-layer' if batch.layer_id is None else batch.layer_id} | {len(batch.file_paths)} {files_label}",
             "",
         ]
 
@@ -376,6 +393,49 @@ def _layer_dependencies(lines: list[str], plan: Any, zh: bool) -> None:
             f"- **[{layer.layer_id}] {layer.name}**: {layer.description} "
             f"({'依赖' if zh else 'depends on'}: {deps})"
         )
+
+    lines += ["", "---", ""]
+
+
+def _precheck_issues_section(lines: list[str], state: MergeState, zh: bool) -> None:
+    """List MISMATCH / NOT-BATCHED issues detected by precheck_plan_integrity.
+
+    Scans every round's issues_detail for entries with source="precheck",
+    deduplicates by file_path (first detection wins), and renders a compact
+    table. No-op when no precheck issues exist.
+    """
+    seen: dict[str, dict[str, str]] = {}
+    for rnd in state.plan_review_log:
+        for iss in rnd.issues_detail:
+            fp = iss.get("file_path", "")
+            if iss.get("source") == "precheck" and fp and fp not in seen:
+                seen[fp] = iss
+
+    if not seen:
+        return
+
+    title = "Precheck 完整性问题" if zh else "Precheck Integrity Issues"
+    intro = (
+        "以下文件由确定性完整性检查（无 LLM 调用）发现，已在 Planner-Judge 轮次中自动处理。"
+        if zh
+        else "The following files were flagged by the deterministic integrity check "
+        "(no LLM call). They were merged into the Planner-Judge rounds automatically."
+    )
+    lines += [
+        f"## {title}",
+        "",
+        f"_{intro}_",
+        "",
+        f"| {'文件' if zh else 'File'} | {'问题类型' if zh else 'Issue type'} "
+        f"| {'当前' if zh else 'Current'} | {'建议' if zh else 'Suggested'} |",
+        "|------|------|------|------|",
+    ]
+    for iss in seen.values():
+        fp = iss.get("file_path", "")
+        issue_type = iss.get("issue_type", iss.get("reason", "")[:60])
+        current = iss.get("current", "")
+        suggested = iss.get("suggested", "")
+        lines.append(f"| `{fp}` | {issue_type} | {current} | {suggested} |")
 
     lines += ["", "---", ""]
 
@@ -410,6 +470,34 @@ def _planner_judge_log(lines: list[str], state: MergeState, zh: bool) -> None:
                     f"  - `{issue.get('file_path', '?')}`: "
                     f"{issue.get('reason', '')} "
                     f"({issue.get('current', '?')} → {issue.get('suggested', '?')})"
+                )
+
+        tele = rnd.segment_telemetry
+        if tele is not None:
+            cost_label = "本轮 Segment 成本" if zh else "Segment cost (this round)"
+            if tele.llm_segments > 0:
+                avg_tokens = (
+                    tele.total_tokens_in + tele.total_tokens_out
+                ) // tele.llm_segments
+                avg_latency = tele.total_latency_s / tele.llm_segments
+                lines.append(
+                    f"- **{cost_label}**: "
+                    f"{tele.llm_segments} LLM segment(s), "
+                    f"{tele.cache_hit_segments} cache, "
+                    f"{tele.safelist_segments} safelist | "
+                    f"~{tele.total_tokens_in} tokens-in, "
+                    f"~{tele.total_tokens_out} tokens-out, "
+                    f"{tele.total_latency_s:.1f}s total "
+                    f"(avg {avg_tokens} tokens / "
+                    f"{avg_latency:.2f}s per LLM segment)"
+                )
+            else:
+                skipped = "跳过 LLM" if zh else "skipped LLM entirely"
+                lines.append(
+                    f"- **{cost_label}**: 0 LLM segment(s) — "
+                    f"{tele.cache_hit_segments} cache, "
+                    f"{tele.safelist_segments} safelist "
+                    f"({skipped})"
                 )
         lines.append("")
 
