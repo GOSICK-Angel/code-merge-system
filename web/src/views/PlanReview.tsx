@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import type { WsClient } from "../ws/client";
+import type { ConnState, WsClient } from "../ws/client";
 import type { OutboundMessage } from "../ws/messages";
-import { useRunStore } from "../store/runStore";
+import {
+  useRunStore,
+  type PendingOutboundState,
+} from "../store/runStore";
 import {
   commitApprove,
   commitModify,
@@ -912,8 +915,78 @@ function PendingDecisionCard({
   );
 }
 
+function describeDropReason(
+  reason: PendingOutboundState["lastDropReason"],
+): string {
+  switch (reason) {
+    case "not_open":
+      return "socket not open — frame queued for next reconnect";
+    case "queue_overflow":
+      return "outbound buffer overflowed — older frame discarded";
+    case "send_failed":
+      return "socket rejected the send — frame requeued";
+    default:
+      return "frame queued";
+  }
+}
+
+function SubmitWarningBanner({
+  kind,
+  connState,
+  pendingOutbound,
+  elapsedMs,
+}: {
+  kind: "approve" | "modify" | "reject";
+  connState: ConnState;
+  pendingOutbound: PendingOutboundState;
+  elapsedMs: number;
+}): JSX.Element {
+  const elapsedSec = Math.max(0, Math.floor(elapsedMs / 1000));
+  const queued = pendingOutbound.queued;
+  const droppedDetail =
+    pendingOutbound.lastDropAt !== null
+      ? `${pendingOutbound.lastDropType ?? "frame"} · ${describeDropReason(pendingOutbound.lastDropReason)}`
+      : null;
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      data-testid="plan-review-submit-warning"
+      style={{
+        marginTop: 10,
+        padding: "8px 10px",
+        border: "1px solid var(--amber)",
+        background: "rgba(255, 176, 0, 0.06)",
+        fontFamily: "var(--mono)",
+        fontSize: 11,
+        lineHeight: 1.55,
+        color: "var(--fg-1)",
+      }}
+    >
+      <div>
+        <b style={{ color: "var(--amber)" }}>NO ACK ({elapsedSec}s)</b> ·{" "}
+        {kind} click sent {elapsedSec}s ago, no <code>state_snapshot</code>{" "}
+        with <code>plan_human_review</code> yet.
+      </div>
+      <div className="dim" style={{ marginTop: 4 }}>
+        ws: <code>{connState}</code> · queued: <b>{queued}</b>
+        {droppedDetail ? <> · last drop: {droppedDetail}</> : null}
+      </div>
+      <div className="dim" style={{ marginTop: 4 }}>
+        If <code>ws</code> isn't <code>open</code>, wait for reconnect — the
+        frame is buffered locally and will flush on <code>onopen</code>. If it
+        stays open with queued &gt; 0 the back-end has stopped reading; check
+        the merge process logs.
+      </div>
+    </div>
+  );
+}
+
 export function PlanReview({ clientRef }: Props): JSX.Element {
   const snapshot = useRunStore((s) => s.snapshot);
+  const pendingOutbound = useRunStore((s) => s.pendingOutbound);
+  const connState = useRunStore((s) => s.conn);
 
   const drafts = usePlanReviewDraftStore((s) => s.drafts);
   const notes = usePlanReviewDraftStore((s) => s.notes);
@@ -926,6 +999,25 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
   );
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Local submission state — tracks the wall-clock time of the user's
+  // click so we can render SUBMITTING…, lock the action buttons until a
+  // snapshot acknowledges the decision (or the user retries), and flip
+  // to a "still no ack" warning past the 3s SLA. The kind disambiguates
+  // approve/modify (carry per-item drafts) from reject (decision-only).
+  //
+  // ``baselineDecidedAt`` captures the ``plan_human_review.decided_at``
+  // observed at click time. Ack is "a new decided_at appeared", NOT "a
+  // plan_human_review object appeared" — the round-2 case (auto_merge
+  // surfaced new conflict-marker items after the original plan
+  // approval) starts with ``planHumanReview != null`` already, so the
+  // old `!serverDecided` ack signal would clear the lock instantly and
+  // leave SUBMITTING… flashing for one frame.
+  const [submission, setSubmission] = useState<{
+    kind: "approve" | "modify" | "reject";
+    startedAt: number;
+    baselineDecidedAt: string | null;
+  } | null>(null);
+  const [submitTimedOut, setSubmitTimedOut] = useState(false);
 
   const items = useMemo<PendingUserDecision[]>(
     () => snapshot?.pendingUserDecisions ?? [],
@@ -940,7 +1032,15 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
     [pending, drafts],
   );
 
-  const serverDecided = snapshot?.planHumanReview != null;
+  const planHumanReview = snapshot?.planHumanReview ?? null;
+  // ``planApprovedOnce`` is the legacy ``serverDecided`` signal — true
+  // the moment the orchestrator records any plan_human_review at all.
+  // It governs cosmetic state (textarea hint, top-right pill) but NO
+  // LONGER gates the action buttons; auto_merge can surface fresh
+  // ``pending_user_decisions`` after the first approval, and the
+  // reviewer must be able to submit the second round even though
+  // ``plan_human_review`` is already populated from round 1.
+  const planApprovedOnce = planHumanReview != null;
   // Bridge `_apply_plan_review` only takes effect while the orchestrator
   // is parked in HUMAN_REVIEW awaiting our signal — if the run already
   // moved on to AUTO_MERGING / JUDGE_REVIEWING / ... a REJECT click sets
@@ -968,16 +1068,78 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
   // REJECT should be live even when there are zero per-file pending
   // items — the reviewer is signing off on the plan as a whole.
   const awaitingPlanSignoff =
-    !serverDecided && conclusion != null && inAwaitingHuman;
+    !planApprovedOnce && conclusion != null && inAwaitingHuman;
+  // ``canSubmit`` no longer gates on ``planApprovedOnce``. Round 2:
+  // ``plan_human_review`` is already set from round 1 yet auto_merge
+  // surfaced new ``pending_user_decisions`` (e.g. conflict-marker
+  // items) — the bridge's ``_apply_user_plan_decisions`` happily
+  // updates the per-item ``user_choice`` and re-fires the wake event,
+  // so the buttons must stay live whenever there is unfinished work in
+  // the AWAITING_HUMAN gate.
   const canSubmit =
-    !serverDecided && inAwaitingHuman && (pending.length > 0 || awaitingPlanSignoff);
+    inAwaitingHuman && (pending.length > 0 || awaitingPlanSignoff);
 
+  const baselineDecidedAt = planHumanReview?.decided_at ?? null;
   const send = (msg: OutboundMessage) => clientRef.current?.send(msg);
 
-  const onApproveAll = () => commitApprove(send, pending, drafts, notes);
-  const onReject = () => commitReject(send, notes);
-  const onModify = () => commitModify(send, pending, drafts, notes);
+  // Drop the local submitting lock when a fresh ack lands. "Fresh" is
+  // measured against the ``decided_at`` we snapshotted at click time,
+  // so round 2 — where ``plan_human_review`` was already populated by
+  // round 1 — is detected by the timestamp advancing rather than a
+  // null→object transition that already happened minutes ago.
+  useEffect(() => {
+    if (!submission) return;
+    if (baselineDecidedAt !== submission.baselineDecidedAt) {
+      setSubmission(null);
+      setSubmitTimedOut(false);
+    }
+  }, [submission, baselineDecidedAt]);
+
+  // 3-second SLA on the round trip. Plan-review commits flush two WS
+  // frames (``submit_user_plan_decisions`` + ``submit_plan_review``) and
+  // the orchestrator always re-runs ``HumanReviewPhase`` before
+  // re-broadcasting, so ~600ms is the typical ack latency; 3s gives the
+  // human a clear "something is wrong" signal without crying wolf on a
+  // slow local LLM run.
+  useEffect(() => {
+    if (!submission) {
+      setSubmitTimedOut(false);
+      return;
+    }
+    const handle = window.setTimeout(() => setSubmitTimedOut(true), 3000);
+    return () => window.clearTimeout(handle);
+  }, [submission]);
+
+  const beginSubmit = (kind: "approve" | "modify" | "reject"): void => {
+    setSubmission({
+      kind,
+      startedAt: Date.now(),
+      baselineDecidedAt,
+    });
+    setSubmitTimedOut(false);
+  };
+
+  const onApproveAll = () => {
+    beginSubmit("approve");
+    commitApprove(send, pending, drafts, notes);
+  };
+  const onReject = () => {
+    beginSubmit("reject");
+    commitReject(send, notes);
+  };
+  const onModify = () => {
+    beginSubmit("modify");
+    commitModify(send, pending, drafts, notes);
+  };
   const onApplyRecommended = () => applyRecommendedToAll(pending);
+
+  // Locked from click to ack. Ack is "a fresh decided_at landed" — the
+  // useEffect above clears ``submission`` when that happens, which in
+  // turn drops ``submittingLocked`` to false.
+  const submittingLocked = submission !== null;
+  const showSubmitWarning =
+    submittingLocked &&
+    (submitTimedOut || pendingOutbound.lastDropAt !== null);
 
   return (
     <div>
@@ -1001,7 +1163,7 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
           </div>
         </div>
         <div className="row">
-          {serverDecided ? (
+          {planApprovedOnce && pending.length === 0 ? (
             <Pill tone="green">
               {snapshot?.planHumanReview?.decision ?? "DECIDED"}
             </Pill>
@@ -1017,9 +1179,15 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
               if (!inAwaitingHuman) {
                 return <Pill tone="">{status}</Pill>;
               }
+              // Round 2 — plan was already approved earlier but
+              // auto_merge surfaced fresh items. Make the suffix
+              // explicit so the reviewer doesn't think the green pill
+              // they remember means "nothing left to do".
               const suffix = awaitingPlanSignoff
                 ? " · plan sign-off"
-                : ` · ${pending.length}`;
+                : planApprovedOnce && pending.length > 0
+                  ? ` · ${pending.length} MORE`
+                  : ` · ${pending.length}`;
               return (
                 <Pill tone="orange" live>
                   {status}
@@ -1140,7 +1308,7 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
                         onSetChoice={(k) => setDraft(u.item_id, k)}
                         onSetInput={(v) => setDraftInput(u.item_id, v)}
                         onClear={() => clearDraft(u.item_id)}
-                        decidedServerSide={serverDecided}
+                        decidedServerSide={u.user_choice != null}
                       />
                     );
                   })()}
@@ -1153,7 +1321,7 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              disabled={serverDecided}
+              disabled={!inAwaitingHuman || submittingLocked}
               placeholder="shared reviewer_notes for approve / reject / modify ..."
               style={{
                 width: "100%",
@@ -1174,7 +1342,9 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
                 className="btn"
                 onClick={onApplyRecommended}
                 disabled={
-                  serverDecided || pending.length === 0 || !inAwaitingHuman
+                  pending.length === 0 ||
+                  !inAwaitingHuman ||
+                  submittingLocked
                 }
                 title={
                   !inAwaitingHuman
@@ -1189,49 +1359,83 @@ export function PlanReview({ clientRef }: Props): JSX.Element {
                 type="button"
                 className="btn primary"
                 onClick={onApproveAll}
-                disabled={!canSubmit}
+                disabled={!canSubmit || submittingLocked}
                 style={{ flex: 1, justifyContent: "center" }}
                 title={
-                  !inAwaitingHuman && !serverDecided
+                  !inAwaitingHuman
                     ? `run is ${snapshot?.status ?? "—"} — orchestrator is not waiting on plan review`
                     : awaitingPlanSignoff && pending.length === 0
                       ? "approve the non-converged plan as-is"
-                      : undefined
+                      : planApprovedOnce && pending.length > 0
+                        ? "round 2: submit the new items surfaced by auto_merge"
+                        : undefined
                 }
+                data-testid="plan-review-approve"
               >
-                {awaitingPlanSignoff && pending.length === 0
-                  ? "APPROVE PLAN"
-                  : "APPROVE ALL"}
+                {submission?.kind === "approve" && submittingLocked
+                  ? "SUBMITTING…"
+                  : awaitingPlanSignoff && pending.length === 0
+                    ? "APPROVE PLAN"
+                    : "APPROVE ALL"}
               </button>
               <button
                 type="button"
                 className="btn"
                 onClick={onModify}
-                disabled={serverDecided || !inAwaitingHuman}
+                disabled={
+                  // MODIFY only makes sense before any plan-level decision
+                  // has landed — round 2 is item-level only.
+                  planApprovedOnce ||
+                  !inAwaitingHuman ||
+                  submittingLocked
+                }
                 title={
                   !inAwaitingHuman
                     ? `run is ${snapshot?.status ?? "—"} — orchestrator is not waiting on plan review`
                     : undefined
                 }
                 style={{ flex: 1, justifyContent: "center" }}
+                data-testid="plan-review-modify"
               >
-                MODIFY
+                {submission?.kind === "modify" && submittingLocked
+                  ? "SUBMITTING…"
+                  : "MODIFY"}
               </button>
               <button
                 type="button"
                 className="btn danger"
                 onClick={onReject}
-                disabled={serverDecided || !inAwaitingHuman}
+                disabled={
+                  // REJECT, like MODIFY, only applies to the first
+                  // plan-level decision. Once the plan was approved
+                  // there is nothing to reject — round 2 is per-file.
+                  planApprovedOnce ||
+                  !inAwaitingHuman ||
+                  submittingLocked
+                }
                 title={
                   !inAwaitingHuman
                     ? `run is ${snapshot?.status ?? "—"} — orchestrator is not waiting on plan review`
                     : undefined
                 }
                 style={{ flex: 1, justifyContent: "center" }}
+                data-testid="plan-review-reject"
               >
-                REJECT
+                {submission?.kind === "reject" && submittingLocked
+                  ? "SUBMITTING…"
+                  : "REJECT"}
               </button>
             </div>
+            {showSubmitWarning && (
+              <SubmitWarningBanner
+                kind={submission?.kind ?? "approve"}
+                connState={connState}
+                pendingOutbound={pendingOutbound}
+                elapsedMs={
+                  submission ? Date.now() - submission.startedAt : 0
+                }
+              />
+            )}
             <div className="dim mt-2" style={{ fontSize: 10.5, lineHeight: 1.6 }}>
               <code>submit_user_plan_decisions</code> +{" "}
               <code>submit_plan_review</code> · two-step protocol per plan

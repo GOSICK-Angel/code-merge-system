@@ -90,9 +90,10 @@ beforeEach(() => {
 function makeClientRef(): React.MutableRefObject<{
   send: (msg: OutboundMessage) => void;
   close: () => void;
+  pendingCount: () => number;
 } | null> {
   return {
-    current: { send: sendSpy, close: vi.fn() },
+    current: { send: sendSpy, close: vi.fn(), pendingCount: () => 0 },
   };
 }
 
@@ -391,6 +392,60 @@ describe("Setup — flexible providers", () => {
     }
     expect(container.querySelector("[data-testid='anthropic_models']"))
       .toBeTruthy();
+  });
+
+  it("test-connection button sends setup.test_connection and renders per-model results", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: {
+          name: "ANTHROPIC_API_KEY",
+          masked: "sk-ant-****",
+          source: "shell",
+        },
+      },
+    });
+    const { getByTestId } = renderSetup();
+
+    // Anthropic auto-enabled (key on disk) with recommended models
+    // pre-filled, so the probe button is active.
+    act(() => {
+      fireEvent.click(getByTestId("anthropic_test"));
+    });
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const msg = sendSpy.mock.calls[0][0];
+    if (msg.type !== "setup.test_connection") throw new Error("wrong type");
+    expect(msg.payload.provider).toBe("anthropic");
+    expect(msg.payload.models).toEqual(
+      baseContext.provider_recommended_models.anthropic,
+    );
+
+    // Server replies — the panel renders one row per model with the
+    // ok/fail verdict.
+    act(() => {
+      useRunStore.getState().applySetupTestResult({
+        provider: "anthropic",
+        error: null,
+        results: [
+          {
+            model: "claude-opus-4-7",
+            ok: true,
+            latency_ms: 142,
+            detail: "ok",
+          },
+          {
+            model: "claude-haiku-4-5-20251001",
+            ok: false,
+            latency_ms: null,
+            detail: "auth_permanent: 401",
+          },
+        ],
+      });
+    });
+    const panel = getByTestId("anthropic_test_result");
+    expect(panel.textContent).toContain("claude-opus-4-7");
+    expect(panel.textContent).toContain("142ms");
+    expect(panel.textContent).toContain("auth_permanent: 401");
   });
 
   it("surfaces server-side setup_error in the form", () => {

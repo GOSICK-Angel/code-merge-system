@@ -92,21 +92,25 @@ beforeEach(() => {
     current: {
       send: sendSpy,
       close: vi.fn(),
+      pendingCount: () => 0,
     },
   } as unknown as React.MutableRefObject<{
     send: (msg: OutboundMessage) => void;
     close: () => void;
+    pendingCount: () => number;
   }>);
 });
 
 function makeClientRef(): React.MutableRefObject<{
   send: (msg: OutboundMessage) => void;
   close: () => void;
+  pendingCount: () => number;
 } | null> {
   return {
     current: {
       send: sendSpy,
       close: vi.fn(),
+      pendingCount: () => 0,
     },
   };
 }

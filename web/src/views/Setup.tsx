@@ -10,6 +10,7 @@ import {
 } from "react";
 import { Card, Pill } from "../components/brutalist";
 import { useSetup } from "../ws/useSetup";
+import type { SetupTestState } from "../store/runStore";
 import type { WsClient } from "../ws/client";
 import type {
   AgentChoice,
@@ -434,6 +435,8 @@ interface ProviderSectionProps {
   recommendedModels: string[];
   onChange: (next: ProviderFormState) => void;
   disabled: boolean;
+  testState: SetupTestState | undefined;
+  onTest: () => void;
 }
 
 function ProviderSection({
@@ -443,6 +446,8 @@ function ProviderSection({
   recommendedModels,
   onChange,
   disabled,
+  testState,
+  onTest,
 }: ProviderSectionProps): JSX.Element {
   const update = useCallback(
     <K extends keyof ProviderFormState>(
@@ -564,13 +569,68 @@ function ProviderSection({
             default for agents without an override.
           </div>
         </div>
+        <div>
+          <button
+            type="button"
+            className="btn ghost"
+            data-testid={`${provider}_test`}
+            style={{ fontSize: 10, padding: "4px 8px" }}
+            disabled={
+              disabled ||
+              !state.enabled ||
+              parsedCount === 0 ||
+              testState?.status === "testing"
+            }
+            onClick={onTest}
+            title="probe every listed model with a minimal request"
+          >
+            {testState?.status === "testing"
+              ? `testing ${parsedCount} model(s)…`
+              : "↯ test connection"}
+          </button>
+          {testState?.status === "done" && testState.result && (
+            <div
+              data-testid={`${provider}_test_result`}
+              style={{ marginTop: 8, fontSize: 11, fontFamily: "var(--mono)" }}
+            >
+              {testState.result.error ? (
+                <div style={{ color: "var(--red)" }}>
+                  {testState.result.error}
+                </div>
+              ) : (
+                testState.result.results.map((r) => (
+                  <div
+                    key={r.model}
+                    style={{
+                      display: "flex",
+                      gap: 8,
+                      alignItems: "baseline",
+                      color: r.ok ? "var(--green)" : "var(--red)",
+                    }}
+                  >
+                    <span>{r.ok ? "✓" : "✗"}</span>
+                    <span style={{ color: "var(--fg-0)" }}>{r.model}</span>
+                    <span className="dim">
+                      {r.ok
+                        ? r.latency_ms != null
+                          ? `${r.latency_ms}ms`
+                          : "ok"
+                        : r.detail}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </Card>
   );
 }
 
 export function Setup({ clientRef }: Props): JSX.Element {
-  const { context, status, error, ready, submit, refresh } = useSetup(clientRef);
+  const { context, status, error, ready, testResults, submit, refresh, testConnection } =
+    useSetup(clientRef);
   const [form, setForm] = useState<FormState | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(false);
@@ -850,6 +910,15 @@ export function Setup({ clientRef }: Props): JSX.Element {
         recommendedModels={context.provider_recommended_models.anthropic ?? []}
         onChange={(next) => updateProvider("anthropic", next)}
         disabled={submitting}
+        testState={testResults.anthropic}
+        onTest={() =>
+          testConnection({
+            provider: "anthropic",
+            api_key: form.anthropic.api_key.trim(),
+            base_url: form.anthropic.base_url.trim() || null,
+            models: parseModels(form.anthropic.models_text),
+          })
+        }
       />
 
       <ProviderSection
@@ -866,6 +935,15 @@ export function Setup({ clientRef }: Props): JSX.Element {
         recommendedModels={context.provider_recommended_models.openai ?? []}
         onChange={(next) => updateProvider("openai", next)}
         disabled={submitting}
+        testState={testResults.openai}
+        onTest={() =>
+          testConnection({
+            provider: "openai",
+            api_key: form.openai.api_key.trim(),
+            base_url: form.openai.base_url.trim() || null,
+            models: parseModels(form.openai.models_text),
+          })
+        }
       />
 
       {needsDefaultPick && (

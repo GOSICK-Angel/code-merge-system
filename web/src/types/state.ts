@@ -34,7 +34,7 @@ export const SYSTEM_STATUS_ORDER: SystemStatus[] = [
 
 export interface PhaseResult {
   phase: string;
-  status: "pending" | "running" | "completed" | "failed" | "skipped";
+  status: "pending" | "running" | "awaiting" | "completed" | "failed" | "skipped";
   started_at: string | null;
   completed_at: string | null;
   error: string | null;
@@ -373,6 +373,12 @@ export interface AgentActivityEvent {
   phase: string;
   event_type: "start" | "progress" | "complete" | "error";
   elapsed: number | null;
+  // When set, this event is a directed handoff from `agent` to `target`
+  // (e.g. judge → executor in the dispute loop) rather than a solo
+  // run-state change. Optional: older buffered events may omit it.
+  target?: string | null;
+  // Wall-clock emit time (epoch seconds) for live elapsed timers.
+  ts?: number;
 }
 
 // ---- Setup wizard ---------------------------------------------------------
@@ -473,4 +479,19 @@ export interface SetupReady {
 export interface SetupError {
   reason: string;
   details?: string;
+}
+
+export interface SetupTestModelResult {
+  model: string;
+  ok: boolean;
+  latency_ms: number | null;
+  detail: string;
+}
+
+export interface SetupTestResult {
+  provider: ProviderName;
+  // Provider-level failure (no key resolved / unknown provider). When
+  // set, ``results`` is empty.
+  error: string | null;
+  results: SetupTestModelResult[];
 }
