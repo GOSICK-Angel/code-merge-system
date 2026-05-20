@@ -5,6 +5,8 @@ import type { MergeStateSnapshot } from "../types/state";
 import type { ConnState } from "../ws/client";
 import { resolveWsUrl } from "../ws/client";
 import { BgFx, AsciiBar, Pill } from "./brutalist";
+import { useRunStore } from "../store/runStore";
+import { busyAgentIds } from "../lib/agents";
 
 interface NavEntry {
   id: ActiveView;
@@ -128,17 +130,17 @@ export function AppShell({
   const upstream = plan?.upstream_ref ?? "—";
   const fork = plan?.fork_ref ?? "—";
 
+  const activity = useRunStore((s) => s.activity);
   const agents = useMemo(() => {
     const byAgent = snapshot?.costSummary?.by_agent ?? {};
+    const busy = busyAgentIds(snapshot?.status, activity);
     return Object.entries(byAgent).map(([id, v]) => ({
       id,
       cost: v.cost_usd ?? 0,
       tokens: v.tokens ?? 0,
-      busy: snapshot?.currentPhase
-        ? id.toLowerCase().includes(snapshot.currentPhase.split("_")[0] ?? "")
-        : false,
+      busy: busy.has(id),
     }));
-  }, [snapshot]);
+  }, [snapshot, activity]);
 
   const statusPillTone = (() => {
     const s = snapshot?.status;

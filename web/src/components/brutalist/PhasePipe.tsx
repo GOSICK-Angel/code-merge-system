@@ -3,7 +3,7 @@ import { formatDuration } from "../../lib/format";
 export interface PipePhase {
   id: string;
   label: string;
-  status: "pending" | "running" | "completed" | "failed" | "skipped";
+  status: "pending" | "running" | "awaiting" | "completed" | "failed" | "skipped";
   elapsed: number | null;
 }
 
@@ -14,12 +14,14 @@ interface Props {
 function statusClass(s: PipePhase["status"]): string {
   if (s === "completed") return "done";
   if (s === "running") return "run";
+  if (s === "awaiting") return "await";
   return "pending";
 }
 
 function statusGlyph(s: PipePhase["status"], i: number): string {
   if (s === "completed") return "✓";
   if (s === "running") return "›";
+  if (s === "awaiting") return "‖";
   if (s === "failed") return "✗";
   if (s === "skipped") return "·";
   return String(i + 1);

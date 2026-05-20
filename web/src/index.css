@@ -933,6 +933,12 @@
   }
 }
 
+.pipe .step.await .glyph {
+  background: var(--bg-2);
+  border-color: var(--amber);
+  color: var(--amber);
+}
+
 .pipe .step.pending .glyph {
   opacity: 0.55;
 }

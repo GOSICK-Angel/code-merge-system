@@ -12,6 +12,7 @@ import {
   Pill,
 } from "../components/brutalist";
 import type { AgentNode, PipePhase } from "../components/brutalist";
+import { deriveAgentRuntime } from "../lib/agents";
 
 interface Props {
   // clientRef is part of the API every view exposes but the dashboard
@@ -121,15 +122,9 @@ function deriveRisk(snapshot: MergeStateSnapshot | null): {
 
 function deriveAgents(snapshot: MergeStateSnapshot | null): AgentNode[] {
   const byAgent = snapshot?.costSummary?.by_agent ?? {};
-  const phase = snapshot?.currentPhase ?? "";
-  const phaseHint = phase.split("_")[0] ?? "";
   return Object.entries(byAgent).map(([id, v]) => ({
     id,
     role: id.replace(/_/g, " "),
-    status:
-      phaseHint && id.toLowerCase().includes(phaseHint.toLowerCase())
-        ? "busy"
-        : "idle",
     cost: v.cost_usd ?? 0,
     tokens: v.tokens ?? 0,
   }));
@@ -364,7 +359,14 @@ export function RunDashboard(props: Props): JSX.Element {
 
   const phases = useMemo(() => derivePhases(snapshot), [snapshot]);
   const risk = useMemo(() => deriveRisk(snapshot), [snapshot]);
+  const runtime = useMemo(
+    () => deriveAgentRuntime(snapshot?.status, activity),
+    [snapshot?.status, activity],
+  );
   const agents = useMemo(() => deriveAgents(snapshot), [snapshot]);
+  const busyCount = agents.filter(
+    (a) => runtime.states[a.id]?.running,
+  ).length;
 
   const totalCost = snapshot?.costSummary?.total_cost_usd ?? 0;
   const totalTokens = snapshot?.costSummary?.total_tokens ?? 0;
@@ -575,12 +577,17 @@ export function RunDashboard(props: Props): JSX.Element {
 
         <Card
           title="› AGENT TOPOLOGY"
-          hint={`${agents.length} agents · ${agents.filter((a) => a.status === "busy").length} busy`}
+          hint={`${agents.length} agents · ${busyCount} running`}
           style={{ display: "flex", flexDirection: "column" }}
         >
           {agents.length > 0 ? (
             <div style={{ position: "relative" }}>
-              <AgentGraph agents={agents} width={640} height={460} />
+              <AgentGraph
+                agents={agents}
+                runtime={runtime}
+                width={640}
+                height={460}
+              />
             </div>
           ) : (
             <div
@@ -724,7 +731,9 @@ export function RunDashboard(props: Props): JSX.Element {
                         ? "var(--red)"
                         : result.status === "running"
                           ? "var(--accent)"
-                          : "var(--fg-3)";
+                          : result.status === "awaiting"
+                            ? "var(--amber)"
+                            : "var(--fg-3)";
                   return (
                     <div
                       key={phase}
