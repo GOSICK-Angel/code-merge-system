@@ -1,10 +1,12 @@
 import type {
   AgentActivityEvent,
   MergeStateSnapshot,
+  ProviderName,
   SetupContext,
   SetupError,
   SetupPayload,
   SetupReady,
+  SetupTestResult,
 } from "../types/state";
 
 export type InboundMessage =
@@ -19,6 +21,7 @@ export type InboundMessage =
   | { type: "setup_snapshot"; payload: SetupContext }
   | { type: "setup_ready"; payload: SetupReady }
   | { type: "setup_error"; payload: SetupError }
+  | { type: "setup_test_result"; payload: SetupTestResult }
   | {
       type: "command_error";
       payload: { reason: string; command: string };
@@ -67,4 +70,13 @@ export type OutboundMessage =
   | { type: "pause"; payload: Record<string, never> }
   | { type: "resume"; payload: Record<string, never> }
   | { type: "setup.detect"; payload: Record<string, never> }
-  | { type: "setup.submit"; payload: SetupPayload };
+  | { type: "setup.submit"; payload: SetupPayload }
+  | {
+      type: "setup.test_connection";
+      payload: {
+        provider: ProviderName;
+        api_key: string;
+        base_url: string | null;
+        models: string[];
+      };
+    };

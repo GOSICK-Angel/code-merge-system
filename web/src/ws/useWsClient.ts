@@ -14,51 +14,55 @@ import { useRunStore } from "../store/runStore";
  * connection persists across L1↔L3 view switches (a per-view client
  * would tear down + reconnect on every transition, wiping the activity
  * replay buffer).
+ *
+ * Stability invariant: this hook's ``useEffect`` MUST run exactly once
+ * per mount (deps ``[]``). Earlier revisions listed each zustand setter
+ * in the deps array, which made the client tear-down + reconnect any
+ * time a selector identity drifted — losing in-flight outbound frames
+ * during the reconnect backoff (``web/src/ws/client.ts`` only queues
+ * when the same socket is mid-handshake, not across rebuilds). To keep
+ * effect-deps empty we read the latest store via
+ * ``useRunStore.getState()`` inside the handler closure.
  */
 export function useWsClient(): React.MutableRefObject<WsClient | null> {
-  const setConn = useRunStore((s) => s.setConn);
-  const applySnapshot = useRunStore((s) => s.applySnapshot);
-  const appendActivity = useRunStore((s) => s.appendActivity);
-  const replaceActivity = useRunStore((s) => s.replaceActivity);
-  const setCancelError = useRunStore((s) => s.setCancelError);
-  const applySetupSnapshot = useRunStore((s) => s.applySetupSnapshot);
-  const applySetupReady = useRunStore((s) => s.applySetupReady);
-  const applySetupError = useRunStore((s) => s.applySetupError);
-
   const clientRef = useRef<WsClient | null>(null);
 
   useEffect(() => {
     const client = createWsClient({
-      onState: setConn,
+      onState: (s) => useRunStore.getState().setConn(s),
       onMessage: (msg) => {
+        const store = useRunStore.getState();
         switch (msg.type) {
           case "state_snapshot":
           case "state_patch":
-            applySnapshot(msg.payload);
+            store.applySnapshot(msg.payload);
             break;
           case "agent_activity":
-            appendActivity(msg.payload);
+            store.appendActivity(msg.payload);
             break;
           case "agent_activity_replay":
-            replaceActivity(msg.payload.events);
+            store.replaceActivity(msg.payload.events);
             break;
           case "cancel_error":
-            setCancelError(msg.payload);
+            store.setCancelError(msg.payload);
             break;
           case "setup_snapshot":
-            applySetupSnapshot(msg.payload);
+            store.applySetupSnapshot(msg.payload);
             break;
           case "setup_ready":
-            applySetupReady(msg.payload);
+            store.applySetupReady(msg.payload);
             break;
           case "setup_error":
-            applySetupError(msg.payload);
+            store.applySetupError(msg.payload);
+            break;
+          case "setup_test_result":
+            store.applySetupTestResult(msg.payload);
             break;
           case "command_error":
             // Surface as a setup_error when reason matches, otherwise
             // log — there is no general command-error toast yet.
             if (msg.payload.reason === "setup_required") {
-              applySetupError({
+              store.applySetupError({
                 reason: msg.payload.reason,
                 details: `command ${msg.payload.command} blocked`,
               });
@@ -68,22 +72,16 @@ export function useWsClient(): React.MutableRefObject<WsClient | null> {
             break;
         }
       },
+      onDrop: (event) => useRunStore.getState().recordOutboundDrop(event),
+      onFlush: (event) => useRunStore.getState().recordOutboundFlush(event),
     });
     clientRef.current = client;
     return () => {
       client.close();
       clientRef.current = null;
     };
-  }, [
-    setConn,
-    applySnapshot,
-    appendActivity,
-    replaceActivity,
-    setCancelError,
-    applySetupSnapshot,
-    applySetupReady,
-    applySetupError,
-  ]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return clientRef;
 }

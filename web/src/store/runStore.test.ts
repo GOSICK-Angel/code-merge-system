@@ -91,4 +91,27 @@ describe("runStore", () => {
     useRunStore.getState().clearCancelError();
     expect(useRunStore.getState().lastCancelError).toBeNull();
   });
+
+  it("markSetupTesting then applySetupTestResult round-trips per provider", () => {
+    useRunStore.getState().markSetupTesting("openai");
+    expect(useRunStore.getState().setupTestResults.openai?.status).toBe(
+      "testing",
+    );
+    expect(useRunStore.getState().setupTestResults.openai?.result).toBeNull();
+
+    useRunStore.getState().applySetupTestResult({
+      provider: "openai",
+      error: null,
+      results: [
+        { model: "gpt-4o", ok: true, latency_ms: 123, detail: "ok" },
+        { model: "gpt-bad", ok: false, latency_ms: null, detail: "auth_permanent: 401" },
+      ],
+    });
+    const state = useRunStore.getState().setupTestResults.openai;
+    expect(state?.status).toBe("done");
+    expect(state?.result?.results).toHaveLength(2);
+    expect(state?.result?.results[0].ok).toBe(true);
+    // anthropic untouched
+    expect(useRunStore.getState().setupTestResults.anthropic).toBeUndefined();
+  });
 });

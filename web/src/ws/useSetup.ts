@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import type { MutableRefObject } from "react";
 import { useRunStore } from "../store/runStore";
-import type { SetupPayload } from "../types/state";
+import type { ProviderName, SetupPayload } from "../types/state";
 import type { WsClient } from "./client";
 
 /**
@@ -22,13 +22,22 @@ import type { WsClient } from "./client";
  * reconnect logic re-fires ``setup.detect`` and the server re-sends
  * ``setup_snapshot`` which resets the form state cleanly.
  */
+export interface TestConnectionArgs {
+  provider: ProviderName;
+  api_key: string;
+  base_url: string | null;
+  models: string[];
+}
+
 export interface UseSetupReturn {
   context: ReturnType<typeof useRunStore.getState>["setupContext"];
   status: ReturnType<typeof useRunStore.getState>["setupStatus"];
   error: ReturnType<typeof useRunStore.getState>["setupError"];
   ready: ReturnType<typeof useRunStore.getState>["setupReady"];
+  testResults: ReturnType<typeof useRunStore.getState>["setupTestResults"];
   submit: (payload: SetupPayload) => void;
   refresh: () => void;
+  testConnection: (args: TestConnectionArgs) => void;
 }
 
 export function useSetup(
@@ -38,7 +47,9 @@ export function useSetup(
   const status = useRunStore((s) => s.setupStatus);
   const error = useRunStore((s) => s.setupError);
   const ready = useRunStore((s) => s.setupReady);
+  const testResults = useRunStore((s) => s.setupTestResults);
   const markSetupSubmitting = useRunStore((s) => s.markSetupSubmitting);
+  const markSetupTesting = useRunStore((s) => s.markSetupTesting);
 
   const submit = useCallback(
     (payload: SetupPayload) => {
@@ -59,5 +70,27 @@ export function useSetup(
     client.send({ type: "setup.detect", payload: {} });
   }, [clientRef]);
 
-  return { context, status, error, ready, submit, refresh };
+  const testConnection = useCallback(
+    (args: TestConnectionArgs) => {
+      const client = clientRef.current;
+      if (client === null) {
+        console.warn("useSetup.testConnection: ws client not ready");
+        return;
+      }
+      markSetupTesting(args.provider);
+      client.send({ type: "setup.test_connection", payload: args });
+    },
+    [clientRef, markSetupTesting],
+  );
+
+  return {
+    context,
+    status,
+    error,
+    ready,
+    testResults,
+    submit,
+    refresh,
+    testConnection,
+  };
 }
