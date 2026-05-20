@@ -70,7 +70,7 @@ class SystemStatus(str, Enum):
 
 class PhaseResult(BaseModel):
     phase: MergePhase
-    status: Literal["pending", "running", "completed", "failed", "skipped"]
+    status: Literal["pending", "running", "awaiting", "completed", "failed", "skipped"]
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error: str | None = None

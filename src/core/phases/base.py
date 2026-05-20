@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -33,6 +34,13 @@ class ActivityEvent:
     phase: str
     event_type: Literal["start", "progress", "complete", "error"]
     elapsed: float | None = None
+    # When set, this event is a communication/handoff from ``agent`` to
+    # ``target`` (e.g. judge → executor with N blocking issues) rather than a
+    # solo run-state change. The topology renders it as a directed edge.
+    target: str | None = None
+    # Wall-clock emit time (epoch seconds) so the UI can tick a live elapsed
+    # timer for a still-running agent.
+    ts: float = field(default_factory=time.time)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -70,6 +78,25 @@ class PhaseContext:
             self.emit(
                 ActivityEvent(
                     agent=agent, action=action, phase="", event_type="progress"
+                )
+            )
+
+    def notify_comm(
+        self, sender: str, receiver: str, action: str, phase: str = ""
+    ) -> None:
+        """Emit a directed communication/handoff event (sender → receiver).
+
+        Used at real inter-agent handoff points (e.g. judge → executor in the
+        dispute loop) so the topology can draw a labeled, transient edge.
+        """
+        if self.emit is not None:
+            self.emit(
+                ActivityEvent(
+                    agent=sender,
+                    action=action,
+                    phase=phase,
+                    event_type="progress",
+                    target=receiver,
                 )
             )
 

@@ -9,7 +9,7 @@ made multiple calls.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import git as _git
 
@@ -178,6 +178,52 @@ class TestCostCeiling:
             result = await orch.run(state)
 
         assert result.status == SystemStatus.AWAITING_HUMAN
+
+
+class TestSuspendedPhaseStatus:
+    """A phase that suspends to AWAITING_HUMAN must read as ``awaiting``, not
+    ``running`` — otherwise the pipeline shows several phases RUNNING at once.
+    """
+
+    def _state_with_running(self, tmp_path, phase):
+        from src.models.state import PhaseResult
+
+        config = _make_config(tmp_path)
+        state = MergeState(config=config)
+        state.current_phase = phase
+        state.phase_results[phase.value] = PhaseResult(phase=phase, status="running")
+        return state
+
+    def test_running_phase_flips_to_awaiting_on_suspend(self, tmp_path):
+        from src.core.orchestrator import _mark_suspended_phase
+        from src.models.plan import MergePhase
+
+        state = self._state_with_running(tmp_path, MergePhase.AUTO_MERGE)
+        _mark_suspended_phase(state, SystemStatus.AWAITING_HUMAN)
+        assert state.phase_results["auto_merge"].status == "awaiting"
+        assert state.phase_results["auto_merge"].completed_at is not None
+
+    def test_non_awaiting_target_leaves_running(self, tmp_path):
+        from src.core.orchestrator import _mark_suspended_phase
+        from src.models.plan import MergePhase
+
+        state = self._state_with_running(tmp_path, MergePhase.AUTO_MERGE)
+        _mark_suspended_phase(state, SystemStatus.AUTO_MERGING)
+        assert state.phase_results["auto_merge"].status == "running"
+
+    def test_completed_phase_not_downgraded(self, tmp_path):
+        from src.core.orchestrator import _mark_suspended_phase
+        from src.models.plan import MergePhase
+        from src.models.state import PhaseResult
+
+        config = _make_config(tmp_path)
+        state = MergeState(config=config)
+        state.current_phase = MergePhase.JUDGE_REVIEW
+        state.phase_results["judge_review"] = PhaseResult(
+            phase=MergePhase.JUDGE_REVIEW, status="completed"
+        )
+        _mark_suspended_phase(state, SystemStatus.AWAITING_HUMAN)
+        assert state.phase_results["judge_review"].status == "completed"
 
 
 class TestDryRun:

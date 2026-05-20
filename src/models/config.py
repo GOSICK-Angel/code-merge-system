@@ -15,7 +15,7 @@ class CompressionConfig(BaseModel):
 
 
 class AgentLLMConfig(BaseModel):
-    provider: Literal["anthropic", "openai"] = "anthropic"
+    provider: Literal["anthropic", "openai", "openai_compatible"] = "anthropic"
     model: str = "claude-opus-4-6"
     temperature: float = Field(default=0.2, ge=0.0, le=1.0)
     max_tokens: int = Field(default=8192, ge=512, le=200000)

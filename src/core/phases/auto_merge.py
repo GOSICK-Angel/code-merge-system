@@ -54,6 +54,60 @@ logger = logging.getLogger(__name__)
 # escalate without running the (very expensive) downstream analysis.
 _B_CLASS_DRIFT_FATAL_THRESHOLD = 100
 
+
+def _conflict_marker_decision_options() -> list[DecisionOption]:
+    """Options offered for a file left with unresolved git conflict markers
+    by cherry-pick fall-back (O-M1).
+
+    LLM-merge options are intentionally omitted: feeding marker-laden
+    content to the LLM is the exact anti-pattern O-M1 escalates to avoid.
+    ``manual_paste`` and ``skip`` are the marker-friendly extensions that
+    bring this path closer to the plan-review option set; both are
+    actualized by the O-L5 user_choice executor below. ``kind`` is required
+    on those two so the Web UI renders the paste textarea / hides the input.
+    """
+    return [
+        DecisionOption(
+            key="approve_human",
+            label="Manual review",
+            description=(
+                "You will resolve the conflict markers by hand before continuing"
+            ),
+        ),
+        DecisionOption(
+            key="take_target",
+            label="Take upstream",
+            description="Replace the conflicted file with the upstream version as-is",
+        ),
+        DecisionOption(
+            key="take_current",
+            label="Keep fork",
+            description="Keep the fork version and drop the upstream change for this file",
+        ),
+        DecisionOption(
+            key="manual_paste",
+            label="Paste resolved content",
+            description=(
+                "Paste the final file content into the textarea below — the "
+                "Executor writes it verbatim, replacing the conflict markers. "
+                "Use when you've already resolved the conflict locally."
+            ),
+            kind="manual_paste",
+        ),
+        DecisionOption(
+            key="skip",
+            label="Skip for now (resolve later)",
+            description=(
+                "Defer this file to a follow-up PR. Recorded as SKIP and "
+                "excluded from further auto-merge batches; the conflicted file "
+                "is left in the working tree for you to resolve later (not "
+                "committed with markers)."
+            ),
+            kind="skip",
+        ),
+    ]
+
+
 _DEP_BUMP_RE = re.compile(
     r"(bump|chore[\(\[]deps|update[- ]dep|dependabot|renovate|"
     r"upgrade[- ]dep|security[- ]update|pin[- ]dep)",
@@ -306,32 +360,7 @@ class AutoMergePhase(Phase):
                         risk_context="unresolved_conflict_markers",
                         conflict_preview=preview,
                         current_classification=RiskLevel.HUMAN_REQUIRED.value,
-                        options=[
-                            DecisionOption(
-                                key="approve_human",
-                                label="Manual review",
-                                description=(
-                                    "You will resolve the conflict markers by "
-                                    "hand before continuing"
-                                ),
-                            ),
-                            DecisionOption(
-                                key="take_target",
-                                label="Take upstream",
-                                description=(
-                                    "Replace the conflicted file with the "
-                                    "upstream version as-is"
-                                ),
-                            ),
-                            DecisionOption(
-                                key="take_current",
-                                label="Keep fork",
-                                description=(
-                                    "Keep the fork version and drop the "
-                                    "upstream change for this file"
-                                ),
-                            ),
-                        ],
+                        options=_conflict_marker_decision_options(),
                     )
                 )
 
@@ -1139,6 +1168,13 @@ class AutoMergePhase(Phase):
                         )
                         break
 
+                    ctx.notify_comm(
+                        "judge",
+                        "executor",
+                        f"{len(batch_verdict.issues)} blocking issue(s) "
+                        f"· dispute r{dispute_round + 1}",
+                        phase="auto_merge",
+                    )
                     rebuttal = await executor.build_rebuttal(
                         batch_verdict.issues, state
                     )
@@ -1146,11 +1182,18 @@ class AutoMergePhase(Phase):
                     if rebuttal.accepts_all:
                         if rebuttal.repair_instructions:
                             await executor.repair(rebuttal.repair_instructions, state)
+                            ctx.notify_comm(
+                                "executor",
+                                "judge",
+                                f"repaired {len(rebuttal.repair_instructions)} fix(es)",
+                                phase="auto_merge",
+                            )
                         batch_verdict = await judge.review_batch(
                             layer_id, layer_files, ReadOnlyStateView(state)
                         )
                         continue
 
+                    ctx.notify_comm("executor", "judge", "rebuttal", phase="auto_merge")
                     batch_verdict = await judge.re_evaluate(
                         rebuttal, batch_verdict, ReadOnlyStateView(state)
                     )
@@ -1586,9 +1629,18 @@ class AutoMergePhase(Phase):
 
             fd = file_diffs_map.get(file_path)
             if fd is not None:
-                shape = f"+{fd.lines_added}/-{fd.lines_deleted} lines"
+                up_shape = (
+                    f"+{fd.upstream_lines_added}/-{fd.upstream_lines_deleted} lines"
+                )
+                if fd.lines_added or fd.lines_deleted:
+                    fork_state = (
+                        f"Fork modified (+{fd.lines_added}/-{fd.lines_deleted} lines)"
+                    )
+                else:
+                    fork_state = "Fork unchanged (upstream-only file)"
             else:
-                shape = "(diff metadata unavailable)"
+                up_shape = "(diff metadata unavailable)"
+                fork_state = "Fork change unavailable"
 
             state.human_decision_requests[file_path] = HumanDecisionRequest(
                 file_path=file_path,
@@ -1600,9 +1652,9 @@ class AutoMergePhase(Phase):
                     f"(O-L3). Executor's repairs did not resolve all "
                     "remaining blocking issues."
                 ),
-                upstream_change_summary=f"Upstream changed: {shape}",
+                upstream_change_summary=f"Upstream changed: {up_shape}",
                 fork_change_summary=(
-                    f"Fork preserved; Judge flagged {len(issue_lines)} "
+                    f"{fork_state}; Judge flagged {len(issue_lines)} "
                     f"blocking issue(s) after {max_dispute} dispute rounds"
                 ),
                 analyst_recommendation=MergeDecision.ESCALATE_HUMAN,
@@ -1770,12 +1822,18 @@ class AutoMergePhase(Phase):
                 SystemStatus.PLAN_REVISING,
                 f"dispute: {dispute.dispute_reason}",
             )
+            ctx.notify_comm(
+                "planner_judge", "planner", "revision request", phase="plan_review"
+            )
             revised_plan = await planner.handle_dispute(state, dispute)
             state.merge_plan = revised_plan
 
             file_diffs: list[FileDiff] = state.file_diffs
             ctx.state_machine.transition(
                 state, SystemStatus.PLAN_REVIEWING, "dispute revision complete"
+            )
+            ctx.notify_comm(
+                "planner", "planner_judge", "revised plan", phase="plan_review"
             )
 
             verdict = await planner_judge.review_plan(

@@ -28,6 +28,7 @@ from src.models.plan_review import (
 from src.models.state import MergeState, SystemStatus
 from src.tools.conflict_markers import (
     file_has_conflict_markers,
+    find_conflict_marker,
     has_conflict_markers,
 )
 from src.tools.patch_applier import apply_with_snapshot
@@ -36,6 +37,29 @@ from src.tools.patch_applier import apply_with_snapshot
 # --------------------------------------------------------------------------
 # O-M1: conflict-marker detection
 # --------------------------------------------------------------------------
+
+
+def test_conflict_marker_options_offer_manual_paste_and_skip():
+    from src.core.phases.auto_merge import _conflict_marker_decision_options
+
+    opts = _conflict_marker_decision_options()
+    by_key = {o.key: o for o in opts}
+
+    # Core pick-a-side axes plus the marker-friendly extensions.
+    assert set(by_key) == {
+        "approve_human",
+        "take_target",
+        "take_current",
+        "manual_paste",
+        "skip",
+    }
+    # LLM-merge options stay omitted (O-M1 anti-pattern).
+    assert "llm_auto_merge" not in by_key
+    assert "llm_with_instruction" not in by_key
+    # kind must be set so the Web UI renders the paste box / hides input;
+    # the bridge keys manual_resolution capture off these.
+    assert by_key["manual_paste"].kind == "manual_paste"
+    assert by_key["skip"].kind == "skip"
 
 
 def test_has_conflict_markers_detects_all_three():
@@ -50,6 +74,27 @@ def test_has_conflict_markers_clean_content():
     assert not has_conflict_markers("def foo():\n    return 1\n")
     # Shorter-than-7 angle brackets should not trip it.
     assert not has_conflict_markers("<<<<<<\n======\n>>>>>>\n")
+
+
+def test_has_conflict_markers_ignores_string_literal_runs():
+    # Regression: a legitimate Go string literal with >7 angle brackets must
+    # NOT be flagged as an unresolved conflict marker. (forgejo
+    # gitea_uploader_test.go:640 escalated falsely on the substring scan.)
+    line = (
+        "\t\t\tstopMark := fmt.Sprintf("
+        '">>>>>>>>>>>>>STOP: %s<<<<<<<<<<<<<<<", testCase.name)\n'
+    )
+    assert not has_conflict_markers(line)
+    assert find_conflict_marker(line) is None
+    # Eight-or-more of the marker char on its own line is also not a git marker.
+    assert not has_conflict_markers("<<<<<<<<\n========\n>>>>>>>>\n")
+
+
+def test_find_conflict_marker_returns_canonical_token():
+    assert find_conflict_marker("x\n<<<<<<< HEAD\ny\n") == "<<<<<<<"
+    assert find_conflict_marker("line\n=======\nline") == "======="
+    assert find_conflict_marker(">>>>>>> theirs\n") == ">>>>>>>"
+    assert find_conflict_marker("clean code\n") is None
 
 
 def test_file_has_conflict_markers_reads_from_repo():
@@ -296,8 +341,10 @@ def test_register_dispute_exhaustion_includes_fork_upstream_diff():
             file_status=FileStatus.MODIFIED,
             risk_level=RiskLevel.HUMAN_REQUIRED,
             risk_score=0.7,
-            lines_added=10,
-            lines_deleted=2,
+            lines_added=5,
+            lines_deleted=1,
+            upstream_lines_added=10,
+            upstream_lines_deleted=2,
         )
     )
     issues = [
@@ -329,7 +376,10 @@ def test_register_dispute_exhaustion_includes_fork_upstream_diff():
     req = state.human_decision_requests["pkg/x.go"]
     assert "see Judge issues summary" not in (req.upstream_change_summary or "")
     assert "see Judge issues summary" not in (req.fork_change_summary or "")
+    # Upstream summary reflects upstream-side line counts; fork summary the
+    # fork-side counts — the two must not be conflated.
     assert "+10" in req.upstream_change_summary and "-2" in req.upstream_change_summary
+    assert "+5" in req.fork_change_summary and "-1" in req.fork_change_summary
     # analyst_rationale carries the Judge issue text.
     assert "upstream removed the auth check" in (req.analyst_rationale or "")
     # Options carry real unified diffs (fork → upstream and reverse).

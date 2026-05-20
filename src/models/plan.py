@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from src.models.diff import RiskLevel, FileChangeCategory
 from src.models.config import GateCommandConfig
 
@@ -146,6 +146,17 @@ class PhaseFileBatch(BaseModel):
     change_category: FileChangeCategory | None = None
     estimated_duration_minutes: float | None = None
     can_parallelize: bool = True
+    # Frozen membership captured at construction. ``auto_merge`` drains
+    # ``file_paths`` as files are applied, so review/audit artifacts that
+    # render the plan *as the human signed off on it* must read this
+    # instead — see ``write_plan_review_report``.
+    original_file_paths: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _snapshot_original_file_paths(self) -> "PhaseFileBatch":
+        if not self.original_file_paths:
+            self.original_file_paths = list(self.file_paths)
+        return self
 
 
 def validate_plan_shape(plan: "MergePlan") -> None:

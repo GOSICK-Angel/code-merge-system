@@ -85,6 +85,30 @@ PHASE_MAP: dict[SystemStatus, type[Phase]] = {
     SystemStatus.GENERATING_REPORT: ReportGenerationPhase,
 }
 
+
+def _mark_suspended_phase(state: MergeState, target_status: SystemStatus) -> None:
+    """Flip the just-run phase from ``running`` → ``awaiting`` when it suspends
+    to AWAITING_HUMAN.
+
+    A phase that yields to human review returns without marking its own
+    PhaseResult terminal, so it stays ``running`` forever — and across resume
+    cycles several phases pile up as simultaneously RUNNING in the UI. Reflect
+    the suspension so only a genuinely-executing phase reads as running.
+    """
+    if target_status != SystemStatus.AWAITING_HUMAN:
+        return
+    cur_key = (
+        state.current_phase.value
+        if hasattr(state.current_phase, "value")
+        else str(state.current_phase)
+    )
+    pr = state.phase_results.get(cur_key)
+    if pr is not None and pr.status == "running":
+        state.phase_results[cur_key] = pr.model_copy(
+            update={"status": "awaiting", "completed_at": datetime.now()}
+        )
+
+
 # Per-status activity notifications (agent_name, before_msg, after_msg)
 _PHASE_ACTIVITY: dict[SystemStatus, tuple[str, str, str]] = {
     SystemStatus.INITIALIZED: (
@@ -177,6 +201,7 @@ class Orchestrator:
 
         # --- logging/activity ---
         self._log_handler: logging.FileHandler | None = None
+        self._run_dir_log_handler: logging.FileHandler | None = None
         self._structured_handler: logging.FileHandler | None = None
         self._trace_logger: TraceLogger | None = None
         self._on_activity: OnActivityCallback | None = None
@@ -270,17 +295,20 @@ class Orchestrator:
                     self._finalize_log(state, run_start)
                     return state
 
-                # U2 double-transition guard: if BaseAgent already raised
-                # RunBudgetExceeded and we transitioned to AWAITING_HUMAN,
-                # the loop predicate already pulled us out — but defensive
-                # short-circuit here keeps the ceiling check from layering
-                # a second transition on a status that wraps the same fact.
-                if state.status == SystemStatus.AWAITING_HUMAN:
-                    self._finalize_log(state, run_start)
-                    return state
-
+                # G5 ceiling check is gated on ``status != AWAITING_HUMAN``
+                # rather than short-circuiting the whole loop. The earlier
+                # blanket guard ("if status == AWAITING_HUMAN: return")
+                # accidentally suppressed ``PHASE_MAP[AWAITING_HUMAN] =
+                # HumanReviewPhase`` dispatch too, which broke the web
+                # approve-flow: ``bridge._apply_user_plan_decisions`` would
+                # write ``plan_human_review`` into in-memory state and wake
+                # the orchestrator, but the guard returned before
+                # HumanReviewPhase could observe the approval and transition
+                # to AUTO_MERGING. The narrower guard below keeps the U-P2.13
+                # invariant (no double-fire of the ceiling transition) while
+                # letting HumanReviewPhase actually run.
                 ceiling = state.config.max_cost_usd
-                if ceiling is not None:
+                if ceiling is not None and state.status != SystemStatus.AWAITING_HUMAN:
                     # _prior_cost_summary holds spending from earlier processes
                     # (resume case); the in-process tracker holds spending
                     # since this Orchestrator started. Add them — never read
@@ -336,6 +364,7 @@ class Orchestrator:
                     state=state,
                 )
                 logger.info("Phase %s completed in %.1fs", phase.name, elapsed)
+                _mark_suspended_phase(state, outcome.target_status)
 
                 if self._trace_logger:
                     self._trace_logger.record_phase_transition(
@@ -691,6 +720,25 @@ class Orchestrator:
 
         self._log_handler = handler
 
+        # Co-locate a copy of the run log next to checkpoint.json so it is
+        # discoverable. The canonical log lives under the platformdirs data
+        # dir (``~/Library/Application Support/...`` on macOS) — far from the
+        # ``.merge/runs/<id>/`` directory users actually open. The Web UI's
+        # "check the merge process logs" hint is useless without this.
+        run_dir = get_run_dir(self.config.repo_path, run_id)
+        if run_dir.resolve() != log_dir.resolve():
+            try:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                run_dir_handler = logging.FileHandler(
+                    run_dir / "run.log", encoding="utf-8"
+                )
+                run_dir_handler.setFormatter(formatter)
+                run_dir_handler.setLevel(logging.DEBUG)
+                root.addHandler(run_dir_handler)
+                self._run_dir_log_handler = run_dir_handler
+            except OSError as exc:
+                logger.warning("Could not open co-located run log: %s", exc)
+
         if self.config.output.structured_logs:
             structured_path = str(log_dir / f"run_{run_id}.jsonl")
             self._structured_handler = create_structured_handler(structured_path)
@@ -709,6 +757,10 @@ class Orchestrator:
             root.removeHandler(self._log_handler)
             self._log_handler.close()
             self._log_handler = None
+        if self._run_dir_log_handler:
+            root.removeHandler(self._run_dir_log_handler)
+            self._run_dir_log_handler.close()
+            self._run_dir_log_handler = None
         if self._structured_handler:
             root.removeHandler(self._structured_handler)
             self._structured_handler.close()
