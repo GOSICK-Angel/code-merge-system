@@ -176,6 +176,8 @@ class MergeWSBridge:
                     await self._handle_command(ws, msg)
                 except json.JSONDecodeError:
                     pass
+        except websockets.exceptions.ConnectionClosed:
+            logger.debug("Client disconnected (remote=%s)", ws.remote_address)
         finally:
             self._clients.discard(ws)
             logger.info("TUI client disconnected (%d remaining)", len(self._clients))
@@ -240,6 +242,10 @@ class MergeWSBridge:
 
         if cmd_type == "setup.submit":
             await self._handle_setup_submit(ws, payload)
+            return
+
+        if cmd_type == "setup.test_connection":
+            await self._handle_setup_test_connection(ws, payload)
             return
 
         if self._mode == "setup":
@@ -415,6 +421,115 @@ class MergeWSBridge:
         )
         logger.info(
             "setup.submit applied — config persisted, awaiting orchestrator launch"
+        )
+
+    async def _handle_setup_test_connection(
+        self, ws: ServerConnection, payload: dict[str, Any]
+    ) -> None:
+        """Probe a provider's models with the supplied (or on-disk) creds.
+
+        Blank ``api_key`` / ``base_url`` in the payload fall back to the
+        resolved env chain (shell > project ``.env`` > global ``.env``) so
+        the test mirrors what a run would actually pick up. Replies with a
+        ``setup_test_result`` frame carrying a per-model verdict, or a
+        provider-level ``error`` when no key can be resolved."""
+        if self._mode != "setup":
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "command_error",
+                        "payload": {
+                            "reason": "not_in_setup_mode",
+                            "command": "setup.test_connection",
+                        },
+                    }
+                )
+            )
+            return
+
+        provider = payload.get("provider", "")
+        if provider not in ("anthropic", "openai"):
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "setup_test_result",
+                        "payload": {
+                            "provider": provider,
+                            "error": f"unknown provider {provider!r}",
+                            "results": [],
+                        },
+                    }
+                )
+            )
+            return
+
+        from src.cli.commands.setup import (
+            PROVIDER_API_KEY_ENV,
+            PROVIDER_BASE_URL_ENV,
+            _resolve_env_value,
+        )
+        from src.llm.connectivity import probe_provider
+
+        models = [m for m in payload.get("models", []) if isinstance(m, str) and m]
+        api_key = (payload.get("api_key") or "").strip() or _resolve_env_value(
+            PROVIDER_API_KEY_ENV[provider], self._repo_path
+        )
+        base_url = (payload.get("base_url") or "").strip() or _resolve_env_value(
+            PROVIDER_BASE_URL_ENV[provider], self._repo_path
+        )
+
+        if not api_key:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "setup_test_result",
+                        "payload": {
+                            "provider": provider,
+                            "error": "no API key supplied and none found on disk",
+                            "results": [],
+                        },
+                    }
+                )
+            )
+            return
+        if not models:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "setup_test_result",
+                        "payload": {
+                            "provider": provider,
+                            "error": "no models listed to test",
+                            "results": [],
+                        },
+                    }
+                )
+            )
+            return
+
+        probes = await probe_provider(provider, models, api_key, base_url)
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "setup_test_result",
+                    "payload": {
+                        "provider": provider,
+                        "error": None,
+                        "results": [
+                            {
+                                "model": p.model,
+                                "ok": p.ok,
+                                "latency_ms": p.latency_ms,
+                                "detail": p.detail,
+                            }
+                            for p in probes
+                        ],
+                    },
+                }
+            )
+        )
+        logger.info(
+            "setup.test_connection probed %d %s model(s)", len(probes), provider
         )
 
     async def _handle_cancel_run(self, ws: ServerConnection) -> None:
@@ -668,10 +783,16 @@ class MergeWSBridge:
         if data_hash == self._last_snapshot_hash:
             return
         self._last_snapshot_hash = data_hash
-        await asyncio.gather(
-            *(ws.send(data) for ws in self._clients),
+        results = await asyncio.gather(
+            *(ws.send(data) for ws in list(self._clients)),
             return_exceptions=True,
         )
+        dead = {
+            ws
+            for ws, result in zip(list(self._clients), results)
+            if isinstance(result, Exception)
+        }
+        self._clients -= dead
 
     def notify_state_change(self, reason: str = "") -> None:
         """Called by the orchestrator observer hook (sync or thread context).
@@ -729,6 +850,8 @@ class MergeWSBridge:
             "phase": event.phase,
             "event_type": event.event_type,
             "elapsed": event.elapsed,
+            "target": event.target,
+            "ts": event.ts,
         }
         loop = self._loop
         if loop is None or loop.is_closed():

@@ -136,9 +136,7 @@ async def _serve(
     await bridge.start("localhost", ws_port)
 
     runs_root = get_project_merge_dir(repo_path) / "runs"
-    static_server = StaticHTTPServer(
-        web_dist, runs_root=runs_root if runs_root.exists() else None
-    )
+    static_server = StaticHTTPServer(web_dist, runs_root=runs_root)
     await static_server.start("localhost", web_port)
 
     url = f"http://localhost:{web_port}/?ws={ws_port}"
@@ -160,7 +158,12 @@ async def _serve(
             state=state,
             config=merge_config,
         )
-    except (KeyboardInterrupt, SystemExit):
+        console.print(
+            f"[bold green]Run complete — report at "
+            f"http://localhost:{web_port} (Ctrl+C to exit)[/bold green]"
+        )
+        await asyncio.sleep(float("inf"))
+    except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
         console.print("[yellow]Interrupted by user.[/yellow]")
     finally:
         await _shutdown_servers(bridge, static_server)
@@ -178,10 +181,8 @@ async def _serve_with_state(
     bridge = MergeWSBridge(state)
     await bridge.start("localhost", ws_port)
 
-    runs_root = get_project_merge_dir(".") / "runs"
-    static_server = StaticHTTPServer(
-        web_dist, runs_root=runs_root if runs_root.exists() else None
-    )
+    runs_root = get_project_merge_dir(config.repo_path) / "runs"
+    static_server = StaticHTTPServer(web_dist, runs_root=runs_root)
     await static_server.start("localhost", web_port)
 
     url = f"http://localhost:{web_port}/?ws={ws_port}"
@@ -190,7 +191,12 @@ async def _serve_with_state(
 
     try:
         await _run_orchestrator(bridge=bridge, state=state, config=config)
-    except (KeyboardInterrupt, SystemExit):
+        console.print(
+            f"[bold green]Run complete — report at "
+            f"http://localhost:{web_port} (Ctrl+C to exit)[/bold green]"
+        )
+        await asyncio.sleep(float("inf"))
+    except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
         console.print("[yellow]Interrupted by user.[/yellow]")
     finally:
         await _shutdown_servers(bridge, static_server)
