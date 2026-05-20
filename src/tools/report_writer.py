@@ -642,11 +642,17 @@ def write_plan_review_report(state: MergeState, output_dir: str) -> Path:
                 if hasattr(batch.risk_level, "value")
                 else batch.risk_level
             )
+            # Render the plan as the reviewer signed off on it. ``auto_merge``
+            # drains ``file_paths`` as it applies files, and this report is
+            # regenerated in ``human_review`` after that drain — so reading
+            # ``file_paths`` here would show "Files (0)" for already-applied
+            # batches. ``original_file_paths`` is the frozen snapshot.
+            batch_files = batch.original_file_paths or batch.file_paths
             lines += [
                 f"#### {t('batch')} `{batch.batch_id}` — {risk_val}",
-                f"- {t('files')} ({len(batch.file_paths)}):",
+                f"- {t('files')} ({len(batch_files)}):",
             ]
-            for fp in batch.file_paths:
+            for fp in batch_files:
                 lines.append(f"  - `{fp}`")
             lines.append("")
 
