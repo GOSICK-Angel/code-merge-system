@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.agents.base_agent import AgentError, BaseAgent
+from src.agents.base_agent import AgentError, AgentExhaustedError, BaseAgent
 from src.agents.planner_judge_agent import PlannerJudgeAgent
 from src.llm.error_classifier import ClassifiedError, ErrorCategory, classify_error
 from src.models.config import AgentLLMConfig
@@ -149,6 +149,70 @@ class TestOnFallbackNeeded:
         assert agent._on_fallback_needed(classified) is False
 
 
+def _make_simple_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[_StubAgent, MagicMock]:
+    """Stub agent with a single (no-fallback) MagicMock LLM."""
+    llm = MagicMock(name="llm")
+
+    from src.agents import base_agent as base_agent_mod
+
+    monkeypatch.setattr(
+        base_agent_mod.LLMClientFactory, "create", staticmethod(lambda _cfg: llm)
+    )
+    cfg = AgentLLMConfig(
+        provider="openai",
+        model="gpt-5.4-mini",
+        api_key_env="OPENAI_API_KEY",
+        max_tokens=4096,
+        max_retries=1,
+    )
+    return _StubAgent(cfg), llm
+
+
+class TestPerAgentActivityEmission:
+    """BaseAgent emits per-agent start + terminal (complete/error) activity
+    around each LLM call so the topology can show genuine live run state."""
+
+    @pytest.mark.asyncio
+    async def test_emits_start_and_complete_on_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        agent, llm = _make_simple_agent(monkeypatch)
+        llm.complete = AsyncMock(return_value="ok")
+
+        events: list[Any] = []
+        agent.set_activity_callback(events.append)
+        agent._current_phase = "auto_merge"
+
+        result = await agent._call_llm_with_retry([{"role": "user", "content": "hi"}])
+        assert result == "ok"
+
+        pairs = [(e.agent, e.event_type) for e in events]
+        assert ("planner", "start") in pairs
+        assert ("planner", "complete") in pairs
+        complete = [e for e in events if e.event_type == "complete"][-1]
+        assert complete.elapsed is not None
+        assert complete.target is None
+
+    @pytest.mark.asyncio
+    async def test_emits_error_on_nonretryable_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        agent, llm = _make_simple_agent(monkeypatch)
+        llm.complete = AsyncMock(side_effect=_HTTPError("Invalid API key", 401))
+
+        events: list[Any] = []
+        agent.set_activity_callback(events.append)
+
+        with pytest.raises(AgentError):
+            await agent._call_llm_with_retry([{"role": "user", "content": "hi"}])
+
+        pairs = [(e.agent, e.event_type) for e in events]
+        assert ("planner", "start") in pairs
+        assert ("planner", "error") in pairs
+
+
 class TestRetryLoopSwapsOn401:
     """End-to-end: a 401 from the primary LLM should trigger fallback and
     return its response, instead of raising AgentError."""
@@ -167,6 +231,72 @@ class TestRetryLoopSwapsOn401:
         result = await agent._call_llm_with_retry([{"role": "user", "content": "ping"}])
         assert result == "ok-from-fallback"
         assert agent.llm is fallback
+        assert agent._using_fallback is True
+        primary.complete.assert_awaited_once()
+        fallback.complete.assert_awaited_once()
+
+
+class TestRetryLoopSwapsOnOverload:
+    """A sustained 503/overload (retryable) from the primary must, after the
+    primary's local retries are exhausted, route to the configured fallback
+    provider instead of raising AgentExhaustedError.
+
+    Regression for the planner_judge bug: a single-call agent hit by a 503 on
+    every attempt never reached the immediate-category / sliding-window /
+    circuit-breaker fallback triggers, so it failed straight to
+    LLM_UNAVAILABLE even though a healthy fallback was configured.
+    """
+
+    def test_overload_marked_should_fallback(self):
+        cls = classify_error(
+            _HTTPError("Service temporarily unavailable", 503), provider="openai"
+        )
+        assert cls.category == ErrorCategory.OVERLOAD
+        assert cls.retryable is True
+        assert cls.should_fallback is True
+
+    @pytest.mark.asyncio
+    async def test_sustained_503_routes_to_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        agent, primary, fallback = _make_stub_agent(monkeypatch)
+
+        primary.complete = AsyncMock(
+            side_effect=_HTTPError("Service temporarily unavailable", 503)
+        )
+        fallback.complete = AsyncMock(return_value="ok-from-fallback")
+
+        # max_retries=1: primary fails once → budget exhausted → switch to
+        # fallback (no backoff sleep on the exhaustion path).
+        result = await agent._call_llm_with_retry(
+            [{"role": "user", "content": "ping"}], max_retries=1
+        )
+
+        assert result == "ok-from-fallback"
+        assert agent.llm is fallback
+        assert agent._using_fallback is True
+        primary.complete.assert_awaited_once()
+        fallback.complete.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_both_providers_503_raises_after_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        agent, primary, fallback = _make_stub_agent(monkeypatch)
+
+        primary.complete = AsyncMock(
+            side_effect=_HTTPError("Service temporarily unavailable", 503)
+        )
+        fallback.complete = AsyncMock(
+            side_effect=_HTTPError("Service temporarily unavailable", 503)
+        )
+
+        with pytest.raises(AgentExhaustedError):
+            await agent._call_llm_with_retry(
+                [{"role": "user", "content": "ping"}], max_retries=1
+            )
+
+        # fallback was actually attempted before giving up
         assert agent._using_fallback is True
         primary.complete.assert_awaited_once()
         fallback.complete.assert_awaited_once()

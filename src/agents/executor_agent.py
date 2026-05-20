@@ -27,6 +27,7 @@ from src.llm.prompts.executor_prompts import (
     build_deletion_analysis_prompt,
     build_rebuttal_prompt,
 )
+from src.llm.client import ParseError
 from src.llm.response_parser import parse_merge_result
 from src.tools.patch_applier import apply_with_snapshot, create_escalate_record
 from src.tools.file_classifier import _fork_deleted_skip_record, is_fork_deleted
@@ -57,6 +58,16 @@ class ExecutorAgent(BaseAgent):
     def __init__(self, llm_config: AgentLLMConfig, git_tool: GitTool | None = None):
         super().__init__(llm_config)
         self.git_tool = git_tool
+        # P4: most recent merge-generation LLMResponse.stop_reason — fed
+        # forward to ``build_rebuttal_prompt`` so the dispute round can
+        # tell the LLM "your last output was truncated at max_tokens"
+        # instead of mechanically asking it to regenerate identical
+        # garbage. Concurrent per-file merges can race on this (the
+        # last writer wins) but the failure mode is graceful: rebuttal
+        # gets a slightly stale signal, never wrong information that
+        # could cause a regression.
+        self._last_merge_stop_reason: str | None = None
+        self._last_merge_had_prose_preamble: bool = False
 
     async def run(self, state: MergeState) -> AgentMessage:
         view = self.restricted_view(state)
@@ -439,9 +450,17 @@ class ExecutorAgent(BaseAgent):
         messages = [{"role": "user", "content": prompt}]
 
         try:
-            raw = await self._call_llm_with_retry(messages, system=EXECUTOR_SYSTEM)
-            merged_content = parse_merge_result(str(raw))
+            raw = await self._call_llm_with_retry_meta(messages, system=EXECUTOR_SYSTEM)
+            self._last_merge_stop_reason = raw.stop_reason
+            self._last_merge_had_prose_preamble = False
+            merged_content = parse_merge_result(
+                raw,
+                current_size=len(current_content),
+                target_size=len(target_content),
+            )
         except Exception as e:
+            if isinstance(e, ParseError) and "preamble" in str(e).lower():
+                self._last_merge_had_prose_preamble = True
             logger.warning("Semantic merge failed for %s: %s", file_diff.file_path, e)
             stash_note = self._stash_upstream_diff_for_escalation(
                 file_diff.file_path, state
@@ -519,11 +538,17 @@ class ExecutorAgent(BaseAgent):
             if memory_text:
                 prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
             try:
-                raw = await self._call_llm_with_retry(
+                raw = await self._call_llm_with_retry_meta(
                     [{"role": "user", "content": prompt}],
                     system=EXECUTOR_SYSTEM,
                 )
-                merged_chunks.append(parse_merge_result(str(raw)))
+                merged_chunks.append(
+                    parse_merge_result(
+                        raw,
+                        current_size=len(curr_chunk),
+                        target_size=len(tgt_chunk),
+                    )
+                )
             except Exception as e:
                 logger.warning(
                     "Chunk %d/%d merge failed for %s: %s — escalating",
@@ -715,8 +740,14 @@ class ExecutorAgent(BaseAgent):
             messages = [{"role": "user", "content": prompt}]
 
             try:
-                raw = await self._call_llm_with_retry(messages, system=EXECUTOR_SYSTEM)
-                repaired = parse_merge_result(str(raw))
+                raw = await self._call_llm_with_retry_meta(
+                    messages, system=EXECUTOR_SYSTEM
+                )
+                repaired = parse_merge_result(
+                    raw,
+                    current_size=len(current_content) if current_content else None,
+                    target_size=len(target_content) if target_content else None,
+                )
             except Exception as exc:
                 self.logger.warning("Repair failed for %s: %s", instr.file_path, exc)
                 continue
@@ -894,7 +925,13 @@ class ExecutorAgent(BaseAgent):
             f"- [{i.issue_id}] {i.issue_level.value}: {i.description}" for i in issues
         )
         file_paths = list({i.file_path for i in issues})
-        prompt = build_rebuttal_prompt(issues_summary, file_paths, project_context)
+        prompt = build_rebuttal_prompt(
+            issues_summary,
+            file_paths,
+            project_context,
+            last_stop_reason=self._last_merge_stop_reason,
+            last_had_prose_preamble=self._last_merge_had_prose_preamble,
+        )
         memory_text = self.get_memory_context(self._current_phase, file_paths)
         if memory_text:
             prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"

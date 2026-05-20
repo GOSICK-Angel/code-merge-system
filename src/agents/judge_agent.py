@@ -38,6 +38,7 @@ from src.llm.response_parser import (
     parse_judge_verdict,
 )
 from src.tools.file_classifier import matches_any_pattern
+from src.tools.conflict_markers import find_conflict_marker
 from src.tools.forks_profile_loader import (
     find_removed_domain_match,
     find_rewritten_module_match,
@@ -303,19 +304,17 @@ class JudgeAgent(BaseAgent):
         except Exception as e:
             self.logger.error(f"File review failed for {file_path}: {e}")
 
-        conflict_markers = ["<<<<<<<", "=======", ">>>>>>>"]
-        for marker in conflict_markers:
-            if marker in merged_content:
-                issues.append(
-                    JudgeIssue(
-                        file_path=file_path,
-                        issue_level=IssueSeverity.CRITICAL,
-                        issue_type="unresolved_conflict",
-                        description=f"Conflict marker '{marker}' found in merged content",
-                        must_fix_before_merge=True,
-                    )
+        marker = find_conflict_marker(merged_content)
+        if marker is not None:
+            issues.append(
+                JudgeIssue(
+                    file_path=file_path,
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="unresolved_conflict",
+                    description=f"Conflict marker '{marker}' found in merged content",
+                    must_fix_before_merge=True,
                 )
-                break
+            )
 
         return issues
 
@@ -1370,18 +1369,17 @@ class JudgeAgent(BaseAgent):
                     )
                 )
 
-        for marker in ("<<<<<<<", "=======", ">>>>>>>"):
-            if marker in merged_content:
-                issues.append(
-                    JudgeIssue(
-                        file_path=file_path,
-                        issue_level=IssueSeverity.CRITICAL,
-                        issue_type="unresolved_conflict",
-                        description=f"Conflict marker '{marker}' found in merged content",
-                        must_fix_before_merge=True,
-                    )
+        marker = find_conflict_marker(merged_content)
+        if marker is not None:
+            issues.append(
+                JudgeIssue(
+                    file_path=file_path,
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="unresolved_conflict",
+                    description=f"Conflict marker '{marker}' found in merged content",
+                    must_fix_before_merge=True,
                 )
-                break
+            )
 
         return issues
 

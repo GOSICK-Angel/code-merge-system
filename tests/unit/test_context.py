@@ -276,3 +276,27 @@ class TestBuildStagedContent:
             budget_tokens=50000,
         )
         assert result == content
+
+    def test_build_staged_content_no_diff_overlap_falls_back_to_full(self):
+        """Regression: a large file with no diff/conflict overlap (e.g. an
+        upstream_only take_target file under Judge review) must not be elided
+        down to a content-free '# ... (N sections omitted)' placeholder. When
+        relevance scoring drops every chunk but the budget has room, the real
+        content is returned instead of a placeholder the Judge mistakes for an
+        empty file."""
+        builder = self._make_builder()
+        lines = [f"def func_{i}():\n    return {i}\n" for i in range(300)]
+        large_content = "\n".join(lines)
+        # Sanity: this must be big enough to enter the staging path.
+        assert large_content.count("\n") >= 200
+
+        result = builder.build_staged_content(
+            content=large_content,
+            file_path="routers/web/auth/password.py",
+            diff_ranges=[],  # take_target / upstream_only: no diff anchor
+            budget_tokens=1_000_000,  # whole file fits easily
+        )
+
+        assert "sections omitted" not in result
+        assert "func_0" in result
+        assert "func_299" in result

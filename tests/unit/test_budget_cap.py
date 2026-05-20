@@ -273,3 +273,138 @@ class TestOrchestratorBudgetExceeded:
         # Exactly one budget_exceeded tag — no follow-up cost_ceiling_halt.
         assert tags.count("budget_exceeded") == 1
         assert "cost_ceiling_halt" not in tags
+
+
+class TestOrchestratorAwaitingHumanDispatch:
+    """Regression guard for the web approve-flow.
+
+    Prior to the fix the orchestrator main loop had a blanket
+    ``if state.status == AWAITING_HUMAN: return`` short-circuit at the
+    top, which prevented ``PHASE_MAP[AWAITING_HUMAN] = HumanReviewPhase``
+    from ever dispatching on re-entry. The bridge would set
+    ``plan_human_review`` and wake the orchestrator, but the loop kept
+    returning before HumanReviewPhase could observe the approval and
+    transition to AUTO_MERGING. These tests pin the dispatch path so
+    the regression cannot be reintroduced silently.
+    """
+
+    async def test_awaiting_human_dispatches_human_review_phase(self, tmp_path):
+        """When ``orch.run(state)`` is entered with status=AWAITING_HUMAN,
+        ``PHASE_MAP[AWAITING_HUMAN]`` MUST be invoked. The earlier
+        blanket short-circuit returned before the dispatch, breaking the
+        web approve flow."""
+        from src.models.state import SystemStatus
+
+        config = _make_config(tmp_path)
+        with patch("src.core.orchestrator.GitTool"):
+            orch = Orchestrator(config, agents={})
+        state = MergeState(config=config)
+        state.run_id = "awaiting-dispatch"
+        state.status = SystemStatus.AWAITING_HUMAN
+
+        # Stub HumanReviewPhase via PHASE_MAP — we don't care about its
+        # internal logic here, only that it was actually instantiated and
+        # ``run`` was awaited. Pause the loop afterwards so the test
+        # doesn't dispatch follow-on phases.
+        from src.core.phases.base import PhaseOutcome
+
+        async def paused_run(*args, **kwargs):
+            return PhaseOutcome(
+                target_status=SystemStatus.AWAITING_HUMAN,
+                reason="test-stop",
+                checkpoint_tag="awaiting_human",
+                extra={"paused": True},
+            )
+
+        phase_instance = MagicMock()
+        phase_instance.run = AsyncMock(side_effect=paused_run)
+        phase_instance.name = "human_review"
+        phase_cls_mock = MagicMock(return_value=phase_instance)
+
+        with (
+            patch(
+                "src.core.orchestrator.PHASE_MAP",
+                {SystemStatus.AWAITING_HUMAN: phase_cls_mock},
+            ),
+            patch.object(orch, "_inject_cost_tracker"),
+            patch.object(orch, "_build_context"),
+            patch.object(orch, "_finalize_log"),
+            patch.object(orch, "_snapshot_telemetry"),
+            patch("src.core.orchestrator.Checkpoint.save"),
+            patch.object(orch._hooks, "emit", new=AsyncMock()),
+        ):
+            await orch.run(state)
+
+        # The regression was: phase_cls_mock never called → HumanReviewPhase
+        # never dispatched → bridge approval wakes orchestrator but state
+        # stays at AWAITING_HUMAN forever.
+        phase_cls_mock.assert_called_once()
+        phase_instance.run.assert_awaited_once()
+
+    async def test_plan_human_review_approve_routes_to_auto_merging(self, tmp_path):
+        """End-to-end: ``state.plan_human_review.decision == APPROVE`` with
+        no undecided ``pending_user_decisions`` MUST cause the real
+        HumanReviewPhase to transition to AUTO_MERGING on the same
+        ``orch.run`` call. Earlier the dispatch was suppressed and the
+        run stayed parked at AWAITING_HUMAN."""
+        from src.models.plan_review import PlanHumanDecision, PlanHumanReview
+        from src.models.state import SystemStatus
+
+        config = _make_config(tmp_path)
+        with patch("src.core.orchestrator.GitTool"):
+            orch = Orchestrator(config, agents={})
+        state = MergeState(config=config)
+        state.run_id = "approve-routes"
+        state.status = SystemStatus.AWAITING_HUMAN
+        state.plan_human_review = PlanHumanReview(
+            decision=PlanHumanDecision.APPROVE,
+            reviewer_name="tui_user",
+        )
+        # Empty pending_user_decisions means HumanReviewPhase's O-L4 guard
+        # ("any item.user_choice is None") doesn't fire — the path under
+        # test is the clean APPROVE → AUTO_MERGING route.
+        state.pending_user_decisions = []
+
+        # Stop the loop right after the transition by pointing AUTO_MERGING
+        # to a paused stub, so the assertion can observe status without
+        # the real AutoMergePhase running.
+        from src.core.phases.base import PhaseOutcome
+        from src.core.phases.human_review import HumanReviewPhase
+
+        async def auto_merge_stub(*args, **kwargs):
+            return PhaseOutcome(
+                target_status=SystemStatus.AUTO_MERGING,
+                reason="test-stop",
+                checkpoint_tag="auto_merge_stop",
+                extra={"paused": True},
+            )
+
+        auto_merge_phase = MagicMock()
+        auto_merge_phase.run = AsyncMock(side_effect=auto_merge_stub)
+        auto_merge_phase.name = "auto_merge"
+        auto_merge_cls = MagicMock(return_value=auto_merge_phase)
+
+        with (
+            patch(
+                "src.core.orchestrator.PHASE_MAP",
+                {
+                    SystemStatus.AWAITING_HUMAN: HumanReviewPhase,
+                    SystemStatus.AUTO_MERGING: auto_merge_cls,
+                },
+            ),
+            patch.object(orch, "_inject_cost_tracker"),
+            patch.object(orch, "_finalize_log"),
+            patch.object(orch, "_snapshot_telemetry"),
+            patch("src.core.orchestrator.Checkpoint.save"),
+            patch("src.core.phases.human_review.write_plan_review_report"),
+            patch("src.core.phases.human_review.write_merge_plan_report"),
+            patch.object(orch._hooks, "emit", new=AsyncMock()),
+        ):
+            result = await orch.run(state)
+
+        # Before the fix: status stayed AWAITING_HUMAN, auto_merge_cls
+        # never called.
+        auto_merge_cls.assert_called_once()
+        # Final state reflects the AUTO_MERGING dispatch that the stub
+        # paused inside.
+        assert result.status == SystemStatus.AUTO_MERGING
