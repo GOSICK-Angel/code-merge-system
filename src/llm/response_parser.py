@@ -262,25 +262,106 @@ def parse_judge_verdict(
     )
 
 
-def parse_merge_result(raw: str | dict[str, Any]) -> str:
-    if isinstance(raw, dict):
-        result = str(raw.get("content", ""))
+def parse_merge_result(
+    raw: "str | dict[str, Any] | LLMResponseLike",
+    *,
+    current_size: int | None = None,
+    target_size: int | None = None,
+) -> str:
+    """Strip code fences and run the merge-output quality gate.
+
+    Quality gate order (any single failure raises ``ParseError`` —
+    callers route to ``create_escalate_record``):
+
+    1. ``stop_reason in {"max_tokens", "length"}`` — provider signalled
+       truncation. The text is incomplete by definition; don't even
+       look at it.
+    2. ``has_prose_preamble`` — the first non-empty line is narrative
+       ("Looking at the current content..."). The LLM ignored the
+       "return ONLY the merged content" instruction.
+    3. ``has_elision`` — explicit ``# ... (N sections omitted)`` style
+       markers echoed back in the output.
+    4. ``looks_truncated`` (when sizes are provided) — last line ends
+       mid-token AND output is < 60% of the smaller input.
+
+    Accepts three input shapes for backward compatibility:
+
+    - ``LLMResponse`` (new) — carries ``stop_reason`` for gate #1
+    - ``dict`` (legacy) — older callers passing an envelope
+    - ``str`` (legacy) — gate #1 is skipped, the rest still run
+
+    ``current_size`` / ``target_size`` enable gate #4. Pass them as
+    ``len(current_content)`` / ``len(target_content)`` from
+    ``execute_semantic_merge`` so the heuristic has the reference
+    point it needs to flag suspiciously short output.
+    """
+    stop_reason: str | None = None
+    if hasattr(raw, "text") and hasattr(raw, "stop_reason"):
+        # LLMResponse — duck-type so we don't pull a circular import.
+        stop_reason = getattr(raw, "stop_reason", None)
+        raw_text = getattr(raw, "text")
+        text = str(raw_text).strip()
+    elif isinstance(raw, dict):
+        text = str(raw.get("content", "")).strip()
     else:
-        text = raw.strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            start = 1
-            end = len(lines)
-            for i in range(len(lines) - 1, 0, -1):
-                if lines[i].strip() == "```":
-                    end = i
-                    break
-            result = "\n".join(lines[start:end])
-        else:
-            result = text
+        text = str(raw).strip()
 
-    from src.tools.elision_detector import has_elision
+    # Gate 1: provider-side truncation — refuse before anything else,
+    # the bytes after the cut are missing by definition.
+    if stop_reason in {"max_tokens", "length"}:
+        raise ParseError(
+            f"Refusing LLM merge result truncated at provider boundary "
+            f"(stop_reason={stop_reason!r}). The output ran past the "
+            f"``max_tokens`` ceiling; the trailing bytes are not in the "
+            f"response. Escalate to human review and bump max_tokens or "
+            f"split the file before retrying."
+        )
 
+    # Gate 1b: cooperative truncation — the prompt asks the LLM to emit
+    # the sentinel ``OUTPUT_TOO_LARGE`` instead of producing a truncated
+    # file when it can't fit the full content. Treat as a refuse the
+    # same way provider-side truncation is treated; the caller will
+    # route to chunked merging.
+    if text.strip() == "OUTPUT_TOO_LARGE":
+        raise ParseError(
+            "LLM signalled OUTPUT_TOO_LARGE — the merged file would exceed "
+            "the model's output buffer. Caller should fall back to chunked "
+            "semantic merge."
+        )
+
+    # Gate 2: prose preamble before any fence stripping — the
+    # ``has_prose_preamble`` detector itself skips fenced output.
+    from src.tools.elision_detector import (
+        has_elision,
+        has_prose_preamble,
+        looks_truncated,
+    )
+
+    prose_hit, prose_line = has_prose_preamble(text)
+    if prose_hit:
+        raise ParseError(
+            f"Refusing merge result that opens with conversational preamble "
+            f"(LLM ignored 'return ONLY the merged content' instruction): "
+            f"{prose_line!r}. Escalate to human review instead of writing "
+            f"chain-of-thought into the file."
+        )
+
+    # Strip the code fence wrapper if present — same logic as before,
+    # but only after the preamble gate so a fenced preamble (extremely
+    # rare) is still caught by gate 3 against the unwrapped text.
+    if text.startswith("```"):
+        lines = text.splitlines()
+        start = 1
+        end = len(lines)
+        for i in range(len(lines) - 1, 0, -1):
+            if lines[i].strip() == "```":
+                end = i
+                break
+        result = "\n".join(lines[start:end])
+    else:
+        result = text
+
+    # Gate 3: explicit elision markers in the body.
     hit, sample = has_elision(result)
     if hit:
         raise ParseError(
@@ -288,7 +369,25 @@ def parse_merge_result(raw: str | dict[str, Any]) -> str:
             f"truncated LLM output): {sample!r}. Escalate to human review "
             f"instead of writing a partial file."
         )
+
+    # Gate 4: heuristic truncation check — only when caller passed
+    # input sizes so the length sanity guard can run.
+    trunc_hit, trunc_sample = looks_truncated(
+        result, current_size=current_size, target_size=target_size
+    )
+    if trunc_hit:
+        raise ParseError(
+            f"Refusing merge result that appears truncated mid-line "
+            f"(tail looks unfinished, output dramatically shorter than "
+            f"inputs): {trunc_sample!r}. Escalate to human review."
+        )
+
     return result
+
+
+# Forward-ref for the duck-typed ``LLMResponse`` argument above —
+# avoids a hard import cycle (llm.client → models.diff → ...).
+LLMResponseLike = Any
 
 
 _GROUNDING_REQUIRED_LEVELS: frozenset[IssueSeverity] = frozenset(

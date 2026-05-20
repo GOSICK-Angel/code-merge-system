@@ -213,7 +213,7 @@ def classify_error(error: Exception, provider: str = "") -> ClassifiedError:
                 retryable=True,
                 should_compress=False,
                 should_rotate=False,
-                should_fallback=False,
+                should_fallback=True,
                 cooldown_seconds=30 if is_cf_edge else 5,
                 message=f"Server overloaded ({provider}): {msg}",
             )
@@ -222,7 +222,7 @@ def classify_error(error: Exception, provider: str = "") -> ClassifiedError:
             retryable=True,
             should_compress=False,
             should_rotate=False,
-            should_fallback=False,
+            should_fallback=True,
             cooldown_seconds=30 if is_cf_edge else 2,
             message=f"Server error {status} ({provider}): {msg}",
         )

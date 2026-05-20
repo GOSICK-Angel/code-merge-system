@@ -151,4 +151,15 @@ class AgentPromptBuilder:
             budget_tokens,
         )
 
+        # Floor: relevance scoring can drop every chunk when a file has no diff
+        # or conflict anchor (e.g. an upstream_only take_target file under Judge
+        # review). render_file_staged would then emit only a content-free
+        # "# ... (N sections omitted)" placeholder, which downstream LLMs — the
+        # Judge in particular — mistake for an empty / unverifiable file. When
+        # nothing real was rendered, fall back to the actual content (trimmed to
+        # the token budget) instead of the placeholder.
+        if used_tokens == 0:
+            max_chars = int(budget_tokens * _CHARS_PER_TOKEN)
+            return content[:max_chars]
+
         return render_file_staged(chunks, levels)

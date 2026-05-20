@@ -3,7 +3,8 @@ from __future__ import annotations
 import os
 import re
 from abc import ABC, abstractmethod
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import anthropic
 import httpx
@@ -13,6 +14,32 @@ from pydantic import BaseModel
 
 from src.llm.prompt_caching import CacheStrategy, apply_cache_markers
 from src.models.config import AgentLLMConfig
+
+
+@dataclass(frozen=True)
+class LLMResponse:
+    """LLM completion response carrying provider-side metadata.
+
+    ``stop_reason`` is normalised across providers to one of:
+
+    - ``"stop"``       — normal end-of-message (Anthropic ``end_turn``,
+      OpenAI ``stop``)
+    - ``"max_tokens"`` — output hit the ``max_tokens`` ceiling and was
+      truncated mid-stream (Anthropic ``max_tokens``, OpenAI ``length``,
+      OpenAI Responses ``incomplete``)
+    - ``"tool_use"``   — provider asked to call a tool instead of
+      finishing (rare for our merge-output path; surfaced for
+      completeness so downstream can decide)
+    - ``"content_filter"`` — provider refused / filtered
+    - ``None``         — provider gave no signal (test mocks, legacy
+      paths that didn't carry metadata)
+
+    Callers MUST treat ``stop_reason == "max_tokens"`` as "this text is
+    truncated; do not write it to disk" — see ``parse_merge_result``.
+    """
+
+    text: str
+    stop_reason: str | None = None
 
 
 def _build_httpx_timeout(total_seconds: float) -> httpx.Timeout:
@@ -51,6 +78,22 @@ class LLMClient(ABC):
         self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
     ) -> str:
         pass
+
+    async def complete_meta(
+        self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
+    ) -> LLMResponse:
+        """Return text + provider metadata (stop_reason, ...).
+
+        Concrete subclasses override this with the real implementation
+        that captures ``stop_reason`` / ``finish_reason`` from the
+        provider response. The default here calls ``complete()`` so
+        existing test mocks that only implement ``complete`` keep
+        working — they just won't carry a stop_reason, and callers that
+        depend on truncation detection will see ``None`` (the most
+        cautious default: "no signal").
+        """
+        text = await self.complete(messages, system=system, **kwargs)
+        return LLMResponse(text=text, stop_reason=None)
 
     @abstractmethod
     async def complete_structured(
@@ -197,6 +240,12 @@ class AnthropicClient(LLMClient):
     async def complete(
         self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
     ) -> str:
+        result = await self.complete_meta(messages, system=system, **kwargs)
+        return result.text
+
+    async def complete_meta(
+        self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
+    ) -> LLMResponse:
         cached_messages, cached_system = apply_cache_markers(
             messages, system=system, strategy=self.cache_strategy
         )
@@ -214,12 +263,16 @@ class AnthropicClient(LLMClient):
 
         response = await self._client.messages.create(**kwargs_merged)
         text = _extract_anthropic_text(response)
+        raw_stop = getattr(response, "stop_reason", None)
         if not text:
-            stop_reason = getattr(response, "stop_reason", None)
             raise RuntimeError(
-                f"Anthropic returned no text blocks (stop_reason={stop_reason!r}, model={self.model!r})"
+                f"Anthropic returned no text blocks (stop_reason={raw_stop!r}, model={self.model!r})"
             )
-        return text
+        # Anthropic emits ``end_turn`` for normal completion and
+        # ``max_tokens`` when truncated. Normalise the former to ``stop``
+        # to align with the OpenAI vocabulary used by ``LLMResponse``.
+        stop_reason = "stop" if raw_stop == "end_turn" else raw_stop
+        return LLMResponse(text=text, stop_reason=stop_reason)
 
     async def complete_structured(
         self,
@@ -300,6 +353,12 @@ class OpenAIClient(LLMClient):
     async def complete(
         self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
     ) -> str:
+        result = await self.complete_meta(messages, system=system, **kwargs)
+        return result.text
+
+    async def complete_meta(
+        self, messages: list[dict[str, Any]], system: str | None = None, **kwargs: Any
+    ) -> LLMResponse:
         sanitized_messages = _sanitize_surrogates(messages)
         sanitized_system = _sanitize_surrogates(system)
 
@@ -333,20 +392,23 @@ class OpenAIClient(LLMClient):
                 messages=all_messages,
                 **kwargs,
             )
-        content: str | None = response.choices[0].message.content
+        choice = response.choices[0]
+        content: str | None = choice.message.content
+        finish_reason: str | None = choice.finish_reason
         if not content:
-            finish_reason = response.choices[0].finish_reason
             raise RuntimeError(
                 f"OpenAI returned empty content (finish_reason={finish_reason!r}, model={self.model!r})"
             )
-        return content
+        # Normalise: OpenAI ``length`` → our ``max_tokens``.
+        stop_reason = "max_tokens" if finish_reason == "length" else finish_reason
+        return LLMResponse(text=content, stop_reason=stop_reason)
 
     async def _complete_responses(
         self,
         sanitized_messages: list[dict[str, Any]],
         sanitized_system: str | None,
         **kwargs: Any,
-    ) -> str:
+    ) -> LLMResponse:
         if (
             len(sanitized_messages) == 1
             and sanitized_messages[0].get("role") == "user"
@@ -381,13 +443,29 @@ class OpenAIClient(LLMClient):
             **kwargs,
         )
         text = _extract_responses_text(response)
+        status = getattr(response, "status", None)
         if not text:
-            status = getattr(response, "status", None)
             raise RuntimeError(
                 f"OpenAI Responses API returned empty content "
                 f"(status={status!r}, model={self.model!r})"
             )
-        return text
+        # The Responses API surfaces truncation via ``status="incomplete"``
+        # plus ``incomplete_details.reason="max_output_tokens"`` (the
+        # exact strings vary by SDK version — guard with getattr).
+        stop_reason: str | None
+        if status == "incomplete":
+            details = getattr(response, "incomplete_details", None)
+            reason = getattr(details, "reason", None) if details else None
+            stop_reason = (
+                "max_tokens"
+                if reason in {"max_output_tokens", "max_tokens"}
+                else (reason or "incomplete")
+            )
+        elif status == "completed":
+            stop_reason = "stop"
+        else:
+            stop_reason = status
+        return LLMResponse(text=text, stop_reason=stop_reason)
 
     async def complete_structured(
         self,
@@ -427,48 +505,125 @@ class OpenAIClient(LLMClient):
             raise ModelOutputError(raw, schema.__name__, str(ve)) from ve
 
 
+@dataclass(frozen=True)
+class ProviderSpec:
+    """Registry entry describing how to build a client for a provider.
+
+    ``wire`` selects the request/response format (and thus the concrete
+    ``LLMClient`` subclass). ``openai_compatible`` reuses the OpenAI wire
+    but targets self-hosted / proxied OpenAI-API-compatible gateways that
+    are distinguished only by ``base_url`` + ``model`` — so it requires an
+    explicit base URL and does not assume the public OpenAI ``/v1`` suffix
+    or the ``OPENAI_BASE_URL`` default env. This keeps gateway endpoints in
+    config (per the target-repo-agnostic rule) rather than baked into source.
+    """
+
+    wire: Literal["anthropic", "openai"]
+    default_base_url_env: str | None
+    base_url_required: bool
+    append_v1: bool
+    supports_prompt_cache: bool
+
+
+_PROVIDER_REGISTRY: dict[str, ProviderSpec] = {
+    "anthropic": ProviderSpec(
+        wire="anthropic",
+        default_base_url_env="ANTHROPIC_BASE_URL",
+        base_url_required=False,
+        append_v1=False,
+        supports_prompt_cache=True,
+    ),
+    "openai": ProviderSpec(
+        wire="openai",
+        default_base_url_env="OPENAI_BASE_URL",
+        base_url_required=False,
+        append_v1=True,
+        supports_prompt_cache=False,
+    ),
+    "openai_compatible": ProviderSpec(
+        wire="openai",
+        default_base_url_env=None,
+        base_url_required=True,
+        append_v1=False,
+        supports_prompt_cache=False,
+    ),
+}
+
+
+def uses_openai_wire(provider: str) -> bool:
+    """True when the provider speaks the OpenAI chat/responses wire format.
+
+    Callers that special-case OpenAI request shaping (e.g. ``response_format``
+    JSON mode) must treat every OpenAI-wire provider alike, not just the
+    literal ``"openai"`` — otherwise ``openai_compatible`` gateways silently
+    lose JSON mode.
+    """
+    spec = _PROVIDER_REGISTRY.get(provider)
+    return spec is not None and spec.wire == "openai"
+
+
 class LLMClientFactory:
-    _WARNED_CACHE_OPENAI: bool = False
+    _WARNED_NO_CACHE: bool = False
 
     @staticmethod
-    def create(config: AgentLLMConfig) -> LLMClient:
-        primary_env = config.api_key_env_list[0]
+    def create(
+        config: AgentLLMConfig,
+        *,
+        api_key_override: str | None = None,
+        base_url_override: str | None = None,
+    ) -> LLMClient:
+        """Build a client for ``config``.
+
+        ``api_key_override`` / ``base_url_override`` let callers supply
+        credentials directly instead of resolving them from the process
+        environment — used by the Setup connectivity probe so testing an
+        un-saved key never has to mutate ``os.environ``. When omitted the
+        normal env-resolution chain applies.
+        """
+        spec = _PROVIDER_REGISTRY.get(config.provider)
+        if spec is None:
+            raise ValueError(f"Unknown provider: {config.provider}")
+
         # O-C3: prompt caching is an Anthropic-only feature. If the user
-        # leaves ``cache_strategy`` at its default but routes to OpenAI they
-        # silently get zero cache hits — warn once per process so ops can
-        # either switch providers or migrate to a stable system-preamble
-        # pattern for OpenAI.
+        # leaves ``cache_strategy`` at its default but routes to a provider
+        # that can't cache they silently get zero cache hits — warn once per
+        # process so ops can either switch providers or set
+        # ``cache_strategy='none'``.
         if (
-            config.provider == "openai"
+            not spec.supports_prompt_cache
             and config.cache_strategy != "none"
-            and not LLMClientFactory._WARNED_CACHE_OPENAI
+            and not LLMClientFactory._WARNED_NO_CACHE
         ):
             import logging as _logging
 
             _logging.getLogger("llm.factory").warning(
-                "cache_strategy=%r has no effect on OpenAI (%s); Anthropic-only. "
-                "Set cache_strategy='none' to silence this warning.",
+                "cache_strategy=%r has no effect on provider %r (%s); "
+                "prompt caching is Anthropic-only. Set cache_strategy='none' "
+                "to silence this warning.",
                 config.cache_strategy,
+                config.provider,
                 config.model,
             )
-            LLMClientFactory._WARNED_CACHE_OPENAI = True
-        api_key = os.environ.get(primary_env)
-        if not api_key:
-            raise EnvironmentError(
-                f"Required env var '{primary_env}' is not set. "
-                f"Needed for agent using {config.provider}/{config.model}."
-            )
-        base_url: str | None = None
-        if config.api_base_url_env:
-            base_url = os.environ.get(config.api_base_url_env) or None
-        if not base_url:
-            default_env = (
-                "ANTHROPIC_BASE_URL"
-                if config.provider == "anthropic"
-                else "OPENAI_BASE_URL"
-            )
-            base_url = os.environ.get(default_env) or None
-        if config.provider == "anthropic":
+            LLMClientFactory._WARNED_NO_CACHE = True
+
+        api_key: str
+        if api_key_override is not None:
+            api_key = api_key_override
+        else:
+            primary_env = config.api_key_env_list[0]
+            resolved = os.environ.get(primary_env)
+            if not resolved:
+                raise EnvironmentError(
+                    f"Required env var '{primary_env}' is not set. "
+                    f"Needed for agent using {config.provider}/{config.model}."
+                )
+            api_key = resolved
+
+        base_url = LLMClientFactory._resolve_base_url(
+            config, spec, explicit=base_url_override
+        )
+
+        if spec.wire == "anthropic":
             return AnthropicClient(
                 model=config.model,
                 api_key=api_key,
@@ -479,37 +634,58 @@ class LLMClientFactory:
                 cache_strategy=CacheStrategy(config.cache_strategy),
                 timeout=float(config.request_timeout_seconds),
             )
-        elif config.provider == "openai":
-            if base_url and not base_url.rstrip("/").endswith("/v1"):
-                base_url = base_url.rstrip("/") + "/v1"
-            effective_max_tokens = config.max_tokens
-            effective_reasoning_effort = config.reasoning_effort
-            if _is_openai_reasoning_model(config.model):
-                if effective_reasoning_effort is None:
-                    effective_reasoning_effort = _OPENAI_REASONING_DEFAULT_EFFORT
-                if effective_max_tokens < _OPENAI_REASONING_MIN_MAX_TOKENS:
-                    import logging as _logging
+        return LLMClientFactory._build_openai(config, api_key, base_url)
 
-                    _logging.getLogger("llm.factory").warning(
-                        "OpenAI reasoning model %r needs max_tokens >= %d "
-                        "(shared between hidden reasoning and visible output); "
-                        "auto-bumping from %d to %d. Set max_tokens explicitly "
-                        "in config to silence this.",
-                        config.model,
-                        _OPENAI_REASONING_MIN_MAX_TOKENS,
-                        effective_max_tokens,
-                        _OPENAI_REASONING_MIN_MAX_TOKENS,
-                    )
-                    effective_max_tokens = _OPENAI_REASONING_MIN_MAX_TOKENS
-            return OpenAIClient(
-                model=config.model,
-                api_key=api_key,
-                temperature=config.temperature,
-                max_tokens=effective_max_tokens,
-                max_retries=config.max_retries,
-                base_url=base_url,
-                timeout=float(config.request_timeout_seconds),
-                reasoning_effort=effective_reasoning_effort,
-                api_style=config.api_style,
+    @staticmethod
+    def _resolve_base_url(
+        config: AgentLLMConfig, spec: ProviderSpec, explicit: str | None = None
+    ) -> str | None:
+        base_url: str | None = explicit or None
+        if not base_url and config.api_base_url_env:
+            base_url = os.environ.get(config.api_base_url_env) or None
+        if not base_url and spec.default_base_url_env:
+            base_url = os.environ.get(spec.default_base_url_env) or None
+        if not base_url and spec.base_url_required:
+            raise EnvironmentError(
+                f"Provider '{config.provider}' requires an explicit base URL. "
+                f"Point 'api_base_url_env' at an env var holding the gateway "
+                f"URL (e.g. api_base_url_env: MERGE_GATEWAY_URL) and set it."
             )
-        raise ValueError(f"Unknown provider: {config.provider}")
+        if base_url and spec.append_v1 and not base_url.rstrip("/").endswith("/v1"):
+            base_url = base_url.rstrip("/") + "/v1"
+        return base_url
+
+    @staticmethod
+    def _build_openai(
+        config: AgentLLMConfig, api_key: str, base_url: str | None
+    ) -> OpenAIClient:
+        effective_max_tokens = config.max_tokens
+        effective_reasoning_effort = config.reasoning_effort
+        if _is_openai_reasoning_model(config.model):
+            if effective_reasoning_effort is None:
+                effective_reasoning_effort = _OPENAI_REASONING_DEFAULT_EFFORT
+            if effective_max_tokens < _OPENAI_REASONING_MIN_MAX_TOKENS:
+                import logging as _logging
+
+                _logging.getLogger("llm.factory").warning(
+                    "OpenAI reasoning model %r needs max_tokens >= %d "
+                    "(shared between hidden reasoning and visible output); "
+                    "auto-bumping from %d to %d. Set max_tokens explicitly "
+                    "in config to silence this.",
+                    config.model,
+                    _OPENAI_REASONING_MIN_MAX_TOKENS,
+                    effective_max_tokens,
+                    _OPENAI_REASONING_MIN_MAX_TOKENS,
+                )
+                effective_max_tokens = _OPENAI_REASONING_MIN_MAX_TOKENS
+        return OpenAIClient(
+            model=config.model,
+            api_key=api_key,
+            temperature=config.temperature,
+            max_tokens=effective_max_tokens,
+            max_retries=config.max_retries,
+            base_url=base_url,
+            timeout=float(config.request_timeout_seconds),
+            reasoning_effort=effective_reasoning_effort,
+            api_style=config.api_style,
+        )

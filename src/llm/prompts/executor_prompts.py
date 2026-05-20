@@ -6,7 +6,26 @@ from src.models.conflict import ConflictAnalysis
 
 EXECUTOR_SYSTEM = """You are a code merge executor. Your task is to apply merge decisions to files,
 performing semantic merges when needed. You must be precise and preserve all important logic from both branches.
-Never lose code that may be functionally important."""
+Never lose code that may be functionally important.
+
+OUTPUT CONTRACT — strictly enforced by a parser, violating any rule causes the merge to be escalated to a human:
+
+1. Output ONLY the merged file content. No prefatory explanation, no chain-of-thought,
+   no "Looking at...", "Here is...", "Let me merge...", "I'll combine...", or any other
+   conversational preamble. The first character of your reply must be the first character
+   of the merged file.
+2. Do NOT wrap the output in markdown code fences (no ```language ... ```). The downstream
+   parser strips fences as a backwards-compat fallback but treats their absence as the
+   contract.
+3. Do NOT echo elision markers like "# ... (3 sections omitted)" or "<... omitted ...>" —
+   even if they appeared in the prompt's staged context. Always emit the complete file.
+4. If the merged file would exceed your output buffer (you cannot fit it in one response),
+   STOP immediately and emit exactly this single token on its own line and nothing else:
+
+       OUTPUT_TOO_LARGE
+
+   The orchestrator will fall back to chunked merging. Outputting a truncated file is
+   strictly worse than emitting this token — a truncated file silently corrupts the repo."""
 
 
 def build_semantic_merge_prompt(
@@ -82,15 +101,53 @@ def build_rebuttal_prompt(
     issues_summary: str,
     file_paths: list[str],
     project_context: str,
+    *,
+    last_stop_reason: str | None = None,
+    last_had_prose_preamble: bool = False,
 ) -> str:
+    """Build the rebuttal-decision prompt fed to the executor LLM.
+
+    ``last_stop_reason`` / ``last_had_prose_preamble`` carry forward
+    quality-gate observations from the previous executor call so the
+    LLM can reason about its own failure mode rather than mechanically
+    regenerating the same broken output. When both default values are
+    used the prompt is identical to the pre-quality-gate version
+    (backwards compatibility for legacy callers / tests).
+    """
     paths_str = ", ".join(file_paths[:10])
+    prior_failure_block = ""
+    if last_stop_reason in {"max_tokens", "length"} or last_had_prose_preamble:
+        notes: list[str] = []
+        if last_stop_reason in {"max_tokens", "length"}:
+            notes.append(
+                "* Your previous response was TRUNCATED at the max_tokens "
+                "ceiling — the trailing bytes never made it into the file. "
+                "If the file is too large to emit in one response this round, "
+                "STOP and emit only `OUTPUT_TOO_LARGE` on its own line so the "
+                "orchestrator can fall back to chunked merging."
+            )
+        if last_had_prose_preamble:
+            notes.append(
+                "* Your previous response began with conversational preamble "
+                "(e.g. 'Looking at the current content...'). The parser "
+                "rejected it because that text was treated as the file body. "
+                "Output ONLY the merged file content — no narration, no "
+                "chain-of-thought, no markdown fences."
+            )
+        prior_failure_block = (
+            "\n# Prior-Round Quality-Gate Findings\n"
+            "Your last attempt was rejected before the judge even reviewed it:\n"
+            + "\n".join(notes)
+            + "\n"
+        )
+
     return f"""You are a code merge executor reviewing a judge's assessment of your merge work.
 
 # Project Context
 {project_context or "No project context provided."}
 
 # Files reviewed: {paths_str}
-
+{prior_failure_block}
 # Judge's Issues
 {issues_summary}
 
