@@ -198,6 +198,7 @@ class Coordinator:
                     update={
                         "batch_id": str(uuid4()),
                         "file_paths": groups[key],
+                        "original_file_paths": list(groups[key]),
                     }
                 )
             )
@@ -212,7 +213,11 @@ class Coordinator:
             sub_paths = batch.file_paths[i : i + max_size]
             out.append(
                 batch.model_copy(
-                    update={"batch_id": str(uuid4()), "file_paths": sub_paths}
+                    update={
+                        "batch_id": str(uuid4()),
+                        "file_paths": sub_paths,
+                        "original_file_paths": list(sub_paths),
+                    }
                 )
             )
         return out
@@ -235,6 +240,7 @@ class Coordinator:
                             update={
                                 "batch_id": str(uuid4()),
                                 "file_paths": running,
+                                "original_file_paths": list(running),
                             }
                         )
                     )
@@ -251,6 +257,7 @@ class Coordinator:
                             update={
                                 "batch_id": str(uuid4()),
                                 "file_paths": running,
+                                "original_file_paths": list(running),
                             }
                         )
                     )

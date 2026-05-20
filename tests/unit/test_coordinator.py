@@ -193,6 +193,26 @@ class TestEnforceBatchLimits:
         ids = [b.batch_id for b in result.phases]
         assert len(ids) == len(set(ids))
 
+    def test_split_resnapshots_original_file_paths(self):
+        """model_copy skips the original_file_paths snapshot validator, so
+        each split sub-batch must re-freeze it to its own slice. Otherwise
+        every sub-batch inherits the parent's full pre-split list, which the
+        plan-review report renders verbatim — making N sub-batches look
+        identical."""
+        cfg = _make_config()
+        cfg.coordinator.max_files_per_batch = 2
+        files = [f"f{i}.py" for i in range(6)]
+        plan = _make_plan([_make_batch(files)])
+
+        c = Coordinator(cfg)
+        result = c.enforce_batch_limits(plan)
+
+        assert len(result.phases) == 3
+        for sub in result.phases:
+            assert sub.original_file_paths == sub.file_paths
+        rendered = [f for sub in result.phases for f in sub.original_file_paths]
+        assert sorted(rendered) == sorted(files)
+
     def test_compute_max_batch_size_respects_hard_cap(self):
         cfg = _make_config()
         cfg.coordinator.max_files_per_batch = 7
