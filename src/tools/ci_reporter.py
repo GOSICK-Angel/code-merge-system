@@ -23,16 +23,36 @@ def build_ci_summary(state: MergeState) -> dict[str, Any]:
         for rec in state.file_decision_records.values()
         if rec.decision_source.value in ("auto_planner", "auto_executor")
     )
-    human_required = sum(
-        1
-        for req in state.human_decision_requests.values()
+
+    # Files awaiting / having a human decision live in two collections:
+    #   * pending_user_decisions     — plan-stage HUMAN_REQUIRED + conflict-marker
+    #   * human_decision_requests    — conflict_analysis ESCALATE_HUMAN
+    # Count by file_path union so a plan-stage halt (no human_decision_requests
+    # yet) is not reported as human_required=0, and a file appearing in both
+    # stages is not double-counted.
+    undecided_paths = {
+        item.file_path
+        for item in state.pending_user_decisions
+        if item.user_choice is None
+    } | {
+        fp
+        for fp, req in state.human_decision_requests.items()
         if req.human_decision is None
-    )
-    human_decided = sum(
-        1
-        for req in state.human_decision_requests.values()
-        if req.human_decision is not None
-    )
+    }
+    decided_paths = (
+        {
+            item.file_path
+            for item in state.pending_user_decisions
+            if item.user_choice is not None
+        }
+        | {
+            fp
+            for fp, req in state.human_decision_requests.items()
+            if req.human_decision is not None
+        }
+    ) - undecided_paths
+    human_required = len(undecided_paths)
+    human_decided = len(decided_paths)
     failed = len(state.errors)
 
     judge_verdict = "none"
