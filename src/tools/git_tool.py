@@ -217,6 +217,21 @@ class GitTool:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
+    def checkout_file(self, ref: str, file_path: str) -> bool:
+        """Restore one path to its content at ``ref`` in BOTH the index and
+        the working tree, clearing any unmerged (conflict) state left by a
+        cherry-pick fall-back.
+
+        Used to drop conflict markers on C-class files before routing them to
+        conflict analysis (which reads clean content from refs anyway), so the
+        interim auto_merge commit never captures marker-laden content.
+        """
+        try:
+            self.repo.git.checkout(ref, "--", file_path)
+            return True
+        except git.GitCommandError:
+            return False
+
     def get_commit_messages(
         self, file_path: str, ref: str, limit: int = 10
     ) -> list[str]:

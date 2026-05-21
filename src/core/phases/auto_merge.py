@@ -262,11 +262,20 @@ class AutoMergePhase(Phase):
                         agent="commit_replayer",
                     )
 
+        # C-class files whose markers were reset to fork content above; they
+        # are routed to conflict_analysis via unhandled_conflict_files below.
+        marker_analysis_files: list[str] = []
+
         # --- O-M1: scan working tree for files with unresolved conflict
         # markers (<<<<<<< / ======= / >>>>>>>) left over by cherry-pick
-        # fall-back. Route them directly to human review: skip AUTO_MERGE
-        # and the Judge pipeline, both of which cannot recover from the
-        # markers being part of the stored content. ---
+        # fall-back. Two routes by change category:
+        #   * C-class (both sides modified) → reset to clean fork content and
+        #     route to conflict_analysis, which reads the three-way diff from
+        #     refs (never the marker-laden working tree) and lets the analyst
+        #     produce a semantic recommendation before any human decision.
+        #   * everything else → escalate directly to human review, skipping
+        #     AUTO_MERGE and the Judge pipeline, neither of which can recover
+        #     from the markers being part of the stored content. ---
         repo_path = Path(ctx.git_tool.repo_path)
         files_with_markers: list[str] = []
         for batch in state.merge_plan.phases:
@@ -281,10 +290,22 @@ class AutoMergePhase(Phase):
                     files_with_markers.append(file_path)
 
         if files_with_markers:
+            marker_analysis_files = [
+                fp
+                for fp in files_with_markers
+                if (fd := file_diffs_map.get(fp)) is not None
+                and fd.change_category == FileChangeCategory.C
+            ]
+            marker_analysis_set = set(marker_analysis_files)
+            marker_human_files = [
+                fp for fp in files_with_markers if fp not in marker_analysis_set
+            ]
             logger.warning(
-                "O-M1: %d file(s) contain unresolved conflict markers — "
-                "escalating to human review: %s",
+                "O-M1: %d file(s) with unresolved conflict markers — "
+                "%d C-class routed to conflict_analysis, %d escalated to human: %s",
                 len(files_with_markers),
+                len(marker_analysis_files),
+                len(marker_human_files),
                 ", ".join(files_with_markers[:10])
                 + (" ..." if len(files_with_markers) > 10 else ""),
             )
@@ -309,7 +330,19 @@ class AutoMergePhase(Phase):
                     for fd in state.file_diffs
                 ]
 
-            for fp in files_with_markers:
+            # C-class: drop the markers by restoring fork content (index +
+            # working tree). conflict_analysis re-derives the real merge from
+            # refs; no ESCALATE_HUMAN record is seeded so its skip-guard
+            # (``fp in file_decision_records``) does not exclude these files.
+            for fp in marker_analysis_files:
+                if not ctx.git_tool.checkout_file(state.config.fork_ref, fp):
+                    logger.warning(
+                        "O-M1: failed to reset C-class marker file %s to fork "
+                        "content — leaving markers in place for conflict_analysis",
+                        fp,
+                    )
+
+            for fp in marker_human_files:
                 fd_item = file_diffs_map.get(fp)
                 state.file_decision_records[fp] = FileDecisionRecord(
                     file_path=fp,
@@ -339,7 +372,7 @@ class AutoMergePhase(Phase):
             existing_plan_paths = {
                 item.file_path for item in state.pending_user_decisions
             }
-            for fp in files_with_markers:
+            for fp in marker_human_files:
                 if fp in existing_plan_paths:
                     continue
                 cnt, preview = conflict_info.get(fp, (0, ""))
@@ -1285,6 +1318,13 @@ class AutoMergePhase(Phase):
         # agent is dead code in the replay path.
         unhandled_conflict_files: list[str] = []
         seen: set[str] = set(state.file_decision_records.keys())
+        # O-M1 C-class marker files: reset to clean fork content above, no
+        # decision record seeded — route them to the conflict analyst first.
+        for fp in marker_analysis_files:
+            if fp in seen:
+                continue
+            unhandled_conflict_files.append(fp)
+            seen.add(fp)
         for fp in skipped_layer_files:
             if fp in seen:
                 continue

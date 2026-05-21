@@ -12,8 +12,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from src.tools.git_tool import GitTool
 
 
@@ -142,6 +140,53 @@ class TestThreeWayMergeClean:
         gt = GitTool(str(repo))
         result = gt.three_way_merge_file(base_sha, "main", "upstream", "a.txt")
         assert result == "hello\n"
+
+
+class TestCheckoutFile:
+    """``checkout_file`` resets a path to a ref in index + working tree,
+    clearing unmerged conflict state — backs O-M1's C-class routing, which
+    drops cherry-pick markers before handing the file to conflict_analysis."""
+
+    def _conflicted_repo(self, tmp_path: Path) -> Path:
+        repo = _init_repo(tmp_path)
+        base_sha = _commit(repo, "f.py", "x = 1\ny = 2\n", "base")
+        _branch_from(repo, "fork", base_sha)
+        _commit(repo, "f.py", "x = 42\ny = 2\n", "fork edit")
+        subprocess.run(
+            ["git", "checkout", "-q", "main"],
+            cwd=str(repo),
+            check=True,
+            capture_output=True,
+        )
+        _commit(repo, "f.py", "x = 99\ny = 2\n", "main edit")
+        # Merge fork into main → conflict: markers in worktree, unmerged index.
+        subprocess.run(["git", "merge", "fork"], cwd=str(repo), capture_output=True)
+        return repo
+
+    def test_resets_to_ref_and_clears_unmerged(self, tmp_path: Path) -> None:
+        repo = self._conflicted_repo(tmp_path)
+        assert "<<<<<<<" in (repo / "f.py").read_text(encoding="utf-8")
+
+        gt = GitTool(str(repo))
+        assert gt.checkout_file("fork", "f.py") is True
+
+        content = (repo / "f.py").read_text(encoding="utf-8")
+        assert content == "x = 42\ny = 2\n"
+        assert "<<<<<<<" not in content
+        unmerged = subprocess.run(
+            ["git", "ls-files", "--unmerged", "f.py"],
+            cwd=str(repo),
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert unmerged.strip() == ""
+
+    def test_missing_ref_returns_false(self, tmp_path: Path) -> None:
+        repo = _init_repo(tmp_path)
+        _commit(repo, "a.txt", "x\n", "base")
+        gt = GitTool(str(repo))
+        assert gt.checkout_file("nonexistent-ref", "a.txt") is False
 
 
 class TestThreeWayMergeConflict:
