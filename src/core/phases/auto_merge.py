@@ -1437,12 +1437,31 @@ class AutoMergePhase(Phase):
                 memory_phase="auto_merge",
             )
         elif b_drift:
-            logger.warning(
-                "O-B5: %d B-class files drifted from upstream — adding to "
-                "conflict analysis queue",
-                len(b_drift),
+            # B-class = upstream_only: the correct merged result is upstream
+            # HEAD content verbatim (fork has no changes to preserve). Drift
+            # means a multi-commit file's later commit failed to replay (e.g.
+            # partial cherry-pick bail-out) yet an earlier commit's success
+            # still stamped a take_target "cleanly" record. Repair the loss
+            # deterministically instead of only logging it — the stale record
+            # otherwise blocks both this queue (`fp in seen`) and the
+            # conflict_analysis skip-guard, so the gap would survive to Judge.
+            repaired = await self._repair_b_class_drift(
+                state, ctx, b_drift, file_diffs_map, executor
             )
-            for fp in b_drift:
+            unrepaired = [fp for fp in b_drift if fp not in repaired]
+            logger.warning(
+                "O-B5: %d B-class files drifted from upstream — repaired %d "
+                "via take_target (upstream content), %d routed to conflict "
+                "analysis",
+                len(b_drift),
+                len(repaired),
+                len(unrepaired),
+            )
+            for fp in unrepaired:
+                # Drop the stale auto take_target record so the
+                # conflict_analysis skip-guard does not exclude the file.
+                state.file_decision_records.pop(fp, None)
+                seen.discard(fp)
                 if fp not in seen:
                     unhandled_conflict_files.append(fp)
                     seen.add(fp)
@@ -1735,11 +1754,17 @@ class AutoMergePhase(Phase):
         ctx: PhaseContext,
     ) -> list[str]:
         """O-B5: compare worktree blob sha vs upstream blob sha for every
-        B-class file in the plan. Returns the list of drifted paths.
+        pure-upstream file (B-class and D-missing) in the plan. Returns the
+        list of drifted paths.
 
-        B-class means "upstream changed, fork did not" — after auto-merge
-        the worktree should byte-equal upstream. Anything else is a bug
-        in the take_target / cherry-pick path.
+        Both categories are replayed (REPLAYABLE_CATEGORIES) and carry no fork
+        delta, so after auto-merge the worktree must byte-equal upstream.
+        A multi-commit file whose later commit failed to replay (partial
+        cherry-pick bail-out) drifts here while still stamped take_target
+        "cleanly"; checking D-missing too is required because new feature files
+        (e.g. an upstream UI added across create/view/edit commits) land in
+        D-missing batches, not B-class ones. Fork-deleted files are excluded —
+        resurrecting them would undo an intentional fork deletion.
         """
         if state.merge_plan is None:
             return []
@@ -1747,14 +1772,19 @@ class AutoMergePhase(Phase):
         drift: list[str] = []
         checked = 0
         for batch in state.merge_plan.phases:
-            if batch.change_category != FileChangeCategory.B:
+            if batch.change_category not in (
+                FileChangeCategory.B,
+                FileChangeCategory.D_MISSING,
+            ):
                 continue
             for fp in batch.file_paths:
                 existing = state.file_decision_records.get(fp)
-                if (
-                    existing is not None
-                    and existing.decision == MergeDecision.ESCALATE_HUMAN
+                if existing is not None and existing.decision in (
+                    MergeDecision.ESCALATE_HUMAN,
+                    MergeDecision.SKIP,
                 ):
+                    continue
+                if is_fork_deleted(state, fp):
                     continue
                 checked += 1
                 upstream_sha = ctx.git_tool.get_file_hash(upstream_ref, fp)
@@ -1766,11 +1796,61 @@ class AutoMergePhase(Phase):
                 if upstream_sha != worktree_sha:
                     drift.append(fp)
         logger.info(
-            "O-B5 sanity-check: %d/%d B-class files drift from upstream",
+            "O-B5 sanity-check: %d/%d pure-upstream (B/D-missing) files drift "
+            "from upstream",
             len(drift),
             checked,
         )
         return drift
+
+    async def _repair_b_class_drift(
+        self,
+        state: MergeState,
+        ctx: PhaseContext,
+        drift: list[str],
+        file_diffs_map: dict[str, FileDiff],
+        executor: "ExecutorAgent",
+    ) -> set[str]:
+        """O-B5 repair: rewrite each drifted B-class file to upstream HEAD
+        content via take_target, overwriting any stale "cherry-picked cleanly"
+        record. B-class is upstream_only, so upstream content is the correct
+        merged result with no fork delta to preserve.
+
+        Returns the set of file paths whose worktree blob now equals upstream
+        after the rewrite. Files without a FileDiff, or that still differ after
+        the rewrite (e.g. encoding round-trip), are left for the caller to
+        route to conflict_analysis.
+        """
+        if ctx.git_tool is None:
+            return set()
+        upstream_ref = state.config.upstream_ref
+        repaired: set[str] = set()
+        for fp in drift:
+            fd = file_diffs_map.get(fp)
+            if fd is None:
+                continue
+            record = await executor.execute_auto_merge(
+                fd, MergeDecision.TAKE_TARGET, state
+            )
+            if record.decision != MergeDecision.TAKE_TARGET:
+                continue
+            upstream_sha = ctx.git_tool.get_file_hash(upstream_ref, fp)
+            worktree_sha = ctx.git_tool.get_worktree_blob_sha(fp)
+            if upstream_sha is None or worktree_sha is None:
+                continue
+            if upstream_sha != worktree_sha:
+                continue
+            state.file_decision_records[fp] = record.model_copy(
+                update={
+                    "rationale": (
+                        "O-B5 drift repair: replay left an intermediate version "
+                        "(a later upstream commit failed to cherry-pick); "
+                        "rewrote to upstream content (take_target)."
+                    )
+                }
+            )
+            repaired.add(fp)
+        return repaired
 
     async def _execute_batch(
         self,

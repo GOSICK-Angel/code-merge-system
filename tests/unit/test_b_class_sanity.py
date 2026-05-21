@@ -9,7 +9,7 @@ Covers:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -37,9 +37,7 @@ class TestOB5ReplayClean_UsesActualDiff:
 
         assert result.replayed_files == ["actually.py"]
         assert "skipped_by_X_theirs.py" not in result.replayed_files
-        git_tool.diff_files_between.assert_called_once_with(
-            "before_sha", "after_sha"
-        )
+        git_tool.diff_files_between.assert_called_once_with("before_sha", "after_sha")
 
     @pytest.mark.asyncio
     async def test_empty_cherry_pick_yields_no_replayed_files(self):
@@ -150,7 +148,11 @@ class TestOB5SanityCheck:
         """Files that the layer-skip path (or any earlier stage) already
         marked ESCALATE_HUMAN are intentional escalations, not silent
         drift — sanity-check must not double-count them."""
-        from src.models.decision import FileDecisionRecord, MergeDecision, DecisionSource
+        from src.models.decision import (
+            FileDecisionRecord,
+            MergeDecision,
+            DecisionSource,
+        )
         from src.models.diff import FileStatus
 
         state = self._make_phase_with_b_batch(["escalated.py", "real_drift.py"])
@@ -174,6 +176,151 @@ class TestOB5SanityCheck:
 
         assert drift == ["real_drift.py"]
         assert ctx.git_tool.get_file_hash.call_count == 1
+
+
+class TestOB5SanityCheckDMissing:
+    """O-B5 must also cover D-missing (upstream-new) files: new feature files
+    added across several upstream commits land in D-missing batches, and a
+    later commit's failed replay leaves them drifted while still take_target."""
+
+    def _state_with_batch(self, files, category, div_map=None):
+        batch = MagicMock()
+        batch.change_category = category
+        batch.file_paths = files
+        plan = MagicMock()
+        plan.phases = [batch]
+        state = MagicMock()
+        state.merge_plan = plan
+        state.config.upstream_ref = "upstream/main"
+        state.file_decision_records = {}
+        state.fork_divergence_map = div_map or {}
+        return state
+
+    @pytest.mark.asyncio
+    async def test_d_missing_drift_detected(self):
+        state = self._state_with_batch(["new_feature.go"], FileChangeCategory.D_MISSING)
+        ctx = MagicMock()
+        ctx.git_tool.get_file_hash.return_value = "upstream_sha"
+        ctx.git_tool.get_worktree_blob_sha.return_value = "intermediate_sha"
+
+        drift = await AutoMergePhase()._b_class_sanity_check(state, ctx)
+        assert drift == ["new_feature.go"]
+
+    @pytest.mark.asyncio
+    async def test_fork_deleted_d_missing_not_flagged(self):
+        from src.models.diff import ForkDivergence
+
+        state = self._state_with_batch(
+            ["removed_by_fork.go"],
+            FileChangeCategory.D_MISSING,
+            div_map={"removed_by_fork.go": ForkDivergence.FORK_DELETED.value},
+        )
+        ctx = MagicMock()
+        ctx.git_tool.get_file_hash.return_value = "upstream_sha"
+        ctx.git_tool.get_worktree_blob_sha.return_value = "different_sha"
+
+        drift = await AutoMergePhase()._b_class_sanity_check(state, ctx)
+        assert drift == []
+
+
+class TestOB5RepairBClassDrift:
+    """O-B5 repair: drifted B-class files are rewritten to upstream content
+    (take_target) so a multi-commit replay gap is not left for Judge / lost
+    silently when the file is auto_safe."""
+
+    def _record(self, decision: str, fp: str = "x.go"):
+        from src.models.decision import (
+            DecisionSource,
+            FileDecisionRecord,
+            MergeDecision,
+        )
+        from src.models.diff import FileStatus
+
+        return FileDecisionRecord(
+            file_path=fp,
+            file_status=FileStatus.MODIFIED,
+            decision=MergeDecision(decision),
+            decision_source=DecisionSource.AUTO_EXECUTOR,
+            rationale="Cherry-picked cleanly from upstream commit",
+        )
+
+    def _state(self, fp: str):
+        state = MagicMock()
+        state.config.upstream_ref = "origin/forgejo"
+        state.file_decision_records = {fp: self._record("take_target", fp)}
+        return state
+
+    @pytest.mark.asyncio
+    async def test_repairs_drift_to_upstream(self):
+        fp = "routers/web/user/setting/authorized_integrations.go"
+        state = self._state(fp)
+        ctx = MagicMock()
+        # After the rewrite the worktree blob equals upstream.
+        ctx.git_tool.get_file_hash.return_value = "up_sha"
+        ctx.git_tool.get_worktree_blob_sha.return_value = "up_sha"
+        executor = MagicMock()
+        executor.execute_auto_merge = AsyncMock(
+            return_value=self._record("take_target", fp)
+        )
+
+        repaired = await AutoMergePhase()._repair_b_class_drift(
+            state, ctx, [fp], {fp: MagicMock()}, executor
+        )
+
+        assert repaired == {fp}
+        executor.execute_auto_merge.assert_awaited_once()
+        assert "drift repair" in state.file_decision_records[fp].rationale
+
+    @pytest.mark.asyncio
+    async def test_skips_file_without_diff(self):
+        fp = "x.go"
+        state = self._state(fp)
+        ctx = MagicMock()
+        executor = MagicMock()
+        executor.execute_auto_merge = AsyncMock()
+
+        repaired = await AutoMergePhase()._repair_b_class_drift(
+            state, ctx, [fp], {}, executor
+        )
+
+        assert repaired == set()
+        executor.execute_auto_merge.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_not_repaired_when_still_drifts_after_rewrite(self):
+        fp = "x.go"
+        state = self._state(fp)
+        ctx = MagicMock()
+        ctx.git_tool.get_file_hash.return_value = "up_sha"
+        ctx.git_tool.get_worktree_blob_sha.return_value = "still_other_sha"
+        executor = MagicMock()
+        executor.execute_auto_merge = AsyncMock(
+            return_value=self._record("take_target", fp)
+        )
+
+        repaired = await AutoMergePhase()._repair_b_class_drift(
+            state, ctx, [fp], {fp: MagicMock()}, executor
+        )
+
+        assert repaired == set()
+
+    @pytest.mark.asyncio
+    async def test_not_repaired_when_executor_escalates(self):
+        fp = "x.go"
+        state = self._state(fp)
+        ctx = MagicMock()
+        ctx.git_tool.get_file_hash.return_value = "up_sha"
+        ctx.git_tool.get_worktree_blob_sha.return_value = "up_sha"
+        executor = MagicMock()
+        executor.execute_auto_merge = AsyncMock(
+            return_value=self._record("escalate_human", fp)
+        )
+
+        repaired = await AutoMergePhase()._repair_b_class_drift(
+            state, ctx, [fp], {fp: MagicMock()}, executor
+        )
+
+        assert repaired == set()
 
 
 class TestOJ3VerifyTakeDecisions:
