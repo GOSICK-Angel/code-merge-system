@@ -200,6 +200,13 @@ class GitTool:
         unmerged = self.repo.git.ls_files("--unmerged")
         if unmerged.strip():
             self.repo.git.reset("--hard", "HEAD")
+        # Remove .merge/ from the index before checkout. If a previous run
+        # committed .merge/ to this branch (pre-fix), the tracked state would
+        # cause "changes would be overwritten" and block the checkout.
+        try:
+            self.repo.git.rm("--cached", "-r", "--ignore-unmatch", "--", ".merge/")
+        except Exception as exc:
+            logger.warning("create_working_branch: untrack .merge/ failed: %s", exc)
         self.repo.git.checkout(base_ref)
         self.repo.git.checkout("-b", resolved)
         return resolved

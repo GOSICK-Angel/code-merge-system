@@ -322,3 +322,105 @@ def test_create_working_branch_resets_dirty_index(tmp_path: Path):
         ["git", "ls-files", "--unmerged"], cwd=str(repo), capture_output=True, text=True
     )
     assert ls.stdout.strip() == ""
+
+
+def test_create_working_branch_untrack_merge_dir(tmp_path: Path):
+    """If a previous run committed .merge/ to the current branch, checkout
+    must not be blocked by 'changes would be overwritten'. The fix untracks
+    .merge/ from the index before switching to base_ref."""
+    repo = _make_repo(tmp_path)
+
+    # Simulate a pre-fix run: commit .merge/config.yaml and .merge/.env
+    merge_dir = repo / ".merge"
+    merge_dir.mkdir()
+    (merge_dir / "config.yaml").write_text("upstream_ref: upstream/main")
+    (merge_dir / ".env").write_text("ANTHROPIC_API_KEY=sk-test-secret")
+
+    subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "bad: committed .merge with secrets"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+
+    # Modify the tracked files so checkout would be blocked without the fix
+    (merge_dir / "config.yaml").write_text("upstream_ref: changed")
+    (merge_dir / ".env").write_text("ANTHROPIC_API_KEY=sk-new-key")
+
+    git_tool = GitTool(str(repo))
+    # Should NOT raise — fix untracks .merge/ before checkout
+    branch = git_tool.create_working_branch("merge/clean", "main")
+
+    assert branch == "merge/clean"
+    assert _current_branch(repo) == "merge/clean"
+    # .merge/ must not be tracked on the new branch
+    tracked = subprocess.run(
+        ["git", "ls-files", ".merge/"], cwd=str(repo), capture_output=True, text=True
+    )
+    assert tracked.stdout.strip() == ""
+
+
+def test_finalize_working_tree_excludes_merge_dir(tmp_path: Path):
+    """_finalize_working_tree must never commit files under .merge/,
+    even when .merge/.env is present and not covered by .gitignore."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from src.core.phases.report_generation import _finalize_working_tree
+    from src.models.config import MergeConfig
+    from src.models.state import MergeState
+
+    repo = _make_repo(tmp_path)
+
+    # Write a source file and a .merge/.env that should NOT be committed
+    (repo / "src.py").write_text("x = 1")
+    merge_dir = repo / ".merge"
+    merge_dir.mkdir()
+    (merge_dir / ".env").write_text("ANTHROPIC_API_KEY=sk-leaked-key")
+    (merge_dir / "config.yaml").write_text("upstream_ref: upstream/main")
+
+    config = MergeConfig(
+        upstream_ref="upstream/main",
+        fork_ref="main",
+        repo_path=str(repo),
+    )
+    state = MergeState(config=config)
+
+    git_tool = GitTool(str(repo))
+    # Simulate working on a new branch from main (HEAD exists)
+    subprocess.run(
+        ["git", "checkout", "-b", "merge/auto-test"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+    )
+
+    ctx = MagicMock()
+    ctx.git_tool = git_tool
+
+    _finalize_working_tree(state, ctx)
+
+    # src.py must be committed
+    committed = subprocess.run(
+        ["git", "ls-files", "src.py"], cwd=str(repo), capture_output=True, text=True
+    )
+    assert "src.py" in committed.stdout
+
+    # .merge/.env must NOT be committed
+    env_tracked = subprocess.run(
+        ["git", "ls-files", ".merge/.env"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+    )
+    assert env_tracked.stdout.strip() == ""
+
+    # .merge/config.yaml must NOT be committed either
+    cfg_tracked = subprocess.run(
+        ["git", "ls-files", ".merge/config.yaml"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+    )
+    assert cfg_tracked.stdout.strip() == ""

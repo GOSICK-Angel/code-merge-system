@@ -26,6 +26,10 @@ def _finalize_working_tree(state: MergeState, ctx: PhaseContext) -> None:
     uncommitted changes — surprising the operator and breaking diff
     reproducibility. Commit failures are downgraded to warnings so the
     report itself still gets written.
+
+    .merge/ is always excluded: it contains secrets (.env), runtime
+    checkpoints, and reports that must never be committed to merge working
+    branches regardless of .gitignore state.
     """
     if state.dry_run:
         return
@@ -37,10 +41,25 @@ def _finalize_working_tree(state: MergeState, ctx: PhaseContext) -> None:
     if not entries:
         return
 
-    untracked = sum(1 for code, _ in entries if code == "??")
-    modified = len(entries) - untracked
+    # Count only source-tree changes; .merge/ entries are noise here.
+    source_entries = [
+        (code, path) for code, path in entries if not path.startswith(".merge/")
+    ]
+    if not source_entries:
+        return
+
+    untracked = sum(1 for code, _ in source_entries if code == "??")
+    modified = len(source_entries) - untracked
     try:
         ctx.git_tool.repo.git.add("-A")
+        # Immediately purge .merge/ from the index — belt-and-suspenders
+        # against gitignore gaps or previously tracked files from old runs.
+        try:
+            ctx.git_tool.repo.git.rm(
+                "--cached", "-r", "--ignore-unmatch", "--", ".merge/"
+            )
+        except Exception as unstage_exc:
+            logger.warning("finalize: could not unstage .merge/: %s", unstage_exc)
         sha = ctx.git_tool.repo.git.commit(
             "-m",
             (
