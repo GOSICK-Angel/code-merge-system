@@ -13,6 +13,7 @@ can't read arbitrary repo files.
 from __future__ import annotations
 
 import logging
+import socket
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -20,6 +21,27 @@ from typing import Any, BinaryIO
 from io import BytesIO
 
 logger = logging.getLogger(__name__)
+
+
+def _detect_port_squatters(port: int) -> list[str]:
+    """Return addresses where something is already listening on *port*.
+
+    Checks both IPv4 loopback (127.0.0.1) and IPv6 loopback (::1) with a
+    short connect-timeout so we can warn about Vite dev-server conflicts
+    before our ThreadingHTTPServer silently loses the IPv6 race.
+    """
+    squatters: list[str] = []
+    for host in ("127.0.0.1", "::1"):
+        try:
+            family = socket.AF_INET6 if ":" in host else socket.AF_INET
+            with socket.socket(family, socket.SOCK_STREAM) as s:
+                s.settimeout(0.15)
+                s.connect((host, port))
+            squatters.append(host)
+        except (ConnectionRefusedError, OSError):
+            pass
+    return squatters
+
 
 _RUNS_URL_PREFIX = "/runs/"
 _RUNS_ALLOWED_SUFFIXES = {".md", ".json", ".yaml", ".yml", ".txt", ".log"}
@@ -115,6 +137,17 @@ class StaticHTTPServer:
         self._thread: Thread | None = None
 
     async def start(self, host: str = "localhost", port: int = 5173) -> None:
+        squatters = _detect_port_squatters(port)
+        if squatters:
+            logger.warning(
+                "Port %d is already in use on %s — a Vite dev server may be "
+                "running. The browser may connect to that server instead of "
+                "merge's static server, causing /runs/ fetches to fail with "
+                "HTTP 500. Stop it with: pkill -f vite",
+                port,
+                ", ".join(squatters),
+            )
+
         bound_root = self.root
         bound_runs_root = self.runs_root
 
