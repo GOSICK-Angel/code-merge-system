@@ -358,12 +358,18 @@ def _build_human_decision_request(
     upstream_change_summary = (
         " · ".join(upstream_intents[:2])
         if upstream_intents
-        else f"Upstream changed (+{fd.lines_added}/-{fd.lines_deleted})"
+        else (
+            take_target_preview
+            or f"Upstream changed (+{fd.lines_added}/-{fd.lines_deleted})"
+        )
     )
     fork_change_summary = (
         " · ".join(fork_intents[:2])
         if fork_intents
-        else f"Fork changed (+{fd.lines_added}/-{fd.lines_deleted})"
+        else (
+            take_current_preview
+            or f"Fork changed (+{fd.lines_added}/-{fd.lines_deleted})"
+        )
     )
 
     return HumanDecisionRequest(
