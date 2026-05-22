@@ -33,7 +33,7 @@ git checkout -b test/upstream forgejo
 # → 停在 4ecb25a54（forgejo 最新 commit）
 
 # test/fork：从 forgejo~20（共同祖先）出发，叠加 fork 改动
-git checkout -b test/fork 160377405
+git checkout -b test/fork-1 160377405
 ```
 
 共同祖先 commit：`160377405c53145e56dd0aab6ee05fce9764c184`（`forgejo~20`）
