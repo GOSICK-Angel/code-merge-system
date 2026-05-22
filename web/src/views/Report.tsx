@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRunStore } from "../store/runStore";
 import { Card, Pill } from "../components/brutalist";
 import { renderMarkdown } from "../lib/markdown";
+import { totalTokenCount } from "../types/state";
 
 interface MemoryEntry {
   key?: string;
@@ -91,7 +92,7 @@ export function Report(): JSX.Element {
   const errors = snapshot?.errors ?? [];
 
   const totalCost = snapshot?.costSummary?.total_cost_usd ?? 0;
-  const totalTokens = snapshot?.costSummary?.total_tokens ?? 0;
+  const totalTokens = totalTokenCount(snapshot?.costSummary);
   const byAgent = snapshot?.costSummary?.by_agent ?? {};
 
   const decisionCounts = snapshot?.decisionRecordCounts ?? {};

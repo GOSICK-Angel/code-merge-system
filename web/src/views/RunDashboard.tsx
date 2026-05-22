@@ -3,6 +3,7 @@ import { useRunStore } from "../store/runStore";
 import type { WsClient } from "../ws/client";
 import type { ActiveView } from "../lib/classifyView";
 import type { MergePlanPayload, MergeStateSnapshot } from "../types/state";
+import { totalTokenCount } from "../types/state";
 import {
   AgentGraph,
   ActivityStream,
@@ -369,7 +370,7 @@ export function RunDashboard(props: Props): JSX.Element {
   ).length;
 
   const totalCost = snapshot?.costSummary?.total_cost_usd ?? 0;
-  const totalTokens = snapshot?.costSummary?.total_tokens ?? 0;
+  const totalTokens = totalTokenCount(snapshot?.costSummary);
   // U2 budget progress bar inputs — null limit means the cap is disabled,
   // in which case BudgetBar renders nothing.
   const budgetLimit = snapshot?.costSummary?.limit_usd ?? null;

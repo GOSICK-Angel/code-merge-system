@@ -309,15 +309,40 @@ export interface PlanReviewRoundPayload {
   timestamp: string;
 }
 
+// Mirror of cost_tracker's serialized breakdown — total_tokens is an object,
+// not a scalar. The backend's TokenUsage.total_tokens == input + output, which
+// also equals the sum of by_agent[*].tokens.
+export interface TokenBreakdown {
+  input?: number;
+  output?: number;
+  cache_read?: number;
+  cache_write?: number;
+}
+
 export interface CostSummary {
   total_cost_usd?: number;
-  total_tokens?: number;
+  // Current backend emits a breakdown object; older snapshots may carry a
+  // bare number. Consume via totalTokenCount() rather than dividing directly.
+  total_tokens?: TokenBreakdown | number | null;
   by_agent?: Record<string, { cost_usd?: number; tokens?: number }>;
   // U2 per-run budget knobs surfaced by serializers._serialize_cost_summary.
   // ``limit_usd === null`` means the cap is disabled (no progress bar).
   limit_usd?: number | null;
   warn_pct?: number;
   [k: string]: unknown;
+}
+
+// Resolves total_tokens (object breakdown or legacy scalar) to input + output,
+// matching the backend's definition. Returns 0 for missing / malformed data.
+export function totalTokenCount(cs: CostSummary | null | undefined): number {
+  const t = cs?.total_tokens;
+  if (typeof t === "number") return Number.isFinite(t) ? t : 0;
+  if (t && typeof t === "object") {
+    const input = typeof t.input === "number" ? t.input : 0;
+    const output = typeof t.output === "number" ? t.output : 0;
+    return input + output;
+  }
+  return 0;
 }
 
 export interface MergeStateSnapshot {
