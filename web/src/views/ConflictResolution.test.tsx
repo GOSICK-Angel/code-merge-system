@@ -222,6 +222,64 @@ describe("ConflictResolution submit payload (H3)", () => {
   });
 });
 
+describe("ConflictResolution code diff (real preview_content)", () => {
+  const previewSnapshot: MergeStateSnapshot = {
+    ...baseSnapshot,
+    humanDecisionRequests: {
+      "oauth.go": {
+        request_id: "r-oauth",
+        file_path: "oauth.go",
+        priority: 5,
+        conflict_points: [],
+        context_summary: "ctx",
+        upstream_change_summary: "upstream prose",
+        fork_change_summary: "fork prose",
+        analyst_recommendation: "take_target",
+        analyst_confidence: 0.75,
+        analyst_rationale: "rationale text",
+        options: [
+          {
+            option_key: "B",
+            decision: "take_target",
+            description: "Take upstream",
+            preview_content:
+              "--- fork:oauth.go\n+++ upstream:oauth.go\n@@ -10,2 +10,3 @@\n ctxLine\n-forkRemoved\n+upstreamAdded\n",
+            risk_warning: null,
+          },
+        ],
+        human_decision: null,
+        custom_content: null,
+        reviewer_notes: null,
+        related_files: [],
+      },
+    },
+  };
+
+  it("renders actual diff lines with fork/upstream side labels, not prose", () => {
+    useRunStore.setState({ snapshot: previewSnapshot });
+    act(() => useConflictDraftStore.getState().selectFile("oauth.go"));
+    const ref = makeClientRef();
+    const { container } = render(
+      <ConflictResolution
+        clientRef={
+          ref as unknown as React.MutableRefObject<
+            ReturnType<typeof useWsClient>["current"]
+          >
+        }
+      />,
+    );
+    const text = container.textContent ?? "";
+    expect(text).toContain("forkRemoved");
+    expect(text).toContain("upstreamAdded");
+    expect(text).toContain("FORK");
+    expect(text).toContain("UPSTREAM");
+    // The LLM recommendation must surface in the centre column.
+    expect(text).toContain("LLM recommendation");
+    // Prose summaries belong in the intent card, not faked as diff hunks.
+    expect(text).not.toContain("═══════ CONFLICT");
+  });
+});
+
 describe("ConflictResolution status pill (Fix 8)", () => {
   it("shows AWAITING_HUMAN suffix when status === 'awaiting_human'", () => {
     useRunStore.setState({ snapshot: { ...baseSnapshot, status: "awaiting_human" } });

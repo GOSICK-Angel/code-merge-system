@@ -55,53 +55,104 @@ function buildTree(requests: HumanDecisionRequest[]): TreeNode[] {
   return lines;
 }
 
-function diffRows(
-  upstream: string,
-  fork: string,
-  lineRange?: string,
-): JSX.Element[] {
-  const rows: JSX.Element[] = [];
-  const forkLines = fork.split("\n");
-  const upLines = upstream.split("\n");
-  rows.push(
-    <div key="hunk" className="row hunk">
-      <span className="ln"></span>
-      <span className="ln"></span>
-      <span className="code">
-        ═══════ CONFLICT{lineRange ? ` @ ${lineRange}` : ""} ═══════
-      </span>
-    </div>,
-  );
-  forkLines.forEach((line, i) => {
-    if (!line) return;
-    rows.push(
-      <div key={`f-${i}`} className="row del">
-        <span className="ln">{i + 1}</span>
-        <span className="ln"></span>
-        <span className="code">- {line}</span>
-      </div>,
-    );
-  });
-  upLines.forEach((line, i) => {
-    if (!line) return;
-    rows.push(
-      <div key={`u-${i}`} className="row add">
-        <span className="ln"></span>
-        <span className="ln">{i + 1}</span>
-        <span className="code">+ {line}</span>
-      </div>,
-    );
-  });
-  if (rows.length === 1) {
-    rows.push(
-      <div key="empty" className="row ctx">
-        <span className="ln"></span>
-        <span className="ln"></span>
-        <span className="code dim">(no diff content captured)</span>
-      </div>,
-    );
+// `fork` / `up` (not add/del): the preview is a diff between the fork's and
+// upstream's version of the same region — both sides changed it. Framing the
+// rows as deletions/additions (−/+, red/green) would wrongly imply fork
+// removed and upstream added, so each row is tagged by which side it belongs
+// to instead.
+// forkLn / upLn are always normalised so column 1 is the fork side and
+// column 2 the upstream side, regardless of which direction the underlying
+// diff was generated in.
+interface DiffLine {
+  kind: "hunk" | "up" | "fork" | "ctx";
+  forkLn: number | null;
+  upLn: number | null;
+  text: string;
+}
+
+// The preview is a real unified diff whose `--- X` / `+++ Y` header names the
+// two sides (e.g. `--- fork` / `+++ upstream`). take_target reads
+// fork→upstream; take_current is reversed, so we read the header rather than
+// assuming a direction.
+function diffSides(preview: string): { oldSide: string; newSide: string } {
+  let oldSide = "fork";
+  let newSide = "upstream";
+  for (const raw of preview.split("\n")) {
+    if (raw.startsWith("--- ")) {
+      oldSide = raw.slice(4).split(":")[0].trim() || oldSide;
+    } else if (raw.startsWith("+++ ")) {
+      newSide = raw.slice(4).split(":")[0].trim() || newSide;
+      break;
+    }
   }
-  return rows;
+  return { oldSide, newSide };
+}
+
+function parseUnifiedDiff(preview: string): DiffLine[] {
+  const { oldSide } = diffSides(preview);
+  const oldIsFork = oldSide.toLowerCase().includes("fork");
+  const out: DiffLine[] = [];
+  let oldLn = 0;
+  let newLn = 0;
+  for (const raw of preview.split("\n")) {
+    if (raw.startsWith("--- ") || raw.startsWith("+++ ")) continue;
+    if (raw.startsWith("@@")) {
+      const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
+      if (m) {
+        oldLn = Number.parseInt(m[1], 10);
+        newLn = Number.parseInt(m[2], 10);
+      }
+      out.push({ kind: "hunk", forkLn: null, upLn: null, text: raw });
+      continue;
+    }
+    if (raw.startsWith("-")) {
+      out.push({
+        kind: oldIsFork ? "fork" : "up",
+        forkLn: oldIsFork ? oldLn : null,
+        upLn: oldIsFork ? null : oldLn,
+        text: raw.slice(1),
+      });
+      oldLn += 1;
+    } else if (raw.startsWith("+")) {
+      out.push({
+        kind: oldIsFork ? "up" : "fork",
+        forkLn: oldIsFork ? null : newLn,
+        upLn: oldIsFork ? newLn : null,
+        text: raw.slice(1),
+      });
+      newLn += 1;
+    } else {
+      const text = raw.startsWith(" ") ? raw.slice(1) : raw;
+      out.push({
+        kind: "ctx",
+        forkLn: oldIsFork ? oldLn : newLn,
+        upLn: oldIsFork ? newLn : oldLn,
+        text,
+      });
+      oldLn += 1;
+      newLn += 1;
+    }
+  }
+  return out;
+}
+
+// Prefer take_target (fork→upstream); fall back to take_current (reversed,
+// handled by the orientation check in parseUnifiedDiff).
+function pickPreview(r: HumanDecisionRequest): string | null {
+  const byDecision = (d: MergeDecisionValue): string | null =>
+    r.options.find((o) => o.decision === d && o.preview_content)
+      ?.preview_content ?? null;
+  return byDecision("take_target") ?? byDecision("take_current") ?? null;
+}
+
+function diffRows(lines: DiffLine[]): JSX.Element[] {
+  return lines.map((l, i) => (
+    <div key={i} className={`row ${l.kind}`}>
+      <span className="ln">{l.forkLn ?? ""}</span>
+      <span className="ln">{l.upLn ?? ""}</span>
+      <span className="code">{l.text}</span>
+    </div>
+  ));
 }
 
 export function ConflictResolution({ clientRef }: Props): JSX.Element {
@@ -211,6 +262,9 @@ export function ConflictResolution({ clientRef }: Props): JSX.Element {
 
   const decisionOptions = current?.options ?? [];
   const useFallbackOptions = decisionOptions.length === 0;
+
+  const preview = current ? pickPreview(current) : null;
+  const diffLines = preview ? parseUnifiedDiff(preview) : [];
 
   return (
     <div>
@@ -440,38 +494,78 @@ export function ConflictResolution({ clientRef }: Props): JSX.Element {
             </Card>
           )}
 
+          {current && (
+            <Card title="› CHANGE INTENT · fork vs upstream" hint="analyst summary">
+              {current.analyst_recommendation && (
+                <div className="reco-banner">
+                  <span className="upcase">LLM recommendation</span>
+                  <span className="reco-val">
+                    {current.analyst_recommendation.toUpperCase()}
+                  </span>
+                  {current.analyst_confidence !== null && (
+                    <span className="reco-conf">
+                      {Math.round((current.analyst_confidence ?? 0) * 100)}% conf
+                    </span>
+                  )}
+                </div>
+              )}
+              <div className="intent-split">
+                <div className="intent-block fork">
+                  <div className="intent-label">FORK · current</div>
+                  <div className="intent-body">
+                    {current.fork_change_summary || "—"}
+                  </div>
+                </div>
+                <div className="intent-block upstream">
+                  <div className="intent-label">UPSTREAM · incoming</div>
+                  <div className="intent-body">
+                    {current.upstream_change_summary || "—"}
+                  </div>
+                </div>
+              </div>
+              {current.analyst_rationale && (
+                <div className="intent-rationale">
+                  <div className="intent-label">why this recommendation</div>
+                  <div className="intent-body dim">
+                    {current.analyst_rationale}
+                  </div>
+                </div>
+              )}
+            </Card>
+          )}
+
           <Card
-            title="› DIFF · upstream vs fork"
+            title="› CONFLICTING CODE · fork vs upstream"
             hint={current?.file_path ?? "—"}
             pad={false}
           >
-            {current ? (
+            {!current ? (
+              <div className="dim" style={{ fontSize: 11, padding: 16 }}>
+                select a file to view its conflicting code
+              </div>
+            ) : preview ? (
               <div className="diff">
                 <div className="head">
-                  <span>
-                    <span className="dimmer">a/</span>
-                    <span className="branch">fork</span>
+                  <span className="legend">
+                    <i className="sw fork" />
+                    <span className="branch">FORK</span>
+                    <span className="dimmer">current</span>
                   </span>
-                  <span className="dim">→</span>
-                  <span>
-                    <span className="dimmer">b/</span>
-                    <span className="branch">upstream</span>
+                  <span className="legend">
+                    <i className="sw up" />
+                    <span className="branch">UPSTREAM</span>
+                    <span className="dimmer">incoming</span>
+                  </span>
+                  <span className="legend-note">
+                    both sides changed these lines — line nums: fork │ upstream
                   </span>
                 </div>
-                <div className="table">
-                  {diffRows(
-                    current.upstream_change_summary,
-                    current.fork_change_summary,
-                    current.conflict_points[0]?.line_range,
-                  )}
-                </div>
+                <div className="table">{diffRows(diffLines)}</div>
               </div>
             ) : (
-              <div
-                className="dim"
-                style={{ fontSize: 11, padding: 16 }}
-              >
-                select a file to view its three-way diff
+              <div className="dim" style={{ fontSize: 11, padding: 16 }}>
+                no code was captured for this conflict — see the fork /
+                upstream change intent above to decide.
               </div>
             )}
           </Card>
