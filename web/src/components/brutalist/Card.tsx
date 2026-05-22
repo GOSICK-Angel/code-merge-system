@@ -28,7 +28,7 @@ export function Card({
           <span className="t">{title}</span>
           {hint && (
             <span
-              className="dimmer"
+              className="dimmer card-hint"
               style={{ fontFamily: "var(--mono)", fontSize: 10 }}
             >
               {hint}

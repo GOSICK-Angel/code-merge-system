@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AgentRuntime } from "../../lib/agents";
 
 export interface AgentNode {
@@ -32,10 +32,29 @@ export function AgentGraph({
   width = 640,
   height = 460,
 }: Props): JSX.Element {
-  const cx = width / 2;
-  const cy = height / 2;
-  const rX = width * 0.4;
-  const rY = height * 0.4;
+  // The SVG scales to its container via viewBox, but the agent node overlays
+  // are absolutely positioned in raw pixels. Driving the geometry off the
+  // measured container width (rather than the fixed `width` prop) keeps the
+  // nodes aligned with the SVG and inside the card on any column size.
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [measuredWidth, setMeasuredWidth] = useState(width);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width;
+      if (w && w > 0) setMeasuredWidth(w);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const w = measuredWidth;
+  const h = height;
+  const cx = w / 2;
+  const cy = h / 2;
+  const rX = w * 0.4;
+  const rY = h * 0.4;
 
   const positions = useMemo(() => {
     const n = Math.max(agents.length, 1);
@@ -91,8 +110,8 @@ export function AgentGraph({
   const activeStar = starEdges.filter((e) => e.active);
 
   return (
-    <div className="agraph" style={{ width: "100%", height }}>
-      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet">
+    <div ref={containerRef} className="agraph" style={{ width: "100%", height: h }}>
+      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="xMidYMid meet">
         <defs>
           <marker
             id="comm-arrow"

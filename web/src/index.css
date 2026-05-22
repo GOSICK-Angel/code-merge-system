@@ -644,6 +644,16 @@
   flex-shrink: 0;
 }
 
+/* Hint sits opposite the title in a nowrap row; let it ellipsize instead of
+ * spilling past the card edge when the column is narrow. */
+.card-title .card-hint {
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .card .corner {
   position: absolute;
   top: -1px;
@@ -779,9 +789,13 @@
    ============================================================= */
 .dash-grid {
   display: grid;
-  grid-template-columns: 280px 1fr 360px;
+  grid-template-columns: 280px minmax(0, 1fr) 360px;
   gap: 14px;
   min-height: 560px;
+}
+
+.dash-grid > * {
+  min-width: 0;
 }
 
 .dash-stat-row {
@@ -2283,9 +2297,23 @@ details.layer-block:not([open]) .lhead {
    ============================================================= */
 .report-grid {
   display: grid;
-  grid-template-columns: 1fr 360px;
+  grid-template-columns: minmax(0, 1fr) 360px;
   gap: 14px;
   min-height: 600px;
+}
+
+/* Without min-width:0 the markdown track refuses to shrink below its
+ * content's min-content width (wide tables / code blocks), pushing the
+ * right-hand column off-screen. The inner pre/table scroll containers then
+ * scroll instead of expanding the track. */
+.report-grid > * {
+  min-width: 0;
+}
+
+@media (max-width: 1100px) {
+  .report-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .md {
@@ -2294,6 +2322,7 @@ details.layer-block:not([open]) .lhead {
   line-height: 1.7;
   color: var(--fg-1);
   padding: 14px 18px;
+  overflow-wrap: anywhere;
 }
 
 .md h1 {
