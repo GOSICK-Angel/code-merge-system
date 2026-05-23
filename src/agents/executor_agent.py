@@ -633,7 +633,25 @@ class ExecutorAgent(BaseAgent):
                 risk_score=0.9,
             )
 
-        record = await self.execute_auto_merge(fd, request.human_decision, state)
+        # SEMANTIC_MERGE cannot go through execute_auto_merge — that path
+        # has a defensive guard that escalates SEMANTIC_MERGE back to human
+        # (it needs a ConflictAnalysis it does not have). When the reviewer
+        # explicitly picks semantic_merge, route to execute_semantic_merge
+        # with the analysis ConflictAnalysisPhase already produced; otherwise
+        # the human's choice silently degrades to escalate_human and the file
+        # is left at fork baseline with upstream changes dropped.
+        if request.human_decision == MergeDecision.SEMANTIC_MERGE:
+            analysis = (state.conflict_analyses or {}).get(request.file_path)
+            if analysis is None:
+                return create_escalate_record(
+                    request.file_path,
+                    "Reviewer chose semantic_merge but no ConflictAnalysis is "
+                    "available for this file — cannot perform the merge.",
+                    phase=current_phase_str,
+                )
+            record = await self.execute_semantic_merge(fd, analysis, state)
+        else:
+            record = await self.execute_auto_merge(fd, request.human_decision, state)
         return FileDecisionRecord(
             record_id=record.record_id,
             file_path=record.file_path,

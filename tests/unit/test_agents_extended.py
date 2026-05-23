@@ -751,6 +751,70 @@ class TestExecutorAgent:
 
         assert record.decision_source == DecisionSource.HUMAN
 
+    def test_execute_human_decision_semantic_merge_routes_to_semantic(self):
+        """Regression: a reviewer choosing semantic_merge must NOT be sent to
+        execute_auto_merge (whose SEMANTIC_MERGE guard escalates back to
+        human). It must run execute_semantic_merge with the existing
+        ConflictAnalysis, otherwise the choice silently degrades to
+        escalate_human and the file is left at fork baseline."""
+        import asyncio
+
+        state = _make_state()
+        state.current_phase = MergePhase.HUMAN_REVIEW
+        fd = _make_file_diff("src/auth.py")
+        state.file_diffs = [fd]
+        state.conflict_analyses["src/auth.py"] = _make_conflict_analysis("src/auth.py")
+
+        request = _make_human_request(
+            "src/auth.py", human_decision=MergeDecision.SEMANTIC_MERGE
+        )
+        sem_record = FileDecisionRecord(
+            file_path="src/auth.py",
+            file_status=FileStatus.MODIFIED,
+            decision=MergeDecision.SEMANTIC_MERGE,
+            decision_source=DecisionSource.AUTO_EXECUTOR,
+            rationale="merged",
+        )
+
+        with (
+            patch.object(
+                self.agent,
+                "execute_semantic_merge",
+                new=AsyncMock(return_value=sem_record),
+            ) as sem_mock,
+            patch.object(
+                self.agent, "execute_auto_merge", new=AsyncMock()
+            ) as auto_mock,
+        ):
+            record = asyncio.get_event_loop().run_until_complete(
+                self.agent.execute_human_decision(request, state)
+            )
+
+        sem_mock.assert_awaited_once()
+        auto_mock.assert_not_awaited()
+        assert record.decision == MergeDecision.SEMANTIC_MERGE
+        assert record.decision_source == DecisionSource.HUMAN
+
+    def test_execute_human_decision_semantic_merge_escalates_without_analysis(self):
+        """If the reviewer picks semantic_merge but no ConflictAnalysis exists,
+        the merge genuinely cannot run — escalate explicitly rather than
+        crashing or silently taking a side."""
+        import asyncio
+
+        state = _make_state()
+        state.current_phase = MergePhase.HUMAN_REVIEW
+        fd = _make_file_diff("src/auth.py")
+        state.file_diffs = [fd]
+        # no entry in state.conflict_analyses
+
+        request = _make_human_request(
+            "src/auth.py", human_decision=MergeDecision.SEMANTIC_MERGE
+        )
+        record = asyncio.get_event_loop().run_until_complete(
+            self.agent.execute_human_decision(request, state)
+        )
+        assert record.decision == MergeDecision.ESCALATE_HUMAN
+
     def test_raise_plan_dispute_appends_to_state(self):
         state = _make_state()
         state.current_phase = MergePhase.AUTO_MERGE
