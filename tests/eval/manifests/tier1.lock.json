@@ -1,6 +1,6 @@
 {
   "eval_version": "0.1.0",
-  "generated_at": "2026-05-16T10:57:26.926208Z",
+  "generated_at": "2026-05-22T17:16:21.134380Z",
   "samples": [
     {
       "content_sha256": "e616a2a0e1b2597ef135a4ae88007c1594a0da7c3523849a5c852d36af016dbd",
@@ -180,6 +180,24 @@
       "content_sha256": "02fe2c7aada59521c6f18e403693f23c6bc26924612cc1520fb8889299e6ff80",
       "relative_path": "tier1/samples/t1-0030",
       "sample_id": "t1-0030",
+      "tier": 1
+    },
+    {
+      "content_sha256": "8c044b5d7c4d7973fded8c80f0ae805c1d30666998887fd38a7281b1aa8cc667",
+      "relative_path": "tier1/samples/t1-0031",
+      "sample_id": "t1-0031",
+      "tier": 1
+    },
+    {
+      "content_sha256": "30dae55afed58260053bdc8abb0fc020ba637fe03cd06b2f745b57861f7665e6",
+      "relative_path": "tier1/samples/t1-0032",
+      "sample_id": "t1-0032",
+      "tier": 1
+    },
+    {
+      "content_sha256": "85660a606a205c5d7f38b95408df9d2ed3caa0d9fc9f071f55c624587f47d5df",
+      "relative_path": "tier1/samples/t1-0033",
+      "sample_id": "t1-0033",
       "tier": 1
     }
   ],

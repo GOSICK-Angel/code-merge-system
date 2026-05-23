@@ -1,0 +1,17 @@
+sample_id: t1-0031
+tier: 1
+category: C
+loss_class: null         # organic sample (not M-injected); natural shape ~ M3 interface/struct contract
+expected_human: true     # git produces conflict markers on this file → system should escalate
+description: |
+  C-class: models/auth/auth_token.go — fork and upstream both modify the
+  same two regions with INDEPENDENT additions:
+    * enum block: fork adds LongTermAuthorizationGuest, upstream adds
+      LongTermAuthorizationSSO.
+    * AuthorizationToken struct: fork adds CreatedUnix + UserAgent,
+      upstream adds LoginSourceID (optional.Option[int64]).
+  Golden keeps ALL of them (hand-resolved, `go build` verified). This is
+  the structural half of the same upstream loginSourceID interface change
+  exercised by t1-0032. The automated forgejo run (2026-05-22) silently
+  dropped upstream's LoginSourceID here — this sample guards that
+  regression. Independent human golden, NOT the system's merge output.

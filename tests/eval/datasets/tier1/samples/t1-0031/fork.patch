@@ -1,0 +1,30 @@
+diff --git a/models/auth/auth_token.go b/models/auth/auth_token.go
+index d01ddbca1e..107f06fef6 100644
+--- a/models/auth/auth_token.go
++++ b/models/auth/auth_token.go
+@@ -17,10 +17,16 @@ import (
+ 
+ type AuthorizationPurpose string
+ 
++// MaxActiveTokensPerUser caps how many concurrent long-term tokens a user may hold.
++const MaxActiveTokensPerUser = 10
++
+ var (
+ 	// Used to store long term authorization tokens.
+ 	LongTermAuthorization AuthorizationPurpose = "long_term_authorization"
+ 
++	// Used to store long term authorization tokens for guest sessions.
++	LongTermAuthorizationGuest AuthorizationPurpose = "long_term_authorization_guest"
++
+ 	// Used to activate a user account.
+ 	UserActivation AuthorizationPurpose = "user_activation"
+ 
+@@ -40,6 +46,8 @@ type AuthorizationToken struct {
+ 	LookupKey       string `xorm:"INDEX UNIQUE"`
+ 	HashedValidator string
+ 	Purpose         AuthorizationPurpose `xorm:"NOT NULL DEFAULT 'long_term_authorization'"`
++	CreatedUnix     timeutil.TimeStamp   `xorm:"INDEX created"`
++	UserAgent       string
+ 	Expiry          timeutil.TimeStamp
+ }
+ 
