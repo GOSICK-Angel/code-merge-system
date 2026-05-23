@@ -104,7 +104,15 @@ class ReportGenerationPhase(Phase):
         )
 
         try:
-            cost_summary = ctx.cost_tracker.summary() if ctx.cost_tracker else None
+            # Prefer the cumulative state.cost_summary (merged across resumes
+            # by _snapshot_telemetry) over the live CostTracker, which on a
+            # resumed run only holds the current process's calls. Using the
+            # live tracker made the markdown report under-count cost on
+            # resumed runs (e.g. forgejo run 0dec928c showed $0.0240/13 calls
+            # in markdown vs the correct $0.0397/21 in JSON + the Web UI).
+            cost_summary = state.cost_summary or (
+                ctx.cost_tracker.summary() if ctx.cost_tracker else None
+            )
             utilization_summary = (
                 ctx.trace_logger.get_utilization_summary() if ctx.trace_logger else None
             )

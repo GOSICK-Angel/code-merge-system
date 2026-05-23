@@ -582,6 +582,42 @@ class TestReportGenerationPhase:
         )
 
     @pytest.mark.asyncio
+    async def test_report_uses_cumulative_cost_summary_not_live_tracker(self):
+        """On a resumed run the in-process CostTracker only holds the current
+        session's calls; the markdown report must use the cumulative
+        state.cost_summary (merged across resumes) so it matches the JSON
+        report and Web UI — otherwise it under-reports cost."""
+        state = _make_state(status=SystemStatus.GENERATING_REPORT)
+        # Cumulative across resumes (what JSON / Web UI show).
+        state.cost_summary = {"total_calls": 21, "total_cost_usd": 0.0397}
+
+        live_tracker = MagicMock()
+        live_tracker.summary.return_value = {
+            "total_calls": 13,
+            "total_cost_usd": 0.024,
+        }
+        ctx = _make_ctx(cost_tracker=live_tracker)
+
+        captured = {}
+
+        def _capture(*args, **kwargs):
+            captured["cost_summary"] = kwargs.get("cost_summary")
+
+        phase = ReportGenerationPhase()
+        with (
+            patch("src.core.phases.report_generation.write_json_report"),
+            patch(
+                "src.core.phases.report_generation.write_markdown_report",
+                side_effect=_capture,
+            ),
+            patch("src.core.phases.report_generation.write_living_plan_report"),
+        ):
+            await phase.execute(state, ctx)
+
+        assert captured["cost_summary"] == state.cost_summary
+        assert captured["cost_summary"]["total_calls"] == 21
+
+    @pytest.mark.asyncio
     async def test_report_failure_still_completes(self):
         state = _make_state(status=SystemStatus.GENERATING_REPORT)
 
