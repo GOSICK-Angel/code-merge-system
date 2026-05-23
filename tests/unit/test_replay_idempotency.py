@@ -162,25 +162,36 @@ async def test_auto_merge_runs_replay_on_first_entry(monkeypatch):
     )
 
 
-def _make_git_tool_with_mock_repo() -> GitTool:
+def _make_git_tool_with_mock_repo(tmp_path, *, sequencer: bool = True) -> GitTool:
     """Bypass GitTool.__init__'s Repo() probe by constructing a hollow
     instance and stubbing the .repo attribute. Keeping the real GitTool
     class on the test target ensures we exercise the actual abort + ladder
-    code paths, not a re-implementation."""
+    code paths, not a re-implementation.
+
+    ``cherry_pick_abort`` now branches on whether a cherry-pick sequencer
+    is in progress, so the mock needs a real ``git_dir`` it can stat.
+    ``sequencer=True`` plants a CHERRY_PICK_HEAD (full cherry-pick failure
+    shape); ``sequencer=False`` leaves none (failed ``cherry-pick -n``).
+    """
     tool = GitTool.__new__(GitTool)
     tool.repo = MagicMock()
     tool.repo_path = MagicMock()
+    git_dir = tmp_path / ".git"
+    git_dir.mkdir(parents=True, exist_ok=True)
+    tool.repo.git_dir = str(git_dir)
+    if sequencer:
+        (git_dir / "CHERRY_PICK_HEAD").write_text("deadbeef\n", encoding="utf-8")
     return tool
 
 
 class TestCherryPickAbortReturnValue:
-    def test_abort_success_returns_true(self):
-        tool = _make_git_tool_with_mock_repo()
+    def test_abort_success_returns_true(self, tmp_path):
+        tool = _make_git_tool_with_mock_repo(tmp_path)
         tool.repo.git.cherry_pick = MagicMock(return_value=None)
         assert tool.cherry_pick_abort() is True
 
-    def test_abort_failure_returns_false_and_logs(self, caplog):
-        tool = _make_git_tool_with_mock_repo()
+    def test_abort_failure_returns_false_and_logs(self, tmp_path, caplog):
+        tool = _make_git_tool_with_mock_repo(tmp_path)
         tool.repo.git.cherry_pick = MagicMock(
             side_effect=git.GitCommandError(
                 "cherry-pick", 128, b"fatal: no in-progress"
@@ -195,6 +206,22 @@ class TestCherryPickAbortReturnValue:
             "cherry_pick_abort failed" in rec.message for rec in caplog.records
         ), "abort failure must emit a WARNING log for observability"
 
+    def test_abort_without_sequencer_uses_reset_hard(self, tmp_path):
+        """A failed ``cherry-pick -n`` leaves no CHERRY_PICK_HEAD, so
+        ``--abort`` must NOT be attempted (it would error "no cherry-pick
+        in progress"); the partial application is discarded via
+        ``reset --hard`` instead. This is the O-R4 cascade fix."""
+        tool = _make_git_tool_with_mock_repo(tmp_path, sequencer=False)
+        tool.repo.git.cherry_pick = MagicMock()
+        tool.repo.git.reset = MagicMock(return_value=None)
+
+        assert tool.cherry_pick_abort() is True
+        tool.repo.git.reset.assert_called_once_with("--hard", "HEAD")
+        for call in tool.repo.git.cherry_pick.call_args_list:
+            assert "--abort" not in call.args, (
+                "must not call cherry-pick --abort when no sequencer is active"
+            )
+
 
 class TestStrategyLadderShortCircuitOnAbortFailure:
     """When cherry-pick fails AND abort fails, the ladder must NOT keep
@@ -203,8 +230,8 @@ class TestStrategyLadderShortCircuitOnAbortFailure:
     of subprocess time. This is the precise hang vector observed in the
     Run 6dd6a513 P0 (silent 18-min hang)."""
 
-    def test_ladder_bails_out_when_abort_fails(self):
-        tool = _make_git_tool_with_mock_repo()
+    def test_ladder_bails_out_when_abort_fails(self, tmp_path):
+        tool = _make_git_tool_with_mock_repo(tmp_path)
         cherry_pick_calls: list[tuple] = []
 
         def fake_cherry_pick(*args):
@@ -227,8 +254,8 @@ class TestStrategyLadderShortCircuitOnAbortFailure:
             f"{len(cherry_pick_calls)} cherry_pick attempts: {cherry_pick_calls}"
         )
 
-    def test_ladder_continues_when_abort_succeeds(self):
-        tool = _make_git_tool_with_mock_repo()
+    def test_ladder_continues_when_abort_succeeds(self, tmp_path):
+        tool = _make_git_tool_with_mock_repo(tmp_path)
         cherry_pick_attempts: list[tuple] = []
 
         def fake_cherry_pick(*args):

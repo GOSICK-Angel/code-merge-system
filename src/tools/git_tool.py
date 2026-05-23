@@ -510,15 +510,48 @@ class GitTool:
             return ""
 
     def cherry_pick_abort(self) -> bool:
+        """Clean up after a failed cherry-pick so the next op starts clean.
+
+        Two failure shapes need different handling:
+          * full ``cherry-pick`` → leaves CHERRY_PICK_HEAD / a sequencer
+            dir; ``--abort`` is the correct unwind.
+          * ``cherry-pick -n`` (O-R1 per-file) → never creates sequencer
+            state, so ``--abort`` errors with "no cherry-pick in progress"
+            while the partial application still dirties the index/worktree.
+            Left uncleaned, the next commit's cherry-pick starts from a
+            dirty tree and cascades into spurious O-R4 bail-outs. Discard
+            the partial with ``reset --hard`` instead.
+        """
+        git_dir = Path(self.repo.git_dir)
+        sequencer_active = (git_dir / "CHERRY_PICK_HEAD").exists() or (
+            git_dir / "sequencer"
+        ).is_dir()
+        if sequencer_active:
+            # Full cherry-pick failure: ``--abort`` is the only correct
+            # unwind (``reset --hard`` would NOT clear CHERRY_PICK_HEAD, so
+            # the next cherry-pick would still hit "previous cherry-pick
+            # still in progress"). If ``--abort`` fails the sequencer is
+            # genuinely stuck — return False so the strategy ladder bails
+            # out instead of cascading (Run 6dd6a513 P0 hang vector).
+            try:
+                self.repo.git.cherry_pick("--abort")
+                return True
+            except git.GitCommandError as exc:
+                logger.warning(
+                    "cherry_pick_abort failed (sequencer stuck, worktree "
+                    "still holds CHERRY_PICK_HEAD or unmerged paths): %s",
+                    exc,
+                )
+                return False
+        # No sequencer state — a failed ``cherry-pick -n`` (O-R1 per-file)
+        # never creates one, so ``--abort`` would error with "no cherry-pick
+        # in progress" while its partial application still dirties the tree.
+        # Discard the partial with reset --hard so the next op starts clean.
         try:
-            self.repo.git.cherry_pick("--abort")
+            self.repo.git.reset("--hard", "HEAD")
             return True
         except git.GitCommandError as exc:
-            logger.warning(
-                "cherry_pick_abort failed (worktree may still hold "
-                "CHERRY_PICK_HEAD or unmerged paths): %s",
-                exc,
-            )
+            logger.warning("cherry_pick_abort: reset --hard cleanup failed: %s", exc)
             return False
 
     def commit_staged(self, message: str) -> str:
