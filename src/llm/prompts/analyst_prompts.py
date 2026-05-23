@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import difflib
 from typing import Any
 
 from src.models.diff import FileDiff
 
 _ROUND_PER_VERSION_CHARS = 1000
+# Per-side diff budget for commit-round prompts. Two sides (fork, upstream)
+# keep total per-file content near _FILE_TOKEN_ESTIMATE (1000 tokens ≈ 4000
+# chars) so the round token estimate in conflict_analysis.py stays valid and
+# a full 60-file round cannot blow the context window.
+_ROUND_DIFF_MAX_CHARS_PER_SIDE = 2000
 
 
 def _fmt_version(content: str | None, language: str) -> str:
@@ -14,6 +20,44 @@ def _fmt_version(content: str | None, language: str) -> str:
     if len(content) > _ROUND_PER_VERSION_CHARS:
         trimmed += "\n... [truncated]"
     return f"```{language}\n{trimmed}\n```"
+
+
+def _unified_diff_section(
+    from_text: str | None,
+    to_text: str | None,
+    from_label: str,
+    to_label: str,
+    max_chars: int,
+) -> str | None:
+    """Render a char-bounded unified diff of ``from_text`` → ``to_text``.
+
+    Returns ``None`` when the two sides are identical (no diff to show), so
+    callers can emit an explicit "no changes" note. Truncation happens on
+    line boundaries with a trailing marker counting omitted diff lines.
+    """
+    from_lines = (from_text or "").splitlines(keepends=True)
+    to_lines = (to_text or "").splitlines(keepends=True)
+    diff_lines = list(
+        difflib.unified_diff(
+            from_lines, to_lines, fromfile=from_label, tofile=to_label, n=3
+        )
+    )
+    if not diff_lines:
+        return None
+
+    kept: list[str] = []
+    used = 0
+    omitted = 0
+    for idx, line in enumerate(diff_lines):
+        if kept and used + len(line) > max_chars:
+            omitted = len(diff_lines) - idx
+            break
+        kept.append(line)
+        used += len(line)
+    body = "".join(kept)
+    if omitted:
+        body += f"... (+{omitted} more diff lines)\n"
+    return body
 
 
 def build_commit_round_prompt(
@@ -30,11 +74,34 @@ def build_commit_round_prompt(
     file_sections: list[str] = []
     for fp, (base_c, current_c, target_c) in file_three_way.items():
         lang = file_languages.get(fp, "")
+        fork_diff = _unified_diff_section(
+            base_c,
+            current_c,
+            f"base:{fp}",
+            f"fork:{fp}",
+            _ROUND_DIFF_MAX_CHARS_PER_SIDE,
+        )
+        upstream_diff = _unified_diff_section(
+            base_c,
+            target_c,
+            f"base:{fp}",
+            f"upstream:{fp}",
+            _ROUND_DIFF_MAX_CHARS_PER_SIDE,
+        )
+        fork_block = (
+            f"```diff\n{fork_diff}```"
+            if fork_diff
+            else "*(fork made no changes vs merge-base)*"
+        )
+        upstream_block = (
+            f"```diff\n{upstream_diff}```"
+            if upstream_diff
+            else "*(upstream made no changes vs merge-base)*"
+        )
         file_sections.append(
             f"## {fp}  (language: {lang})\n"
-            f"### Base (merge-base)\n{_fmt_version(base_c, lang)}\n"
-            f"### Fork (current branch)\n{_fmt_version(current_c, lang)}\n"
-            f"### Upstream (commit change)\n{_fmt_version(target_c, lang)}"
+            f"### Fork changes (merge-base → fork)\n{fork_block}\n"
+            f"### Upstream changes (merge-base → upstream)\n{upstream_block}"
         )
 
     return (
@@ -42,7 +109,10 @@ def build_commit_round_prompt(
         f"{len(round_commits)} upstream commits being merged into a fork.\n\n"
         f"# Project Context\n{project_context or 'No project context provided.'}\n\n"
         f"# Commits in this round\n{commit_summary}\n\n"
-        f"# File Contents\n"
+        f"# File Changes (three-way diffs against the merge-base)\n"
+        f"Each file shows what the fork changed and what upstream changed, "
+        f"relative to their common ancestor. Reason about whether the two "
+        f"sets of changes touch the same regions and can coexist.\n\n"
         + "\n\n".join(file_sections)
         + """
 
