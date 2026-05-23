@@ -114,6 +114,16 @@ class AgentPromptBuilder:
             max_chars = int(budget_tokens * _CHARS_PER_TOKEN)
             return content[:max_chars]
 
+        # When the whole file fits the budget, stage nothing — return it
+        # verbatim. Relevance scoring drops every chunk below SIGNATURE_THRESHOLD
+        # purely on score, so a large review budget can sit ~idle while the
+        # rendered output is a near-empty set of fragments (the forgejo Judge
+        # saw tokens=309/98789 then capped its verdict citing "truncated
+        # content"). Returning the full file when it fits removes the false
+        # truncation without ever exceeding budget.
+        if estimate_tokens(content) <= budget_tokens:
+            return content
+
         language = detect_language(file_path)
         chunks = ASTChunker.chunk(content, language)
 
