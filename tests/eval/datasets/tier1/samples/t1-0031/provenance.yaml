@@ -6,6 +6,10 @@ base_ref: 160377405c53145e56dd0aab6ee05fce9764c184
 upstream_ref: aec047c7b5e81a53130ab41cf5405c27e90d1d1d
 fork_ref: 01dc61c4e544a56aebdfb8e5a741d610fb40e8c9
 golden_ref: 2c1659769909d8b6826da3d7280ff7d35f4b0384
+# golden_ref is a hand-resolved 3-way merge (test/fork + origin/forgejo),
+# NOT the merge system's own output. It is preserved on branch
+# `eval/golden-forgejo-auth` in the repo above; golden.tar is committed so
+# the sample stands alone even if that branch is later pruned.
 paths: ['models/auth/auth_token.go']
 # F8: files touched in base→golden but in neither base→upstream nor
 # base→fork — content the human added directly during the merge commit.

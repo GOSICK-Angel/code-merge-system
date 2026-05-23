@@ -2,19 +2,21 @@ sample_id: t1-0032
 tier: 1
 category: C
 loss_class: null         # organic sample (not M-injected); natural shape = M1 call-site + M3 interface contract
-expected_human: true     # git produces conflict markers on this file → system should escalate
+expected_human: true     # golden preserves both sides → system should escalate (calibration: dataset.md §2.3)
 description: |
-  C-class: models/user/user.go — concurrent change to the same call site
-  in GenerateEmailAuthorizationCode:
+  C-class coverage: models/user/user.go — concurrent change to the same
+  call site in GenerateEmailAuthorizationCode:
     * fork extracts the expiry into a new helper EmailAuthCodeExpiry()
       and calls GenerateAuthToken(ctx, u.ID, EmailAuthCodeExpiry(), purpose).
     * upstream changes GenerateAuthToken's signature, inserting a new
       loginSourceID parameter: GenerateAuthToken(ctx, u.ID,
       optional.None[int64](), <expiry>, purpose).
-  Correct golden combines BOTH: GenerateAuthToken(ctx, u.ID,
-  optional.None[int64](), EmailAuthCodeExpiry(), purpose) (hand-resolved,
-  `go build` verified). The automated forgejo run (2026-05-22) kept fork's
-  4-arg call and dropped upstream's loginSourceID param — a textbook
-  M1 (call-site) + M3 (interface contract) loss that judge passed at 0.70.
-  This is the highest-value regression sample. Independent human golden,
-  NOT the system's merge output.
+  Golden combines BOTH: GenerateAuthToken(ctx, u.ID, optional.None[int64](),
+  EmailAuthCodeExpiry(), purpose) (hand-resolved, `go build` verified) —
+  independent human output, NOT the system's merge (dataset.md §1.4). The
+  conflict shape is a textbook M1 (call-site) + M3 (interface contract);
+  the automated forgejo run (2026-05-22) dropped upstream's loginSourceID
+  param here — that post-escalation regression is guarded by a unit test,
+  while this sample provides the C-class coverage + correct golden
+  reference. Under single-shot Tier-1 eval the expected outcome is
+  escalation (no human present).
