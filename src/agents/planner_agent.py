@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, cast
 from uuid import uuid4
 from src.agents.base_agent import BaseAgent
-from src.models.config import AgentLLMConfig, MergeConfig
+from src.models.config import AgentLLMConfig, MergeConfig, ModuleConfig
 from src.models.message import AgentType, AgentMessage, MessageType
 from src.models.plan import (
     MergePlan,
@@ -34,6 +34,7 @@ from src.tools.file_classifier import (
     compute_risk_score,
     classify_file,
 )
+from src.tools.module_inference import infer_modules
 from src.llm.prompts.gate_registry import get_gate
 from src.core.parallel_file_runner import (
     ParallelFileRunner,
@@ -203,78 +204,94 @@ class PlannerAgent(BaseAgent):
             FileChangeCategory.C: RiskLevel.AUTO_RISKY,
         }
 
-        d_missing_all = [
-            fp
-            for fp, cat in actionable_files.items()
-            if cat == FileChangeCategory.D_MISSING
-        ]
-        if d_missing_all:
-            d_safe, d_risky, d_human = self._split_by_risk_level(
-                d_missing_all,
+        fallback_set = set(fallback_paths)
+        path_layer: dict[str, int] = {}
+        for lid, paths in file_layer_map.items():
+            for fp in paths:
+                path_layer[fp] = lid
+
+        module_map, ordered_modules = self._assign_modules(
+            list(actionable_files.keys()), state
+        )
+        files_by_module: dict[str | None, list[str]] = {}
+        for fp in actionable_files:
+            files_by_module.setdefault(module_map.get(fp), []).append(fp)
+
+        def _emit(
+            paths: list[str],
+            cat: FileChangeCategory,
+            module: str | None,
+            layer_id: int | None,
+        ) -> None:
+            if not paths:
+                return
+            safe, risky, human = self._split_by_risk_level(
+                paths,
                 diffs_by_path,
                 shadow_paths,
-                fallback_risk=category_fallback[FileChangeCategory.D_MISSING],
+                fallback_risk=category_fallback[cat],
             )
             self._emit_risk_split_batches(
                 phases,
-                d_safe,
-                d_risky,
-                d_human,
-                layer_id=None,
-                change_category=FileChangeCategory.D_MISSING,
+                safe,
+                risky,
+                human,
+                layer_id=layer_id,
+                change_category=cat,
+                module=module,
             )
 
-        if fallback_paths:
-            fb_by_cat: dict[FileChangeCategory, list[str]] = {}
-            for fp in fallback_paths:
-                fb_by_cat.setdefault(actionable_files[fp], []).append(fp)
-            for cat in (FileChangeCategory.B, FileChangeCategory.C):
-                paths = fb_by_cat.get(cat, [])
-                if not paths:
-                    continue
-                safe, risky, human = self._split_by_risk_level(
-                    paths,
-                    diffs_by_path,
-                    shadow_paths,
-                    fallback_risk=category_fallback[cat],
-                )
-                self._emit_risk_split_batches(
-                    phases,
-                    safe,
-                    risky,
-                    human,
-                    layer_id=None,
-                    change_category=cat,
-                )
-
-        for layer in layers:
-            layer_files = file_layer_map.get(layer.layer_id, [])
-            if not layer_files:
+        for module in ordered_modules:
+            mod_paths = files_by_module.get(module, [])
+            if not mod_paths:
                 continue
 
-            by_category: dict[FileChangeCategory, list[str]] = {}
-            for fp in layer_files:
-                cat = actionable_files[fp]
-                by_category.setdefault(cat, []).append(fp)
+            # D_MISSING first: upstream-new files (including migrations)
+            # merge before the conflicted model files in the same module,
+            # turning the migration-ordering hint into real batch order.
+            _emit(
+                [
+                    fp
+                    for fp in mod_paths
+                    if actionable_files[fp] == FileChangeCategory.D_MISSING
+                ],
+                FileChangeCategory.D_MISSING,
+                module,
+                None,
+            )
 
-            for change_cat in (FileChangeCategory.B, FileChangeCategory.C):
-                cat_paths = by_category.get(change_cat, [])
-                if not cat_paths:
-                    continue
-                safe, risky, human = self._split_by_risk_level(
-                    cat_paths,
-                    diffs_by_path,
-                    shadow_paths,
-                    fallback_risk=category_fallback[change_cat],
+            # B/C files unassigned to any real layer (fallback bucket).
+            for cat in (FileChangeCategory.B, FileChangeCategory.C):
+                _emit(
+                    [
+                        fp
+                        for fp in mod_paths
+                        if fp in fallback_set and actionable_files[fp] == cat
+                    ],
+                    cat,
+                    module,
+                    None,
                 )
-                self._emit_risk_split_batches(
-                    phases,
-                    safe,
-                    risky,
-                    human,
-                    layer_id=layer.layer_id,
-                    change_category=change_cat,
-                )
+
+            # B/C files per real layer, in topological layer order.
+            for layer in layers:
+                for cat in (FileChangeCategory.B, FileChangeCategory.C):
+                    _emit(
+                        [
+                            fp
+                            for fp in mod_paths
+                            if path_layer.get(fp) == layer.layer_id
+                            and actionable_files[fp] == cat
+                        ],
+                        cat,
+                        module,
+                        layer.layer_id,
+                    )
+
+        module_summary: dict[str, int] = {}
+        for fp, mod in module_map.items():
+            if mod is not None:
+                module_summary[mod] = module_summary.get(mod, 0) + 1
 
         cat_summary = self._build_category_summary(categories)
         risk_summary = self._build_risk_summary(file_diffs, actionable_files)
@@ -341,6 +358,7 @@ class PlannerAgent(BaseAgent):
             layers=layers,
             project_context_summary=state.user_project_context or "",
             special_instructions=special_instructions,
+            module_summary=module_summary,
         )
 
     def _resolve_layers(self, config: MergeConfig) -> list[MergeLayer]:
@@ -376,6 +394,63 @@ class PlannerAgent(BaseAgent):
     def _layer_specificity_key(layer: MergeLayer) -> tuple[int, int]:
         has_catchall = any(p == "**" or p == "*" for p in layer.path_patterns)
         return (1 if has_catchall else 0, layer.layer_id)
+
+    def _assign_modules(
+        self, paths: list[str], state: MergeState
+    ) -> tuple[dict[str, str | None], list[str | None]]:
+        """Map actionable paths to module names and return the modules in
+        the order their batches should be emitted. When module grouping is
+        disabled every path maps to ``None`` (untagged) and the single
+        ``[None]`` pass reproduces the pre-module layered plan exactly.
+        """
+        cfg = state.config.module_config
+        if not cfg.enabled or cfg.mode == "off":
+            return {fp: None for fp in paths}, [None]
+
+        rewritten = [
+            rm.path
+            for rm in (
+                state.forks_profile.rewritten_modules if state.forks_profile else []
+            )
+        ]
+        module_map: dict[str, str | None] = dict(
+            infer_modules(paths, cfg, rewritten or None)
+        )
+        ordered = self._order_modules(
+            {m for m in module_map.values() if m is not None}, cfg
+        )
+        return module_map, list(ordered)
+
+    @staticmethod
+    def _order_modules(modules: set[str], config: ModuleConfig) -> list[str]:
+        """Topologically order modules so a module's declared dependencies
+        merge first; ties broken alphabetically for determinism. A
+        dependency cycle falls back to alphabetical order rather than
+        aborting the plan."""
+        mods = sorted(modules)
+        present = set(mods)
+        deps = config.module_depends_on
+        in_degree = {m: 0 for m in mods}
+        dependents: dict[str, list[str]] = {m: [] for m in mods}
+        for m in mods:
+            for d in deps.get(m, []):
+                if d in present:
+                    in_degree[m] += 1
+                    dependents[d].append(m)
+
+        queue = sorted(m for m in mods if in_degree[m] == 0)
+        out: list[str] = []
+        while queue:
+            m = queue.pop(0)
+            out.append(m)
+            for child in sorted(dependents[m]):
+                in_degree[child] -= 1
+                if in_degree[child] == 0:
+                    queue.append(child)
+
+        if len(out) != len(mods):
+            return mods
+        return out
 
     def _matches_layer(self, file_path: str, patterns: list[str]) -> bool:
         for pattern in patterns:
@@ -499,6 +574,7 @@ class PlannerAgent(BaseAgent):
         *,
         layer_id: int | None,
         change_category: FileChangeCategory,
+        module: str | None = None,
     ) -> None:
         # P1-6: respect the (risk_score asc, path asc) ordering produced
         # by ``_split_by_risk_level``. Calling ``sorted()`` here would
@@ -512,6 +588,7 @@ class PlannerAgent(BaseAgent):
                     file_paths=list(safe),
                     risk_level=RiskLevel.AUTO_SAFE,
                     layer_id=layer_id,
+                    module=module,
                     change_category=change_category,
                     can_parallelize=True,
                 )
@@ -524,6 +601,7 @@ class PlannerAgent(BaseAgent):
                     file_paths=list(risky),
                     risk_level=RiskLevel.AUTO_RISKY,
                     layer_id=layer_id,
+                    module=module,
                     change_category=change_category,
                     can_parallelize=True,
                 )
@@ -536,6 +614,7 @@ class PlannerAgent(BaseAgent):
                     file_paths=list(human),
                     risk_level=RiskLevel.HUMAN_REQUIRED,
                     layer_id=layer_id,
+                    module=module,
                     change_category=change_category,
                     can_parallelize=False,
                 )

@@ -2,7 +2,6 @@
 
 from datetime import datetime
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
 
 import pytest
 
@@ -426,23 +425,32 @@ class TestPlannerLayeredPlan:
         assert "unchanged.py" not in all_files_in_plan
         assert "custom_only.py" not in all_files_in_plan
 
-        layer_ids = [p.layer_id for p in plan.phases if p.layer_id is not None]
-        layer_order = []
-        for lid in layer_ids:
-            if lid not in layer_order:
-                layer_order.append(lid)
+        # Module-aware ordering: layers are ordered WITHIN each module's
+        # contiguous run of phases, not globally (module is the outer sort).
+        from itertools import groupby
+
         layer_by_id = {ly.layer_id: ly for ly in plan.layers}
-        for lid in layer_order:
-            ly = layer_by_id.get(lid)
-            if ly is None:
-                continue
-            idx = layer_order.index(lid)
-            for dep in ly.depends_on:
-                if dep in layer_order:
-                    dep_idx = layer_order.index(dep)
-                    assert dep_idx < idx, (
-                        f"Layer {lid} appears before dependency {dep}: {layer_order}"
-                    )
+        for module, group in groupby(plan.phases, key=lambda p: p.module):
+            layer_order: list[int] = []
+            for p in group:
+                if p.layer_id is not None and p.layer_id not in layer_order:
+                    layer_order.append(p.layer_id)
+            for lid in layer_order:
+                ly = layer_by_id.get(lid)
+                if ly is None:
+                    continue
+                idx = layer_order.index(lid)
+                for dep in ly.depends_on:
+                    if dep in layer_order:
+                        assert layer_order.index(dep) < idx, (
+                            f"Layer {lid} before dep {dep} in module "
+                            f"{module}: {layer_order}"
+                        )
+
+        # Module grouping is on by default — every actionable batch is
+        # tagged and the summary is populated.
+        assert all(p.module for p in plan.phases)
+        assert plan.module_summary
 
         b_phases = [p for p in plan.phases if p.change_category == FileChangeCategory.B]
         for bp in b_phases:
