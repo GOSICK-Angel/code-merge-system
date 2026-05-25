@@ -320,6 +320,47 @@ describe("classifyView", () => {
     expect(classifyView(snap)).toBe("plan_review");
   });
 
+  it("conflict gate wins over the plan sign-off fallback when plan was auto-approved", () => {
+    // Auto-approved plan (no HUMAN_REQUIRED files): the orchestrator skips
+    // sign-off, so planHumanReview stays null while reviewConclusion is set.
+    // That must NOT mask the live conflict gate downstream.
+    const snap: MergeStateSnapshot = {
+      ...base,
+      status: "awaiting_human",
+      reviewConclusion: {
+        reason: "approved",
+        final_round: 0,
+        total_rounds: 1,
+        max_rounds: 2,
+        summary: "approved",
+        pending_decisions_count: 0,
+        rejection_details: [],
+      },
+      planHumanReview: null,
+      pendingUserDecisions: [],
+      humanDecisionRequests: {
+        "models/user/user.go": {
+          request_id: "r1",
+          file_path: "models/user/user.go",
+          priority: 5,
+          conflict_points: [],
+          context_summary: "",
+          upstream_change_summary: "",
+          fork_change_summary: "",
+          analyst_recommendation: "escalate_human",
+          analyst_confidence: 0.5,
+          analyst_rationale: "",
+          options: [],
+          human_decision: null,
+          custom_content: null,
+          reviewer_notes: null,
+          related_files: [],
+        },
+      },
+    };
+    expect(classifyView(snap)).toBe("conflict_resolution");
+  });
+
   it("falls back to dashboard once planHumanReview is recorded", () => {
     const snap: MergeStateSnapshot = {
       ...base,

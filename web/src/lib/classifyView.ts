@@ -15,28 +15,29 @@ export type StoreMode = "setup" | "run";
  *
  * Routing rules (highest priority first):
  *   1. Terminal status (``completed`` / ``failed``) → L5 report
- *   2. ``awaiting_human`` + pending plan-review items → L2 plan_review
- *   3. ``awaiting_human`` + reviewConclusion present + planHumanReview
- *      not yet recorded → L2 plan_review (plan-level sign-off — the
- *      planner/judge loop terminated without converging, so per-file
- *      pendingUserDecisions may be empty but the reviewer still has to
- *      approve / modify / reject the last revised plan)
- *   4. ``awaiting_human`` + pending conflict requests → L3 conflict_resolution
- *   5. ``awaiting_human`` + judge_verdict present + no resolution → L4 judge_verdict
+ *   2. ``awaiting_human`` + pending per-file plan decisions → L2 plan_review
+ *   3. ``awaiting_human`` + pending conflict requests → L3 conflict_resolution
+ *   4. ``awaiting_human`` + judge_verdict present + no resolution → L4 judge_verdict
+ *   5. ``awaiting_human`` + reviewConclusion present + planHumanReview
+ *      not yet recorded → L2 plan_review (plan-level sign-off fallback — the
+ *      planner/judge loop terminated, so per-file pendingUserDecisions may be
+ *      empty but the reviewer still has to approve / modify / reject the plan)
  *   6. Everything else → L1 dashboard
  *
  * Why this order:
  *   - Terminal states win regardless of any in-flight state — once the
  *     run is done the user wants the report, not the half-stale gates
- *   - Plan-review > conflict_resolution: ``pending_user_decisions`` is
- *     populated upstream of ``human_decision_requests`` (the former in
- *     ``src/core/phases/plan_review.py``, the latter in
- *     ``src/core/phases/conflict_analysis.py`` / ``auto_merge.py``).
- *     If the two ever coexist (stale state), route to the upstream
- *     decision first
- *   - L4 lives at the bottom of the awaiting_human stack because the
- *     judge gate is the *last* checkpoint — we should never land here
- *     while plan_review or conflict items are still pending
+ *   - The plan-level sign-off fallback (rule 5) is checked AFTER the
+ *     conflict/judge gates, not before. When a plan is auto-approved (no
+ *     HUMAN_REQUIRED files) the orchestrator skips sign-off and leaves
+ *     ``planHumanReview`` null while ``reviewConclusion`` is set — so that
+ *     condition stays true for the rest of the run. Checking it before the
+ *     conflict/judge gates would mask a live downstream gate (the operator
+ *     would be parked on an already-approved plan while 3 conflict files wait
+ *     for a decision). A plan that genuinely still needs sign-off has no
+ *     pending conflicts and no judge verdict, so it falls through to rule 5.
+ *   - L4 (judge) sits above the plan fallback but below conflicts because the
+ *     judge gate is the *last* real checkpoint of a run.
  */
 export function classifyView(
   snapshot: MergeStateSnapshot | null,
@@ -60,17 +61,6 @@ export function classifyView(
   );
   if (planPending) return "plan_review";
 
-  // Plan-level sign-off path: planner/judge finished (review_conclusion
-  // set) but the human hasn't approved/modified/rejected yet. Without
-  // this branch a non-converged plan with zero per-file pending items
-  // falls through to dashboard and the reviewer has nowhere to act.
-  if (
-    snapshot.reviewConclusion != null &&
-    (snapshot.planHumanReview ?? null) == null
-  ) {
-    return "plan_review";
-  }
-
   const conflictPending = Object.values(snapshot.humanDecisionRequests).some(
     (r) => r.human_decision === null,
   );
@@ -81,6 +71,18 @@ export function classifyView(
     (snapshot.judgeResolution ?? null) === null
   ) {
     return "judge_verdict";
+  }
+
+  // Plan-level sign-off fallback — see the "Why this order" note above.
+  // Checked last among the awaiting_human gates: when a plan is auto-approved
+  // the orchestrator skips sign-off and leaves planHumanReview null while
+  // reviewConclusion is set, so this would otherwise mask a live conflict or
+  // judge gate downstream.
+  if (
+    snapshot.reviewConclusion != null &&
+    (snapshot.planHumanReview ?? null) == null
+  ) {
+    return "plan_review";
   }
 
   return "dashboard";
