@@ -73,8 +73,29 @@ def split_by_semantic_boundary(
 
 
 def merge_chunks(chunks: list[str]) -> str:
-    """Concatenate chunks back into a single file."""
-    return "".join(chunks)
+    """Concatenate chunks back into a single file.
+
+    Chunks are produced by slicing ``splitlines(keepends=True)`` at semantic
+    boundaries (``split_by_semantic_boundary``), so every seam between two
+    chunks falls between two whole lines. But each chunk is round-tripped
+    through the LLM and ``parse_merge_result`` ``.strip()``s the response,
+    dropping the chunk's trailing newline. A naive ``"".join`` then glues the
+    last line of one chunk onto the first line of the next — and because Go/
+    Python/JS boundaries split *before* a ``func``/``def`` line, the seam sits
+    between a doc comment and its declaration, producing
+    ``// ...reservedfunc IsUsableUsername(...)`` which comments the function
+    out and breaks compilation. Re-insert the separating newline whenever a
+    non-final chunk lost it so seams stay on line boundaries.
+    """
+    if not chunks:
+        return ""
+    parts: list[str] = []
+    last = len(chunks) - 1
+    for i, chunk in enumerate(chunks):
+        parts.append(chunk)
+        if i != last and chunk and not chunk.endswith("\n"):
+            parts.append("\n")
+    return "".join(parts)
 
 
 def align_chunks(
