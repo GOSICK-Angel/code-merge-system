@@ -18,7 +18,7 @@ opposite ``take_target`` / ``take_current`` sides of the merge.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.agents.contract import FieldNotInContract
 from src.agents.judge_agent import JudgeAgent
@@ -26,7 +26,13 @@ from src.core.read_only_state_view import ReadOnlyStateView
 from src.models.config import AgentLLMConfig, MergeConfig
 from src.models.decision import DecisionSource, FileDecisionRecord, MergeDecision
 from src.models.diff import FileStatus
-from src.models.judge import IssueSeverity
+from src.models.judge import (
+    BatchVerdict,
+    DisputePoint,
+    ExecutorRebuttal,
+    IssueSeverity,
+    JudgeIssue,
+)
 from src.models.state import MergeState
 from src.tools.interface_change_extractor import (
     InterfaceChange,
@@ -129,7 +135,8 @@ def test_opposite_decisions_with_reference_flagged(tmp_path) -> None:
     assert issues[0].issue_type == "cross_file_signature_split"
     assert issues[0].issue_level == IssueSeverity.HIGH
     assert issues[0].file_path == "models/user/user.go"
-    assert issues[0].must_fix_before_merge is False
+    assert issues[0].must_fix_before_merge is True
+    assert issues[0].veto_condition == "Cross-file signature split unresolved"
 
 
 def test_same_direction_decisions_not_flagged(tmp_path) -> None:
@@ -220,3 +227,67 @@ def test_out_of_contract_field_still_blocked(tmp_path) -> None:
         raise AssertionError("expected FieldNotInContract")
     except FieldNotInContract:
         pass
+
+
+# --------------------------------------------------------------------------- #
+# re_evaluate — deterministic must_fix / veto issues survive negotiation
+# --------------------------------------------------------------------------- #
+
+
+def _veto_issue() -> JudgeIssue:
+    return JudgeIssue(
+        file_path="models/user/user.go",
+        issue_level=IssueSeverity.HIGH,
+        issue_type="cross_file_signature_split",
+        description="opposite merge sides",
+        must_fix_before_merge=True,
+        veto_condition="Cross-file signature split unresolved",
+    )
+
+
+def _soft_issue() -> JudgeIssue:
+    return JudgeIssue(
+        file_path="a.go",
+        issue_level=IssueSeverity.LOW,
+        issue_type="style_nit",
+        description="advisory",
+        must_fix_before_merge=False,
+    )
+
+
+async def test_re_evaluate_cannot_drop_deterministic_veto(tmp_path) -> None:
+    """The executor↔judge negotiation must not erase a must_fix/veto issue even
+    when the LLM rebuttal claims everything is resolved."""
+    judge = _judge(tmp_path)
+    veto, soft = _veto_issue(), _soft_issue()
+    current = BatchVerdict(
+        layer_id=None,
+        approved=False,
+        issues=[veto, soft],
+        reviewed_files=["models/user/user.go", "a.go"],
+        round_num=0,
+    )
+    rebuttal = ExecutorRebuttal(
+        accepts_all=False,
+        dispute_points=[
+            DisputePoint(
+                issue_id=veto.issue_id, counter_evidence="LGTM", accepts=False
+            ),
+            DisputePoint(
+                issue_id=soft.issue_id, counter_evidence="LGTM", accepts=False
+            ),
+        ],
+        overall_rationale="all fine",
+    )
+    # LLM tries to drop BOTH issues and approve.
+    judge._call_llm_with_retry = AsyncMock(
+        return_value='{"overall_approved": true, "remaining_issues": []}'
+    )
+
+    state = MergeState(config=MergeConfig(upstream_ref="u", fork_ref="f"))
+    result = await judge.re_evaluate(rebuttal, current, ReadOnlyStateView(state))
+
+    kept_types = {i.issue_type for i in result.issues}
+    assert "cross_file_signature_split" in kept_types  # veto retained
+    assert "style_nit" not in kept_types  # soft issue dropped as LLM said
+    assert result.approved is False  # must_fix issue blocks approval

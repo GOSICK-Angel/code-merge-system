@@ -813,7 +813,8 @@ class JudgeAgent(BaseAgent):
                             f"— opposite merge sides likely produce a compile "
                             f"mismatch the per-file review cannot detect."
                         ),
-                        must_fix_before_merge=False,
+                        must_fix_before_merge=True,
+                        veto_condition="Cross-file signature split unresolved",
                     )
                 )
         return issues
@@ -1659,6 +1660,22 @@ class JudgeAgent(BaseAgent):
             status = entry.get("status", "maintained")
             if status == "maintained" and issue_id in issue_map:
                 remaining_issues.append(issue_map[issue_id])
+
+        # Deterministic blocking findings are authoritative: the executor↔judge
+        # negotiation may resolve soft/advisory issues, but it must never erase
+        # a must_fix or veto-bearing deterministic check (cross_file_signature_split,
+        # b_class_mismatch, sentinel_hit, …). Without this, the LLM's rebuttal can
+        # silently drop a structural veto and flip the verdict to PASS — which let
+        # genuinely incompatible merges through. Repairable issues that the
+        # Executor actually fixed disappear from the next round's pipeline output,
+        # so force-retain here does not trap a closed issue.
+        retained_ids = {i.issue_id for i in remaining_issues}
+        for issue in current_verdict.issues:
+            if issue.issue_id in retained_ids:
+                continue
+            if issue.must_fix_before_merge or issue.veto_condition:
+                remaining_issues.append(issue)
+                retained_ids.add(issue.issue_id)
 
         # O-M2: even if LLM claims overall_approved=true, any remaining issue
         # whose severity is in the configured blocking levels must block the

@@ -99,6 +99,7 @@ VETO_CONDITIONS: list[str] = [
     "Sentinel hit in AUTO_SAFE file unacknowledged",
     "Config retention required line missing",
     "Build check failed",
+    "Cross-file signature split unresolved",
 ]
 
 
@@ -113,6 +114,7 @@ ISSUE_TYPES_NEW: set[str] = {
     "sentinel_hit_unacknowledged",
     "config_retention_violation",
     "build_check_failed",
+    "cross_file_signature_split",
 }
 
 
