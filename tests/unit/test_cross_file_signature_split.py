@@ -223,7 +223,7 @@ def test_out_of_contract_field_still_blocked(tmp_path) -> None:
     judge = _judge(tmp_path)
     restricted = judge.restricted_view(state)
     try:
-        _ = restricted.sentinel_hits
+        _ = restricted.merge_plan  # not in the judge contract
         raise AssertionError("expected FieldNotInContract")
     except FieldNotInContract:
         pass

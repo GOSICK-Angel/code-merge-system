@@ -13,6 +13,8 @@ inputs:
   - judge_verdicts_log
   - merge_base_commit
   - reverse_impacts
+  - sentinel_hits
+  - shadow_conflicts
   - status
 output_schema: JudgeVerdict
 gates:

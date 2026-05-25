@@ -479,6 +479,51 @@ class TestJudgeAgentP2Checks:
         state = self._make_state(sentinel_hits={})
         assert judge._check_sentinel_hits(state) == []
 
+    def test_dead_checks_revived_under_judge_contract(self, tmp_path: Path):
+        """Regression: sentinel_hits / shadow_conflicts were absent from
+        judge.yaml inputs, so getattr on the contract-restricted view swallowed
+        FieldNotInContract (it subclasses AttributeError) and both checks never
+        fired in production. The earlier tests pass a bare MagicMock, bypassing
+        the contract entirely — this one drives the real restricted view."""
+        from src.models.config import MergeConfig
+        from src.models.state import MergeState
+        from src.tools.shadow_conflict_detector import ShadowConflict
+
+        judge = self._make_judge(tmp_path)
+        state = MergeState(
+            config=MergeConfig(upstream_ref="upstream/main", fork_ref="fork")
+        )
+        state.merge_base_commit = "base"
+        state.sentinel_hits = {
+            "src/api.py": [
+                SentinelHit(
+                    file_path="src/api.py",
+                    line_number=5,
+                    pattern=r"@fork-only",
+                    matched_text="# @fork-only",
+                )
+            ]
+        }
+        state.shadow_conflicts = [
+            ShadowConflict(
+                logical_name="cfg",
+                path_a="a.yaml",
+                path_b="b.yaml",
+                rule_description="dup",
+            )
+        ]
+
+        restricted = judge.restricted_view(state)
+        # Contract now grants read access — these would raise
+        # FieldNotInContract (swallowed to empty) before the fix.
+        assert restricted.sentinel_hits
+        assert restricted.shadow_conflicts
+
+        issues = judge._run_deterministic_pipeline(restricted, {})
+        types = {i.issue_type for i in issues}
+        assert "sentinel_hit_unacknowledged" in types
+        assert "shadow_conflict_unresolved" in types
+
     def test_config_retention_violation_emits_issue(self, tmp_path: Path):
         from src.models.judge import IssueSeverity
 
