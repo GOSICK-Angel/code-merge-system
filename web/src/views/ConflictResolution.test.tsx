@@ -222,6 +222,36 @@ describe("ConflictResolution submit payload (H3)", () => {
   });
 });
 
+describe("ConflictResolution submit feedback", () => {
+  it("shows a submitted banner + Resubmit label once the file is decided", () => {
+    const decidedSnapshot: MergeStateSnapshot = {
+      ...baseSnapshot,
+      humanDecisionRequests: {
+        "a.py": {
+          ...baseSnapshot.humanDecisionRequests["a.py"],
+          human_decision: "take_current",
+        },
+      },
+    };
+    useRunStore.setState({ snapshot: decidedSnapshot });
+    act(() => useConflictDraftStore.getState().selectFile("a.py"));
+
+    const ref = makeClientRef();
+    const { container, getByText } = render(
+      <ConflictResolution
+        clientRef={
+          ref as unknown as React.MutableRefObject<
+            ReturnType<typeof useWsClient>["current"]
+          >
+        }
+      />,
+    );
+    expect(container.textContent).toContain("decision submitted");
+    expect(container.textContent).toContain("TAKE_CURRENT");
+    expect(getByText("Resubmit decision")).toBeTruthy();
+  });
+});
+
 describe("ConflictResolution code diff (real preview_content)", () => {
   const previewSnapshot: MergeStateSnapshot = {
     ...baseSnapshot,

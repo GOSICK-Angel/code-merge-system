@@ -577,6 +577,25 @@ export function ConflictResolution({ clientRef }: Props): JSX.Element {
         >
           {current ? (
             <>
+              {current.human_decision && (
+                <div
+                  className="reco-banner"
+                  style={{
+                    borderColor: "var(--green)",
+                    background:
+                      "color-mix(in oklch, var(--green), transparent 90%)",
+                  }}
+                >
+                  <span className="upcase">✓ decision submitted</span>
+                  <span
+                    className="reco-val"
+                    style={{ color: "var(--green)" }}
+                  >
+                    {current.human_decision.toUpperCase()}
+                  </span>
+                </div>
+              )}
+
               {current.analyst_recommendation && (
                 <div style={{ padding: "10px 0" }}>
                   <div className="upcase">analyst recommendation</div>
@@ -727,7 +746,7 @@ export function ConflictResolution({ clientRef }: Props): JSX.Element {
                     }
                     style={{ justifyContent: "center" }}
                   >
-                    Submit decision
+                    {current.human_decision ? "Resubmit decision" : "Submit decision"}
                   </button>
                   {currentDraft && (
                     <button
