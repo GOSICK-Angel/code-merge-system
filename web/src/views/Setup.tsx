@@ -56,6 +56,7 @@ interface FormState {
   threshold_low: string;
   threshold_high: string;
   request_timeout_seconds: string;
+  llm_assist_mode: "off" | "auto" | "always";
   dry_run: boolean;
   workflow: string;
   init_forks_profile: boolean;
@@ -68,6 +69,12 @@ const WORKFLOW_OPTIONS = [
   { value: "fast", label: "fast" },
   { value: "analysis-only", label: "analysis-only" },
 ];
+
+const LLM_ASSIST_OPTIONS = [
+  { value: "auto", label: "auto (complexity-driven)" },
+  { value: "off", label: "off (deterministic)" },
+  { value: "always", label: "always" },
+] as const;
 
 const inputStyle: CSSProperties = {
   width: "100%",
@@ -264,6 +271,7 @@ function deriveDefaults(ctx: SetupContext): FormState {
       typeof summary.request_timeout_seconds === "number"
         ? String(summary.request_timeout_seconds)
         : "",
+    llm_assist_mode: "auto",
     dry_run: false,
     workflow: "",
     init_forks_profile: false,
@@ -337,6 +345,7 @@ function buildPayload(form: FormState): SetupPayload {
       form.default_provider === "" ? null : form.default_provider,
     agent_choices,
     thresholds: buildThresholds(form),
+    llm_assist_mode: form.llm_assist_mode,
     request_timeout_seconds: parseTimeout(form.request_timeout_seconds),
     dry_run: form.dry_run,
     workflow: form.workflow.trim() === "" ? null : form.workflow,
@@ -1106,7 +1115,7 @@ export function Setup({ clientRef }: Props): JSX.Element {
                 }
               />
             </div>
-            <div style={rowStyle}>
+            <div style={{ ...rowStyle, gridTemplateColumns: "1fr 1fr 1fr" }}>
               <label
                 style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}
               >
@@ -1128,6 +1137,29 @@ export function Setup({ clientRef }: Props): JSX.Element {
                   onChange={(e) => updateField("workflow", e.target.value)}
                 >
                   {WORKFLOW_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label style={labelStyle} htmlFor="llm_assist_mode">
+                  LLM assist
+                </label>
+                <select
+                  id="llm_assist_mode"
+                  data-testid="llm_assist_mode"
+                  style={inputStyle}
+                  value={form.llm_assist_mode}
+                  onChange={(e) =>
+                    updateField(
+                      "llm_assist_mode",
+                      e.target.value as FormState["llm_assist_mode"],
+                    )
+                  }
+                >
+                  {LLM_ASSIST_OPTIONS.map((opt) => (
                     <option key={opt.value} value={opt.value}>
                       {opt.label}
                     </option>

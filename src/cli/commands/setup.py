@@ -253,6 +253,7 @@ def _default_config_data(payload: SetupPayload, repo_path: str) -> dict[str, Any
             "risk_score_low": 0.30,
             "risk_score_high": 0.60,
         },
+        "llm_assist": {"mode": "auto"},
         "output": {
             "directory": "./outputs",
             "formats": ["json", "markdown"],
@@ -354,6 +355,9 @@ def apply_setup_payload(payload: SetupPayload, repo_path: str = ".") -> MergeCon
         }
         if explicit:
             config_data.setdefault("thresholds", {}).update(explicit)
+
+    if payload.llm_assist_mode is not None:
+        config_data.setdefault("llm_assist", {})["mode"] = payload.llm_assist_mode
 
     if payload.github_token:
         config_data["github"] = {"enabled": True, "token_env": "GITHUB_TOKEN"}

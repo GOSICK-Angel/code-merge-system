@@ -175,6 +175,39 @@ describe("Setup — flexible providers", () => {
       provider: "anthropic",
       model: "claude-haiku-4-5-20251001",
     });
+    // LLM assist defaults to complexity-driven auto.
+    expect(msg.payload.llm_assist_mode).toBe("auto");
+  });
+
+  it("submits the chosen LLM assist mode", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: {
+          name: "ANTHROPIC_API_KEY",
+          masked: "sk-ant-****",
+          source: "shell",
+        },
+      },
+    });
+    const { getByTestId, getByText } = renderSetup();
+
+    // The LLM assist selector lives in the collapsed ADVANCED panel.
+    act(() => {
+      fireEvent.click(getByText(/ADVANCED/));
+    });
+    act(() => {
+      fireEvent.change(getByTestId("llm_assist_mode"), {
+        target: { value: "off" },
+      });
+    });
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+
+    const msg = sendSpy.mock.calls[0][0];
+    if (msg.type !== "setup.submit") throw new Error("wrong type");
+    expect(msg.payload.llm_assist_mode).toBe("off");
   });
 
   it("blocks submit when an enabled provider has an empty models list", () => {

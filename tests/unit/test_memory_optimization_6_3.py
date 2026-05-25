@@ -128,7 +128,7 @@ async def test_enhance_risk_scores_injects_memory_for_gray_zone():
     _attach_memory(agent, "GRAY_ZONE_HINT_TEST", "planning")
 
     cfg = MergeConfig(upstream_ref="upstream/main", fork_ref="origin/feat")
-    cfg.llm_assist.mode = "auto"
+    cfg.llm_assist.mode = "always"
     fd = FileDiff(
         file_path="middle.py",
         file_status=FileStatus.MODIFIED,
@@ -164,7 +164,7 @@ async def test_enhance_risk_scores_fans_out_in_parallel():
     agent._call_llm_with_retry = AsyncMock(side_effect=fake_call)
 
     cfg = MergeConfig(upstream_ref="upstream/main", fork_ref="origin/feat")
-    cfg.llm_assist.mode = "auto"
+    cfg.llm_assist.mode = "always"
     diffs = [
         FileDiff(
             file_path=f"src/f{i}.py",
@@ -213,7 +213,7 @@ async def test_enhance_risk_scores_emits_progress_events():
     agent.set_activity_callback(collect)
 
     cfg = MergeConfig(upstream_ref="upstream/main", fork_ref="origin/feat")
-    cfg.llm_assist.mode = "auto"
+    cfg.llm_assist.mode = "always"
     diffs = [
         FileDiff(
             file_path=f"src/f{i}.py",

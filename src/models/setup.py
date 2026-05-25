@@ -119,6 +119,7 @@ class SetupPayload(BaseModel):
     agent_choices: dict[str, AgentChoice] = Field(default_factory=dict)
 
     thresholds: ThresholdsPayload | None = None
+    llm_assist_mode: Literal["off", "auto", "always"] | None = None
     request_timeout_seconds: int | None = None
     dry_run: bool = False
     workflow: str | None = None

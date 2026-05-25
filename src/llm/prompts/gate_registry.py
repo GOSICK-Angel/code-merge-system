@@ -59,6 +59,10 @@ from src.llm.prompts.planner_prompts import (
     build_revision_prompt,
     get_planner_system,
 )
+from src.llm.prompts.risk_scoring_prompts import (
+    RISK_SCORING_SYSTEM,
+    build_risk_scoring_prompt,
+)
 
 
 @dataclass(frozen=True)
@@ -96,6 +100,10 @@ def registered_gate_ids() -> list[str]:
 
 def _planner_system_constant(*_args: Any, **_kwargs: Any) -> str:
     return PLANNER_EVALUATION_SYSTEM
+
+
+def _risk_scoring_system_constant(*_args: Any, **_kwargs: Any) -> str:
+    return RISK_SCORING_SYSTEM
 
 
 def _executor_system_constant(*_args: Any, **_kwargs: Any) -> str:
@@ -147,6 +155,16 @@ register_gate(
     "P-EVALUATION",
     build_evaluation_prompt,
     "Planner evaluation prompt: accept/reject reviewer issues.",
+)
+register_gate(
+    "P-RISK-SCORE",
+    build_risk_scoring_prompt,
+    "Planner single-file risk rescore prompt (tier-2 LLM assist).",
+)
+register_gate(
+    "P-RISK-SCORE-SYSTEM",
+    _risk_scoring_system_constant,
+    "Planner risk rescore system prompt.",
 )
 
 # PlannerJudge (PJ-)

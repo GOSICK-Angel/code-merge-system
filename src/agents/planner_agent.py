@@ -29,7 +29,12 @@ from src.models.plan_review import (
     IssueResponseAction,
     PlanDiffEntry,
 )
-from src.tools.file_classifier import compute_risk_score, classify_file
+from src.tools.file_classifier import (
+    compute_complexity,
+    compute_risk_score,
+    classify_file,
+)
+from src.llm.prompts.gate_registry import get_gate
 from src.core.parallel_file_runner import (
     ParallelFileRunner,
     assert_disjoint_file_shards,
@@ -99,7 +104,9 @@ class PlannerAgent(BaseAgent):
         # _split_by_risk_level grouping.
         if state.config.llm_assist.mode != "off":
             all_file_diffs = await self._enhance_risk_scores(
-                all_file_diffs, state.config
+                all_file_diffs,
+                state.config,
+                rename_pairs=state.rename_pairs or None,
             )
 
         if state.file_categories:
@@ -1247,51 +1254,93 @@ class PlannerAgent(BaseAgent):
         return plan
 
     async def _enhance_risk_scores(
-        self, file_diffs: list[FileDiff], config: MergeConfig
+        self,
+        file_diffs: list[FileDiff],
+        config: MergeConfig,
+        rename_pairs: list[tuple[str, str]] | None = None,
     ) -> list[FileDiff]:
-        from src.llm.prompts.risk_scoring_prompts import (
-            build_risk_scoring_prompt,
-            RISK_SCORING_SYSTEM,
-        )
+        """Spend LLM calls to refine the deterministic plan, complexity-driven.
 
-        gray_low = config.llm_assist.uncertainty_low
-        gray_high = config.llm_assist.uncertainty_high
-        rule_weight = config.llm_assist.rule_weight
+        Tier selection is governed by ``compute_complexity`` rather than a
+        per-file flag: files in the uncertainty band get a single-file
+        rescore (tier 2), files above it get a full batch re-classification
+        (tier 3, the strong-judgment layer). ``budget_max_files`` caps the
+        combined set by descending complexity so the most uncertain files
+        are served first and tier 3 is never starved by the cut.
+        """
+        assist = config.llm_assist
+        if assist.mode == "off":
+            return list(file_diffs)
 
         enhanced_diffs = list(file_diffs)
-
-        gray_indices = [
-            i
-            for i, fd in enumerate(enhanced_diffs)
-            if gray_low <= fd.risk_score <= gray_high
+        low, high = assist.uncertainty_low, assist.uncertainty_high
+        complexity = [
+            compute_complexity(fd, config.complexity) for fd in enhanced_diffs
         ]
-        if not gray_indices:
+
+        tier3 = {i for i, c in enumerate(complexity) if c > high}
+        if assist.mode == "always":
+            tier2 = {i for i in range(len(enhanced_diffs)) if i not in tier3}
+        else:  # auto
+            tier2 = {i for i, c in enumerate(complexity) if low <= c <= high}
+
+        selected = tier2 | tier3
+        if not selected:
             return enhanced_diffs
 
-        gray_paths = [enhanced_diffs[i].file_path for i in gray_indices]
-        memory_text = self.get_memory_context(self._current_phase, gray_paths)
+        if len(selected) > assist.budget_max_files:
+            selected = set(
+                sorted(selected, key=lambda i: complexity[i], reverse=True)[
+                    : assist.budget_max_files
+                ]
+            )
+            tier3 = {i for i in selected if complexity[i] > high}
+            tier2 = selected - tier3
 
-        total = len(gray_indices)
         self.logger.info(
-            "LLM risk rescore: fan-out %d gray-zone files [%.2f, %.2f]",
-            total,
-            gray_low,
-            gray_high,
+            "LLM assist (%s): %d files (tier2 rescore=%d, tier3 reclassify=%d), "
+            "budget=%d",
+            assist.mode,
+            len(selected),
+            len(tier2),
+            len(tier3),
+            assist.budget_max_files,
         )
 
-        completed = 0
+        if tier2:
+            enhanced_diffs = await self._rescore_files(
+                enhanced_diffs, sorted(tier2), config
+            )
+        if tier3:
+            enhanced_diffs = await self._reclassify_files(
+                enhanced_diffs, sorted(tier3), config, rename_pairs
+            )
+        return enhanced_diffs
+
+    async def _rescore_files(
+        self,
+        enhanced_diffs: list[FileDiff],
+        indices: list[int],
+        config: MergeConfig,
+    ) -> list[FileDiff]:
+        """Tier 2: blend a single-file LLM risk score into the rule score."""
+        rule_weight = config.llm_assist.rule_weight
+        result = list(enhanced_diffs)
+        paths = [result[i].file_path for i in indices]
+        memory_text = self.get_memory_context(self._current_phase, paths)
+        total = len(indices)
         progress_lock = asyncio.Lock()
 
         async def _rescore_one(idx: int) -> float | None:
-            fd = enhanced_diffs[idx]
-            prompt = build_risk_scoring_prompt(fd, fd.risk_score)
+            fd = result[idx]
+            prompt = get_gate("P-RISK-SCORE").render(fd, fd.risk_score)
             if memory_text:
                 prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
             messages = [{"role": "user", "content": prompt}]
             llm_score: float | None
             try:
                 raw = await self._call_llm_with_retry(
-                    messages, system=RISK_SCORING_SYSTEM
+                    messages, system=get_gate("P-RISK-SCORE-SYSTEM").render()
                 )
                 raw_str = str(raw).strip()
                 if raw_str.startswith("```"):
@@ -1310,27 +1359,74 @@ class PlannerAgent(BaseAgent):
             await self._emit_rescore_progress(
                 progress_lock, fd.file_path, total, llm_score is not None
             )
-            nonlocal completed
             return llm_score
 
         runner = ParallelFileRunner.from_api_key_env_list(
             self.llm_config.api_key_env_list,
             override=None,
         )
-        results = await runner.run_files(gray_indices, _rescore_one)
+        results = await runner.run_files(indices, _rescore_one)
 
-        for idx in gray_indices:
-            result = results.get(idx)
-            if isinstance(result, BaseException) or result is None:
+        for idx in indices:
+            scored = results.get(idx)
+            if isinstance(scored, BaseException) or scored is None:
                 continue
-            fd = enhanced_diffs[idx]
-            blended = rule_weight * fd.risk_score + (1.0 - rule_weight) * result
+            fd = result[idx]
+            blended = rule_weight * fd.risk_score + (1.0 - rule_weight) * scored
             blended = round(max(0.0, min(1.0, blended)), 3)
             new_fd = fd.model_copy(update={"risk_score": blended})
             new_level = classify_file(new_fd, config.file_classifier)
-            enhanced_diffs[idx] = new_fd.model_copy(update={"risk_level": new_level})
+            result[idx] = new_fd.model_copy(update={"risk_level": new_level})
 
-        return enhanced_diffs
+        return result
+
+    async def _reclassify_files(
+        self,
+        enhanced_diffs: list[FileDiff],
+        indices: list[int],
+        config: MergeConfig,
+        rename_pairs: list[tuple[str, str]] | None,
+    ) -> list[FileDiff]:
+        """Tier 3 (strong judgment): run the batch classification prompt on
+        the most complex files and let its categorical risk_level override
+        the rule classification — no blend, the LLM decision wins."""
+        tier3_diffs = [enhanced_diffs[i] for i in indices]
+        system_prompt = get_planner_system(config.output.language)
+        tier3_paths = {fd.file_path for fd in tier3_diffs}
+        scoped_renames = (
+            [
+                (old, new)
+                for old, new in rename_pairs
+                if old in tier3_paths or new in tier3_paths
+            ]
+            if rename_pairs
+            else None
+        )
+        plan_data = await self._classify_batch(
+            tier3_diffs,
+            config.project_context,
+            system_prompt,
+            0,
+            1,
+            scoped_renames,
+        )
+
+        risk_by_path: dict[str, RiskLevel] = {}
+        for phase in plan_data.get("phases", []):
+            try:
+                rl = RiskLevel(phase.get("risk_level", "auto_safe"))
+            except ValueError:
+                rl = RiskLevel.AUTO_SAFE
+            for fp in phase.get("file_paths", []):
+                risk_by_path[fp] = rl
+
+        result = list(enhanced_diffs)
+        for i in indices:
+            fd = result[i]
+            new_level = risk_by_path.get(fd.file_path)
+            if new_level is not None and new_level != fd.risk_level:
+                result[i] = fd.model_copy(update={"risk_level": new_level})
+        return result
 
     async def _emit_rescore_progress(
         self,

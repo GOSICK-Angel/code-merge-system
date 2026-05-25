@@ -488,6 +488,7 @@ export interface SetupPayload {
   default_provider: ProviderName | null;
   agent_choices: Record<string, AgentChoice>;
   thresholds: ThresholdsPayload | null;
+  llm_assist_mode: "off" | "auto" | "always" | null;
   request_timeout_seconds: number | null;
   dry_run: boolean;
   workflow: string | null;
