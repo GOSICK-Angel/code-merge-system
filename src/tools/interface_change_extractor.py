@@ -2,7 +2,8 @@
 
 Language-agnostic regex fallback (tree-sitter planned as future upgrade):
 - constructor_signature: ``__init__`` / ``constructor`` parameter list diff
-- method_signature: top-level ``def foo(...)`` / ``function foo(...)`` diff
+- method_signature: top-level ``def foo(...)`` / ``function foo(...)`` /
+  Go ``func foo(...)`` and ``func (recv) foo(...)`` parameter-list diff
 - base_class: ``class Foo(Base)`` change
 - enum_value: ``KEY = "value"`` diff inside class/module
 - export_removed: identifier removed from ``__all__`` or ``export``
@@ -46,6 +47,14 @@ _METHOD_RE = re.compile(
     r"^\s*(?:async\s+)?(?:def|function)\s+(?P<name>\w+)\s*\((?P<params>[^)]*)\)",
     re.MULTILINE,
 )
+_GO_METHOD_RE = re.compile(
+    r"^\s*func\s+\([^)]*\)\s+(?P<name>\w+)\s*\((?P<params>[^)]*)\)",
+    re.MULTILINE,
+)
+_GO_FUNC_RE = re.compile(
+    r"^\s*func\s+(?P<name>\w+)\s*\((?P<params>[^)]*)\)",
+    re.MULTILINE,
+)
 _CLASS_RE = re.compile(
     r"^\s*class\s+(?P<name>\w+)\s*(?:\((?P<bases>[^)]*)\))?\s*[:{]?",
     re.MULTILINE,
@@ -66,10 +75,11 @@ def _normalize_params(raw: str) -> str:
 
 def _extract_methods(content: str) -> dict[str, str]:
     out: dict[str, str] = {}
-    for m in _METHOD_RE.finditer(content):
-        name = m.group("name")
-        params = _normalize_params(m.group("params"))
-        out[name] = params
+    for regex in (_METHOD_RE, _GO_METHOD_RE, _GO_FUNC_RE):
+        for m in regex.finditer(content):
+            name = m.group("name")
+            params = _normalize_params(m.group("params"))
+            out.setdefault(name, params)
     return out
 
 

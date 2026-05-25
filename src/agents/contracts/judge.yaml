@@ -7,10 +7,12 @@ inputs:
   - file_diffs
   - fork_divergence_map
   - forks_profile
+  - interface_changes
   - judge_repair_rounds
   - judge_verdict
   - judge_verdicts_log
   - merge_base_commit
+  - reverse_impacts
   - status
 output_schema: JudgeVerdict
 gates:

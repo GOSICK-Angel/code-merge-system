@@ -1054,6 +1054,15 @@ class MergeConfig(BaseModel):
         "as advisories and do not prevent consensus. Must be subset of "
         "{critical, high, medium, low, info}.",
     )
+    judge_cross_file_signature_check: bool = Field(
+        default=True,
+        description="Emit a HIGH issue when a symbol whose upstream signature "
+        "changed has its definition file and a referencing file decided onto "
+        "opposite take_target/take_current sides — a likely cross-file "
+        "compilation break the per-file review cannot see. Text-grep based; "
+        "semantic_merge files are skipped because their merged direction is "
+        "indeterminate.",
+    )
     chunk_size_chars: int = Field(
         default=20000,
         ge=5000,

@@ -729,9 +729,93 @@ class JudgeAgent(BaseAgent):
         issues.extend(self._check_top_level_invocations(state, categories))
         issues.extend(self._check_cross_layer_assertions(state))
         issues.extend(self._check_reverse_impacts(state))
+        issues.extend(self._check_cross_decision_signature_split(state))
         issues.extend(self._check_sentinel_hits(state))
         issues.extend(self._check_config_retention(state))
 
+        return issues
+
+    def _check_cross_decision_signature_split(
+        self, state: ReadOnlyStateView
+    ) -> list[JudgeIssue]:
+        """Flag a symbol whose upstream signature changed when its definition
+        file and a referencing file landed on opposite take_target /
+        take_current sides of the merge.
+
+        The per-file review sees each file as internally consistent, so a
+        definition kept on the fork's old signature (take_current) paired with
+        callers pulled from upstream's new signature (take_target) — or the
+        reverse — slips through as a cross-file compile break. Text-grep based
+        and conservative: semantic_merge definitions are skipped because their
+        merged direction is indeterminate.
+        """
+        if self.git_tool is None:
+            return []
+        if not getattr(state.config, "judge_cross_file_signature_check", True):
+            return []
+        interface_changes = getattr(state, "interface_changes", []) or []
+        if not interface_changes:
+            return []
+
+        sig_changes = [
+            ic
+            for ic in interface_changes
+            if ic.change_kind in ("method_signature", "constructor_signature")
+            and ic.before != ic.after
+            and ic.symbol
+        ]
+        if not sig_changes:
+            return []
+
+        records = state.file_decision_records
+        directional = {MergeDecision.TAKE_TARGET, MergeDecision.TAKE_CURRENT}
+        content_cache: dict[str, str | None] = {}
+        seen: set[tuple[str, str]] = set()
+        issues: list[JudgeIssue] = []
+
+        for ic in sig_changes:
+            def_record = records.get(ic.file_path)
+            if def_record is None or def_record.decision not in directional:
+                continue
+            opposite = (
+                MergeDecision.TAKE_CURRENT
+                if def_record.decision == MergeDecision.TAKE_TARGET
+                else MergeDecision.TAKE_TARGET
+            )
+            pattern = re.compile(rf"\b{re.escape(ic.symbol)}\b")
+            for caller_path, caller_record in records.items():
+                if caller_path == ic.file_path:
+                    continue
+                if caller_record.decision != opposite:
+                    continue
+                key = (ic.symbol, caller_path)
+                if key in seen:
+                    continue
+                if caller_path not in content_cache:
+                    abs_path = self.git_tool.repo_path / caller_path
+                    content_cache[caller_path] = (
+                        _safe_read_text(abs_path) if abs_path.exists() else None
+                    )
+                content = content_cache[caller_path]
+                if not content or not pattern.search(content):
+                    continue
+                seen.add(key)
+                issues.append(
+                    JudgeIssue(
+                        file_path=caller_path,
+                        issue_level=IssueSeverity.HIGH,
+                        issue_type="cross_file_signature_split",
+                        description=(
+                            f"Symbol '{ic.symbol}' changed signature upstream "
+                            f"('{ic.before}' -> '{ic.after}'). Its definition "
+                            f"'{ic.file_path}' took {def_record.decision.value} "
+                            f"while this caller took {caller_record.decision.value} "
+                            f"— opposite merge sides likely produce a compile "
+                            f"mismatch the per-file review cannot detect."
+                        ),
+                        must_fix_before_merge=False,
+                    )
+                )
         return issues
 
     def _check_reverse_impacts(self, state: ReadOnlyStateView) -> list[JudgeIssue]:
