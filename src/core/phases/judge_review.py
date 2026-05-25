@@ -200,13 +200,17 @@ class JudgeReviewPhase(Phase):
 
         # Final routing: consensus reached (PASS) or escalate to human
         if state.judge_verdict.verdict == VerdictType.PASS:
-            await self._run_smoke_tests(state, ctx)
-            # Smoke tests may downgrade verdict to FAIL
+            await self._run_build_check(state, ctx)
+            # Build check (compile gate) may downgrade verdict to FAIL; only
+            # run functional smoke tests if the tree still builds.
+            if state.judge_verdict.verdict == VerdictType.PASS:
+                await self._run_smoke_tests(state, ctx)
+            # Either gate may have downgraded the verdict to FAIL
             if state.judge_verdict.verdict != VerdictType.PASS:
                 reason = (
-                    f"smoke test failed: {state.judge_verdict.veto_reason}"
+                    f"post-judge gate failed: {state.judge_verdict.veto_reason}"
                     if state.judge_verdict.veto_reason
-                    else "smoke test failed"
+                    else "post-judge gate failed"
                 )
                 ctx.state_machine.transition(state, SystemStatus.AWAITING_HUMAN, reason)
                 return PhaseOutcome(
@@ -284,6 +288,79 @@ class JudgeReviewPhase(Phase):
                 )
         except Exception as exc:
             logger.warning("Judge meta-review failed: %s", exc)
+
+    async def _run_build_check(self, state: MergeState, ctx: PhaseContext) -> None:
+        """Optional compile/build gate run after Judge PASS.
+
+        Runs the config-supplied ``build_check.command`` in the repo. A
+        non-zero exit (or timeout) downgrades ``state.judge_verdict`` to FAIL
+        with a veto and appends a ``build_check_failed`` issue. This catches
+        cross-file compilation breaks the per-file Judge review cannot see.
+        Skipped when disabled or no command is configured.
+        """
+        import asyncio
+        from pathlib import Path
+
+        cfg = state.config.build_check
+        if not cfg.enabled or not cfg.command.strip():
+            return
+
+        ctx.notify("orchestrator", "Running build check (Phase 5.5)")
+
+        cwd = Path(state.config.repo_path)
+        if cfg.working_dir and cfg.working_dir != ".":
+            cwd = cwd / cfg.working_dir
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                cfg.command,
+                cwd=str(cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                stdout_bytes, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=cfg.timeout_seconds
+                )
+                returncode = proc.returncode if proc.returncode is not None else 0
+                output = stdout_bytes.decode("utf-8", errors="replace")
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                returncode = -1
+                output = f"build check timed out after {cfg.timeout_seconds}s"
+        except Exception as exc:
+            logger.error("Build check raised unexpectedly: %s", exc)
+            return
+
+        if returncode == 0:
+            return
+
+        tail = "\n".join(output.strip().splitlines()[-20:])
+        new_issue = JudgeIssue(
+            file_path="(build)",
+            issue_level=IssueSeverity.CRITICAL,
+            issue_type="build_check_failed",
+            description=(
+                f"Build check `{cfg.command}` exited {returncode}. Output tail:\n{tail}"
+            ),
+            must_fix_before_merge=True,
+            veto_condition="Build check failed",
+        )
+        if state.judge_verdict is not None:
+            state.judge_verdict = state.judge_verdict.model_copy(
+                update={
+                    "verdict": VerdictType.FAIL,
+                    "veto_triggered": True,
+                    "veto_reason": (
+                        f"Build check failed (exit {returncode}): {cfg.command}"
+                    ),
+                    "issues": list(state.judge_verdict.issues) + [new_issue],
+                    "critical_issues_count": (
+                        state.judge_verdict.critical_issues_count + 1
+                    ),
+                }
+            )
 
     async def _run_smoke_tests(self, state: MergeState, ctx: PhaseContext) -> None:
         """P1-3 Phase 5.5: run smoke tests after Judge PASS.

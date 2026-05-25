@@ -98,6 +98,7 @@ VETO_CONDITIONS: list[str] = [
     "Smoke test failed",
     "Sentinel hit in AUTO_SAFE file unacknowledged",
     "Config retention required line missing",
+    "Build check failed",
 ]
 
 
@@ -111,6 +112,7 @@ ISSUE_TYPES_NEW: set[str] = {
     "smoke_test_failed",
     "sentinel_hit_unacknowledged",
     "config_retention_violation",
+    "build_check_failed",
 }
 
 

@@ -708,6 +708,21 @@ class SmokeTestConfig(BaseModel):
     max_consecutive_failures: int = Field(default=3, ge=1)
 
 
+class BuildCheckConfig(BaseModel):
+    """Optional post-judge compile/build gate.
+
+    Generic by design: the toolchain command is supplied per target via
+    config (e.g. ``go build ./...``, ``tsc --noEmit``). A non-zero exit
+    downgrades a Judge PASS to FAIL with a veto. Disabled and empty by
+    default so the agent stays target-agnostic.
+    """
+
+    enabled: bool = False
+    command: str = ""
+    working_dir: str = "."
+    timeout_seconds: int = Field(default=600, ge=1)
+
+
 class MigrationConfig(BaseModel):
     merge_base_override: str | None = Field(
         default=None,
@@ -975,6 +990,11 @@ class MergeConfig(BaseModel):
     smoke_tests: SmokeTestConfig = Field(
         default_factory=SmokeTestConfig,
         description="P1-3: post-judge smoke test configuration.",
+    )
+    build_check: BuildCheckConfig = Field(
+        default_factory=BuildCheckConfig,
+        description="Optional post-judge compile/build gate (config-supplied "
+        "command; disabled by default).",
     )
     sentinels_extra: list[str] = Field(
         default_factory=list,
