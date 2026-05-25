@@ -15,7 +15,7 @@ from src.models.diff import (
     RiskLevel,
     FileStatus,
 )
-from src.models.config import FileClassifierConfig
+from src.models.config import ComplexityConfig, FileClassifierConfig
 
 if TYPE_CHECKING:
     from src.tools.git_tool import GitTool
@@ -246,6 +246,54 @@ def _apply_c_class_floor(
     if file_diff.lines_added == 0 and file_diff.lines_deleted == 0:
         return score
     return max(score, config.c_class_risk_floor)
+
+
+def compute_complexity(
+    file_diff: FileDiff,
+    config: ComplexityConfig,
+    *,
+    fanout: float | None = None,
+) -> float:
+    """Estimate how much a file would benefit from an LLM look, 0..1.
+
+    Distinct from ``compute_risk_score``: risk decides which bucket a
+    file lands in, complexity decides whether spending an LLM call on it
+    is justified. ``fanout`` (cross-module spread, 0..1) is supplied by
+    the caller once module inference is available; while it is None its
+    weight is redistributed across the remaining dimensions so the score
+    stays normalised — mirroring the change_ratio drop in
+    ``compute_risk_score``.
+    """
+    weights = {
+        "size": config.w_size,
+        "hunks": config.w_hunks,
+        "conflict": config.w_conflict,
+        "change_ratio": config.w_change_ratio,
+        "fanout": config.w_fanout,
+    }
+    if fanout is None:
+        dropped = weights.pop("fanout")
+        scale = 1.0 / (1.0 - dropped) if dropped < 1.0 else 1.0
+        for k in weights:
+            weights[k] *= scale
+
+    size_score = min(1.0, (file_diff.lines_changed / 500) ** 0.5)
+    hunks_score = min(1.0, len(file_diff.hunks) / 10)
+    conflict_score = min(1.0, file_diff.conflict_count / 5)
+    change_ratio_score = min(
+        1.0, (file_diff.lines_changed / estimate_total_lines(file_diff)) * 2
+    )
+
+    score = (
+        weights["size"] * size_score
+        + weights["hunks"] * hunks_score
+        + weights["conflict"] * conflict_score
+        + weights["change_ratio"] * change_ratio_score
+    )
+    if fanout is not None:
+        score += weights["fanout"] * max(0.0, min(1.0, fanout))
+
+    return float(round(max(0.0, min(1.0, score)), 3))
 
 
 async def compute_llm_risk_score(

@@ -1074,7 +1074,7 @@ def test_generate_plan_returns_tuple_of_plan_and_diffs() -> None:
     from src.models.state import MergeState
 
     config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/fork")
-    config.llm_risk_scoring.enabled = False
+    config.llm_assist.mode = "off"
     state = MergeState(config=config)
     state.file_diffs = [_make_fd("src/a.py"), _make_fd("src/b.py")]
 
@@ -1871,10 +1871,10 @@ def test_run_writes_rescored_diffs_back_to_state() -> None:
     from src.models.state import MergeState
 
     config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/fork")
-    config.llm_risk_scoring.enabled = True
-    config.llm_risk_scoring.gray_zone_low = 0.0
-    config.llm_risk_scoring.gray_zone_high = 1.0
-    config.llm_risk_scoring.rule_weight = 0.0  # let LLM dominate
+    config.llm_assist.mode = "auto"
+    config.llm_assist.uncertainty_low = 0.0
+    config.llm_assist.uncertainty_high = 1.0
+    config.llm_assist.rule_weight = 0.0  # let LLM dominate
 
     state = MergeState(config=config)
     original = _make_fd("src/borderline.py", lines_added=5, lines_deleted=0)
@@ -1926,7 +1926,7 @@ def test_run_does_not_reassign_when_rescoring_disabled() -> None:
     from src.models.state import MergeState
 
     config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/fork")
-    config.llm_risk_scoring.enabled = False
+    config.llm_assist.mode = "off"
 
     state = MergeState(config=config)
     state.file_diffs = [_make_fd("src/foo.py")]

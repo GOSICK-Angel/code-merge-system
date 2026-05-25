@@ -1,9 +1,15 @@
 import pytest
 
 from src.models.diff import FileChangeCategory, FileDiff, FileStatus, RiskLevel
-from src.models.config import FileClassifierConfig, MergeConfig, SecuritySensitiveConfig
+from src.models.config import (
+    ComplexityConfig,
+    FileClassifierConfig,
+    MergeConfig,
+    SecuritySensitiveConfig,
+)
 from src.tools.file_classifier import (
     classify_file,
+    compute_complexity,
     compute_risk_score,
     matches_any_pattern,
 )
@@ -233,6 +239,79 @@ class TestCClassRiskFloor:
         )
         score = compute_risk_score(fd, config)
         assert score < config.c_class_risk_floor
+
+
+# ---------------------------------------------------------------------------
+# compute_complexity — LLM-worthiness signal
+# ---------------------------------------------------------------------------
+
+
+def _hunk(idx: int, conflict: bool = False):
+    from src.models.diff import DiffHunk
+
+    return DiffHunk(
+        hunk_id=f"h{idx}",
+        start_line_current=idx * 10,
+        end_line_current=idx * 10 + 5,
+        start_line_target=idx * 10,
+        end_line_target=idx * 10 + 5,
+        content_current="a",
+        content_target="b",
+        content_base=None,
+        has_conflict=conflict,
+    )
+
+
+class TestComputeComplexity:
+    def test_trivial_file_scores_low(self) -> None:
+        fd = _make_file_diff(lines_added=1, lines_deleted=0, lines_changed=1)
+        assert compute_complexity(fd, ComplexityConfig()) < 0.2
+
+    def test_large_change_lifts_size_dimension(self) -> None:
+        small = _make_file_diff(lines_changed=2)
+        large = _make_file_diff(lines_changed=500)
+        cfg = ComplexityConfig()
+        assert compute_complexity(large, cfg) > compute_complexity(small, cfg)
+
+    def test_many_hunks_lift_score(self) -> None:
+        few = _make_file_diff(hunks=[_hunk(i) for i in range(1)])
+        many = _make_file_diff(hunks=[_hunk(i) for i in range(10)])
+        cfg = ComplexityConfig()
+        assert compute_complexity(many, cfg) > compute_complexity(few, cfg)
+
+    def test_conflict_count_lifts_score(self) -> None:
+        clean = _make_file_diff(conflict_count=0)
+        conflicted = _make_file_diff(conflict_count=5)
+        cfg = ComplexityConfig()
+        assert compute_complexity(conflicted, cfg) > compute_complexity(clean, cfg)
+
+    def test_score_is_bounded(self) -> None:
+        fd = _make_file_diff(
+            lines_changed=10_000,
+            conflict_count=999,
+            hunks=[_hunk(i, conflict=True) for i in range(50)],
+        )
+        score = compute_complexity(fd, ComplexityConfig())
+        assert 0.0 <= score <= 1.0
+
+    def test_fanout_absent_redistributes_weight(self) -> None:
+        """With fanout=None the remaining four dimensions rescale so a
+        file that maxes all of them still reaches ~1.0 (the dropped
+        w_fanout does not cap the achievable maximum)."""
+        fd = _make_file_diff(
+            lines_changed=10_000,
+            conflict_count=999,
+            hunks=[_hunk(i, conflict=True) for i in range(50)],
+        )
+        score = compute_complexity(fd, ComplexityConfig(), fanout=None)
+        assert score == pytest.approx(1.0, abs=0.01)
+
+    def test_fanout_present_contributes(self) -> None:
+        fd = _make_file_diff(lines_changed=2, conflict_count=0)
+        cfg = ComplexityConfig()
+        without = compute_complexity(fd, cfg, fanout=0.0)
+        with_fanout = compute_complexity(fd, cfg, fanout=1.0)
+        assert with_fanout > without
 
 
 # ---------------------------------------------------------------------------

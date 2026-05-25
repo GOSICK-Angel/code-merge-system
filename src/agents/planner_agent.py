@@ -97,7 +97,7 @@ class PlannerAgent(BaseAgent):
         # legacy). Running it before the layered branch decision means
         # the updated risk_level flows into _build_layered_plan's
         # _split_by_risk_level grouping.
-        if state.config.llm_risk_scoring.enabled:
+        if state.config.llm_assist.mode != "off":
             all_file_diffs = await self._enhance_risk_scores(
                 all_file_diffs, state.config
             )
@@ -1254,9 +1254,9 @@ class PlannerAgent(BaseAgent):
             RISK_SCORING_SYSTEM,
         )
 
-        gray_low = config.llm_risk_scoring.gray_zone_low
-        gray_high = config.llm_risk_scoring.gray_zone_high
-        rule_weight = config.llm_risk_scoring.rule_weight
+        gray_low = config.llm_assist.uncertainty_low
+        gray_high = config.llm_assist.uncertainty_high
+        rule_weight = config.llm_assist.rule_weight
 
         enhanced_diffs = list(file_diffs)
 

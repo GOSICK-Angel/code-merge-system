@@ -429,11 +429,38 @@ class SyntaxCheckConfig(BaseModel):
     languages: list[str] = Field(default_factory=lambda: ["python", "json", "yaml"])
 
 
-class LLMRiskScoringConfig(BaseModel):
-    enabled: bool = False
-    gray_zone_low: float = Field(default=0.25, ge=0.0, le=1.0)
-    gray_zone_high: float = Field(default=0.65, ge=0.0, le=1.0)
+class LLMAssistConfig(BaseModel):
+    """Controls when the planner spends LLM calls to refine the
+    deterministic rule-based plan. ``mode`` is a regime selector, not a
+    per-file switch: under ``auto`` the decision of *which* files get an
+    LLM look is driven entirely by ``compute_complexity`` falling in the
+    uncertainty band (single-file rescore) or above it (batch
+    re-classification), capped by ``budget_max_files``. ``off`` keeps the
+    plan fully deterministic (CI reproducibility / zero cost); ``always``
+    sends every file through at least the rescore tier.
+    """
+
+    mode: Literal["off", "auto", "always"] = "auto"
+    budget_max_files: int = Field(default=200, ge=0)
+    uncertainty_low: float = Field(default=0.30, ge=0.0, le=1.0)
+    uncertainty_high: float = Field(default=0.70, ge=0.0, le=1.0)
     rule_weight: float = Field(default=0.6, ge=0.0, le=1.0)
+
+
+class ComplexityConfig(BaseModel):
+    """Weights for ``compute_complexity`` — the signal that decides
+    whether a file is worth an LLM look. Distinct from the risk-score
+    weights: risk decides which bucket a file lands in, complexity
+    decides whether spending an LLM call on it is justified. ``w_fanout``
+    measures cross-module spread and stays 0 until module inference is
+    wired (its weight is redistributed across the others when absent).
+    """
+
+    w_size: float = Field(default=0.25, ge=0.0, le=1.0)
+    w_hunks: float = Field(default=0.20, ge=0.0, le=1.0)
+    w_conflict: float = Field(default=0.30, ge=0.0, le=1.0)
+    w_change_ratio: float = Field(default=0.15, ge=0.0, le=1.0)
+    w_fanout: float = Field(default=0.10, ge=0.0, le=1.0)
 
 
 class GitHubConfig(BaseModel):
@@ -892,7 +919,8 @@ class MergeConfig(BaseModel):
     file_classifier: FileClassifierConfig = Field(default_factory=FileClassifierConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     syntax_check: SyntaxCheckConfig = Field(default_factory=SyntaxCheckConfig)
-    llm_risk_scoring: LLMRiskScoringConfig = Field(default_factory=LLMRiskScoringConfig)
+    llm_assist: LLMAssistConfig = Field(default_factory=LLMAssistConfig)
+    complexity: ComplexityConfig = Field(default_factory=ComplexityConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     layer_config: MergeLayerConfig = Field(default_factory=MergeLayerConfig)
     customizations: list[CustomizationEntry] = Field(default_factory=list)
