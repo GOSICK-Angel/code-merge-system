@@ -171,7 +171,18 @@ class HumanReviewPhase(Phase):
                 executor = ctx.agents["executor"]
                 executed = 0
                 for req in state.human_decision_requests.values():
-                    if req.file_path in state.file_decision_records:
+                    # Skip only if this file is ALREADY resolved by a human
+                    # decision. A file that was auto-merged earlier in the run
+                    # (e.g. a rerun's auto_merge wrote a SEMANTIC_MERGE record)
+                    # and then escalated to the operator must have the human's
+                    # override executed — otherwise the auto record persists and
+                    # the operator's take_target/take_current/manual_patch is
+                    # silently dropped, committing the rejected auto-merge.
+                    existing = state.file_decision_records.get(req.file_path)
+                    if (
+                        existing is not None
+                        and existing.decision_source == DecisionSource.HUMAN
+                    ):
                         continue
                     try:
                         record = await executor.execute_human_decision(req, state)
@@ -211,13 +222,6 @@ class HumanReviewPhase(Phase):
                             "that missed AUTO_MERGE on this resume",
                             len(binary_catchup),
                         )
-                        from src.models.decision import (
-                            DecisionSource,
-                            FileDecisionRecord,
-                            MergeDecision,
-                        )
-                        from src.models.diff import FileStatus
-
                         for fp in binary_catchup:
                             try:
                                 content_bytes = ctx.git_tool.get_file_bytes(
@@ -289,13 +293,6 @@ class HumanReviewPhase(Phase):
                             "file(s) that missed AUTO_MERGE on this resume",
                             len(text_catchup),
                         )
-                        from src.models.decision import (
-                            DecisionSource,
-                            FileDecisionRecord,
-                            MergeDecision,
-                        )
-                        from src.models.diff import FileStatus
-
                         for fp in text_catchup:
                             try:
                                 content = ctx.git_tool.get_file_content(

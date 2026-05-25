@@ -388,6 +388,12 @@ class ExecutorAgent(BaseAgent):
                 "Could not fetch file contents for semantic merge",
             )
 
+        # Keep the untruncated originals — build_staged_content below rebinds
+        # current_content/target_content to budget-trimmed views, but the
+        # fidelity guard must compare the merge against the FULL sources.
+        orig_current_content = current_content
+        orig_target_content = target_content
+
         chunk_size = state.config.chunk_size_chars
         if max(len(current_content), len(target_content)) > chunk_size:
             logger.info(
@@ -471,6 +477,23 @@ class ExecutorAgent(BaseAgent):
             return create_escalate_record(
                 file_diff.file_path,
                 reason,
+            )
+
+        foreign = _foreign_chars(
+            merged_content, orig_current_content, orig_target_content
+        )
+        if foreign is not None:
+            logger.warning(
+                "Semantic merge for %s invented characters absent from both "
+                "sources (%r) — escalating instead of committing corruption",
+                file_diff.file_path,
+                foreign,
+            )
+            return create_escalate_record(
+                file_diff.file_path,
+                f"SEMANTIC_MERGE_INFIDELITY: merge output introduced "
+                f"character(s) {foreign!r} present in neither fork nor "
+                f"upstream — likely LLM corruption of an opaque blob.",
             )
 
         current_phase_str = (
@@ -567,6 +590,20 @@ class ExecutorAgent(BaseAgent):
                 )
 
         merged_content = merge_chunks(merged_chunks)
+        foreign = _foreign_chars(merged_content, current_content, target_content)
+        if foreign is not None:
+            logger.warning(
+                "Chunked merge for %s invented characters absent from both "
+                "sources (%r) — escalating instead of committing corruption",
+                file_path,
+                foreign,
+            )
+            return create_escalate_record(
+                file_path,
+                f"SEMANTIC_MERGE_INFIDELITY: chunked merge output introduced "
+                f"character(s) {foreign!r} present in neither fork nor "
+                f"upstream — likely LLM corruption of an opaque blob.",
+            )
         current_phase_str = (
             state.current_phase.value
             if hasattr(state.current_phase, "value")
@@ -1059,6 +1096,34 @@ def _extract_diff_ranges(file_diff: FileDiff) -> list[tuple[int, int]]:
     elif file_diff.lines_added > 0 or file_diff.lines_deleted > 0:
         ranges.append((1, file_diff.lines_added + file_diff.lines_deleted + 100))
     return ranges
+
+
+def _foreign_chars(merged: str, *sources: str) -> str | None:
+    """Return a sample of non-ASCII glyphs the merge invented, or None.
+
+    A faithful merge selects and combines lines that already exist in the fork
+    or upstream version; merging ASCII source code never needs to invent a new
+    non-ASCII glyph. When the LLM hallucinates inside an opaque blob (observed:
+    a base64 cert literal where a fullwidth ``，`` U+FF0C was injected,
+    breaking the Go string literal so the file no longer compiles) the output
+    gains a non-ASCII character present in neither input. We treat that as a
+    corruption signal and escalate rather than commit unparseable bytes.
+
+    Scope is deliberately narrow — only **non-ASCII** characters absent from
+    *both* sources are flagged. Pure-ASCII recombination is left alone so the
+    guard never second-guesses a legitimate merge; if a source genuinely
+    contains non-ASCII text (e.g. CJK comments) those glyphs are in the union
+    and therefore allowed.
+    """
+    allowed: set[str] = set()
+    for src in sources:
+        allowed.update(src)
+    foreign = [
+        ch for ch in dict.fromkeys(merged) if ord(ch) > 127 and ch not in allowed
+    ]
+    if not foreign:
+        return None
+    return "".join(foreign)[:20]
 
 
 def _build_chunk_merge_prompt(
