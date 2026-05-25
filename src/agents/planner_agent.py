@@ -44,6 +44,14 @@ import asyncio
 import fnmatch
 import json
 import json as json_lib
+from collections import Counter
+
+
+# Module co-change count that saturates the fanout dimension to 1.0. A
+# generic normalisation scale, not target-repo-specific: a file sharing a
+# module with ~10+ concurrently-changing files is treated as maximally
+# entangled for complexity purposes.
+_FANOUT_SATURATION = 10
 
 
 # Sub-chunk size for one classification LLM call. ``max_files_per_run``
@@ -108,6 +116,7 @@ class PlannerAgent(BaseAgent):
                 all_file_diffs,
                 state.config,
                 rename_pairs=state.rename_pairs or None,
+                fanout_map=self._compute_fanout_map(all_file_diffs, state),
             )
 
         if state.file_categories:
@@ -1332,11 +1341,39 @@ class PlannerAgent(BaseAgent):
         plan, _responses, _diff = await self.revise_plan(state, issues)
         return plan
 
+    def _compute_fanout_map(
+        self, file_diffs: list[FileDiff], state: MergeState
+    ) -> dict[str, float] | None:
+        """Per-file cross-module footprint, 0..1: how many sibling files
+        in the same module are co-changing. A file embedded in a large
+        coordinated module change scores higher (likely cross-file
+        coupling the rule heuristic can't see); a lone file scores 0.
+        Returns ``None`` when module grouping is disabled so the fanout
+        dimension is dropped from ``compute_complexity``.
+        """
+        cfg = state.config.module_config
+        if not cfg.enabled or cfg.mode == "off":
+            return None
+        paths = [fd.file_path for fd in file_diffs]
+        rewritten = [
+            rm.path
+            for rm in (
+                state.forks_profile.rewritten_modules if state.forks_profile else []
+            )
+        ]
+        module_map = infer_modules(paths, cfg, rewritten or None)
+        sizes = Counter(module_map.values())
+        return {
+            p: min(1.0, max(0, sizes[module_map[p]] - 1) / _FANOUT_SATURATION)
+            for p in paths
+        }
+
     async def _enhance_risk_scores(
         self,
         file_diffs: list[FileDiff],
         config: MergeConfig,
         rename_pairs: list[tuple[str, str]] | None = None,
+        fanout_map: dict[str, float] | None = None,
     ) -> list[FileDiff]:
         """Spend LLM calls to refine the deterministic plan, complexity-driven.
 
@@ -1346,6 +1383,10 @@ class PlannerAgent(BaseAgent):
         (tier 3, the strong-judgment layer). ``budget_max_files`` caps the
         combined set by descending complexity so the most uncertain files
         are served first and tier 3 is never starved by the cut.
+
+        ``fanout_map`` (path → cross-module footprint, 0..1) feeds the
+        ``w_fanout`` complexity dimension when module grouping is active;
+        ``None`` drops the dimension (weight redistributed).
         """
         assist = config.llm_assist
         if assist.mode == "off":
@@ -1354,7 +1395,12 @@ class PlannerAgent(BaseAgent):
         enhanced_diffs = list(file_diffs)
         low, high = assist.uncertainty_low, assist.uncertainty_high
         complexity = [
-            compute_complexity(fd, config.complexity) for fd in enhanced_diffs
+            compute_complexity(
+                fd,
+                config.complexity,
+                fanout=(fanout_map.get(fd.file_path) if fanout_map else None),
+            )
+            for fd in enhanced_diffs
         ]
 
         tier3 = {i for i, c in enumerate(complexity) if c > high}

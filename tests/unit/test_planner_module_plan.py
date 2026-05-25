@@ -101,3 +101,24 @@ def test_module_internal_risk_split_preserved() -> None:
     risks = {p.risk_level for p in auth}
     assert RiskLevel.AUTO_SAFE in risks
     assert RiskLevel.AUTO_RISKY in risks
+
+
+def test_fanout_map_counts_module_siblings() -> None:
+    diffs = [
+        _fd("packages/auth/a.py", FileChangeCategory.B, RiskLevel.AUTO_SAFE),
+        _fd("packages/auth/b.py", FileChangeCategory.B, RiskLevel.AUTO_SAFE),
+        _fd("packages/auth/c.py", FileChangeCategory.B, RiskLevel.AUTO_SAFE),
+        _fd("packages/orders/x.py", FileChangeCategory.B, RiskLevel.AUTO_SAFE),
+    ]
+    state = _state()
+    fanout = _planner()._compute_fanout_map(diffs, state)
+    assert fanout is not None
+    # auth has 3 co-changing files → (3-1)/10 = 0.2 each
+    assert fanout["packages/auth/a.py"] == 0.2
+    # orders has a lone file → 0
+    assert fanout["packages/orders/x.py"] == 0.0
+
+
+def test_fanout_map_none_when_module_disabled() -> None:
+    diffs = _diffs()
+    assert _planner()._compute_fanout_map(diffs, _state(mode="off")) is None
