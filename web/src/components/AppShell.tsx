@@ -85,7 +85,13 @@ function navBadge(
     if (pending > 0) return { text: String(pending), kind: "alert" };
   }
   if (entry.id === "judge_verdict") {
+    // Only flag the gate as actionable once the orchestrator has actually
+    // parked on it. During ``judge_reviewing`` a (preliminary) verdict
+    // already exists, but acting is premature — surfacing "OPEN" then would
+    // invite a click before the auto-route fires and before the buttons do
+    // anything.
     if (
+      snapshot.status === "awaiting_human" &&
       snapshot.judgeVerdict !== null &&
       (snapshot.judgeResolution ?? null) === null
     ) {

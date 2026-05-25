@@ -28,6 +28,24 @@ export function App(): JSX.Element {
     setSelectedView(activeView);
   }, [activeView]);
 
+  // Proactively pull the user into an actionable awaiting_human gate
+  // (plan review / conflict / judge verdict). The effect above only reacts
+  // to ``activeView`` *transitions*, so a manual detour to the dashboard
+  // would otherwise strand the user there while the orchestrator is parked
+  // waiting on their decision — forcing them to hunt for the nav "OPEN"
+  // badge. Re-asserting on every snapshot push closes that gap. While
+  // parked the snapshot is stable (the orchestrator emits no frames until
+  // the user acts), so this never fights a deliberate step-away between
+  // pushes.
+  const atActionableGate =
+    snapshot?.status === "awaiting_human" &&
+    (activeView === "plan_review" ||
+      activeView === "conflict_resolution" ||
+      activeView === "judge_verdict");
+  useEffect(() => {
+    if (atActionableGate) setSelectedView(activeView);
+  }, [atActionableGate, activeView, snapshot]);
+
   // Cancel is only honoured by the bridge at AWAITING_HUMAN (see
   // ``ws_bridge._handle_cancel_run``); from any other live status the
   // server replies with ``cancel_error`` and the existing toast on
