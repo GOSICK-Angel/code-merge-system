@@ -745,6 +745,26 @@ class ExecutorAgent(BaseAgent):
             if not instr.is_repairable:
                 continue
 
+            # Never overwrite an operator's explicit decision. When the Judge
+            # flags a file the human already resolved (take_target / take_current
+            # / manual_patch), the dispute-round repair must NOT silently
+            # re-merge it back to SEMANTIC_MERGE — that drops the human override
+            # exactly like the human_review Bug B. The issue instead stays
+            # unrepaired, the verdict stays FAIL, and the run escalates to the
+            # Judge gate so the operator can re-decide or RERUN.
+            existing = state.file_decision_records.get(instr.file_path)
+            if (
+                existing is not None
+                and existing.decision_source == DecisionSource.HUMAN
+            ):
+                self.logger.info(
+                    "Skipping dispute-round repair for %s — operator decided it "
+                    "(%s); human decision must not be overwritten",
+                    instr.file_path,
+                    existing.decision.value,
+                )
+                continue
+
             if instr.file_path.endswith(_NON_LLM_REPAIR_SUFFIXES):
                 self.logger.info(
                     "Skipping LLM repair for generated/lock file %s "

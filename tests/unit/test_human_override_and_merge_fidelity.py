@@ -17,16 +17,17 @@ auto record.
 from __future__ import annotations
 
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.agents.executor_agent import _foreign_chars
+from src.agents.executor_agent import ExecutorAgent, _foreign_chars
 from src.core.phases.human_review import HumanReviewPhase
-from src.models.config import MergeConfig
+from src.models.config import AgentLLMConfig, MergeConfig
 from src.models.decision import DecisionSource, FileDecisionRecord, MergeDecision
 from src.models.diff import FileStatus
 from src.models.human import HumanDecisionRequest
+from src.models.judge import RepairInstruction
 from src.models.plan_review import PlanHumanDecision, PlanHumanReview
 from src.models.state import MergePhase, MergeState, SystemStatus
 
@@ -154,3 +155,41 @@ async def test_human_override_executes_over_stale_auto_record() -> None:
     )
     assert state.file_decision_records["auto.go"].decision == MergeDecision.TAKE_TARGET
     assert outcome.target_status == SystemStatus.JUDGE_REVIEWING
+
+
+# --------------------------------------------------------------------------- #
+# Bug B sibling — judge dispute-round repair must not overwrite a human record
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_repair_skips_human_decided_file() -> None:
+    """Executor.repair must leave an operator-decided file untouched: the
+    dispute-round re-merge would otherwise clobber the human take_target back to
+    SEMANTIC_MERGE/auto_executor (observed on auth_token.go in run 0cba557f)."""
+    with patch("src.llm.client.LLMClientFactory.create"):
+        executor = ExecutorAgent(AgentLLMConfig(), git_tool=MagicMock())
+    executor._call_llm_with_retry_meta = AsyncMock(
+        side_effect=AssertionError("LLM repair must not run on a human-decided file")
+    )
+
+    state = MergeState(config=MergeConfig(upstream_ref="u", fork_ref="f"))
+    state.current_phase = MergePhase.JUDGE_REVIEW
+    human = _human_record("human.go")
+    state.file_decision_records = {"human.go": human}
+
+    results = await executor.repair(
+        [
+            RepairInstruction(
+                file_path="human.go", instruction="fix", is_repairable=True
+            )
+        ],
+        state,
+    )
+
+    assert results == []
+    executor._call_llm_with_retry_meta.assert_not_called()
+    executor.git_tool.get_file_content.assert_not_called()
+    kept = state.file_decision_records["human.go"]
+    assert kept.decision_source == DecisionSource.HUMAN
+    assert kept.decision == MergeDecision.TAKE_TARGET
