@@ -475,6 +475,40 @@ class MergeLayerConfig(BaseModel):
     custom_layers: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class ModuleConfig(BaseModel):
+    """Groups files into functional modules so the plan can be organised
+    by module first and file type/risk second. Target-repo agnostic:
+    module boundaries come from explicit globs, the forks-profile
+    rewritten-module list, or directory topology — never hardcoded names.
+    """
+
+    enabled: bool = True
+    mode: Literal["auto", "config", "off"] = "auto"
+    container_dirs: list[str] = Field(
+        default_factory=lambda: [
+            "packages",
+            "apps",
+            "plugins",
+            "services",
+            "libs",
+            "src",
+        ],
+        description=(
+            "Monorepo container directories whose immediate child names the "
+            "module (e.g. packages/<mod>/...). Neutral conventions by default; "
+            "override per repo."
+        ),
+    )
+    explicit: dict[str, str] = Field(
+        default_factory=dict,
+        description="Glob → module-name overrides, highest precedence.",
+    )
+    module_depends_on: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Module → modules it depends on, used to order modules.",
+    )
+
+
 class CustomizationVerification(BaseModel):
     type: Literal[
         "grep",
@@ -923,6 +957,7 @@ class MergeConfig(BaseModel):
     complexity: ComplexityConfig = Field(default_factory=ComplexityConfig)
     github: GitHubConfig = Field(default_factory=GitHubConfig)
     layer_config: MergeLayerConfig = Field(default_factory=MergeLayerConfig)
+    module_config: ModuleConfig = Field(default_factory=ModuleConfig)
     customizations: list[CustomizationEntry] = Field(default_factory=list)
     shadow_rules_extra: list[ShadowRuleConfig] = Field(
         default_factory=list,

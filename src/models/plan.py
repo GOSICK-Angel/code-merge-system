@@ -143,6 +143,7 @@ class PhaseFileBatch(BaseModel):
     file_paths: list[str]
     risk_level: RiskLevel
     layer_id: int | None = None
+    module: str | None = None
     change_category: FileChangeCategory | None = None
     estimated_duration_minutes: float | None = None
     can_parallelize: bool = True
@@ -239,6 +240,7 @@ class MergePlan(BaseModel):
     layers: list[MergeLayer] = Field(default_factory=list)
     project_context_summary: str
     special_instructions: list[str] = Field(default_factory=list)
+    module_summary: dict[str, int] = Field(default_factory=dict)
     version: str = "2.0"
 
 
