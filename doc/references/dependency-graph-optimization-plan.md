@@ -2,7 +2,11 @@
 
 > 综合 [Graphify](./graphify-analysis.md) 与 [Understand-Anything](https://github.com/Lum1104/Understand-Anything) 两个开源项目，
 > 把当前半死的依赖图机制升级为**全局共享、多 agent 消费**的一等资产。
-> 状态：设计提案（未实施）。日期：2026-05-25。
+>
+> **状态（2026-05-26 更新）**：**Phase A 已落地**（提交 `58600ac`，2026-05-25）——多语言提取 + initialize 构建 +
+> planner topo/fanout + judge EXTRACTED 漏改 + config 开关，§0 反死代码 DoD 四条均满足。**Phase A+（计划外）**：
+> tree-sitter 实装后 edge `target_symbol` 已填充,新增「依赖图符号 → staging relevance」消费方(提交 `d1aa956`)。
+> **Phase B / C 待做**。进度详见 §7 标记与 `doc/execute/implementation-notes.md`。原始日期：2026-05-25。
 
 ---
 
@@ -165,23 +169,36 @@ God Node（高 degree 节点）→ 命中的改动文件风险提升。
 
 > 每阶段结尾必须通过 §0 的反死代码 DoD 四条。
 
-### Phase A — 复活 + 接通最小闭环（P0，最高杠杆）
-1. `dependency_extractor.py`：tree-sitter 化（先 py/js/ts/go 四语言），子图作用域（§6.1）。
-2. `initialize.py`（~609，紧挨 `_run_reverse_impact`）：新增 `_build_dependency_graph()`，
-   填 `state.dependency_graph`，受新 config 开关 `dependency_graph.enabled` 控制。
-3. `planner.yaml` inputs 加 `dependency_graph`；`_compute_fanout_map`（planner_agent.py:1344）
-   改用 `len(impact_radius(f))` 归一化，喂 `compute_complexity` fanout 维度。
-4. planner batch 排序接 `topological_order`（替代/叠加现 `_order_modules`）。
-5. `judge.yaml` 已含 `reverse_impacts`，加 `dependency_graph`；
-   `_check_reverse_impacts`（judge_agent.py:821）用 EXTRACTED 边精化漏改检测。
-6. 单测：图非空时 planner 排序变化 + judge 多报漏改 issue + 风险单调性。
+### Phase A — 复活 + 接通最小闭环（P0，最高杠杆）✅ 已完成（提交 `58600ac`，2026-05-25）
+1. ✅ tree-sitter 化提取，子图作用域（§6.1）。落地于 `src/tools/dep_extractors/`
+   （`python_extractor`=stdlib ast、`treesitter_extractor`=js/ts/tsx/go，缺绑定优雅降级）。
+2. ✅ `initialize.py`：`_build_dependency_graph()`（定义 :1317，调用 :615 紧挨 `_run_reverse_impact`），
+   受 config 开关控制（`DependencyGraphConfig`，config.py:683）。
+3. ✅ `planner.yaml` 加 `dependency_graph`；`_compute_fanout_map`（planner_agent.py:1384）改用
+   `len(impact_radius(f))` 归一化喂 `compute_complexity` fanout。
+4. ✅ planner batch 排序接 `topological_order`（planner_agent.py:233）。
+5. ✅ `judge.yaml` 加 `dependency_graph`；`_check_dependency_graph_impacts`（judge_agent.py:876）
+   用 EXTRACTED 边报漏改硬 issue。
+6. ✅ 单测：`test_dependency_graph_phase` / `test_dependency_graph_consumers` / `test_dep_extractors`。
 
-### Phase B — 冲突与执行消费（P1）
+### Phase A+ — 计划外新增：依赖图符号 → staging 相关性 ✅（提交 `d1aa956`，2026-05-26）
+> 原 §4 表格未列此消费方。tree-sitter 实装后，edge 的 `target_symbol` 被真正填充
+> （Python `ImportFrom` 按 alias 多重边、JS/TS named import 标识符），首次让依赖图的**符号粒度**可用，
+> 由此接通 LLM 上下文压缩（staging）的 relevance 评分——把审大文件时「展开真正相关代码块」落到依赖信号上。
+- ✅ 提取器填 `target_symbol`；`FileDependencyGraph.referenced_symbols(fp)` 汇总入边符号。
+- ✅ judge / executor / conflict_analyst 的 `build_staged_content` 用 `referenced_symbols` 喂
+  `relevance._reference_score`：文件中被其他文件 import 的公共符号，即使不在 diff 内也保 SIGNATURE+，不被压缩丢弃。
+- 关联：同轮还接通了 relevance 的 `security` / `conflict` 维度（详见 `doc/execute/implementation-notes.md` §6）。
+
+### Phase B — 冲突与执行消费（P1）⬜ 待做
 7. `conflict_analyst.yaml` + CA gate：注入 hunk blast-radius / God Node 命中。
 8. `executor.yaml` + E-DELETION/E-SEMANTIC-MERGE：删除/改签名前查 `dependents_of`，与 sentinel 协同。
 9. `planner_judge.yaml` + PJ-PLAN-REVIEW：topo 顺序违规检查。
+> 注：conflict_analyst / executor 本轮已因 Phase A+ 的 staging 而读取 `state.dependency_graph`（走原始 state /
+> phase 传参，未经 `restricted_view`，故无需扩二者 contract）；但 §4 表设想的 **blast-radius / dependents_of**
+> 消费（step 7/8）本身仍未实现。
 
-### Phase C — 增强（P2/P3，可选）
+### Phase C — 增强（P2/P3，可选）⬜ 待做
 10. import 别名/monorepo 解析（§6.3）；Leiden 社区 + God Node（§6.4）。
 11. memory_extractor 沉淀 hub/surprising；human_interface 决策卡展示依赖摘要。
 
