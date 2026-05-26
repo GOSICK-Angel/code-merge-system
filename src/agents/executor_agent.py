@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
+from typing import Literal
 
 from src.agents.base_agent import BaseAgent
 from src.models.config import AgentLLMConfig
@@ -429,6 +430,7 @@ class ExecutorAgent(BaseAgent):
                 )
 
         diff_ranges = _extract_diff_ranges(file_diff)
+        target_ranges = _extract_diff_ranges(file_diff, side="target")
         content_budget = builder.compute_content_budget(
             EXECUTOR_SYSTEM + enriched_context
         )
@@ -442,7 +444,7 @@ class ExecutorAgent(BaseAgent):
         target_content = builder.build_staged_content(
             target_content,
             file_diff.file_path,
-            diff_ranges,
+            target_ranges,
             budget_tokens // 2,
         )
 
@@ -1108,11 +1110,16 @@ def _chunk_issues_by_file(
     return chunks
 
 
-def _extract_diff_ranges(file_diff: FileDiff) -> list[tuple[int, int]]:
+def _extract_diff_ranges(
+    file_diff: FileDiff, side: Literal["current", "target"] = "current"
+) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
     if file_diff.hunks:
         for hunk in file_diff.hunks:
-            ranges.append((hunk.start_line_current, hunk.end_line_current))
+            if side == "target":
+                ranges.append((hunk.start_line_target, hunk.end_line_target))
+            else:
+                ranges.append((hunk.start_line_current, hunk.end_line_current))
     elif file_diff.lines_added > 0 or file_diff.lines_deleted > 0:
         ranges.append((1, file_diff.lines_added + file_diff.lines_deleted + 100))
     return ranges

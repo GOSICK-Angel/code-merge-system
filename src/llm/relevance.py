@@ -8,6 +8,8 @@ levels — FULL, SIGNATURE, or DROP — while respecting a token budget.
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -55,6 +57,16 @@ class ScoringContext:
     referenced_names: frozenset[str] = field(default_factory=frozenset)
 
 
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _identifier_tokens(contents: Iterable[str]) -> frozenset[str]:
+    tokens: set[str] = set()
+    for content in contents:
+        tokens.update(_IDENTIFIER_RE.findall(content))
+    return frozenset(tokens)
+
+
 def _ranges_overlap(a: range, b: range) -> bool:
     return a.start < b.stop and b.start < a.stop
 
@@ -87,11 +99,13 @@ class RelevanceScorer:
 
         scored = [(c, self.score_chunk(c)) for c in chunks]
 
-        full_contents = " ".join(c.content for c, s in scored if s >= FULL_THRESHOLD)
+        full_names = _identifier_tokens(
+            c.content for c, s in scored if s >= FULL_THRESHOLD
+        )
 
         boosted: list[tuple[CodeChunk, float]] = []
         for chunk, score in scored:
-            if score < FULL_THRESHOLD and chunk.name and chunk.name in full_contents:
+            if score < FULL_THRESHOLD and chunk.name and chunk.name in full_names:
                 score = min(1.0, score + 0.3)
             boosted.append((chunk, score))
 

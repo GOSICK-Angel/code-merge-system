@@ -229,19 +229,30 @@ Phase A 在未装 `[ast]` 的环境里收益为零（又是死代码）。
     `review_file` 优先用它；`original_snapshot` 缺失 / 无变化 / 文件过大（>6000 行 guard）时回退旧的 hunk 行段。
   - 验证示例:before 第 2 行变更、merged 顶部插 3 行 ⇒ 正确报 `(5,5)`（merged 坐标），而非旧的 `(2,2)`。
   - 回归测试：`test_judge_diff_ranges.py`（merged 坐标、None/identical/大文件 guard 回退、review_file 确实传 snapshot 行段）。
-  - **范围**：仅修 judge（merged 审查，最高价值）。conflict_analyst/executor 对 `target_content`/`base_content`
-    也用 current 侧行段(同类错配,较轻)——见下方"未修"。
+  - **范围**：judge 走 merged 坐标(本条);conflict_analyst/executor 的 `target_content` target 侧错配在下一条修复。
+
+- **修复④-target：conflict_analyst/executor 给 `target_content` staging 改用 target 侧行段**
+  （`conflict_analyst_agent` / `executor_agent`）。
+  原两个 agent 的本地 `_extract_diff_ranges` 只取 `hunk.start_line_current/end_line_current`，但 `target_content` 是
+  upstream 版本——同一改动在 fork 与 upstream 行号不同，用 current 侧行段会锚错 upstream 的相关块。
+  - **改法**：两个本地 `_extract_diff_ranges` 加 `side: Literal["current","target"]="current"` 参数；`"target"` 取
+    `hunk.start_line_target/end_line_target`，hunk 缺失时的回退分支(`lines_added+lines_deleted+100`)两侧通用、不变。
+    staging `target_content` 时传 target ranges；`current_content` 仍 current。
+  - **base 侧不修**(`DiffHunk` 无 base 行号,要对齐需额外 diff base↔current;base 的 staging 预算最小 `//4`、影响最低)，
+    `base_content` 继续用 current ranges——记为已知限制。
+  - executor 的 target 修复属"改 LLM 看到的合并视图"=行为变化面,保真守卫(`_foreign_chars` 拿**全量源**比对)继续兜底。
+  - 回归测试：`test_diff_range_target_side.py`（两 agent 的 side 提取 + analyze_file/execute_semantic_merge 确实把
+    target ranges 传给 `target_content` staging、current 传给 `current_content`、base 传 current）。
+
+- **修复⑥：relevance name-boost 改整标识符匹配,消除短名子串误命中**（`relevance.score_and_assign`）。
+  原 `chunk.name in full_contents`(裸子串)会让短名(`id`/`x`)命中无关词内部(如 `width` 里的 `id`)→误升级无关块、白烧 token。
+  - **改法**：新增 `_identifier_tokens()` 用 `re.findall(r"[A-Za-z_][A-Za-z0-9_]*", ...)` 把 FULL 块内容预切成标识符
+    token 集合,判断改为整词 `chunk.name in full_names`。O(总长) 预处理 + O(1)/块,比逐块正则更快。不加长度阈值(会漏合法短名引用)。
+  - 回归测试：`test_relevance.py::test_name_boost_requires_whole_identifier`（`width` 中的 `id` 不 boost、整词 `get_user` 仍 boost）
+    + `test_identifier_tokens_whole_word_only`。
 
 - **未修（已知、较轻，留作后续）**：
-  - **问题④残留(已评估,列入后续)**：conflict_analyst/executor 给 `target_content`/`base_content` 做 staging 时仍用
-    current 侧 `diff_ranges`。
-    - **target 侧**：值得修、且便宜(`DiffHunk` 已有 `start_line_target/end_line_target`，加一个 target 侧 range 提取、
-      staging `target_content` 时传 target ranges 即可)。**已决定列为后续**,本轮不做。
-    - **base 侧**：不修(`DiffHunk` 无 base 行号,要对齐需额外 diff base↔current;base 的 staging 预算最小 `//4`、影响最低)。
-    - 为何不急:触发窄(8–40KB 且超半预算,>40KB 走分块 fan-out 不经 staging;局部改动的小漂移被 `margin=10` 吸收)+
-      下游兜底(conflict_analyst 有 judge/人工复核;executor 有保真守卫拿**全量源**比对,错锚最坏导致一次更差合并被守卫拦下→升级/repair,不会静默丢内容)。
-    - executor 的 target 修复属"改 LLM 看到的合并视图"=行为变化面,需保真守卫继续兜底;conflict_analyst 纯分析更安全。
-  - 问题⑥：name 子串 boost 对短名仍可能误促（只多烧 token，不丢相关内容）。
+  - 问题④ **base 侧**：`base_content` staging 仍用 current 侧行段(见上,won't-fix,`DiffHunk` 无 base 坐标)。
   - budget 用 `//4` 而非 `/3.5`（轻微欠预算）；staging 无 AST/无锚点时兜底仍是头截断（评估后认为收益小未做 diff-anchored 窗口）。
   - executor 整文件分块合并按设计保留（不能丢块）。
-- 验证：`pytest tests/unit/` **2661 passed**；`mypy src` 0 错；`ruff check src/` 通过。
+- 验证：`pytest tests/unit/` **2667 passed**；`mypy src` 0 错；`ruff check src/` 通过。

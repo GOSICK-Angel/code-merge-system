@@ -249,3 +249,48 @@ class TestScoreAndAssign:
         ]
         levels = scorer.score_and_assign(chunks, budget_tokens=100_000)
         assert levels[(50, 55)] in (RenderLevel.FULL, RenderLevel.SIGNATURE)
+
+    def test_name_boost_requires_whole_identifier(self) -> None:
+        # The FULL chunk references get_user (whole identifier) and contains
+        # "width" (which embeds the substring "id"). A chunk named "id" must
+        # not be boosted off that substring; "get_user" must be.
+        ctx = ScoringContext(diff_ranges=[(1, 10)])
+        scorer = RelevanceScorer(ctx)
+        chunks = [
+            _make_chunk(
+                name="render",
+                kind=ChunkKind.FUNCTION,
+                start_line=1,
+                end_line=10,
+                content="def render(): return self.width + get_user()",
+            ),
+            _make_chunk(
+                name="get_user",
+                kind=ChunkKind.STATEMENT,
+                start_line=50,
+                end_line=52,
+                content="unrelated",
+                signature="get_user",
+            ),
+            _make_chunk(
+                name="id",
+                kind=ChunkKind.STATEMENT,
+                start_line=60,
+                end_line=62,
+                content="unrelated",
+                signature="id",
+            ),
+        ]
+        levels = scorer.score_and_assign(chunks, budget_tokens=100_000)
+        assert levels[(1, 10)] == RenderLevel.FULL
+        assert levels[(50, 52)] == RenderLevel.SIGNATURE  # boosted by get_user
+        assert levels[(60, 62)] == RenderLevel.DROP  # "id" only as substring
+
+
+def test_identifier_tokens_whole_word_only() -> None:
+    from src.llm.relevance import _identifier_tokens
+
+    tokens = _identifier_tokens(["self.width + get_user()"])
+    assert "width" in tokens
+    assert "get_user" in tokens
+    assert "id" not in tokens
