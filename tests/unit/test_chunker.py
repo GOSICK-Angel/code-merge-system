@@ -116,6 +116,29 @@ class TestASTChunker:
         assert "Foo" in class_chunks[0].name
         assert len(class_chunks[0].children) >= 2
 
+    @needs_tree_sitter
+    def test_ast_chunk_typescript_loads_parser(self) -> None:
+        # Regression: the combined tree_sitter_typescript binding exposes
+        # language_typescript()/language_tsx() (no single language(name)).
+        # A broken loader silently degrades to the indent fallback; assert
+        # real AST chunks (a function node) are produced instead.
+        source = (
+            'import { x } from "./util";\n\n'
+            "function compute(a: number): number {\n"
+            "  return a + x;\n"
+            "}\n"
+        )
+        chunks = ASTChunker.chunk(source, "typescript")
+        kinds = {c.kind for c in chunks}
+        assert ChunkKind.FUNCTION in kinds
+        assert ChunkKind.IMPORT in kinds
+
+    @needs_tree_sitter
+    def test_ast_chunk_tsx_loads_parser(self) -> None:
+        source = 'import React from "react";\n\nfunction App() {\n  return null;\n}\n'
+        chunks = ASTChunker.chunk(source, "tsx")
+        assert any(c.kind == ChunkKind.FUNCTION for c in chunks)
+
     def test_ast_chunk_imports_merged(self) -> None:
         source = "import os\nimport sys\nfrom pathlib import Path\n"
         chunks = ASTChunker.chunk(source, "python")
@@ -333,7 +356,7 @@ class TestRenderFileStaged:
                 signature="def a():",
             ),
         ]
-        levels = {"a": RenderLevel.FULL, "b": RenderLevel.FULL}
+        levels = {(1, 5): RenderLevel.FULL, (10, 15): RenderLevel.FULL}
         result = render_file_staged(chunks, levels)
         assert result.index("def a()") < result.index("def b()")
 
@@ -373,10 +396,10 @@ class TestRenderFileStaged:
             ),
         ]
         levels = {
-            "keep": RenderLevel.FULL,
-            "drop1": RenderLevel.DROP,
-            "drop2": RenderLevel.DROP,
-            "keep2": RenderLevel.FULL,
+            (1, 5): RenderLevel.FULL,
+            (6, 8): RenderLevel.DROP,
+            (9, 11): RenderLevel.DROP,
+            (12, 15): RenderLevel.FULL,
         }
         result = render_file_staged(chunks, levels)
         assert "2 sections omitted" in result
@@ -400,7 +423,7 @@ class TestRenderFileStaged:
                 signature="def b():",
             ),
         ]
-        levels = {"a": RenderLevel.FULL, "b": RenderLevel.FULL}
+        levels = {(1, 3): RenderLevel.FULL, (5, 8): RenderLevel.FULL}
         result = render_file_staged(chunks, levels)
         assert "omitted" not in result
         assert "def a()" in result
@@ -417,6 +440,6 @@ class TestRenderFileStaged:
                 signature="x = 1",
             ),
         ]
-        levels = {"x": RenderLevel.DROP}
+        levels = {(1, 1): RenderLevel.DROP}
         result = render_file_staged(chunks, levels)
         assert "1 sections omitted" in result

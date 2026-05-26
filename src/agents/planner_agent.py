@@ -226,6 +226,15 @@ class PlannerAgent(BaseAgent):
         for fp in actionable_files:
             files_by_module.setdefault(module_map.get(fp), []).append(fp)
 
+        # Dependency topological ranks (lower = earlier = depended-upon).
+        # Used only as a within-bucket tiebreaker so base classes / imported
+        # modules merge before their dependents at equal risk_score.
+        topo_rank: dict[str, int] = {}
+        graph = getattr(state, "dependency_graph", None)
+        if graph is not None and graph.edges:
+            ordered = graph.topological_order(list(actionable_files.keys()))
+            topo_rank = {fp: idx for idx, fp in enumerate(ordered)}
+
         def _emit(
             paths: list[str],
             cat: FileChangeCategory,
@@ -239,6 +248,7 @@ class PlannerAgent(BaseAgent):
                 diffs_by_path,
                 shadow_paths,
                 fallback_risk=category_fallback[cat],
+                topo_rank=topo_rank,
             )
             self._emit_risk_split_batches(
                 phases,
@@ -491,6 +501,7 @@ class PlannerAgent(BaseAgent):
         shadow_paths: set[str],
         *,
         fallback_risk: RiskLevel = RiskLevel.AUTO_SAFE,
+        topo_rank: dict[str, int] | None = None,
     ) -> tuple[list[str], list[str], list[str]]:
         safe: list[str] = []
         risky: list[str] = []
@@ -519,11 +530,17 @@ class PlannerAgent(BaseAgent):
         # P1-6: order each bucket by ascending risk_score so the
         # Executor processes the safest files first; if a later file
         # blows up the rollback cost is bounded to the riskier tail.
-        # Path is the secondary key for deterministic ordering.
-        def _score_key(fp: str) -> tuple[float, str]:
+        # ``topo_rank`` (dependency topological position from the file
+        # dependency graph) is the secondary key so a dependency merges
+        # before its dependent at equal risk; path is the final
+        # deterministic tiebreaker. An empty rank map (graph disabled /
+        # empty) collapses this back to the prior (risk_score, path) order.
+        ranks = topo_rank or {}
+
+        def _score_key(fp: str) -> tuple[float, int, str]:
             fd = diffs_by_path.get(fp)
             score = fd.risk_score if fd is not None else 0.0
-            return (score, fp)
+            return (score, ranks.get(fp, 0), fp)
 
         safe.sort(key=_score_key)
         risky.sort(key=_score_key)
@@ -1344,29 +1361,61 @@ class PlannerAgent(BaseAgent):
     def _compute_fanout_map(
         self, file_diffs: list[FileDiff], state: MergeState
     ) -> dict[str, float] | None:
-        """Per-file cross-module footprint, 0..1: how many sibling files
-        in the same module are co-changing. A file embedded in a large
-        coordinated module change scores higher (likely cross-file
-        coupling the rule heuristic can't see); a lone file scores 0.
-        Returns ``None`` when module grouping is disabled so the fanout
-        dimension is dropped from ``compute_complexity``.
+        """Per-file coupling footprint, 0..1, feeding the ``compute_complexity``
+        fanout dimension.
+
+        Two signals, combined monotonically (``max``) so the dependency graph
+        can only *raise* a file's fanout, never lower the rule heuristic
+        (risk-monotonicity guard):
+
+        * **Dependency graph** (preferred when available): ``impact_radius(f)``
+          — the real count of downstream files that (transitively) depend on
+          ``f``, normalised by ``_FANOUT_SATURATION``.
+        * **Module co-change** (legacy proxy): how many sibling files in the
+          same inferred module are co-changing.
+
+        Returns ``None`` only when *both* signals are unavailable (module
+        grouping disabled and the graph empty), so the fanout dimension is
+        dropped from ``compute_complexity`` exactly as before.
         """
-        cfg = state.config.module_config
-        if not cfg.enabled or cfg.mode == "off":
-            return None
         paths = [fd.file_path for fd in file_diffs]
-        rewritten = [
-            rm.path
-            for rm in (
-                state.forks_profile.rewritten_modules if state.forks_profile else []
-            )
-        ]
-        module_map = infer_modules(paths, cfg, rewritten or None)
-        sizes = Counter(module_map.values())
-        return {
-            p: min(1.0, max(0, sizes[module_map[p]] - 1) / _FANOUT_SATURATION)
-            for p in paths
-        }
+
+        graph_fanout: dict[str, float] | None = None
+        graph = getattr(state, "dependency_graph", None)
+        if graph is not None and graph.edges:
+            max_depth = state.config.dependency_graph.max_depth
+            graph_fanout = {
+                p: min(
+                    1.0,
+                    len(graph.impact_radius(p, max_depth=max_depth))
+                    / _FANOUT_SATURATION,
+                )
+                for p in paths
+            }
+
+        module_fanout: dict[str, float] | None = None
+        cfg = state.config.module_config
+        if cfg.enabled and cfg.mode != "off":
+            rewritten = [
+                rm.path
+                for rm in (
+                    state.forks_profile.rewritten_modules if state.forks_profile else []
+                )
+            ]
+            module_map = infer_modules(paths, cfg, rewritten or None)
+            sizes = Counter(module_map.values())
+            module_fanout = {
+                p: min(1.0, max(0, sizes[module_map[p]] - 1) / _FANOUT_SATURATION)
+                for p in paths
+            }
+
+        if graph_fanout is None and module_fanout is None:
+            return None
+        if graph_fanout is None:
+            return module_fanout
+        if module_fanout is None:
+            return graph_fanout
+        return {p: max(graph_fanout[p], module_fanout[p]) for p in paths}
 
     async def _enhance_risk_scores(
         self,

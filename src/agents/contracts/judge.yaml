@@ -2,6 +2,7 @@ name: judge
 version: 1
 inputs:
   - config
+  - dependency_graph
   - file_categories
   - file_decision_records
   - file_diffs

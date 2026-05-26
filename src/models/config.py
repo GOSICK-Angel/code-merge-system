@@ -680,6 +680,46 @@ class ReverseImpactConfig(BaseModel):
     max_files_per_symbol: int = Field(default=100, ge=1)
 
 
+class DependencyGraphConfig(BaseModel):
+    """Configure the file dependency graph built in the initialize phase.
+
+    The graph is the precise (AST-based) counterpart to the text-grep
+    ``reverse_impact`` scan: planner uses it for topological tie-breaking and
+    an impact-radius fanout dimension; judge uses EXTRACTED edges to flag
+    dependents of a changed interface that were not updated.
+    """
+
+    enabled: bool = True
+    languages: list[str] = Field(
+        default_factory=lambda: [
+            "python",
+            "javascript",
+            "typescript",
+            "tsx",
+            "go",
+        ],
+        description="Languages to attempt extraction for. Non-Python languages "
+        "require the optional [ast] extra (tree-sitter); when absent they "
+        "degrade to no edges.",
+    )
+    max_files: int = Field(
+        default=800,
+        ge=1,
+        description="Upper bound on the number of files scanned into the graph "
+        "(changed files plus reverse-impact scope), to bound build cost.",
+    )
+    max_depth: int = Field(
+        default=3,
+        ge=1,
+        description="Hop limit for impact_radius traversal used by consumers.",
+    )
+    extra_scan_globs: list[str] = Field(
+        default_factory=list,
+        description="Additional file globs (beyond changed files, D_EXTRA and "
+        "customization.files) to include as graph nodes.",
+    )
+
+
 class SmokeTestCase(BaseModel):
     """A single smoke-test case. Exactly one of cmd/url/tag is used depending on ``kind``."""
 
@@ -986,6 +1026,10 @@ class MergeConfig(BaseModel):
     reverse_impact: ReverseImpactConfig = Field(
         default_factory=ReverseImpactConfig,
         description="P1-1: reverse-impact scan configuration.",
+    )
+    dependency_graph: DependencyGraphConfig = Field(
+        default_factory=DependencyGraphConfig,
+        description="File dependency graph build configuration.",
     )
     smoke_tests: SmokeTestConfig = Field(
         default_factory=SmokeTestConfig,

@@ -7,6 +7,8 @@ languages.  Each chunk can be rendered at three levels: FULL, SIGNATURE, or DROP
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import logging
 import re
 from collections.abc import Mapping
@@ -45,6 +47,20 @@ class CodeChunk(BaseModel, frozen=True):
     byte_range: tuple[int, int] = (0, 0)
 
 
+def chunk_key(chunk: CodeChunk) -> tuple[int, int]:
+    """Stable unique key for a chunk within one rendered file.
+
+    Chunks of a file occupy disjoint, ordered line spans, so
+    ``(start_line, end_line)`` identifies a chunk uniquely even when two
+    chunks share a ``name`` — overloaded / conditionally-redefined defs, or
+    statement blocks whose first line repeats. Keying render levels by
+    ``name`` silently collapsed such chunks onto one level, dropping a
+    relevant block or expanding an irrelevant one. ``byte_range`` is not used
+    because the indent-fallback chunker leaves it at its ``(0, 0)`` default.
+    """
+    return (chunk.start_line, chunk.end_line)
+
+
 LANGUAGE_MAP: dict[str, str] = {
     ".py": "python",
     ".js": "javascript",
@@ -72,13 +88,12 @@ def detect_language(file_path: str) -> str | None:
 # Step 2: AST Chunker (tree-sitter) — optional dependency
 # ---------------------------------------------------------------------------
 
-_HAS_TREE_SITTER = False
-try:
-    import tree_sitter  # type: ignore[import-not-found]
-
-    _HAS_TREE_SITTER = True
-except ImportError:
-    tree_sitter = None
+# Resolved via a runtime import string and typed ``Any`` so the optional
+# tree-sitter dependency is invisible to mypy whether or not it (or its
+# stubs) is installed — avoids env-dependent unused-ignore / assignment
+# errors from a plain ``import tree_sitter`` guard.
+_HAS_TREE_SITTER = importlib.util.find_spec("tree_sitter") is not None
+tree_sitter: Any = importlib.import_module("tree_sitter") if _HAS_TREE_SITTER else None
 
 
 CHUNK_BOUNDARY_NODES: dict[str, dict[str, ChunkKind]] = {
@@ -172,24 +187,32 @@ def _get_parser(language: str) -> Any | None:
         return None
 
     try:
-        import importlib
-
         lang_mod = importlib.import_module(module_name)
-        lang_fn = lang_mod.language
-
-        if language == "tsx":
-            lang_obj = tree_sitter.Language(lang_fn("tsx"))
-        elif language == "typescript":
-            lang_obj = tree_sitter.Language(lang_fn("typescript"))
-        else:
-            lang_obj = tree_sitter.Language(lang_fn())
-
+        lang_obj = tree_sitter.Language(_resolve_grammar(lang_mod, language))
         parser = tree_sitter.Parser(lang_obj)
         _PARSER_CACHE[language] = parser
         return parser
     except Exception:
         logger.debug("Failed to load tree-sitter parser for %s", language)
         return None
+
+
+def _resolve_grammar(lang_mod: Any, language: str) -> Any:
+    """Return the grammar PyCapsule across tree-sitter binding API shapes.
+
+    The combined ``tree_sitter_typescript`` package exposes per-dialect
+    ``language_typescript()`` / ``language_tsx()`` (no-arg) in current
+    releases; older builds shipped a single ``language(name)`` taking the
+    dialect name. Single-language grammars expose a no-arg ``language()``.
+    """
+    if language == "typescript" and hasattr(lang_mod, "language_typescript"):
+        return lang_mod.language_typescript()
+    if language == "tsx" and hasattr(lang_mod, "language_tsx"):
+        return lang_mod.language_tsx()
+    lang_fn = lang_mod.language
+    if language in ("typescript", "tsx"):
+        return lang_fn(language)
+    return lang_fn()
 
 
 def _node_text(node: object, source: str) -> str:
@@ -544,13 +567,13 @@ def render_chunk(chunk: CodeChunk, level: str) -> str:
 
 def render_file_staged(
     chunks: list[CodeChunk],
-    levels: dict[str, str] | Mapping[str, str],
+    levels: Mapping[tuple[int, int], str],
 ) -> str:
     parts: list[str] = []
     consecutive_drops = 0
 
     for chunk in sorted(chunks, key=lambda c: c.start_line):
-        level = levels.get(chunk.name, "drop")
+        level = levels.get(chunk_key(chunk), "drop")
         rendered = render_chunk(chunk, level)
 
         if not rendered:

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from src.llm.chunker import ChunkKind, CodeChunk
 from src.llm.relevance import (
     FULL_THRESHOLD,
@@ -161,6 +159,35 @@ class TestScoreAndAssign:
         levels = scorer.score_and_assign(chunks, budget_tokens=100_000)
         assert all(v == RenderLevel.FULL for v in levels.values())
 
+    def test_same_named_chunks_do_not_collide(self) -> None:
+        # Two chunks share a name (overloaded def); only the second overlaps
+        # the diff. Keying by name would collapse them onto one level and
+        # mis-render the irrelevant one. Keying by (start_line, end_line)
+        # keeps an independent decision per chunk.
+        ctx = ScoringContext(diff_ranges=[(40, 45)])
+        scorer = RelevanceScorer(ctx)
+        chunks = [
+            _make_chunk(
+                name="handle",
+                start_line=1,
+                end_line=5,
+                content="def handle(): legacy()",
+            ),
+            _make_chunk(
+                name="handle",
+                start_line=40,
+                end_line=45,
+                content="def handle(): current()",
+            ),
+        ]
+        levels = scorer.score_and_assign(chunks, budget_tokens=100_000)
+        # One key per chunk — no collapse.
+        assert len(levels) == 2
+        assert (1, 5) in levels and (40, 45) in levels
+        # The diff-overlapping chunk is FULL; the unrelated one is not promoted.
+        assert levels[(40, 45)] == RenderLevel.FULL
+        assert levels[(1, 5)] != RenderLevel.FULL
+
     def test_budget_demotion_full_to_signature(self) -> None:
         ctx = ScoringContext(diff_ranges=[(1, 5)])
         scorer = RelevanceScorer(ctx)
@@ -221,4 +248,4 @@ class TestScoreAndAssign:
             ),
         ]
         levels = scorer.score_and_assign(chunks, budget_tokens=100_000)
-        assert levels["helper"] in (RenderLevel.FULL, RenderLevel.SIGNATURE)
+        assert levels[(50, 55)] in (RenderLevel.FULL, RenderLevel.SIGNATURE)

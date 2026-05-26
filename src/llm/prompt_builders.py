@@ -103,7 +103,12 @@ class AgentPromptBuilder:
         conflict_ranges: list[tuple[int, int]] | None = None,
         security_patterns: list[str] | None = None,
     ) -> str:
-        from src.llm.chunker import ASTChunker, detect_language, render_file_staged
+        from src.llm.chunker import (
+            ASTChunker,
+            chunk_key,
+            detect_language,
+            render_file_staged,
+        )
         from src.llm.relevance import RenderLevel, RelevanceScorer, ScoringContext
 
         line_count = content.count("\n") + 1
@@ -144,9 +149,9 @@ class AgentPromptBuilder:
         drop_count = sum(1 for v in levels.values() if v == RenderLevel.DROP)
         used_tokens = sum(
             estimate_tokens(c.content)
-            if levels.get(c.name) == RenderLevel.FULL
+            if levels.get(chunk_key(c)) == RenderLevel.FULL
             else estimate_tokens(c.signature)
-            if levels.get(c.name) == RenderLevel.SIGNATURE
+            if levels.get(chunk_key(c)) == RenderLevel.SIGNATURE
             else 0
             for c in chunks
         )

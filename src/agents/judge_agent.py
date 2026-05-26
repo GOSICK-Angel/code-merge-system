@@ -1,3 +1,4 @@
+import difflib
 import fnmatch
 import re
 from datetime import datetime
@@ -24,6 +25,7 @@ from src.models.judge import (
 )
 from src.models.config import CustomizationEntry, CustomizationVerification
 from src.models.diff import FileChangeCategory, ForkDivergence
+from src.models.dependency import ConfidenceLabel
 from src.models.state import MergeState
 from src.llm.prompt_builders import AgentPromptBuilder
 from src.core.read_only_state_view import ReadOnlyStateView
@@ -243,28 +245,37 @@ class JudgeAgent(BaseAgent):
                     )
                 )
 
+        # U1.A parity: staging must run regardless of memory_store so a large
+        # merged file is chunked/degraded before the LLM call. Gating it behind
+        # memory_store (as this once did) let the Judge ship whole large files
+        # raw when memory was off — the forgejo "tokens=309/98789 then false
+        # truncated-content verdict" failure. Only the memory-text injection
+        # stays gated.
+        builder = AgentPromptBuilder(
+            self.llm_config, self._memory_store, self._memory_hit_tracker
+        )
         memory_context = ""
-        max_content_chars: int | None = None
         if self._memory_store:
-            builder = AgentPromptBuilder(
-                self.llm_config, self._memory_store, self._memory_hit_tracker
-            )
             memory_context = builder.build_memory_context_text(
                 [file_path], current_phase=self._current_phase
             )
-            max_content_chars = builder.compute_content_budget(
-                JUDGE_SYSTEM + memory_context
-            )
 
-            diff_ranges = _extract_diff_ranges(original_diff)
-            budget_tokens = max_content_chars // 4 if max_content_chars else 2000
-            if merged_content:
-                merged_content = builder.build_staged_content(
-                    merged_content,
-                    file_path,
-                    diff_ranges,
-                    budget_tokens,
-                )
+        max_content_chars = builder.compute_content_budget(
+            JUDGE_SYSTEM + memory_context
+        )
+        # Prefer ranges derived from the merged file itself (merged coords);
+        # fall back to the fork-side hunk ranges when no snapshot is available.
+        diff_ranges = _merged_content_diff_ranges(
+            decision_record.original_snapshot, merged_content
+        ) or _extract_diff_ranges(original_diff)
+        budget_tokens = max_content_chars // 4 if max_content_chars else 2000
+        if merged_content:
+            merged_content = builder.build_staged_content(
+                merged_content,
+                file_path,
+                diff_ranges,
+                budget_tokens,
+            )
 
         # O-M1: dispute-round prior review block. Append before LLM call so
         # the Judge knows which issues were already reported and can focus on
@@ -730,6 +741,7 @@ class JudgeAgent(BaseAgent):
         issues.extend(self._check_cross_layer_assertions(state))
         issues.extend(self._check_reverse_impacts(state))
         issues.extend(self._check_cross_decision_signature_split(state))
+        issues.extend(self._check_dependency_graph_impacts(state))
         issues.extend(self._check_sentinel_hits(state))
         issues.extend(self._check_config_retention(state))
 
@@ -855,6 +867,98 @@ class JudgeAgent(BaseAgent):
                     ),
                 )
             )
+        return issues
+
+    def _check_dependency_graph_impacts(
+        self, state: ReadOnlyStateView
+    ) -> list[JudgeIssue]:
+        """Precise (AST-edge) counterpart to ``_check_reverse_impacts``.
+
+        For each upstream signature change on a symbol defined in file ``F``,
+        walk the dependency graph's EXTRACTED in-edges to find files ``D`` that
+        import ``F``. If ``D`` still references the changed symbol (text-grep
+        confirmation, to guard against coarse file-level edges) and ``D`` was
+        not pulled wholesale from upstream (``decision != TAKE_TARGET``), flag a
+        missed-update. Only EXTRACTED edges raise a hard issue (risk
+        monotonicity §5); INFERRED / AMBIGUOUS edges are ignored here. Dependents
+        already reported by the fork-only reverse-impact grep are skipped to
+        avoid duplicate issues.
+        """
+        if self.git_tool is None:
+            return []
+        graph = getattr(state, "dependency_graph", None)
+        if graph is None or not graph.edges:
+            return []
+
+        interface_changes = getattr(state, "interface_changes", []) or []
+        sig_changes = [
+            ic
+            for ic in interface_changes
+            if ic.change_kind in ("method_signature", "constructor_signature")
+            and ic.before != ic.after
+            and ic.symbol
+        ]
+        if not sig_changes:
+            return []
+
+        reverse_impacts = getattr(state, "reverse_impacts", {}) or {}
+        records = state.file_decision_records
+        content_cache: dict[str, str | None] = {}
+        seen: set[tuple[str, str]] = set()
+        issues: list[JudgeIssue] = []
+
+        for ic in sig_changes:
+            dependents = sorted(
+                {
+                    e.source_file
+                    for e in graph.edges
+                    if e.target_file == ic.file_path
+                    and e.confidence == ConfidenceLabel.EXTRACTED
+                    and e.source_file != ic.file_path
+                }
+            )
+            if not dependents:
+                continue
+            already_grepped = set(reverse_impacts.get(ic.symbol, []))
+            pattern = re.compile(rf"\b{re.escape(ic.symbol)}\b")
+
+            for dep in dependents:
+                key = (ic.symbol, dep)
+                if key in seen or dep in already_grepped:
+                    continue
+                dep_record = records.get(dep)
+                if dep_record is not None and (
+                    dep_record.decision == MergeDecision.TAKE_TARGET
+                ):
+                    continue
+                if dep not in content_cache:
+                    abs_path = self.git_tool.repo_path / dep
+                    content_cache[dep] = (
+                        _safe_read_text(abs_path) if abs_path.exists() else None
+                    )
+                content = content_cache[dep]
+                if not content or not pattern.search(content):
+                    continue
+                seen.add(key)
+                issues.append(
+                    JudgeIssue(
+                        file_path=dep,
+                        issue_level=IssueSeverity.HIGH,
+                        issue_type="dependency_missed_update",
+                        description=(
+                            f"'{dep}' imports '{ic.file_path}' (EXTRACTED dependency) "
+                            f"and still references '{ic.symbol}', whose signature "
+                            f"changed upstream ('{ic.before}' -> '{ic.after}'). The "
+                            f"dependent was not taken from upstream, so it may not be "
+                            f"updated for the new signature."
+                        ),
+                        must_fix_before_merge=True,
+                        veto_condition=(
+                            "Dependency-graph missed update for upstream "
+                            "signature change"
+                        ),
+                    )
+                )
         return issues
 
     def _check_top_level_invocations(
@@ -1736,6 +1840,48 @@ def _extract_diff_ranges(original_diff: FileDiff) -> list[tuple[int, int]]:
         ranges.append(
             (1, original_diff.lines_added + original_diff.lines_deleted + 100)
         )
+    return ranges
+
+
+# Above this line count the O(n*m) line diff is skipped in favour of the
+# coarse hunk-based ranges — a guard against pathological large-file cost.
+_MERGED_DIFF_MAX_LINES = 6000
+
+
+def _merged_content_diff_ranges(
+    before: str | None, after: str
+) -> list[tuple[int, int]]:
+    """Changed-line ranges (1-based inclusive) in ``after`` coordinates.
+
+    Judge stages the *merged* file, so chunk line numbers live in the merged
+    coordinate system. The original (fork-side) diff hunks describe pre-merge
+    line numbers, which drift after the merge inserts/removes lines — scoring
+    chunks against them mis-anchors relevance. Diffing the pre-merge snapshot
+    (``before``) against the merged content (``after``) yields the lines the
+    merge actually touched, in the same coordinates the chunker uses.
+
+    Returns ``[]`` when there is no snapshot, nothing changed, or either side
+    is too large to diff cheaply — callers fall back to the hunk-based ranges.
+    """
+    if not before or not after:
+        return []
+    before_lines = before.splitlines()
+    after_lines = after.splitlines()
+    if (
+        len(before_lines) > _MERGED_DIFF_MAX_LINES
+        or len(after_lines) > _MERGED_DIFF_MAX_LINES
+    ):
+        return []
+    matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=False)
+    ranges: list[tuple[int, int]] = []
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        # j1/j2 are 0-based half-open in ``after``; a pure deletion (j2 == j1)
+        # still anchors the boundary line so adjacent chunks score.
+        start = j1 + 1
+        end = j2 if j2 > j1 else j1 + 1
+        ranges.append((start, end))
     return ranges
 
 

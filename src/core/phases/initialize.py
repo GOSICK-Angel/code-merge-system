@@ -40,6 +40,8 @@ from src.tools.commit_replayer import CommitReplayer
 from src.tools.sync_point_detector import SyncPointDetector
 from src.tools.interface_change_extractor import InterfaceChangeExtractor
 from src.tools.reverse_impact_scanner import ReverseImpactScanner
+from src.tools.three_way_diff import _safe_read_text
+from src.models.dependency import ConfidenceLabel
 from src.tools.forks_profile_loader import (
     ForksProfileError,
     build_effective_profile,
@@ -608,6 +610,9 @@ class InitializePhase(Phase):
 
         if state.config.reverse_impact.enabled:
             self._run_reverse_impact(state, ctx, merge_base)
+
+        if state.config.dependency_graph.enabled:
+            self._build_dependency_graph(state, ctx)
 
     def _apply_forced_decisions(
         self,
@@ -1308,3 +1313,64 @@ class InitializePhase(Phase):
                 "Phase 0.5: %d upstream symbols still referenced in fork-only scope",
                 len(reverse_impacts),
             )
+
+    def _build_dependency_graph(self, state: MergeState, ctx: PhaseContext) -> None:
+        """Build the focused file dependency subgraph and store it on state.
+
+        Scope = changed files (B/C/D_MISSING) plus the reverse-impact
+        fork-only/glob scope, capped at ``max_files``. Content is read from
+        the working tree; the graph is the precise AST counterpart to the
+        text-grep reverse-impact scan and is consumed read-only by planner
+        (ordering + fanout) and judge (missed-update detection).
+        """
+        from src.tools.dependency_extractor import DependencyExtractor
+
+        cfg = state.config.dependency_graph
+        ctx.notify("orchestrator", "Building file dependency graph")
+
+        actionable = {
+            FileChangeCategory.B,
+            FileChangeCategory.C,
+            FileChangeCategory.D_MISSING,
+        }
+        changed_files = {
+            fp for fp, cat in state.file_categories.items() if cat in actionable
+        }
+
+        fork_only = {
+            fp
+            for fp, cat in state.file_categories.items()
+            if cat == FileChangeCategory.D_EXTRA
+        }
+        for entry in state.config.customizations:
+            fork_only.update(entry.files)
+
+        repo_path = Path(state.config.repo_path).resolve()
+        scanner = ReverseImpactScanner(repo_path=repo_path)
+        scope_files = set(scanner._resolve_scope(fork_only, cfg.extra_scan_globs))
+        scope_files |= changed_files
+
+        if not scope_files:
+            return
+
+        sources: dict[str, str] = {}
+        for fp in sorted(scope_files):
+            if len(sources) >= cfg.max_files:
+                break
+            content = _safe_read_text(repo_path / fp)
+            if content is not None:
+                sources[fp] = content
+
+        if not sources:
+            return
+
+        graph = DependencyExtractor.extract_from_sources(
+            sources, languages=cfg.languages
+        )
+        state.dependency_graph = graph
+        logger.info(
+            "Dependency graph: %d edges across %d files (%d EXTRACTED)",
+            len(graph.edges),
+            graph.file_count,
+            sum(1 for e in graph.edges if e.confidence == ConfidenceLabel.EXTRACTED),
+        )

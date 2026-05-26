@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from src.llm.chunker import ChunkKind, CodeChunk
+from src.llm.chunker import ChunkKind, CodeChunk, chunk_key
 from src.llm.context import estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -81,7 +81,7 @@ class RelevanceScorer:
         self,
         chunks: list[CodeChunk],
         budget_tokens: int,
-    ) -> dict[str, RenderLevel]:
+    ) -> dict[tuple[int, int], RenderLevel]:
         if not chunks:
             return {}
 
@@ -91,18 +91,18 @@ class RelevanceScorer:
 
         boosted: list[tuple[CodeChunk, float]] = []
         for chunk, score in scored:
-            if score < FULL_THRESHOLD and chunk.name in full_contents:
+            if score < FULL_THRESHOLD and chunk.name and chunk.name in full_contents:
                 score = min(1.0, score + 0.3)
             boosted.append((chunk, score))
 
-        levels: dict[str, RenderLevel] = {}
+        levels: dict[tuple[int, int], RenderLevel] = {}
         for chunk, score in boosted:
             if score >= FULL_THRESHOLD:
-                levels[chunk.name] = RenderLevel.FULL
+                levels[chunk_key(chunk)] = RenderLevel.FULL
             elif score >= SIGNATURE_THRESHOLD:
-                levels[chunk.name] = RenderLevel.SIGNATURE
+                levels[chunk_key(chunk)] = RenderLevel.SIGNATURE
             else:
-                levels[chunk.name] = RenderLevel.DROP
+                levels[chunk_key(chunk)] = RenderLevel.DROP
 
         levels = self._demote_to_fit(boosted, levels, budget_tokens)
 
@@ -157,13 +157,13 @@ class RelevanceScorer:
     def _demote_to_fit(
         self,
         scored: list[tuple[CodeChunk, float]],
-        levels: dict[str, RenderLevel],
+        levels: dict[tuple[int, int], RenderLevel],
         budget_tokens: int,
-    ) -> dict[str, RenderLevel]:
+    ) -> dict[tuple[int, int], RenderLevel]:
         def _total_tokens() -> int:
             total = 0
             for chunk, _ in scored:
-                level = levels.get(chunk.name, RenderLevel.DROP)
+                level = levels.get(chunk_key(chunk), RenderLevel.DROP)
                 if level == RenderLevel.FULL:
                     total += estimate_tokens(chunk.content)
                 elif level == RenderLevel.SIGNATURE:
@@ -171,21 +171,25 @@ class RelevanceScorer:
             return total
 
         full_by_score = sorted(
-            [(c, s) for c, s in scored if levels.get(c.name) == RenderLevel.FULL],
+            [(c, s) for c, s in scored if levels.get(chunk_key(c)) == RenderLevel.FULL],
             key=lambda x: x[1],
         )
         for chunk, _score in full_by_score:
             if _total_tokens() <= budget_tokens:
                 break
-            levels[chunk.name] = RenderLevel.SIGNATURE
+            levels[chunk_key(chunk)] = RenderLevel.SIGNATURE
 
         sig_by_score = sorted(
-            [(c, s) for c, s in scored if levels.get(c.name) == RenderLevel.SIGNATURE],
+            [
+                (c, s)
+                for c, s in scored
+                if levels.get(chunk_key(c)) == RenderLevel.SIGNATURE
+            ],
             key=lambda x: x[1],
         )
         for chunk, _score in sig_by_score:
             if _total_tokens() <= budget_tokens:
                 break
-            levels[chunk.name] = RenderLevel.DROP
+            levels[chunk_key(chunk)] = RenderLevel.DROP
 
         return levels

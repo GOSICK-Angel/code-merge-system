@@ -117,6 +117,86 @@ async def test_staged_content_runs_without_memory_store() -> None:
     assert result.recommended_strategy == MergeDecision.TAKE_TARGET
 
 
+# ---------- ③ chunked relevance pre-filter ----------
+
+
+def _padded_fn(idx: int, body: str) -> str:
+    # Fixed-shape function so changing only the body keeps byte length (and
+    # thus semantic-chunk boundaries) stable across current/target.
+    return f"def f{idx}():\n    {body}  # pad-xxxxxxxxxxxxxxxxxxxx\n\n\n"
+
+
+async def test_chunked_skips_unchanged_pairs() -> None:
+    """③: identical (cur == tgt) chunk pairs are not sent to the LLM."""
+    from src.tools.chunk_processor import split_by_semantic_boundary
+
+    agent = _make_agent()
+    file_diff = _make_file_diff("demo.py")
+    chunk_size = 200
+
+    current = "".join(_padded_fn(i, f"return {i} + 0") for i in range(12))
+    # Change exactly one function's body, same length -> boundaries unchanged.
+    target = "".join(
+        _padded_fn(i, f"return {i} + 9" if i == 6 else f"return {i} + 0")
+        for i in range(12)
+    )
+    total_chunks = len(split_by_semantic_boundary(current, "demo.py", chunk_size))
+    assert total_chunks > 1  # sanity: file actually splits
+
+    counter = AsyncMock(return_value='{"recommended_strategy": "take_target"}')
+    with (
+        patch.object(agent, "_call_llm_with_retry", new=counter),
+        patch(
+            "src.agents.conflict_analyst_agent.parse_conflict_analysis",
+            return_value=_make_analysis("demo.py", MergeDecision.TAKE_TARGET),
+        ),
+    ):
+        result = await agent.analyze_file(
+            file_diff,
+            base_content=None,
+            current_content=current,
+            target_content=target,
+            chunk_size_chars=chunk_size,
+        )
+
+    assert counter.await_count >= 1
+    assert counter.await_count < total_chunks, (
+        "unchanged chunk pairs must be skipped, sparing their LLM calls"
+    )
+    assert result.recommended_strategy == MergeDecision.TAKE_TARGET
+
+
+async def test_chunked_all_changed_analyzes_every_pair() -> None:
+    """③ degenerate: when every pair differs, nothing is skipped (no regression)."""
+    from src.tools.chunk_processor import split_by_semantic_boundary
+
+    agent = _make_agent()
+    file_diff = _make_file_diff("demo.py")
+    chunk_size = 200
+
+    current = "".join(_padded_fn(i, f"return {i} + 0") for i in range(12))
+    target = "".join(_padded_fn(i, f"return {i} + 9") for i in range(12))
+    total_chunks = len(split_by_semantic_boundary(current, "demo.py", chunk_size))
+
+    counter = AsyncMock(return_value='{"recommended_strategy": "take_target"}')
+    with (
+        patch.object(agent, "_call_llm_with_retry", new=counter),
+        patch(
+            "src.agents.conflict_analyst_agent.parse_conflict_analysis",
+            return_value=_make_analysis("demo.py", MergeDecision.TAKE_TARGET),
+        ),
+    ):
+        await agent.analyze_file(
+            file_diff,
+            base_content=None,
+            current_content=current,
+            target_content=target,
+            chunk_size_chars=chunk_size,
+        )
+
+    assert counter.await_count == total_chunks
+
+
 # ---------- U-P1.2 ~ U-P1.6 reducer paths ----------
 
 

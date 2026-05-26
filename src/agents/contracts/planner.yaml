@@ -4,6 +4,7 @@ inputs:
   - _merge_base
   - config
   - config_drifts
+  - dependency_graph
   - file_categories
   - file_classifications
   - file_diffs

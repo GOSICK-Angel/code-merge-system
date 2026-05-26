@@ -277,6 +277,27 @@ class ConflictAnalystAgent(BaseAgent):
             tgt = target_chunks[idx] if idx < len(target_chunks) else ""
             pairs.append((cur, tgt))
 
+        # ③ Relevance pre-filter: a pair whose current and target chunks are
+        # byte-identical has no divergence, so it cannot host a conflict — skip
+        # its LLM call. Only prune when some (but not all) pairs are unchanged:
+        # an all-identical file (no anchor to analyze) and an all-changed file
+        # both keep every pair, so the aggregate never sees an empty set and the
+        # degenerate paths behave exactly as before. This is a strict subset of
+        # the old fan-out, so it never changes the verdict — only the cost.
+        changed_indices = [i for i, (cur, tgt) in enumerate(pairs) if cur != tgt]
+        if changed_indices and len(changed_indices) < len(pairs):
+            analyze_indices = changed_indices
+        else:
+            analyze_indices = list(range(len(pairs)))
+        skipped = len(pairs) - len(analyze_indices)
+        if skipped:
+            self.logger.info(
+                "Chunked analysis %s: skipping %d/%d unchanged chunk pairs",
+                file_path,
+                skipped,
+                len(pairs),
+            )
+
         async def _analyze_chunk(idx: int) -> ConflictAnalysis:
             cur_chunk, tgt_chunk = pairs[idx]
             prompt = build_conflict_analysis_prompt(
@@ -293,13 +314,11 @@ class ConflictAnalystAgent(BaseAgent):
         # U5: chunks of a single file are tagged ``"<file>#<idx>"`` so the
         # disjointness contract still applies (each chunk is its own shard);
         # this keeps the assert form uniform across all 6 fan-out call sites.
-        assert_disjoint_file_shards(
-            [[f"{file_path}#{idx}"] for idx in range(len(pairs))]
-        )
+        assert_disjoint_file_shards([[f"{file_path}#{idx}"] for idx in analyze_indices])
         runner = ParallelFileRunner.from_api_key_env_list(
             self.llm_config.api_key_env_list
         )
-        results = await runner.run_files(list(range(len(pairs))), _analyze_chunk)
+        results = await runner.run_files(analyze_indices, _analyze_chunk)
 
         chunk_analyses: list[ConflictAnalysis] = []
         failed_indices: list[int] = []
@@ -330,12 +349,12 @@ class ConflictAnalystAgent(BaseAgent):
                 conflict_type=ConflictType.UNKNOWN,
                 rationale=(
                     f"Chunked analysis fell back to ESCALATE_HUMAN due to "
-                    f"failure in {len(failed_indices)} of {len(pairs)} chunks "
-                    f"({reason})"
+                    f"failure in {len(failed_indices)} of {len(analyze_indices)} "
+                    f"analyzed chunks ({reason})"
                 ),
                 confidence=HARD_CAP_CONFIDENCE,
                 is_chunked=True,
-                chunk_count=len(pairs),
+                chunk_count=len(analyze_indices),
             )
 
         return _aggregate_chunked_analyses(
