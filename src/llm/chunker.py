@@ -256,15 +256,38 @@ def _extract_child_method_names(node: object, source: str, language: str) -> lis
     return methods
 
 
+def _signature_cutoff(text: str) -> int | None:
+    """Index of the signature terminator (``:`` for Python, body ``{`` for
+    C-like languages), searched at bracket depth 0.
+
+    A naive ``text.find(":")`` lands on the first parameter type annotation —
+    ``def f(a: int):`` → ``def f(a:`` — truncating the signature mid-parameter.
+    Tracking ``() [] {}`` depth and only accepting a ``:`` / ``{`` at depth 0
+    skips colons and braces inside parameter lists, default values, type
+    annotations, and dict literals, so the cutoff falls at the real end of the
+    signature. Returns ``None`` when no depth-0 terminator exists (e.g. a
+    parameter list that runs past the captured text)."""
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch == "{" and depth == 0:
+            return i
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        elif ch == ":" and depth == 0:
+            return i
+    return None
+
+
 def _extract_signature(
     node: object, source: str, kind: ChunkKind, language: str
 ) -> str:
     text = _node_text(node, source)
     if kind in (ChunkKind.FUNCTION, ChunkKind.METHOD):
-        for delimiter in (":", "{"):
-            idx = text.find(delimiter)
-            if idx != -1:
-                return text[: idx + 1].strip()
+        idx = _signature_cutoff(text)
+        if idx is not None:
+            return text[: idx + 1].strip()
         return text.split("\n")[0].strip()
 
     if kind == ChunkKind.CLASS:
@@ -482,10 +505,9 @@ def _infer_chunk_kind(content: str) -> ChunkKind:
 def _extract_indent_signature(content: str, kind: ChunkKind) -> str:
     first_line = content.strip().split("\n")[0].strip() if content.strip() else ""
     if kind in (ChunkKind.FUNCTION, ChunkKind.METHOD):
-        for delimiter in (":", "{"):
-            idx = first_line.find(delimiter)
-            if idx != -1:
-                return first_line[: idx + 1]
+        idx = _signature_cutoff(first_line)
+        if idx is not None:
+            return first_line[: idx + 1]
         return first_line
     return first_line
 

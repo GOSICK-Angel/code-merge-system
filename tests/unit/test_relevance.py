@@ -92,26 +92,26 @@ class TestConflictBoost:
         assert score >= FULL_THRESHOLD
 
 
-class TestSecurityPatternBoost:
-    def test_security_pattern_boost(self) -> None:
-        ctx = ScoringContext(
-            diff_ranges=[],
-            security_patterns=["password"],
-        )
+class TestSecuritySensitiveBoost:
+    def test_security_sensitive_file_boosts_every_chunk(self) -> None:
+        # File-level signal: when the file is security-sensitive, every chunk
+        # gets the boost regardless of content, so off-diff security logic is
+        # not silently dropped during staged compression.
+        ctx = ScoringContext(diff_ranges=[], is_security_sensitive=True)
         scorer = RelevanceScorer(ctx)
-        chunk = _make_chunk(content="def check_password(pwd): pass")
-        score = scorer.score_chunk(chunk)
-        assert score > 0.3
+        sensitive = scorer.score_chunk(_make_chunk(content="def hello(): pass"))
 
-    def test_no_security_match(self) -> None:
-        ctx = ScoringContext(
-            diff_ranges=[],
-            security_patterns=["password"],
+        ctx_plain = ScoringContext(diff_ranges=[], is_security_sensitive=False)
+        plain = RelevanceScorer(ctx_plain).score_chunk(
+            _make_chunk(content="def hello(): pass")
         )
+        assert abs((sensitive - plain) - 0.3) < 1e-9
+
+    def test_non_sensitive_file_no_boost(self) -> None:
+        ctx = ScoringContext(diff_ranges=[], is_security_sensitive=False)
         scorer = RelevanceScorer(ctx)
-        chunk = _make_chunk(content="def hello(): pass")
-        base_score = scorer.score_chunk(chunk)
-        assert base_score < 0.3
+        score = scorer.score_chunk(_make_chunk(content="def hello(): pass"))
+        assert score < 0.3
 
 
 class TestReferenceBoost:

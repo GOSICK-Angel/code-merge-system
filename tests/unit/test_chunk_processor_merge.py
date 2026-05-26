@@ -12,6 +12,7 @@ the seam newline.
 from __future__ import annotations
 
 from src.tools.chunk_processor import (
+    align_chunks,
     merge_chunks,
     split_by_semantic_boundary,
 )
@@ -45,6 +46,56 @@ def test_merge_chunks_preserves_missing_final_newline() -> None:
 
 def test_merge_chunks_empty() -> None:
     assert merge_chunks([]) == ""
+
+
+def test_align_chunks_equal_counts_zip() -> None:
+    a = ["a1\n", "a2\n"]
+    b = ["b1\n", "b2\n"]
+    assert align_chunks(a, b) == [("a1\n", "b1\n"), ("a2\n", "b2\n")]
+
+
+def test_align_chunks_empty_side() -> None:
+    assert align_chunks([], ["b\n"]) == []
+    assert align_chunks(["a\n"], []) == []
+
+
+def test_align_chunks_more_upstream_covers_every_b_once() -> None:
+    # 2 fork chunks, 5 upstream chunks. Every upstream chunk must appear in
+    # exactly one pair's target (no silent drop, no duplication).
+    a = ["A1\n" * 10, "A2\n" * 10]
+    b = [f"B{i}\n" for i in range(5)]
+    pairs = align_chunks(a, b)
+
+    assert [p[0] for p in pairs] == a  # one pair per fork chunk, in order
+    joined_targets = "".join(p[1] for p in pairs)
+    for i in range(5):
+        assert joined_targets.count(f"B{i}\n") == 1  # each b exactly once
+
+
+def test_align_chunks_more_fork_leaves_some_targets_empty() -> None:
+    # 5 fork chunks, 2 upstream chunks. Every upstream chunk lands once; the
+    # extra fork chunks get an empty target (fork-only regions).
+    a = [f"A{i}\n" for i in range(5)]
+    b = ["B0\n" * 10, "B1\n" * 10]
+    pairs = align_chunks(a, b)
+
+    assert [p[0] for p in pairs] == a
+    joined_targets = "".join(p[1] for p in pairs)
+    assert joined_targets.count("B0\n") == 10
+    assert joined_targets.count("B1\n") == 10
+    assert sum(1 for p in pairs if p[1] == "") >= 3  # extra fork chunks empty
+
+
+def test_align_chunks_groups_are_contiguous() -> None:
+    # Monotonic midpoints => each fork chunk receives a contiguous run of
+    # upstream chunks, so the joined target is a real upstream slice.
+    a = ["A1\n" * 30, "A2\n" * 30]
+    b = [f"B{i}\n" for i in range(6)]
+    pairs = align_chunks(a, b)
+
+    full = "".join(b)
+    reassembled = "".join(p[1] for p in pairs)
+    assert reassembled == full  # order + completeness preserved
 
 
 def test_split_then_stripped_roundtrip_is_compilable_go() -> None:

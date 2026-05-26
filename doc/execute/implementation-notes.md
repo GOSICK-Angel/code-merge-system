@@ -251,8 +251,46 @@ Phase A 在未装 `[ast]` 的环境里收益为零（又是死代码）。
   - 回归测试：`test_relevance.py::test_name_boost_requires_whole_identifier`（`width` 中的 `id` 不 boost、整词 `get_user` 仍 boost）
     + `test_identifier_tokens_whole_word_only`。
 
+- **审计发现（chunker 链路排查 2026-05-25）：relevance 5 个评分维度中 3 个在生产恒为 0（死维度）。**
+  `build_staged_content` 的全部 6 个生产调用点(executor×2 / conflict_analyst×3 / judge×1)只传前 4 个位置参数,
+  `ScoringContext` 从不收到 `conflict_ranges` / `security_patterns` / `referenced_names` → `_conflict_score` /
+  `_security_score` / `_reference_score` 恒 0。压缩只靠 `_diff_overlap_score` + base + entry_point + name-boost 单一信号。
+  后果:安全敏感块/冲突区/被引用依赖若不落在 diff 行段内,会被降级甚至 DROP——与"别丢相关代码"目标冲突。
+
+- **修复A：security 信号接通 staging（文件级布尔）**（`relevance` / `prompt_builders` + 三个 agent）。
+  - **为何不喂 `security_sensitive.patterns`**：该 config 是**文件路径 glob**(`**/.env`、`**/*.pem`、`**/credentials.py`)，
+    而 `_security_score` 做的是 chunk **内容**子串匹配——直接喂 glob 几乎不命中=形式接通、实际无效(假修复)。config 无内容关键词列表。
+  - **改法**：`ScoringContext` 删死字段 `security_patterns`、加 `is_security_sensitive: bool`;`_security_score` 改为
+    `0.3 if ctx.is_security_sensitive else 0.0`(文件级)。`build_staged_content` 删 `security_patterns` 参数、加
+    `is_security_sensitive: bool=False`。三个 agent 关键字传:conflict_analyst/executor 用 `file_diff.is_security_sensitive`、
+    judge 用 `original_diff.is_security_sensitive`。
+  - **效果**：安全敏感文件每个 chunk +0.3 → 至少 SIGNATURE(不被 DROP),预算压缩时也比普通块更晚被 demote → 整文件结构(签名级)保留。
+  - 回归测试：`test_relevance.py::TestSecuritySensitiveBoost`(布尔抬 0.3) + `test_context.py::
+    test_build_staged_content_security_sensitive_preserves_whole_file`(安全敏感大文件保住尾部 `func_99`,非敏感同预算被头截断丢尾)。
+
+- **修复B：`chunk_processor.align_chunks` 块数不等时改「覆盖式反向分组」,杜绝 upstream 静默丢/重**（`chunk_processor`）。
+  - **旧 bug**：不等分支是「每个 current(a) 块找最近 upstream(b) 块」的多对一映射 → 未被任何 a 选中的 b 块从不进 pair
+    (upstream 改动静默丢失)、被多个 a 选中的 b 块重复合并。executor 分块合并外层只遍历 pairs(每个 a 一项),保真守卫
+    `_foreign_chars` 只查无中生有字符、不查内容缺失 → 丢失无人拦。
+  - **改法**：反转为「每个 b 块按中点比例分配给最近的 a 块」。每个 b 恰好消费一次(不丢不重);中点单调 ⇒ 每个 a 拿到**连续**
+    b 片段,`"".join` 还原真实 upstream slice;未分到 b 的 a 得空 tgt(fork-only 段,LLM 保留 fork)。返回结构不变
+    (`list[(a, joined_b)]`,长度 = len(a)),executor 无需改。保留 empty 短路 + `len==len` zip 快路。
+  - 回归测试：`test_chunk_processor_merge.py`(b 全覆盖恰好一次、a 多于 b 时多余 a 空 tgt、b 顺序完整 `reassembled==full`、zip/empty 快路)。
+
+- **修复C：`chunker` 签名提取改括号深度感知,消除参数类型注解 `:` 截断**（`chunker`）。
+  - **旧 bug**：`_extract_signature` / `_extract_indent_signature` 用 `text.find(":")` 取第一个冒号 → 命中**参数**类型注解
+    (`def f(a: int):` → `def f(a:`、TS `function f(x: number): T {` → `function f(x:`),SIGNATURE 级渲染给 LLM 残缺签名。
+  - **改法**：新增 `_signature_cutoff(text)`,跟踪 `() [] {}` 深度,只接受**深度 0** 的 `:`(Python)或 body `{`(C-like)为终止符,
+    跳过参数列表/默认值/类型注解/dict 字面量内部的冒号与花括号;无终止符回退首行。两个签名函数共用。
+  - **效果**：`def f(a: int, b: str) -> None:` 取完整签名;Go `func F(a int) error {` 取到 body `{`;TS 返回类型场景至少保住完整参数
+    (取到返回类型前的深度 0 冒号)。仅影响 SIGNATURE 渲染,FULL 不受影响。
+  - 回归测试：`test_chunker.py::TestSignatureCutoff`(Python 注解/TS 返回类型/Go body/dict 默认值/无终止符) +
+    `TestSignatureExtractionEndToEnd`(IndentChunker + tree-sitter 端到端保完整注解签名)。
+
 - **未修（已知、较轻，留作后续）**：
   - 问题④ **base 侧**：`base_content` staging 仍用 current 侧行段(见上,won't-fix,`DiffHunk` 无 base 坐标)。
+  - **relevance `_conflict_score` / `_reference_score` 仍是死维度**：`conflict_ranges`(需冲突标记行来源)、`referenced_names`
+    (需依赖图/引用来源)从无生产填充。可后续接(依赖图 Phase A 的 `impact_radius` 可喂 referenced_names)。
   - budget 用 `//4` 而非 `/3.5`（轻微欠预算）；staging 无 AST/无锚点时兜底仍是头截断（评估后认为收益小未做 diff-anchored 窗口）。
   - executor 整文件分块合并按设计保留（不能丢块）。
-- 验证：`pytest tests/unit/` **2667 passed**；`mypy src` 0 错；`ruff check src/` 通过。
+- 验证：`pytest tests/unit/` **2680 passed**；`mypy src` 0 错；`ruff check src/` 通过。

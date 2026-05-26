@@ -53,7 +53,7 @@ _ENTRY_POINT_NAMES = {
 class ScoringContext:
     diff_ranges: list[tuple[int, int]]
     conflict_ranges: list[tuple[int, int]] = field(default_factory=list)
-    security_patterns: list[str] = field(default_factory=list)
+    is_security_sensitive: bool = False
     referenced_names: frozenset[str] = field(default_factory=frozenset)
 
 
@@ -151,11 +151,7 @@ class RelevanceScorer:
         return 0.0
 
     def _security_score(self, chunk: CodeChunk) -> float:
-        content_lower = chunk.content.lower()
-        for pattern in self._context.security_patterns:
-            if pattern.lower() in content_lower:
-                return 0.3
-        return 0.0
+        return 0.3 if self._context.is_security_sensitive else 0.0
 
     def _reference_score(self, chunk: CodeChunk) -> float:
         if chunk.name in self._context.referenced_names:

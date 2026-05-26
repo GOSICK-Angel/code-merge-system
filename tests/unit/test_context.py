@@ -300,3 +300,32 @@ class TestBuildStagedContent:
         assert "sections omitted" not in result
         assert "func_0" in result
         assert "func_299" in result
+
+    def test_build_staged_content_security_sensitive_preserves_whole_file(self):
+        """A security-sensitive file with no diff anchor and a budget too small
+        for the full body keeps every chunk at SIGNATURE (file-level boost), so
+        the tail of the file survives. A non-sensitive file under the same
+        budget drops every chunk and falls back to a head-truncated view that
+        loses the tail — proving the security signal is actually wired in."""
+        builder = self._make_builder()
+        bodies = [f"def func_{i}():\n" + "    x = 1\n" * 20 for i in range(100)]
+        large_content = "\n".join(bodies)
+        assert large_content.count("\n") >= 200
+
+        sensitive = builder.build_staged_content(
+            content=large_content,
+            file_path="auth/secrets.py",
+            diff_ranges=[],
+            budget_tokens=2000,
+            is_security_sensitive=True,
+        )
+        plain = builder.build_staged_content(
+            content=large_content,
+            file_path="auth/secrets.py",
+            diff_ranges=[],
+            budget_tokens=2000,
+            is_security_sensitive=False,
+        )
+
+        assert "func_99" in sensitive  # tail signature kept by file-level boost
+        assert "func_99" not in plain  # head-truncated fallback loses the tail

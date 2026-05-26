@@ -104,11 +104,24 @@ def align_chunks(
 ) -> list[tuple[str, str]]:
     """Pair chunks from two versions of the same file.
 
-    Uses proportional line-count alignment: each chunk in *chunks_a* is
-    matched with the chunk in *chunks_b* whose cumulative line count is
-    closest to the same relative position in the file.
+    Returns one ``(chunk_from_a, joined_chunks_from_b)`` pair per *chunks_a*
+    element, so callers (the chunked semantic merge) cover every fork-side
+    chunk in order.
 
-    Returns a list of (chunk_from_a, chunk_from_b) pairs.
+    When the two sides have different chunk counts the alignment assigns each
+    *chunks_b* element to the *chunks_a* element whose positional midpoint is
+    closest, then joins each group in order. This is a **covering, one-shot**
+    assignment: every *chunks_b* element lands in exactly one pair — never
+    dropped, never duplicated. Because the midpoints are monotonic, each a
+    chunk receives a *contiguous* run of b chunks, so the join reproduces a
+    real upstream slice. An a chunk that attracts no b chunk gets an empty
+    target (a fork-only region with no upstream counterpart).
+
+    The earlier nearest-b-per-a mapping was many-to-one: unselected upstream
+    chunks vanished from the merge (silent loss of upstream changes) and
+    multiply-selected ones were merged repeatedly. The executor's fidelity
+    guard only catches invented characters, not missing content, so that loss
+    was silent — hence the inversion to a b-covering assignment.
     """
     if not chunks_a or not chunks_b:
         return []
@@ -121,23 +134,23 @@ def align_chunks(
     total_a = sum(line_counts_a)
     total_b = sum(line_counts_b)
 
-    # Build cumulative midpoint ratios for b
-    cum_b = 0
-    midpoints_b: list[float] = []
-    for lc in line_counts_b:
-        midpoints_b.append((cum_b + lc / 2) / total_b)
-        cum_b += lc
-
-    pairs: list[tuple[str, str]] = []
+    # Positional midpoint ratio of each a chunk.
     cum_a = 0
-    for i, (chunk_a, lc_a) in enumerate(zip(chunks_a, line_counts_a)):
-        ratio_a = (cum_a + lc_a / 2) / total_a
-        cum_a += lc_a
-        # Find the b chunk whose midpoint is closest to ratio_a
-        best_j = min(range(len(chunks_b)), key=lambda j: abs(midpoints_b[j] - ratio_a))
-        pairs.append((chunk_a, chunks_b[best_j]))
+    midpoints_a: list[float] = []
+    for lc in line_counts_a:
+        midpoints_a.append((cum_a + lc / 2) / total_a)
+        cum_a += lc
 
-    return pairs
+    # Assign every b chunk to its closest a midpoint — each b consumed once.
+    groups: list[list[str]] = [[] for _ in chunks_a]
+    cum_b = 0
+    for chunk_b, lc_b in zip(chunks_b, line_counts_b):
+        ratio_b = (cum_b + lc_b / 2) / total_b
+        cum_b += lc_b
+        best_i = min(range(len(chunks_a)), key=lambda i: abs(midpoints_a[i] - ratio_b))
+        groups[best_i].append(chunk_b)
+
+    return [(chunk_a, "".join(groups[i])) for i, chunk_a in enumerate(chunks_a)]
 
 
 # ---------------------------------------------------------------------------

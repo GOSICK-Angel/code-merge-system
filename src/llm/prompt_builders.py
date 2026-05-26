@@ -101,7 +101,7 @@ class AgentPromptBuilder:
         diff_ranges: list[tuple[int, int]],
         budget_tokens: int,
         conflict_ranges: list[tuple[int, int]] | None = None,
-        security_patterns: list[str] | None = None,
+        is_security_sensitive: bool = False,
     ) -> str:
         from src.llm.chunker import (
             ASTChunker,
@@ -139,7 +139,7 @@ class AgentPromptBuilder:
         context = ScoringContext(
             diff_ranges=diff_ranges,
             conflict_ranges=conflict_ranges or [],
-            security_patterns=security_patterns or [],
+            is_security_sensitive=is_security_sensitive,
         )
         scorer = RelevanceScorer(context)
         levels = scorer.score_and_assign(chunks, budget_tokens)

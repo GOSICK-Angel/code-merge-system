@@ -275,6 +275,7 @@ class JudgeAgent(BaseAgent):
                 file_path,
                 diff_ranges,
                 budget_tokens,
+                is_security_sensitive=original_diff.is_security_sensitive,
             )
 
         # O-M1: dispute-round prior review block. Append before LLM call so

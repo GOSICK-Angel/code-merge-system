@@ -12,6 +12,7 @@ from src.llm.chunker import (
     CodeChunk,
     IndentChunker,
     _HAS_TREE_SITTER,
+    _signature_cutoff,
     detect_language,
     render_chunk,
     render_file_staged,
@@ -284,6 +285,50 @@ class TestRenderChunk:
         )
         result = render_chunk(chunk, RenderLevel.DROP)
         assert result == ""
+
+
+class TestSignatureCutoff:
+    def test_python_param_type_annotation_not_truncated(self) -> None:
+        text = "def f(a: int, b: str) -> None:\n    return None"
+        idx = _signature_cutoff(text)
+        assert idx is not None
+        assert text[: idx + 1] == "def f(a: int, b: str) -> None:"
+
+    def test_typescript_return_type_colon(self) -> None:
+        text = "function f(x: number): T {\n}"
+        idx = _signature_cutoff(text)
+        assert idx is not None
+        # depth-0 colon is the return-type colon, never the parameter colon
+        assert text[: idx + 1] == "function f(x: number):"
+
+    def test_go_body_brace(self) -> None:
+        text = "func F(a int) error {\n\treturn nil\n}"
+        idx = _signature_cutoff(text)
+        assert idx is not None
+        assert text[: idx + 1] == "func F(a int) error {"
+
+    def test_default_value_with_colon_inside_brackets(self) -> None:
+        text = "def f(a={1: 2}): pass"
+        idx = _signature_cutoff(text)
+        assert idx is not None
+        assert text[: idx + 1] == "def f(a={1: 2}):"
+
+    def test_no_terminator_returns_none(self) -> None:
+        assert _signature_cutoff("def f(a, b") is None
+
+
+class TestSignatureExtractionEndToEnd:
+    def test_indent_chunker_keeps_full_annotated_signature(self) -> None:
+        source = "def f(a: int, b: str) -> None:\n    return None\n"
+        chunks = IndentChunker.chunk(source, "python")
+        assert chunks[0].signature == "def f(a: int, b: str) -> None:"
+
+    @needs_tree_sitter
+    def test_ast_chunker_keeps_full_annotated_signature(self) -> None:
+        source = "def f(a: int, b: str) -> None:\n    return None\n"
+        chunks = ASTChunker.chunk(source, "python")
+        fn = next(c for c in chunks if c.kind == ChunkKind.FUNCTION)
+        assert fn.signature == "def f(a: int, b: str) -> None:"
 
 
 class TestRenderSignature:

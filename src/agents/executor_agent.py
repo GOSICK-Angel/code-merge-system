@@ -440,12 +440,14 @@ class ExecutorAgent(BaseAgent):
             file_diff.file_path,
             diff_ranges,
             budget_tokens // 2,
+            is_security_sensitive=file_diff.is_security_sensitive,
         )
         target_content = builder.build_staged_content(
             target_content,
             file_diff.file_path,
             target_ranges,
             budget_tokens // 2,
+            is_security_sensitive=file_diff.is_security_sensitive,
         )
 
         prompt = build_semantic_merge_prompt(

@@ -207,6 +207,7 @@ class ConflictAnalystAgent(BaseAgent):
                 file_diff.file_path,
                 diff_ranges,
                 content_budget_tokens // 2,
+                is_security_sensitive=file_diff.is_security_sensitive,
             )
         if target_content:
             target_content = builder.build_staged_content(
@@ -214,6 +215,7 @@ class ConflictAnalystAgent(BaseAgent):
                 file_diff.file_path,
                 target_ranges,
                 content_budget_tokens // 2,
+                is_security_sensitive=file_diff.is_security_sensitive,
             )
         if base_content:
             base_content = builder.build_staged_content(
@@ -221,6 +223,7 @@ class ConflictAnalystAgent(BaseAgent):
                 file_diff.file_path,
                 diff_ranges,
                 content_budget_tokens // 4,
+                is_security_sensitive=file_diff.is_security_sensitive,
             )
 
         prompt = build_conflict_analysis_prompt(
