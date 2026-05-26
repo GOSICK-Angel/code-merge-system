@@ -42,11 +42,13 @@ from src.cli.paths import (
 from src.models.config import MergeConfig
 from src.models.setup import (
     ApiKeyHintSource,
+    ModelParams,
     ProviderConfig,
     ProviderName,
     SetupContext,
     SetupPayload,
 )
+from src.web.config_schema import build_config_schema
 
 console = Console()
 
@@ -103,14 +105,6 @@ PROVIDER_RECOMMENDED_MODELS: dict[ProviderName, list[str]] = {
     ],
 }
 
-# Agents whose existing config block carries a stable ``temperature`` —
-# preserved across the new provider/model selection so the resolver
-# doesn't silently drop tuning that lived in the old hardcoded block.
-AGENT_TEMPERATURE: dict[str, float] = {
-    "executor": 0.1,
-    "judge": 0.1,
-}
-
 # UI-side pre-fill hints for the AGENT OVERRIDES table. Maps
 # ``(provider, agent_name)`` to the model the form should pick when
 # pre-populating that row. NOT a runtime fallback — the resolver still
@@ -143,6 +137,32 @@ def _build_recommended_agent_models() -> dict[str, dict[str, str]]:
     for (provider, agent), model in RECOMMENDED_AGENT_MODELS.items():
         out.setdefault(provider, {})[agent] = model
     return out
+
+
+def recommended_model_params(model: str) -> ModelParams:
+    """Recommended per-model LLM tuning, by model-family prefix.
+
+    Mirrors the UI's ``recommendedModelParams`` (``web/src/lib/modelParams.ts``)
+    so a model the user never edited resolves to the same values on both
+    sides. Calibrated for the current Claude / OpenAI families; the UI lets
+    the user override any of these per model. Used only when a model is
+    absent from ``payload.model_params`` (the UI normally sends an explicit
+    entry for every configured model).
+    """
+    m = model.lower()
+    # OpenAI reasoning-class models need a large completion budget.
+    if m.startswith(("gpt-5", "o1", "o3", "o4")):
+        return ModelParams(max_tokens=32768, temperature=0.2, max_retries=3)
+    if "haiku" in m:
+        return ModelParams(max_tokens=4096, temperature=0.2, max_retries=3)
+    # Claude opus/sonnet, gpt-4o, and everything else.
+    return ModelParams(max_tokens=8192, temperature=0.2, max_retries=3)
+
+
+def _params_for(payload: SetupPayload, model: str) -> ModelParams:
+    """Resolve a model's params: the user-supplied entry when present,
+    otherwise the recommended default for that model family."""
+    return payload.model_params.get(model) or recommended_model_params(model)
 
 
 def _auto_detect_fork_ref(repo_path: str) -> str:
@@ -183,12 +203,45 @@ def _build_agents_block(payload: SetupPayload) -> dict[str, dict[str, Any]]:
     default_cfg = (
         payload.anthropic if default_provider == "anthropic" else payload.openai
     )
-    fallback_model = default_cfg.models[0]
-    fallback_block: dict[str, Any] = {
-        "provider": default_provider,
-        "model": fallback_model,
-        "api_key_env": PROVIDER_API_KEY_ENV[default_provider],
-    }
+    default_model = default_cfg.models[0]
+
+    def block_for(prov: ProviderName, model: str) -> dict[str, Any]:
+        # Per-model tuning: every agent (and fallback) on a given model
+        # shares its (max_tokens, temperature, max_retries) — resolved from
+        # the user's model_params, else the recommended default.
+        params = _params_for(payload, model)
+        return {
+            "provider": prov,
+            "model": model,
+            "api_key_env": PROVIDER_API_KEY_ENV[prov],
+            "max_tokens": params.max_tokens,
+            "temperature": params.temperature,
+            "max_retries": params.max_retries,
+        }
+
+    enabled = payload._enabled_providers()
+    cross_provider = len(enabled) >= 2
+
+    # Cross-provider circuit-breaker fallback: with both providers enabled,
+    # every agent falls back to the *other* provider so a single provider
+    # outage (429 storm, downed gateway, deprecated model id) can't stall
+    # the run. Agents on the default provider take the user-selected
+    # ``payload.fallback`` (defaulting to the non-default provider's first
+    # model); agents already on the non-default provider take the reverse
+    # direction back to the default. With one provider enabled there is
+    # nothing to cross-fall to, so we keep the legacy same-provider model
+    # fallback (the only failure a lone provider can recover from).
+    primary_fb: dict[str, Any] | None = None
+    reverse_fb: dict[str, Any] | None = None
+    if cross_provider:
+        other_provider = next(p for p in enabled if p != default_provider)
+        other_cfg = (
+            payload.anthropic if other_provider == "anthropic" else payload.openai
+        )
+        fb_provider = payload.fallback.provider if payload.fallback else other_provider
+        fb_model = payload.fallback.model if payload.fallback else other_cfg.models[0]
+        primary_fb = block_for(fb_provider, fb_model)
+        reverse_fb = block_for(default_provider, default_model)
 
     for entry in AGENT_INVENTORY:
         name = entry["name"]
@@ -198,24 +251,19 @@ def _build_agents_block(payload: SetupPayload) -> dict[str, dict[str, Any]]:
             model = choice.model
         else:
             provider = default_provider
-            model = fallback_model
+            model = default_model
 
-        block: dict[str, Any] = {
-            "provider": provider,
-            "model": model,
-            "api_key_env": PROVIDER_API_KEY_ENV[provider],
-        }
-        if name in AGENT_TEMPERATURE:
-            block["temperature"] = AGENT_TEMPERATURE[name]
-        # Attach a circuit-breaker fallback so BaseAgent can keep the
-        # run alive when this agent's primary (provider, model) starts
-        # failing — e.g. a deprecated model id, a 429 storm, or a
-        # provider outage. Resolves to (default_provider,
-        # default_provider.models[0]). Skip when the primary already
-        # IS the default, since a self-fallback would just retry the
-        # same broken config and add a confusing log line.
-        if (provider, model) != (default_provider, fallback_model):
-            block["fallback"] = dict(fallback_block)
+        block = block_for(provider, model)
+
+        if cross_provider:
+            fb = primary_fb if provider == default_provider else reverse_fb
+            # Never attach a self-pointing fallback (same provider + model),
+            # which would just retry the broken config.
+            if fb is not None and (fb["provider"], fb["model"]) != (provider, model):
+                block["fallback"] = dict(fb)
+        elif (provider, model) != (default_provider, default_model):
+            block["fallback"] = block_for(default_provider, default_model)
+
         out[name] = block
     return out
 
@@ -362,13 +410,42 @@ def apply_setup_payload(payload: SetupPayload, repo_path: str = ".") -> MergeCon
     if payload.github_token:
         config_data["github"] = {"enabled": True, "token_env": "GITHUB_TOKEN"}
 
+    # Comprehensive-editor overrides win over the generated skeleton. They
+    # carry only non-curated keys (the UI excludes provider/agents/core
+    # thresholds), so this never clobbers the curated build above.
+    if payload.config_overrides:
+        config_data = _deep_merge_dicts(config_data, payload.config_overrides)
+
+    # Validate *before* writing so an out-of-range override surfaces as a
+    # ValidationError (→ setup_error in the WS handler) without leaving an
+    # invalid config.yaml on disk.
+    config = MergeConfig.model_validate(config_data)
+
     config_path = get_config_path(repo_path)
     config_path.write_text(
         yaml.dump(config_data, default_flow_style=False, sort_keys=False),
         encoding="utf-8",
     )
 
-    return MergeConfig.model_validate(config_data)
+    return config
+
+
+def load_current_config_values(repo_path: str = ".") -> dict[str, Any]:
+    """Return the current ``.merge/config.yaml`` as a dict (``{}`` when absent
+    or unreadable).
+
+    Feeds the Web UI's comprehensive config editor so it can pre-fill every
+    field with the persisted value, falling back to the schema default for
+    keys the file omits. Best-effort — a malformed file yields ``{}`` rather
+    than aborting the Setup snapshot."""
+    path = get_config_path(repo_path)
+    if not path.exists():
+        return {}
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
 
 
 def detect_setup_context(repo_path: str = ".") -> SetupContext:
@@ -438,6 +515,8 @@ def detect_setup_context(repo_path: str = ".") -> SetupContext:
         forks_profile_threshold=FORKS_PROFILE_INIT_THRESHOLD,
         has_global_env=has_global_env,
         has_project_env=has_project_env,
+        config_schema=build_config_schema().model_dump(mode="json"),
+        config_values=load_current_config_values(repo_path),
     )
 
 

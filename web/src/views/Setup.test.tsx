@@ -17,7 +17,7 @@ import { act, fireEvent, render } from "@testing-library/react";
 import { useRunStore } from "../store/runStore";
 import { Setup } from "./Setup";
 import type { OutboundMessage } from "../ws/messages";
-import type { SetupContext } from "../types/state";
+import type { ConfigFieldNode, SetupContext } from "../types/state";
 
 const sendSpy = vi.fn<(msg: OutboundMessage) => void>();
 
@@ -427,6 +427,234 @@ describe("Setup — flexible providers", () => {
       .toBeTruthy();
   });
 
+  it("ships a cross-provider fallback (other provider's first model) when both enabled", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: { name: "ANTHROPIC_API_KEY", masked: "sk-a", source: "shell" },
+        openai_key_hint: { name: "OPENAI_API_KEY", masked: "sk-o", source: "shell" },
+      },
+    });
+    const { getByText, getByTestId } = renderSetup();
+    // Card visible with the non-default provider pre-selected.
+    expect(getByText(/CROSS-PROVIDER FALLBACK/)).toBeTruthy();
+    expect((getByTestId("fallback_provider") as HTMLSelectElement).value).toBe(
+      "openai",
+    );
+    expect((getByTestId("fallback_model") as HTMLSelectElement).value).toBe(
+      "gpt-5.4",
+    );
+
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+    const msg = sendSpy.mock.calls[0][0];
+    if (msg.type !== "setup.submit") throw new Error("wrong type");
+    expect(msg.payload.fallback).toEqual({ provider: "openai", model: "gpt-5.4" });
+  });
+
+  it("lets the user pick a different fallback model", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: { name: "ANTHROPIC_API_KEY", masked: "sk-a", source: "shell" },
+        openai_key_hint: { name: "OPENAI_API_KEY", masked: "sk-o", source: "shell" },
+      },
+    });
+    const { getByText, getByTestId } = renderSetup();
+    act(() => {
+      fireEvent.change(getByTestId("fallback_model"), {
+        target: { value: "gpt-5.4-mini" },
+      });
+    });
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+    const msg = sendSpy.mock.calls[0][0];
+    if (msg.type !== "setup.submit") throw new Error("wrong type");
+    expect(msg.payload.fallback).toEqual({
+      provider: "openai",
+      model: "gpt-5.4-mini",
+    });
+  });
+
+  it("disabling the fallback toggle sends fallback=null", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: { name: "ANTHROPIC_API_KEY", masked: "sk-a", source: "shell" },
+        openai_key_hint: { name: "OPENAI_API_KEY", masked: "sk-o", source: "shell" },
+      },
+    });
+    const { getByText, getByTestId } = renderSetup();
+    act(() => {
+      fireEvent.click(getByTestId("fallback_enabled")); // toggle OFF
+    });
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+    const msg = sendSpy.mock.calls[0][0];
+    if (msg.type !== "setup.submit") throw new Error("wrong type");
+    expect(msg.payload.fallback).toBeNull();
+  });
+
+  it("flipping the default provider flips the fallback target", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: { name: "ANTHROPIC_API_KEY", masked: "sk-a", source: "shell" },
+        openai_key_hint: { name: "OPENAI_API_KEY", masked: "sk-o", source: "shell" },
+      },
+    });
+    const { getByTestId, container } = renderSetup();
+    // default_provider radios render in [anthropic, openai] order — pick openai.
+    const radios = container.querySelectorAll<HTMLInputElement>(
+      'input[name="default_provider"]',
+    );
+    act(() => {
+      fireEvent.click(radios[1]);
+    });
+    // Fallback now targets the new non-default provider (anthropic).
+    expect((getByTestId("fallback_provider") as HTMLSelectElement).value).toBe(
+      "anthropic",
+    );
+    expect((getByTestId("fallback_model") as HTMLSelectElement).value).toBe(
+      "claude-opus-4-7",
+    );
+  });
+
+  it("omits the fallback card and sends fallback=null with a single provider", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: { name: "ANTHROPIC_API_KEY", masked: "sk-ant", source: "shell" },
+      },
+    });
+    const { getByText, queryByText } = renderSetup();
+    expect(queryByText(/CROSS-PROVIDER FALLBACK/)).toBeNull();
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+    const msg = sendSpy.mock.calls[0][0];
+    if (msg.type !== "setup.submit") throw new Error("wrong type");
+    expect(msg.payload.fallback).toBeNull();
+  });
+
+  it("auto-fills per-model params (recommended defaults) and ships them on submit", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: { name: "ANTHROPIC_API_KEY", masked: "sk-a", source: "shell" },
+        openai_key_hint: { name: "OPENAI_API_KEY", masked: "sk-o", source: "shell" },
+      },
+    });
+    const { getByText, getByTestId } = renderSetup();
+    act(() => {
+      fireEvent.click(getByText(/^› MODEL PARAMETERS/));
+    });
+    // anthropic opus → 8192; openai gpt-5.4 (reasoning) → 32768; haiku → 4096.
+    expect(
+      (getByTestId("mp-claude-opus-4-7-max_tokens") as HTMLInputElement).value,
+    ).toBe("8192");
+    expect((getByTestId("mp-gpt-5.4-max_tokens") as HTMLInputElement).value).toBe(
+      "32768",
+    );
+    expect(
+      (getByTestId("mp-claude-haiku-4-5-20251001-max_tokens") as HTMLInputElement)
+        .value,
+    ).toBe("4096");
+
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+    const msg = sendSpy.mock.calls[0][0];
+    if (msg.type !== "setup.submit") throw new Error("wrong type");
+    expect(msg.payload.model_params["claude-opus-4-7"]).toEqual({
+      max_tokens: 8192,
+      temperature: 0.2,
+      max_retries: 3,
+    });
+    expect(msg.payload.model_params["gpt-5.4"].max_tokens).toBe(32768);
+  });
+
+  it("editing a model's params flows into model_params on submit", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: { name: "ANTHROPIC_API_KEY", masked: "sk-a", source: "shell" },
+      },
+    });
+    const { getByText, getByTestId } = renderSetup();
+    act(() => {
+      fireEvent.click(getByText(/^› MODEL PARAMETERS/));
+    });
+    act(() => {
+      fireEvent.change(getByTestId("mp-claude-opus-4-7-max_tokens"), {
+        target: { value: "12000" },
+      });
+    });
+    act(() => {
+      fireEvent.change(getByTestId("mp-claude-opus-4-7-temperature"), {
+        target: { value: "0.4" },
+      });
+    });
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+    const msg = sendSpy.mock.calls[0][0];
+    if (msg.type !== "setup.submit") throw new Error("wrong type");
+    expect(msg.payload.model_params["claude-opus-4-7"]).toEqual({
+      max_tokens: 12000,
+      temperature: 0.4,
+      max_retries: 3,
+    });
+  });
+
+  it("blocks submit on an out-of-range model param", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: { name: "ANTHROPIC_API_KEY", masked: "sk-a", source: "shell" },
+      },
+    });
+    const { getByText, getByTestId } = renderSetup();
+    act(() => {
+      fireEvent.click(getByText(/^› MODEL PARAMETERS/));
+    });
+    act(() => {
+      fireEvent.change(getByTestId("mp-claude-opus-4-7-max_tokens"), {
+        target: { value: "10" }, // below 512
+      });
+    });
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(getByText(/max_tokens must be between 512 and 200000/)).toBeTruthy();
+  });
+
+  it("removing a model from the provider textarea drops its param row", () => {
+    useRunStore.setState({
+      setupContext: {
+        ...baseContext,
+        anthropic_key_hint: { name: "ANTHROPIC_API_KEY", masked: "sk-a", source: "shell" },
+      },
+    });
+    const { getByText, getByTestId, queryByTestId } = renderSetup();
+    act(() => {
+      fireEvent.click(getByText(/^› MODEL PARAMETERS/));
+    });
+    expect(queryByTestId("model-param-claude-opus-4-7")).toBeTruthy();
+    // Drop opus from the Anthropic models textarea.
+    act(() => {
+      fireEvent.change(getByTestId("anthropic_models"), {
+        target: { value: "claude-haiku-4-5-20251001" },
+      });
+    });
+    expect(queryByTestId("model-param-claude-opus-4-7")).toBeNull();
+    expect(queryByTestId("model-param-claude-haiku-4-5-20251001")).toBeTruthy();
+  });
+
   it("test-connection button sends setup.test_connection and renders per-model results", () => {
     useRunStore.setState({
       setupContext: {
@@ -504,5 +732,355 @@ describe("Setup — flexible providers", () => {
     const { getByText } = renderSetup();
     expect(getByText(/CONFIG SAVED/)).toBeTruthy();
     expect(getByText(/\/tmp\/repo\/.merge\/config\.yaml/)).toBeTruthy();
+  });
+});
+
+// ---- Schema-driven FULL CONFIGURATION (Web config UI Phase 1 + 2) ---------
+
+function cfgLeaf(
+  name: string,
+  path: string,
+  kind: ConfigFieldNode["kind"],
+  def: unknown,
+): ConfigFieldNode {
+  return {
+    name,
+    path,
+    kind,
+    default: def,
+    description: null,
+    required: false,
+    curated: false,
+    enum: null,
+    minimum: null,
+    maximum: null,
+    children: [],
+  };
+}
+
+const schemaFixture: ConfigFieldNode = {
+  name: "",
+  path: "",
+  kind: "object",
+  default: null,
+  description: null,
+  required: false,
+  curated: false,
+  enum: null,
+  minimum: null,
+  maximum: null,
+  children: [
+    cfgLeaf("max_files_per_run", "max_files_per_run", "int", 500),
+    cfgLeaf("customizations", "customizations", "yaml", []),
+  ],
+};
+
+function contextWithSchema(): SetupContext {
+  return {
+    ...baseContext,
+    anthropic_key_hint: {
+      name: "ANTHROPIC_API_KEY",
+      masked: "sk-ant-****",
+      source: "shell",
+    },
+    config_schema: schemaFixture,
+    config_values: {},
+  };
+}
+
+describe("Setup — FULL CONFIGURATION schema editor", () => {
+  it("scalar + YAML edits flow into config_overrides on submit", () => {
+    useRunStore.setState({ setupContext: contextWithSchema() });
+    const { getByText, getByTestId } = renderSetup();
+
+    act(() => {
+      fireEvent.click(getByText(/FULL CONFIGURATION/));
+    });
+    act(() => {
+      fireEvent.change(getByTestId("cfg-max_files_per_run"), {
+        target: { value: "42" },
+      });
+    });
+    act(() => {
+      fireEvent.change(getByTestId("yaml-customizations"), {
+        target: { value: "- name: t1" },
+      });
+    });
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const msg = sendSpy.mock.calls[0][0];
+    if (msg.type !== "setup.submit") throw new Error("wrong type");
+    expect(msg.payload.config_overrides).toEqual({
+      max_files_per_run: 42,
+      customizations: [{ name: "t1" }],
+    });
+  });
+
+  it("blocks submit on invalid YAML and reports the offending path", () => {
+    useRunStore.setState({ setupContext: contextWithSchema() });
+    const { getByText, getByTestId } = renderSetup();
+
+    act(() => {
+      fireEvent.click(getByText(/FULL CONFIGURATION/));
+    });
+    act(() => {
+      fireEvent.change(getByTestId("yaml-customizations"), {
+        target: { value: "key: [unclosed" },
+      });
+    });
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(getByText(/Fix invalid YAML/)).toBeTruthy();
+  });
+
+  it("search filters the field list", () => {
+    useRunStore.setState({ setupContext: contextWithSchema() });
+    const { getByText, getByTestId, queryByTestId } = renderSetup();
+
+    act(() => {
+      fireEvent.click(getByText(/FULL CONFIGURATION/));
+    });
+    expect(queryByTestId("cfg-max_files_per_run")).toBeTruthy();
+    act(() => {
+      fireEvent.change(getByTestId("config-search"), {
+        target: { value: "customizations" },
+      });
+    });
+    // The non-matching scalar is filtered out; the matching yaml stays.
+    expect(queryByTestId("cfg-max_files_per_run")).toBeNull();
+    expect(queryByTestId("yaml-customizations")).toBeTruthy();
+  });
+
+  it("a modified field shows a reset control that restores the default", () => {
+    useRunStore.setState({ setupContext: contextWithSchema() });
+    const { getByText, getByTestId, queryByText } = renderSetup();
+
+    act(() => {
+      fireEvent.click(getByText(/FULL CONFIGURATION/));
+    });
+    // Default 500 → not modified → no reset affordance yet.
+    expect(queryByText(/reset all/i)).toBeNull();
+    act(() => {
+      fireEvent.change(getByTestId("cfg-max_files_per_run"), {
+        target: { value: "7" },
+      });
+    });
+    expect(getByText(/1 modified/)).toBeTruthy();
+    act(() => {
+      fireEvent.click(getByText(/reset all/i));
+    });
+    expect((getByTestId("cfg-max_files_per_run") as HTMLInputElement).value).toBe(
+      "500",
+    );
+  });
+});
+
+// ---- FULL CONFIGURATION llm-block provider/model coupling -----------------
+
+function llmLeaf(
+  name: string,
+  path: string,
+  kind: ConfigFieldNode["kind"],
+  def: unknown,
+  enumVals: string[] | null = null,
+): ConfigFieldNode {
+  return {
+    name,
+    path,
+    kind,
+    default: def,
+    description: null,
+    required: false,
+    curated: false,
+    enum: enumVals,
+    minimum: null,
+    maximum: null,
+    children: [],
+  };
+}
+
+// Mirrors the LLMConfig subtree of the real schema (the only non-curated
+// model fields). provider is an enum, model/fallback_model are str leaves
+// the UI upgrades to provider-coupled dropdowns.
+const llmSchemaFixture: ConfigFieldNode = {
+  name: "",
+  path: "",
+  kind: "object",
+  default: null,
+  description: null,
+  required: false,
+  curated: false,
+  enum: null,
+  minimum: null,
+  maximum: null,
+  children: [
+    {
+      name: "llm",
+      path: "llm",
+      kind: "object",
+      default: null,
+      description: null,
+      required: false,
+      curated: false,
+      enum: null,
+      minimum: null,
+      maximum: null,
+      children: [
+        llmLeaf("provider", "llm.provider", "enum", "anthropic", [
+          "anthropic",
+          "openai",
+        ]),
+        llmLeaf("model", "llm.model", "str", "claude-opus-4-6"),
+        llmLeaf("fallback_model", "llm.fallback_model", "str", null),
+      ],
+    },
+  ],
+};
+
+function contextWithLlmSchema(): SetupContext {
+  return {
+    ...baseContext,
+    // Both providers on disk → both enabled, so the provider picker can
+    // offer a switch target.
+    anthropic_key_hint: {
+      name: "ANTHROPIC_API_KEY",
+      masked: "sk-ant-****",
+      source: "shell",
+    },
+    openai_key_hint: {
+      name: "OPENAI_API_KEY",
+      masked: "sk-oai-****",
+      source: "shell",
+    },
+    config_schema: llmSchemaFixture,
+    config_values: {},
+  };
+}
+
+describe("Setup — FULL CONFIGURATION llm provider/model coupling", () => {
+  function openLlmSection(getByText: ReturnType<typeof renderSetup>["getByText"], getByTestId: ReturnType<typeof renderSetup>["getByTestId"]) {
+    act(() => {
+      fireEvent.click(getByText(/FULL CONFIGURATION/));
+    });
+    // Searching expands every matching group (forceOpen) so the llm
+    // leaves render without hunting for the collapse toggle.
+    act(() => {
+      fireEvent.change(getByTestId("config-search"), {
+        target: { value: "llm" },
+      });
+    });
+  }
+
+  it("renders llm.model / fallback_model as dropdowns sourced from the configured models", () => {
+    useRunStore.setState({ setupContext: contextWithLlmSchema() });
+    const { getByText, getByTestId } = renderSetup();
+    openLlmSection(getByText, getByTestId);
+
+    const modelSel = getByTestId("cfg-llm.model") as HTMLSelectElement;
+    expect(modelSel.tagName).toBe("SELECT");
+    const modelOpts = Array.from(modelSel.options).map((o) => o.value);
+    // anthropic catalogue from provider_recommended_models
+    expect(modelOpts).toContain("claude-opus-4-7");
+    expect(modelOpts).toContain("claude-haiku-4-5-20251001");
+    // schema default ("claude-opus-4-6") is not in the list → kept as a
+    // stale option rather than silently dropped.
+    expect(modelOpts).toContain("claude-opus-4-6");
+
+    // fallback_model is CROSS-provider: it lists models from every enabled
+    // provider (so a fallback can target a different provider than the
+    // primary), plus the (none) option.
+    const fbSel = getByTestId("cfg-llm.fallback_model") as HTMLSelectElement;
+    expect(fbSel.tagName).toBe("SELECT");
+    const fbOpts = Array.from(fbSel.options).map((o) => o.value);
+    expect(fbOpts).toContain(""); // (none) — fallback is optional
+    expect(fbOpts).toContain("claude-opus-4-7"); // anthropic
+    expect(fbOpts).toContain("gpt-5.4"); // openai — cross-provider
+    expect(fbOpts).toContain("gpt-5.4-mini");
+  });
+
+  it("provider picker is limited to enabled providers; switching it re-snaps model but leaves the cross-provider fallback", () => {
+    useRunStore.setState({ setupContext: contextWithLlmSchema() });
+    const { getByText, getByTestId } = renderSetup();
+    openLlmSection(getByText, getByTestId);
+
+    const providerSel = getByTestId("cfg-llm.provider") as HTMLSelectElement;
+    expect(providerSel.tagName).toBe("SELECT");
+    expect(Array.from(providerSel.options).map((o) => o.value).sort()).toEqual([
+      "anthropic",
+      "openai",
+    ]);
+
+    // Pin a cross-provider fallback (openai) while the primary is anthropic.
+    act(() => {
+      fireEvent.change(getByTestId("cfg-llm.fallback_model"), {
+        target: { value: "gpt-5.4" },
+      });
+    });
+
+    act(() => {
+      fireEvent.change(providerSel, { target: { value: "openai" } });
+    });
+
+    // Primary model snapped to the first openai model; options now openai's.
+    const modelSel = getByTestId("cfg-llm.model") as HTMLSelectElement;
+    expect(modelSel.value).toBe("gpt-5.4");
+    const modelOpts = Array.from(modelSel.options).map((o) => o.value);
+    expect(modelOpts).toContain("gpt-5.4");
+    expect(modelOpts).toContain("gpt-5.4-mini");
+    // Cross-provider fallback is independent of the primary provider, so the
+    // switch must NOT clear or re-snap it.
+    expect((getByTestId("cfg-llm.fallback_model") as HTMLSelectElement).value).toBe(
+      "gpt-5.4",
+    );
+  });
+
+  it("editing the model picker flows into config_overrides on submit", () => {
+    useRunStore.setState({ setupContext: contextWithLlmSchema() });
+    const { getByText, getByTestId } = renderSetup();
+    openLlmSection(getByText, getByTestId);
+
+    act(() => {
+      fireEvent.change(getByTestId("cfg-llm.model"), {
+        target: { value: "claude-haiku-4-5-20251001" },
+      });
+    });
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    const msg = sendSpy.mock.calls[0][0];
+    if (msg.type !== "setup.submit") throw new Error("wrong type");
+    expect(
+      (msg.payload.config_overrides.llm as Record<string, unknown>).model,
+    ).toBe("claude-haiku-4-5-20251001");
+  });
+
+  it("a cross-provider fallback selection flows into config_overrides", () => {
+    useRunStore.setState({ setupContext: contextWithLlmSchema() });
+    const { getByText, getByTestId } = renderSetup();
+    openLlmSection(getByText, getByTestId);
+
+    // Primary provider is anthropic; pick an openai model as the fallback.
+    act(() => {
+      fireEvent.change(getByTestId("cfg-llm.fallback_model"), {
+        target: { value: "gpt-5.4-mini" },
+      });
+    });
+    act(() => {
+      fireEvent.click(getByText(/SAVE & START/));
+    });
+
+    const msg = sendSpy.mock.calls[0][0];
+    if (msg.type !== "setup.submit") throw new Error("wrong type");
+    expect(
+      (msg.payload.config_overrides.llm as Record<string, unknown>).fallback_model,
+    ).toBe("gpt-5.4-mini");
   });
 });

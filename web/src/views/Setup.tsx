@@ -9,7 +9,25 @@ import {
   type MutableRefObject,
 } from "react";
 import { Card, Pill } from "../components/brutalist";
+import { SchemaForm } from "../components/SchemaForm";
+import {
+  modelParamsFromAgents,
+  reconcileModelParams,
+  type ModelParamsForm,
+} from "../lib/modelParams";
 import { useSetup } from "../ws/useSetup";
+import {
+  buildConfigOverrides,
+  cascadeModelPickerChange,
+  defaultFlatValues,
+  filterTree,
+  initFlatValues,
+  modifiedPaths,
+  yamlErrors,
+  type FlatValues,
+  type FormLeafValue,
+  type ProviderModels,
+} from "../lib/configForm";
 import type { SetupTestState } from "../store/runStore";
 import type { WsClient } from "../ws/client";
 import type {
@@ -52,6 +70,15 @@ interface FormState {
   github_token: string;
   default_provider: ProviderName | "";
   agents: Record<string, AgentRowState>;
+  // Cross-provider circuit-breaker fallback. Only meaningful when both
+  // providers are enabled; ``fallback_provider`` is the non-default
+  // provider agents fall over to, ``fallback_model`` one of its models.
+  fallback_enabled: boolean;
+  fallback_provider: ProviderName | "";
+  fallback_model: string;
+  // Per-model tuning keyed by model name (raw input strings). Agents inherit
+  // the params of the model they run.
+  model_params: Record<string, ModelParamsForm>;
   threshold_auto: string;
   threshold_low: string;
   threshold_high: string;
@@ -60,6 +87,9 @@ interface FormState {
   dry_run: boolean;
   workflow: string;
   init_forks_profile: boolean;
+  // Flat path→value map for the schema-driven comprehensive editor. Empty
+  // when the snapshot carried no config_schema.
+  config_flat: FlatValues;
 }
 
 const WORKFLOW_OPTIONS = [
@@ -128,6 +158,39 @@ function recommendedModelFor(
   const recommended = ctx.recommended_agent_models?.[provider]?.[agentName];
   if (recommended && availableModels.includes(recommended)) return recommended;
   return availableModels[0] ?? "";
+}
+
+/** Derive a valid cross-provider fallback selection for the current form.
+ * Cross-provider fallback only exists when *both* providers are enabled (a
+ * lone provider has nothing to fall over to). It targets the non-default
+ * provider; the model defaults to that provider's first configured model,
+ * preserving a still-valid user pick. Auto-enables the first time it
+ * becomes available, otherwise keeps the user's toggle. */
+function reconcileFallback(
+  form: FormState,
+): Pick<FormState, "fallback_enabled" | "fallback_provider" | "fallback_model"> {
+  const bothEnabled = form.anthropic.enabled && form.openai.enabled;
+  if (!bothEnabled || form.default_provider === "") {
+    return { fallback_enabled: false, fallback_provider: "", fallback_model: "" };
+  }
+  const other: ProviderName =
+    form.default_provider === "anthropic" ? "openai" : "anthropic";
+  const otherModels = parseModels(
+    other === "anthropic" ? form.anthropic.models_text : form.openai.models_text,
+  );
+  if (otherModels.length === 0) {
+    return { fallback_enabled: false, fallback_provider: "", fallback_model: "" };
+  }
+  const keepModel =
+    form.fallback_provider === other && otherModels.includes(form.fallback_model)
+      ? form.fallback_model
+      : otherModels[0];
+  const wasUnavailable = form.fallback_provider === "";
+  return {
+    fallback_enabled: wasUnavailable ? true : form.fallback_enabled,
+    fallback_provider: other,
+    fallback_model: keepModel,
+  };
 }
 
 
@@ -246,6 +309,36 @@ function deriveDefaults(ctx: SetupContext): FormState {
     }
   }
 
+  // Cross-provider fallback defaults: when both providers are enabled,
+  // fall the default-provider agents over to the other provider's first
+  // model. Single-provider setups leave it disabled.
+  let fallbackEnabled = false;
+  let fallbackProvider: ProviderName | "" = "";
+  let fallbackModel = "";
+  if (anthropic.enabled && openai.enabled && defaultProvider !== "") {
+    const other: ProviderName =
+      defaultProvider === "anthropic" ? "openai" : "anthropic";
+    const otherModels = other === "anthropic" ? anthropicModels : openaiModels;
+    if (otherModels.length > 0) {
+      fallbackEnabled = true;
+      fallbackProvider = other;
+      fallbackModel = otherModels[0];
+    }
+  }
+
+  // Per-model params: seed from the existing config's agents (reconfigure
+  // round-trip), then reconcile against the configured (enabled) models so
+  // every model has a row with recommended defaults where none existed.
+  const configuredModels = [
+    ...(anthropic.enabled ? anthropicModels : []),
+    ...(openai.enabled ? openaiModels : []),
+  ];
+  const paramsSeed =
+    summary.agents && typeof summary.agents === "object"
+      ? modelParamsFromAgents(summary.agents as Record<string, unknown>)
+      : {};
+  const model_params = reconcileModelParams(configuredModels, paramsSeed);
+
   return {
     target_branch: target,
     fork_ref: fork,
@@ -255,6 +348,10 @@ function deriveDefaults(ctx: SetupContext): FormState {
     github_token: "",
     default_provider: defaultProvider,
     agents,
+    fallback_enabled: fallbackEnabled,
+    fallback_provider: fallbackProvider,
+    fallback_model: fallbackModel,
+    model_params,
     threshold_auto:
       thresholds.auto_merge_confidence === undefined
         ? ""
@@ -275,6 +372,9 @@ function deriveDefaults(ctx: SetupContext): FormState {
     dry_run: false,
     workflow: "",
     init_forks_profile: false,
+    config_flat: ctx.config_schema
+      ? initFlatValues(ctx.config_schema, ctx.config_values ?? {})
+      : {},
   };
 }
 
@@ -314,7 +414,7 @@ function parseModels(text: string): string[] {
   return out;
 }
 
-function buildPayload(form: FormState): SetupPayload {
+function buildPayload(form: FormState, ctx: SetupContext): SetupPayload {
   // Every agent ships with an explicit (provider, model) — there's no
   // "inherit" path on the wire any more. The backend resolver still
   // accepts a missing agent and falls back to default_provider for
@@ -324,6 +424,9 @@ function buildPayload(form: FormState): SetupPayload {
     if (!row.model) continue; // defensive: don't ship rows with empty model
     agent_choices[name] = { provider: row.provider, model: row.model };
   }
+  const config_overrides = ctx.config_schema
+    ? buildConfigOverrides(ctx.config_schema, form.config_flat, ctx.config_values ?? {})
+    : {};
   return {
     target_branch: form.target_branch.trim(),
     fork_ref: form.fork_ref.trim(),
@@ -344,12 +447,29 @@ function buildPayload(form: FormState): SetupPayload {
     default_provider:
       form.default_provider === "" ? null : form.default_provider,
     agent_choices,
+    fallback:
+      form.fallback_enabled &&
+      form.fallback_provider !== "" &&
+      form.fallback_model
+        ? { provider: form.fallback_provider, model: form.fallback_model }
+        : null,
+    model_params: Object.fromEntries(
+      Object.entries(form.model_params).map(([model, p]) => [
+        model,
+        {
+          max_tokens: parseInt(p.max_tokens, 10),
+          temperature: Number(p.temperature),
+          max_retries: parseInt(p.max_retries, 10),
+        },
+      ]),
+    ),
     thresholds: buildThresholds(form),
     llm_assist_mode: form.llm_assist_mode,
     request_timeout_seconds: parseTimeout(form.request_timeout_seconds),
     dry_run: form.dry_run,
     workflow: form.workflow.trim() === "" ? null : form.workflow,
     init_forks_profile: form.init_forks_profile,
+    config_overrides,
   };
 }
 
@@ -415,6 +535,29 @@ function validate(form: FormState, ctx: SetupContext): string | null {
     const available = modelsFor(form, row.provider);
     if (!row.model || !available.includes(row.model)) {
       return `Agent "${name}" must pick a model from ${row.provider}.models.`;
+    }
+  }
+  if (form.fallback_enabled && form.fallback_provider !== "") {
+    if (!enabledList.includes(form.fallback_provider)) {
+      return `Fallback provider "${form.fallback_provider}" is not enabled.`;
+    }
+    const fbModels = modelsFor(form, form.fallback_provider);
+    if (!form.fallback_model || !fbModels.includes(form.fallback_model)) {
+      return `Fallback model must be one of ${form.fallback_provider}.models.`;
+    }
+  }
+  for (const [model, p] of Object.entries(form.model_params)) {
+    const mt = parseInt(p.max_tokens, 10);
+    if (!Number.isFinite(mt) || mt < 512 || mt > 200000) {
+      return `model "${model}": max_tokens must be between 512 and 200000`;
+    }
+    const tmp = Number(p.temperature);
+    if (!Number.isFinite(tmp) || tmp < 0 || tmp > 1) {
+      return `model "${model}": temperature must be between 0.0 and 1.0`;
+    }
+    const mr = parseInt(p.max_retries, 10);
+    if (!Number.isFinite(mr) || mr < 1) {
+      return `model "${model}": max_retries must be ≥ 1`;
     }
   }
   for (const [key, raw] of [
@@ -643,6 +786,9 @@ export function Setup({ clientRef }: Props): JSX.Element {
   const [form, setForm] = useState<FormState | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [agentsOpen, setAgentsOpen] = useState(false);
+  const [modelParamsOpen, setModelParamsOpen] = useState(false);
+  const [fullConfigOpen, setFullConfigOpen] = useState(false);
+  const [configSearch, setConfigSearch] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -729,11 +875,81 @@ export function Setup({ clientRef }: Props): JSX.Element {
           }
           if (touched) merged.agents = fixed;
         }
+        // Keep the cross-provider fallback valid after the provider /
+        // model / default changes above (it depends on all three).
+        const fb = reconcileFallback(merged);
+        merged.fallback_enabled = fb.fallback_enabled;
+        merged.fallback_provider = fb.fallback_provider;
+        merged.fallback_model = fb.fallback_model;
+        // Keep the per-model param rows in sync with the configured models:
+        // new models get recommended defaults, removed ones drop out, edits
+        // to surviving models are preserved.
+        const configuredModels = [
+          ...(merged.anthropic.enabled
+            ? parseModels(merged.anthropic.models_text)
+            : []),
+          ...(merged.openai.enabled
+            ? parseModels(merged.openai.models_text)
+            : []),
+        ];
+        merged.model_params = reconcileModelParams(
+          configuredModels,
+          merged.model_params,
+        );
         return merged;
       });
     },
     [context],
   );
+
+  // Default-provider radio handler — also reconciles the fallback, whose
+  // target is "the provider that isn't the default".
+  const updateDefaultProvider = useCallback((p: ProviderName) => {
+    setForm((prev) => {
+      if (!prev) return prev;
+      const merged: FormState = { ...prev, default_provider: p };
+      return { ...merged, ...reconcileFallback(merged) };
+    });
+  }, []);
+
+  const updateFallbackProvider = useCallback((p: ProviderName) => {
+    setForm((prev) => {
+      if (!prev) return prev;
+      const models = parseModels(
+        p === "anthropic" ? prev.anthropic.models_text : prev.openai.models_text,
+      );
+      return { ...prev, fallback_provider: p, fallback_model: models[0] ?? "" };
+    });
+  }, []);
+
+  const updateModelParam = useCallback(
+    (model: string, field: keyof ModelParamsForm, value: string) => {
+      setForm((prev) =>
+        prev
+          ? {
+              ...prev,
+              model_params: {
+                ...prev.model_params,
+                [model]: { ...prev.model_params[model], [field]: value },
+              },
+            }
+          : prev,
+      );
+    },
+    [],
+  );
+
+  const resetModelParams = useCallback(() => {
+    setForm((prev) => {
+      if (!prev) return prev;
+      const configuredModels = [
+        ...(prev.anthropic.enabled ? parseModels(prev.anthropic.models_text) : []),
+        ...(prev.openai.enabled ? parseModels(prev.openai.models_text) : []),
+      ];
+      // Drop edits by reconciling against an empty map → recommended defaults.
+      return { ...prev, model_params: reconcileModelParams(configuredModels, {}) };
+    });
+  }, []);
 
   // Re-derive every agent row from current providers / default — used
   // by the AGENT OVERRIDES "RESET TO DEFAULTS" button so the user can
@@ -767,6 +983,30 @@ export function Setup({ clientRef }: Props): JSX.Element {
     );
   }, []);
 
+  const updateConfigLeaf = useCallback((path: string, value: FormLeafValue) => {
+    setForm((prev) => {
+      if (!prev) return prev;
+      const nextFlat = { ...prev.config_flat, [path]: value };
+      // Switching a provider leaf re-snaps the model pickers that read it
+      // (e.g. llm.provider → llm.model / llm.fallback_model) so they never
+      // point at the previous provider's catalogue.
+      const providerModels: ProviderModels = {
+        anthropic: parseModels(prev.anthropic.models_text),
+        openai: parseModels(prev.openai.models_text),
+      };
+      const cascade = cascadeModelPickerChange(path, nextFlat, providerModels);
+      return { ...prev, config_flat: { ...nextFlat, ...cascade } };
+    });
+  }, []);
+
+  const resetConfigToDefaults = useCallback(() => {
+    const schema = context?.config_schema;
+    if (!schema) return;
+    setForm((prev) =>
+      prev ? { ...prev, config_flat: defaultFlatValues(schema) } : prev,
+    );
+  }, [context]);
+
   const handleSubmit = useCallback(
     (e: FormEvent<HTMLFormElement>) => {
       e.preventDefault();
@@ -776,8 +1016,19 @@ export function Setup({ clientRef }: Props): JSX.Element {
         setLocalError(validationError);
         return;
       }
+      const yErrors = context.config_schema
+        ? yamlErrors(context.config_schema, form.config_flat)
+        : {};
+      const badPaths = Object.keys(yErrors);
+      if (badPaths.length > 0) {
+        setFullConfigOpen(true);
+        setLocalError(
+          `Fix invalid YAML in FULL CONFIGURATION: ${badPaths.join(", ")}`,
+        );
+        return;
+      }
       setLocalError(null);
-      submit(buildPayload(form));
+      submit(buildPayload(form, context));
     },
     [context, form, submit],
   );
@@ -787,6 +1038,41 @@ export function Setup({ clientRef }: Props): JSX.Element {
       !!context &&
       context.fork_divergence_count >= context.forks_profile_threshold,
     [context],
+  );
+
+  const configErrors = useMemo(
+    () =>
+      context?.config_schema && form
+        ? yamlErrors(context.config_schema, form.config_flat)
+        : {},
+    [context, form],
+  );
+
+  const filteredSchema = useMemo(
+    () =>
+      context?.config_schema
+        ? filterTree(context.config_schema, configSearch)
+        : null,
+    [context, configSearch],
+  );
+
+  const modifiedCount = useMemo(
+    () =>
+      context?.config_schema && form
+        ? modifiedPaths(context.config_schema, form.config_flat).length
+        : 0,
+    [context, form],
+  );
+
+  // Provider → models for the FULL CONFIGURATION model-picker dropdowns,
+  // parsed live from the provider textareas so editing a models list
+  // immediately reshapes the llm.model / llm.fallback_model options.
+  const configProviderModels = useMemo<ProviderModels>(
+    () => ({
+      anthropic: form ? parseModels(form.anthropic.models_text) : [],
+      openai: form ? parseModels(form.openai.models_text) : [],
+    }),
+    [form],
   );
 
   if (!context || !form) {
@@ -967,12 +1253,83 @@ export function Setup({ clientRef }: Props): JSX.Element {
                   type="radio"
                   name="default_provider"
                   checked={form.default_provider === p}
-                  onChange={() => updateField("default_provider", p)}
+                  onChange={() => updateDefaultProvider(p)}
                 />
                 {PROVIDER_LABEL[p]}
               </label>
             ))}
           </div>
+        </Card>
+      )}
+
+      {needsDefaultPick && form.fallback_provider !== "" && (
+        <Card
+          title="› CROSS-PROVIDER FALLBACK"
+          hint="circuit-breaker safety net for a provider outage"
+        >
+          <label
+            style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}
+          >
+            <input
+              type="checkbox"
+              data-testid="fallback_enabled"
+              checked={form.fallback_enabled}
+              onChange={(e) => updateField("fallback_enabled", e.target.checked)}
+            />
+            fall agents over to the other provider when their primary keeps
+            failing
+          </label>
+          {form.fallback_enabled && (
+            <div style={{ ...rowStyle, marginTop: 12 }}>
+              <div>
+                <label style={labelStyle} htmlFor="fallback_provider">
+                  fallback provider
+                </label>
+                <select
+                  id="fallback_provider"
+                  data-testid="fallback_provider"
+                  style={inputStyle}
+                  value={form.fallback_provider}
+                  onChange={(e) =>
+                    updateFallbackProvider(e.target.value as ProviderName)
+                  }
+                >
+                  {enabledProviders.map((p) => (
+                    <option key={p} value={p}>
+                      {PROVIDER_LABEL[p]}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label style={labelStyle} htmlFor="fallback_model">
+                  fallback model
+                </label>
+                <select
+                  id="fallback_model"
+                  data-testid="fallback_model"
+                  style={inputStyle}
+                  value={form.fallback_model}
+                  onChange={(e) =>
+                    updateField("fallback_model", e.target.value)
+                  }
+                >
+                  {modelsFor(form, form.fallback_provider).map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
+          {form.fallback_enabled && (
+            <div className="dim" style={{ fontSize: 10, marginTop: 8 }}>
+              Agents on {form.default_provider} fall back to{" "}
+              {form.fallback_provider}; agents on {form.fallback_provider} fall
+              back to {form.default_provider} automatically.
+            </div>
+          )}
         </Card>
       )}
 
@@ -1079,6 +1436,109 @@ export function Setup({ clientRef }: Props): JSX.Element {
                 </div>
               );
             })}
+          </div>
+        )}
+      </Card>
+
+      <Card
+        title={
+          <span
+            style={{ cursor: "pointer" }}
+            onClick={() => setModelParamsOpen((v) => !v)}
+          >
+            › MODEL PARAMETERS {modelParamsOpen ? "▾" : "▸"}
+          </span>
+        }
+        hint={
+          modelParamsOpen ? (
+            <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>per-model max_tokens / temperature / max_retries</span>
+              <button
+                type="button"
+                className="btn ghost"
+                style={{ fontSize: 9, padding: "2px 6px" }}
+                onClick={resetModelParams}
+                disabled={submitting}
+                title="restore every model to its recommended defaults"
+              >
+                reset to recommended
+              </button>
+            </span>
+          ) : (
+            "agents inherit the params of the model they run"
+          )
+        }
+      >
+        {modelParamsOpen && (
+          <div
+            style={{ display: "flex", flexDirection: "column", gap: 8 }}
+            data-testid="model-parameters"
+          >
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 90px 90px 70px",
+                gap: 10,
+                ...labelStyle,
+                marginBottom: 0,
+              }}
+            >
+              <span>model</span>
+              <span>max_tokens</span>
+              <span>temperature</span>
+              <span>retries</span>
+            </div>
+            {Object.keys(form.model_params).length === 0 && (
+              <div className="dim" style={{ fontSize: 11 }}>
+                configure provider models above to tune them here
+              </div>
+            )}
+            {Object.entries(form.model_params).map(([model, p]) => (
+              <div
+                key={model}
+                data-testid={`model-param-${model}`}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 90px 90px 70px",
+                  gap: 10,
+                  alignItems: "center",
+                }}
+              >
+                <span style={{ fontFamily: "var(--mono)", fontSize: 11 }}>
+                  {model}
+                </span>
+                <input
+                  data-testid={`mp-${model}-max_tokens`}
+                  style={inputStyle}
+                  type="number"
+                  step={1}
+                  value={p.max_tokens}
+                  onChange={(e) =>
+                    updateModelParam(model, "max_tokens", e.target.value)
+                  }
+                />
+                <input
+                  data-testid={`mp-${model}-temperature`}
+                  style={inputStyle}
+                  type="number"
+                  step={0.05}
+                  value={p.temperature}
+                  onChange={(e) =>
+                    updateModelParam(model, "temperature", e.target.value)
+                  }
+                />
+                <input
+                  data-testid={`mp-${model}-max_retries`}
+                  style={inputStyle}
+                  type="number"
+                  step={1}
+                  value={p.max_retries}
+                  onChange={(e) =>
+                    updateModelParam(model, "max_retries", e.target.value)
+                  }
+                />
+              </div>
+            ))}
           </div>
         )}
       </Card>
@@ -1243,6 +1703,67 @@ export function Setup({ clientRef }: Props): JSX.Element {
           </div>
         )}
       </Card>
+
+      {context.config_schema && (
+        <Card
+          title={
+            <span
+              style={{ cursor: "pointer" }}
+              onClick={() => setFullConfigOpen((v) => !v)}
+            >
+              › FULL CONFIGURATION {fullConfigOpen ? "▾" : "▸"}
+            </span>
+          }
+          hint={
+            fullConfigOpen ? (
+              <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span>{modifiedCount > 0 ? `${modifiedCount} modified` : "all defaults"}</span>
+                {modifiedCount > 0 && (
+                  <button
+                    type="button"
+                    className="btn ghost"
+                    style={{ fontSize: 9, padding: "2px 6px" }}
+                    onClick={resetConfigToDefaults}
+                    disabled={submitting}
+                    title="reset every field back to its default"
+                  >
+                    reset all
+                  </button>
+                )}
+              </span>
+            ) : (
+              "click to expand — no need to edit config.yaml by hand"
+            )
+          }
+        >
+          {fullConfigOpen && (
+            <div data-testid="full-config">
+              <input
+                data-testid="config-search"
+                style={{ ...inputStyle, marginBottom: 12 }}
+                value={configSearch}
+                onChange={(e) => setConfigSearch(e.target.value)}
+                placeholder="🔍 filter options by name or description…"
+              />
+              {filteredSchema && filteredSchema.children.length > 0 ? (
+                <SchemaForm
+                  nodes={filteredSchema.children}
+                  flat={form.config_flat}
+                  onChange={updateConfigLeaf}
+                  errors={configErrors}
+                  forceOpen={configSearch.trim() !== ""}
+                  providerModels={configProviderModels}
+                  enabledProviders={enabledProviders}
+                />
+              ) : (
+                <div className="dim" style={{ fontSize: 11 }}>
+                  no options match “{configSearch}”
+                </div>
+              )}
+            </div>
+          )}
+        </Card>
+      )}
 
       {(localError || error) && (
         <Card title="› ERROR" accent={false}>

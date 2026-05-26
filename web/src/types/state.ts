@@ -439,9 +439,47 @@ export interface AgentChoice {
   model: string;
 }
 
+// Per-model LLM tuning. Mirror of src/models/setup.py::ModelParams. Each
+// agent inherits the params of the model it is assigned.
+export interface ModelParams {
+  max_tokens: number;
+  temperature: number;
+  max_retries: number;
+}
+
 export interface AgentInventoryEntry {
   name: string;
   blurb: string;
+}
+
+// ---- Schema-driven config editor ------------------------------------------
+// Mirrors src/web/config_schema.py::ConfigFieldNode. The backend introspects
+// every MergeConfig field into this tree so the Setup view can render the
+// full option surface without hand-wiring each field. `object` nodes carry
+// `children`; every other kind is a leaf with a concrete `default`.
+
+export type ConfigFieldKind =
+  | "bool"
+  | "int"
+  | "float"
+  | "str"
+  | "enum"
+  | "list_str"
+  | "object"
+  | "yaml";
+
+export interface ConfigFieldNode {
+  name: string;
+  path: string;
+  kind: ConfigFieldKind;
+  default: unknown;
+  description: string | null;
+  required: boolean;
+  curated: boolean;
+  enum: string[] | null;
+  minimum: number | null;
+  maximum: number | null;
+  children: ConfigFieldNode[];
 }
 
 export interface SetupContext {
@@ -470,6 +508,14 @@ export interface SetupContext {
   // pre-fill the AGENT OVERRIDES table; falls back to provider.models[0]
   // when the recommended one isn't in the configured models list.
   recommended_agent_models: Partial<Record<ProviderName, Record<string, string>>>;
+
+  // Schema-driven comprehensive config editor (Web config UI Phase 1).
+  // Optional so older snapshots / test fixtures without these fields keep
+  // compiling; the full-config section is simply not rendered when absent.
+  // `config_schema` is the normalized MergeConfig tree (static across
+  // repos); `config_values` is the current .merge/config.yaml for pre-fill.
+  config_schema?: ConfigFieldNode;
+  config_values?: Record<string, unknown>;
 }
 
 export interface ThresholdsPayload {
@@ -487,12 +533,22 @@ export interface SetupPayload {
   github_token: string;
   default_provider: ProviderName | null;
   agent_choices: Record<string, AgentChoice>;
+  // Cross-provider circuit-breaker fallback for agents on the default
+  // provider. ``null`` lets the backend auto-derive (non-default provider's
+  // first model) or skip entirely when only one provider is enabled.
+  fallback: AgentChoice | null;
+  // Per-model tuning keyed by model name. Each agent inherits the params of
+  // the model it runs; models omitted here fall back to recommended defaults.
+  model_params: Record<string, ModelParams>;
   thresholds: ThresholdsPayload | null;
   llm_assist_mode: "off" | "auto" | "always" | null;
   request_timeout_seconds: number | null;
   dry_run: boolean;
   workflow: string | null;
   init_forks_profile: boolean;
+  // Comprehensive-editor values for the non-curated MergeConfig fields.
+  // Deep-merged into config.yaml on the backend before validation.
+  config_overrides: Record<string, unknown>;
 }
 
 export interface SetupReady {

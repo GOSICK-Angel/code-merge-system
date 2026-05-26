@@ -29,6 +29,7 @@ from src.cli.commands.setup import (
 )
 from src.models.setup import (
     AgentChoice,
+    ModelParams,
     ProviderConfig,
     SetupPayload,
     ThresholdsPayload,
@@ -204,15 +205,14 @@ class TestApplySetupPayload:
         )
         assert raw["github"] == {"enabled": True, "token_env": "GITHUB_TOKEN"}
 
-    def test_non_default_agent_gets_fallback_pointing_at_default(
-        self, tmp_path: Path
-    ) -> None:
-        # When an agent's primary (provider, model) differs from
-        # (default_provider, default_provider.models[0]), the resolver
-        # must attach a fallback block so BaseAgent's circuit breaker
-        # can recover when the primary fails (e.g. model deprecated,
-        # 429 storm, provider outage). Same-as-default agents skip
-        # fallback to avoid a self-pointing retry.
+    def test_cross_provider_fallback_protects_every_agent(self, tmp_path: Path) -> None:
+        # With both providers enabled, every agent gets a *cross-provider*
+        # fallback so a single-provider outage (429 storm, downed gateway,
+        # deprecated model id) can't stall the run. Agents on the default
+        # provider fall over to the other provider's first model; agents on
+        # the other provider take the reverse direction back to the
+        # default. No agent is left without a lifeline — that's the gap the
+        # old "fall back to default provider only" behaviour left open.
         payload = _payload(
             anthropic=ProviderConfig(
                 enabled=True,
@@ -235,22 +235,168 @@ class TestApplySetupPayload:
             (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
         )
 
-        # planner_judge runs on openai → fallback to anthropic opus.
+        # planner_judge runs on openai (non-default) → reverse fallback to
+        # the default provider's first model.
         pj_fb = raw["agents"]["planner_judge"].get("fallback")
         assert pj_fb is not None
         assert pj_fb["provider"] == "anthropic"
         assert pj_fb["model"] == "claude-opus-4-7"
         assert pj_fb["api_key_env"] == "ANTHROPIC_API_KEY"
 
-        # human_interface runs on anthropic haiku (same provider, diff
-        # model) → still needs fallback to opus.
+        # human_interface runs on the default provider (anthropic) →
+        # cross-provider fallback to the other provider's first model.
         hi_fb = raw["agents"]["human_interface"].get("fallback")
         assert hi_fb is not None
-        assert hi_fb["model"] == "claude-opus-4-7"
+        assert hi_fb["provider"] == "openai"
+        assert hi_fb["model"] == "gpt-5.4"
+        assert hi_fb["api_key_env"] == "OPENAI_API_KEY"
 
-        # planner already matches default → fallback would be self-pointing
-        # and is therefore omitted.
+        # planner runs on the default provider too — previously left with
+        # no fallback at all; now it falls over to openai.
+        planner_fb = raw["agents"]["planner"].get("fallback")
+        assert planner_fb is not None
+        assert planner_fb["provider"] == "openai"
+        assert planner_fb["model"] == "gpt-5.4"
+
+    def test_explicit_fallback_choice_overrides_default_direction(
+        self, tmp_path: Path
+    ) -> None:
+        # The UI can pin a specific fallback model for the default-provider
+        # agents; agents on the other provider still take the reverse.
+        payload = _payload(
+            anthropic=ProviderConfig(
+                enabled=True, api_key="ak", models=list(_DEFAULT_ANTHROPIC_MODELS)
+            ),
+            openai=ProviderConfig(
+                enabled=True, api_key="ok", models=list(_DEFAULT_OPENAI_MODELS)
+            ),
+            default_provider="anthropic",
+            fallback=AgentChoice(provider="openai", model="gpt-5.4-mini"),
+        )
+        apply_setup_payload(payload, str(tmp_path))
+        raw = yaml.safe_load(
+            (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
+        )
+        # planner on default anthropic → user-pinned openai gpt-5.4-mini.
+        planner_fb = raw["agents"]["planner"].get("fallback")
+        assert planner_fb is not None
+        assert planner_fb["provider"] == "openai"
+        assert planner_fb["model"] == "gpt-5.4-mini"
+
+    def test_single_provider_keeps_same_provider_model_fallback(
+        self, tmp_path: Path
+    ) -> None:
+        # Only one provider enabled → nothing to cross-fall to. An agent on
+        # a non-default model still gets a same-provider fallback to
+        # models[0]; default-model agents stay fallback-free.
+        payload = _payload(
+            anthropic=ProviderConfig(
+                enabled=True,
+                api_key="ak",
+                models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+            ),
+            agent_choices={
+                "human_interface": AgentChoice(
+                    provider="anthropic", model="claude-haiku-4-5-20251001"
+                ),
+            },
+        )
+        apply_setup_payload(payload, str(tmp_path))
+        raw = yaml.safe_load(
+            (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
+        )
+        hi_fb = raw["agents"]["human_interface"].get("fallback")
+        assert hi_fb is not None
+        assert hi_fb["provider"] == "anthropic"
+        assert hi_fb["model"] == "claude-opus-4-7"
         assert "fallback" not in raw["agents"]["planner"]
+
+    def test_fallback_provider_must_be_enabled(self) -> None:
+        with pytest.raises(ValueError, match="fallback.provider.*not enabled"):
+            _payload(
+                anthropic=ProviderConfig(
+                    enabled=True, api_key="ak", models=list(_DEFAULT_ANTHROPIC_MODELS)
+                ),
+                default_provider="anthropic",
+                fallback=AgentChoice(provider="openai", model="gpt-5.4"),
+            )
+
+    def test_agents_get_per_model_params_from_payload(self, tmp_path: Path) -> None:
+        # Each agent inherits the params of the model it runs, sourced from
+        # payload.model_params. Two agents on the same model share them.
+        payload = _payload(
+            anthropic=ProviderConfig(
+                enabled=True,
+                api_key="ak",
+                models=["claude-opus-4-7", "claude-haiku-4-5-20251001"],
+            ),
+            agent_choices={
+                "human_interface": AgentChoice(
+                    provider="anthropic", model="claude-haiku-4-5-20251001"
+                ),
+            },
+            model_params={
+                "claude-opus-4-7": ModelParams(
+                    max_tokens=9001, temperature=0.15, max_retries=4
+                ),
+                "claude-haiku-4-5-20251001": ModelParams(
+                    max_tokens=2048, temperature=0.3, max_retries=2
+                ),
+            },
+        )
+        apply_setup_payload(payload, str(tmp_path))
+        raw = yaml.safe_load(
+            (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
+        )
+        planner = raw["agents"]["planner"]  # opus (default)
+        assert planner["max_tokens"] == 9001
+        assert planner["temperature"] == 0.15
+        assert planner["max_retries"] == 4
+        hi = raw["agents"]["human_interface"]  # haiku
+        assert hi["max_tokens"] == 2048
+        assert hi["temperature"] == 0.3
+        assert hi["max_retries"] == 2
+
+    def test_model_params_fall_back_to_recommended_when_absent(
+        self, tmp_path: Path
+    ) -> None:
+        # No model_params supplied → resolver fills recommended defaults by
+        # model family (gpt-5* reasoning → 32768, opus → 8192).
+        payload = _payload(
+            anthropic=ProviderConfig(
+                enabled=True, api_key="ak", models=list(_DEFAULT_ANTHROPIC_MODELS)
+            ),
+            openai=ProviderConfig(
+                enabled=True, api_key="ok", models=list(_DEFAULT_OPENAI_MODELS)
+            ),
+            default_provider="anthropic",
+            agent_choices={
+                "executor": AgentChoice(provider="openai", model="gpt-5.4"),
+            },
+        )
+        apply_setup_payload(payload, str(tmp_path))
+        raw = yaml.safe_load(
+            (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert raw["agents"]["planner"]["max_tokens"] == 8192  # opus default
+        assert raw["agents"]["executor"]["max_tokens"] == 32768  # gpt-5.4 reasoning
+        # The cross-provider fallback block carries the fallback model's params.
+        exec_fb = raw["agents"]["executor"]["fallback"]
+        assert exec_fb["model"] == _DEFAULT_ANTHROPIC_MODELS[0]
+        assert exec_fb["max_tokens"] == 8192
+
+    def test_fallback_model_must_be_in_provider_list(self) -> None:
+        with pytest.raises(ValueError, match="fallback.model.*not in"):
+            _payload(
+                anthropic=ProviderConfig(
+                    enabled=True, api_key="ak", models=list(_DEFAULT_ANTHROPIC_MODELS)
+                ),
+                openai=ProviderConfig(
+                    enabled=True, api_key="ok", models=list(_DEFAULT_OPENAI_MODELS)
+                ),
+                default_provider="anthropic",
+                fallback=AgentChoice(provider="openai", model="gpt-nonexistent"),
+            )
 
     def test_per_agent_override_routes_to_other_provider(self, tmp_path: Path) -> None:
         payload = _payload(
@@ -604,3 +750,40 @@ class TestDetectSetupContext:
         assert ctx.provider_recommended_models["openai"] == list(
             PROVIDER_RECOMMENDED_MODELS["openai"]
         )
+
+
+class TestConfigOverrides:
+    """``config_overrides`` deep-merges into the generated config.yaml and is
+    validated before the file is written (Web config UI Phase 1)."""
+
+    def test_overrides_deep_merged_and_persisted(self, tmp_path: Path) -> None:
+        payload = _payload(
+            config_overrides={
+                "max_files_per_run": 123,
+                "dependency_graph": {"god_node_min_dependents": 12},
+                "thresholds": {"human_escalation": 0.42},
+            }
+        )
+        config = apply_setup_payload(payload, str(tmp_path))
+
+        raw = yaml.safe_load(
+            (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
+        )
+        assert raw["max_files_per_run"] == 123
+        assert raw["dependency_graph"]["god_node_min_dependents"] == 12
+        # Curated threshold defaults survive a nested override that only
+        # touches a sibling key.
+        assert raw["thresholds"]["auto_merge_confidence"] == 0.85
+        assert raw["thresholds"]["human_escalation"] == 0.42
+
+        assert config.max_files_per_run == 123
+        assert config.dependency_graph.god_node_min_dependents == 12
+        assert config.thresholds.human_escalation == 0.42
+
+    def test_invalid_override_rejected_before_write(self, tmp_path: Path) -> None:
+        # max_files_per_run has ge=1 — 0 must fail validation, and because
+        # validation runs before the write, no config.yaml is left behind.
+        payload = _payload(config_overrides={"max_files_per_run": 0})
+        with pytest.raises(Exception):
+            apply_setup_payload(payload, str(tmp_path))
+        assert not (tmp_path / ".merge" / "config.yaml").exists()

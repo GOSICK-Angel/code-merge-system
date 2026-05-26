@@ -81,6 +81,21 @@ class AgentChoice(BaseModel):
     model: str = Field(..., min_length=1)
 
 
+class ModelParams(BaseModel):
+    """Per-model LLM tuning applied to every agent that runs that model.
+
+    The Setup UI keeps one of these per configured model (auto-filled with
+    a recommended default, then user-editable) and ships them in
+    ``SetupPayload.model_params``. ``apply_setup_payload`` resolves each
+    agent's ``(max_tokens, temperature, max_retries)`` from the model it is
+    assigned, so two agents on the same model share these values.
+    """
+
+    max_tokens: int = Field(default=8192, ge=512, le=200000)
+    temperature: float = Field(default=0.2, ge=0.0, le=1.0)
+    max_retries: int = Field(default=3, ge=1)
+
+
 class ThresholdsPayload(BaseModel):
     """Optional threshold overrides — ``None`` means use the wizard defaults."""
 
@@ -117,6 +132,22 @@ class SetupPayload(BaseModel):
 
     default_provider: ProviderName | None = None
     agent_choices: dict[str, AgentChoice] = Field(default_factory=dict)
+    fallback: AgentChoice | None = Field(
+        default=None,
+        description="Cross-provider circuit-breaker fallback applied to agents "
+        "running on the default provider. When both providers are enabled and "
+        "this is omitted, the resolver auto-derives it as the non-default "
+        "provider's first model so a single-provider outage can't stall the "
+        "run; agents on the non-default provider take the reverse direction "
+        "automatically. Ignored when only one provider is enabled.",
+    )
+    model_params: dict[str, ModelParams] = Field(
+        default_factory=dict,
+        description="Per-model tuning (max_tokens / temperature / "
+        "max_retries) keyed by model name. Each agent inherits the params of "
+        "the model it is assigned; models absent here fall back to the "
+        "resolver's recommended defaults.",
+    )
 
     thresholds: ThresholdsPayload | None = None
     llm_assist_mode: Literal["off", "auto", "always"] | None = None
@@ -124,6 +155,16 @@ class SetupPayload(BaseModel):
     dry_run: bool = False
     workflow: str | None = None
     init_forks_profile: bool = False
+
+    config_overrides: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Comprehensive-editor values for the non-curated "
+        "MergeConfig fields. Deep-merged into the generated config.yaml "
+        "before validation so the Web UI is the single source of truth for "
+        "every option. Curated keys (merge target / providers / agents / "
+        "core thresholds) are built from the dedicated fields above and must "
+        "not appear here.",
+    )
 
     @model_validator(mode="after")
     def _validate_providers(self) -> SetupPayload:
@@ -174,6 +215,20 @@ class SetupPayload(BaseModel):
                 raise ValueError(
                     f"agent_choices[{agent_name!r}].model={choice.model!r} "
                     f"is not in {choice.provider}.models={provider_cfg.models!r}"
+                )
+
+        if self.fallback is not None:
+            if self.fallback.provider not in enabled:
+                raise ValueError(
+                    f"fallback.provider={self.fallback.provider!r} is not enabled"
+                )
+            fb_cfg = (
+                self.anthropic if self.fallback.provider == "anthropic" else self.openai
+            )
+            if self.fallback.model not in fb_cfg.models:
+                raise ValueError(
+                    f"fallback.model={self.fallback.model!r} is not in "
+                    f"{self.fallback.provider}.models={fb_cfg.models!r}"
                 )
         return self
 
@@ -249,3 +304,12 @@ class SetupContext(BaseModel):
     # ``provider.models[0]`` when the recommended one isn't in the
     # configured models list.
     recommended_agent_models: dict[str, dict[str, str]] = Field(default_factory=dict)
+
+    # Schema-driven comprehensive config editor (Web config UI Phase 1).
+    # ``config_schema`` is the normalized ``MergeConfig`` tree produced by
+    # ``src.web.config_schema.build_config_schema`` (model_dump'd); it is
+    # static across repos. ``config_values`` is the current on-disk
+    # ``.merge/config.yaml`` so the editor can pre-fill every field with
+    # its persisted value, falling back to the schema default otherwise.
+    config_schema: dict[str, Any] = Field(default_factory=dict)
+    config_values: dict[str, Any] = Field(default_factory=dict)
