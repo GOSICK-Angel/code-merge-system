@@ -14,6 +14,7 @@ from src.memory.hit_tracker import MemoryHitTracker
 from src.memory.layered_loader import LayeredMemoryLoader
 from src.memory.store import MemoryStore
 from src.models.config import AgentLLMConfig
+from src.tools.conflict_markers import conflict_marker_line_numbers
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,6 @@ class AgentPromptBuilder:
         file_path: str,
         diff_ranges: list[tuple[int, int]],
         budget_tokens: int,
-        conflict_ranges: list[tuple[int, int]] | None = None,
         is_security_sensitive: bool = False,
         referenced_names: frozenset[str] = frozenset(),
     ) -> str:
@@ -137,9 +137,10 @@ class AgentPromptBuilder:
             max_chars = int(budget_tokens * _CHARS_PER_TOKEN)
             return content[:max_chars]
 
+        conflict_ranges = [(ln, ln) for ln in conflict_marker_line_numbers(content)]
         context = ScoringContext(
             diff_ranges=diff_ranges,
-            conflict_ranges=conflict_ranges or [],
+            conflict_ranges=conflict_ranges,
             is_security_sensitive=is_security_sensitive,
             referenced_names=referenced_names,
         )

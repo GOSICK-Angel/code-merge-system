@@ -305,10 +305,23 @@ Phase A 在未装 `[ast]` 的环境里收益为零（又是死代码）。
   - 回归测试:`test_dependency.py::TestReferencedSymbols`、`test_dep_extractors.py::TestImportSymbols`(Python named/module/star +
     tree-sitter named)、`test_context.py::test_build_staged_content_referenced_symbol_survives`(被引用尾部符号存活、无信号时被头截断丢)。
 
+- **修复(conflict)：接通 `_conflict_score`——从 staging 内容自身扫冲突标记**（`conflict_markers` / `prompt_builders`）。
+  - **坐标系陷阱**:`DiffHunk.conflict_marker_lines` 有两种来源——`parse_unified_diff` 给的是 **diff-hunk 内相对行号**(且
+    unified diff 一般无标记),`parse_conflict_markers` 给的是**带标记内容的绝对行号**。而 staging 的 current/target 是**干净单侧
+    版本**(无标记)。把 DiffHunk 的行号喂给 `conflict_ranges` = 坐标错配假接通。
+  - **改法**:不依赖 DiffHunk。`build_staged_content` 对**即将 stage 的 content 自身**扫冲突标记行(新增
+    `conflict_markers.conflict_marker_line_numbers`,复用已校准的整行 7 字符正则,避免 `>>>>>>>>>STOP` 这类 8+字符误报),
+    转成单行 `conflict_ranges` → `ScoringContext`。坐标天然对齐 chunk 行号、对 6 调用点统一生效、无需改调用点。同时移除
+    `build_staged_content` 的死参数 `conflict_ranges`(从无调用方传)。
+  - **效果**:当 staging 内容含未解决冲突标记(合并失败残留 / 冲突工作树文件进入 LLM 分析/审查)时,标记所在 chunk +0.5 →
+    FULL/SIGNATURE,冲突区完整展开;干净内容扫不到标记 → 空 `conflict_ranges`、无副作用。
+  - 回归测试:`test_p0_fixes.py`(行号 1-based、8+字符不误报) + `test_context.py::
+    test_build_staged_content_conflict_region_survives`(带标记大文件尾部冲突区存活、无锚点头部被压缩)。
+
 - **未修（已知、较轻，留作后续）**：
   - 问题④ **base 侧**：`base_content` staging 仍用 current 侧行段(见上,won't-fix,`DiffHunk` 无 base 坐标)。
-  - **relevance `_conflict_score` 仍是死维度**：`conflict_ranges`(冲突标记行)从无生产填充。可后续接(三路合并时把
-    冲突标记行段喂入);reference 维度已于本轮接通。
   - budget 用 `//4` 而非 `/3.5`（轻微欠预算）；staging 无 AST/无锚点时兜底仍是头截断（评估后认为收益小未做 diff-anchored 窗口）。
   - executor 整文件分块合并按设计保留（不能丢块）。
-- 验证：`pytest tests/unit/` **2686 passed**；`mypy src` 0 错；`ruff check src/` 通过；`test_agent_contracts.py` 37 passed。
+- 注:relevance 5 个评分维度(diff_overlap / conflict / security / reference / entry_point + base)现已**全部在生产中生效**——
+  审计初期发现的 conflict/security/reference 三个死维度均已接通。
+- 验证：`pytest tests/unit/` **2689 passed**；`mypy src` 0 错；`ruff check src/` 通过；`test_agent_contracts.py` 37 passed。

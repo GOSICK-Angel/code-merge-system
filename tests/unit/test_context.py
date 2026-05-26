@@ -358,3 +358,30 @@ class TestBuildStagedContent:
 
         assert "keep_me" in with_ref  # referenced tail symbol kept (signature)
         assert "keep_me" not in without_ref  # head-truncated fallback drops tail
+
+    def test_build_staged_content_conflict_region_survives(self):
+        """An unresolved conflict block in the tail of a large file is boosted
+        (conflict markers scanned from the content itself) so it survives staged
+        compression, instead of being dropped to the head-truncated fallback."""
+        builder = self._make_builder()
+        head = [f"def func_{i}():\n" + "    x = 1\n" * 20 for i in range(40)]
+        conflict_block = (
+            "def conflicted():\n"
+            "<<<<<<< HEAD\n"
+            "    a = 1\n"
+            "=======\n"
+            "    a = 2\n"
+            ">>>>>>> upstream\n"
+        )
+        content = "\n".join(head) + "\n" + conflict_block
+        assert content.count("\n") >= 200
+
+        result = builder.build_staged_content(
+            content=content,
+            file_path="m.py",
+            diff_ranges=[],
+            budget_tokens=2000,
+        )
+        # Tail conflict region kept; head functions (no anchor) compressed away.
+        assert "<<<<<<< HEAD" in result
+        assert "func_0" not in result

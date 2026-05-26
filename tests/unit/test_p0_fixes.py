@@ -27,11 +27,23 @@ from src.models.plan_review import (
 )
 from src.models.state import MergeState, SystemStatus
 from src.tools.conflict_markers import (
+    conflict_marker_line_numbers,
     file_has_conflict_markers,
     find_conflict_marker,
     has_conflict_markers,
 )
 from src.tools.patch_applier import apply_with_snapshot
+
+
+def test_conflict_marker_line_numbers_anchored_1based():
+    content = "a\n<<<<<<< HEAD\nb\n=======\nc\n>>>>>>> up\nd\n"
+    assert conflict_marker_line_numbers(content) == [2, 4, 6]
+
+
+def test_conflict_marker_line_numbers_ignores_long_runs():
+    # 8+ char runs / mid-line occurrences in string literals are not markers.
+    content = 'msg = ">>>>>>>>>>>STOP"\nok = True\n'
+    assert conflict_marker_line_numbers(content) == []
 
 
 # --------------------------------------------------------------------------

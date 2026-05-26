@@ -31,6 +31,23 @@ def has_conflict_markers(content: str) -> bool:
     return any(_CONFLICT_MARKER_RE.match(ln) for ln in content.splitlines())
 
 
+def conflict_marker_line_numbers(content: str) -> list[int]:
+    """1-based line numbers of real whole-line conflict markers.
+
+    Uses the same line-anchored, exactly-seven-char regex as
+    ``has_conflict_markers`` so an eight-plus run or a mid-line occurrence in a
+    string literal is not mistaken for a marker. Relevance scoring turns these
+    into single-line ranges so the chunk hosting an unresolved conflict stays
+    FULL under staged compression."""
+    if not content:
+        return []
+    return [
+        i
+        for i, ln in enumerate(content.splitlines(), start=1)
+        if _CONFLICT_MARKER_RE.match(ln)
+    ]
+
+
 def find_conflict_marker(content: str) -> str | None:
     """Return the canonical 7-char marker token (``<<<<<<<`` / ``=======`` /
     ``>>>>>>>`` / ``|||||||``) of the first real conflict-marker line, or
