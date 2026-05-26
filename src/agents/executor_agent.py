@@ -453,12 +453,18 @@ class ExecutorAgent(BaseAgent):
             referenced_names=referenced,
         )
 
+        # Phase B step 8: warn the merge to preserve the public interface of a
+        # file other files import. Empty graph -> empty list -> no prompt
+        # change (safe degrade).
+        dependents = state.dependency_graph.dependents_of(file_diff.file_path)
         prompt = build_semantic_merge_prompt(
             file_diff,
             conflict_analysis,
             current_content,
             target_content,
             enriched_context,
+            dependents=dependents,
+            referenced_symbols=referenced,
         )
         messages = [{"role": "user", "content": prompt}]
 
@@ -881,10 +887,16 @@ class ExecutorAgent(BaseAgent):
         file_diff: FileDiff,
         state: MergeState,
     ) -> UserDecisionItem:
+        # Phase B step 8: surface downstream dependents (AST-precise) and
+        # sentinel hits (text recall) before recommending a deletion. Empty
+        # graph -> empty list -> prompt unchanged (safe degrade).
+        dependents = state.dependency_graph.dependents_of(file_path)
+        sentinel_count = len(state.sentinel_hits.get(file_path, []))
         prompt = build_deletion_analysis_prompt(
             file_path,
             file_diff.lines_deleted,
             state.config.project_context,
+            dependents=dependents,
         )
         memory_text = self.get_memory_context(self._current_phase, [file_path])
         if memory_text:
@@ -897,6 +909,17 @@ class ExecutorAgent(BaseAgent):
             rationale = str(raw).strip()
         except Exception as exc:
             logger.warning("analyze_deletion LLM failed for %s: %s", file_path, exc)
+
+        if dependents or sentinel_count:
+            signals: list[str] = []
+            if dependents:
+                signals.append(
+                    f"{len(dependents)} dependent file(s) still import this "
+                    "(dependency graph)"
+                )
+            if sentinel_count:
+                signals.append(f"{sentinel_count} sentinel hit(s) (text scan)")
+            rationale = f"{rationale}\n\n⚠ Deletion risk: {'; '.join(signals)}."
 
         return UserDecisionItem(
             item_id=f"deleted_only_{file_path}",

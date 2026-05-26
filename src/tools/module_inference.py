@@ -17,6 +17,11 @@ from src.models.config import ModuleConfig
 
 DEFAULT_MODULE = "default"
 
+# Phase C §6.4: label-propagation iteration ceiling. Communities stabilise
+# well within this on the focused merge subgraph; the cap only guards against
+# pathological oscillation.
+_LABEL_PROP_MAX_ITERS = 20
+
 
 def _glob_match(file_path: str, pattern: str) -> bool:
     if fnmatch.fnmatch(file_path, pattern):
@@ -81,9 +86,78 @@ def infer_modules(
         if matched is None:
             matched = (
                 _topology_module(path, config.container_dirs)
-                if config.mode == "auto"
+                if config.mode in ("auto", "graph")
                 else DEFAULT_MODULE
             )
         result[path] = matched
 
+    return result
+
+
+def _modal_module(group: list[str], fallback_modules: dict[str, str]) -> str:
+    """Most common fallback (path-topology) module among a community's
+    members; ties broken by the lexicographically smallest name so the
+    community name is deterministic and human-meaningful."""
+    counts: dict[str, int] = {}
+    for fp in group:
+        name = fallback_modules.get(fp, DEFAULT_MODULE)
+        counts[name] = counts.get(name, 0) + 1
+    return min(counts, key=lambda name: (-counts[name], name))
+
+
+def infer_communities(
+    edges: Iterable[tuple[str, str]],
+    file_paths: Iterable[str],
+    fallback_modules: dict[str, str],
+    *,
+    max_iters: int = _LABEL_PROP_MAX_ITERS,
+) -> dict[str, str]:
+    """Graph-driven module grouping via deterministic label propagation.
+
+    ``edges`` are undirected (source, target) pairs of the dependency graph
+    (caller filters out AMBIGUOUS edges). Each file starts in its own
+    community; each round a node adopts the most frequent label among its
+    neighbours (ties → lexicographically smallest label, nodes visited in
+    sorted order — fully deterministic). A community is then named by the
+    modal path-topology module of its members (``fallback_modules``), keeping
+    names readable and compatible with ``module_depends_on`` ordering.
+    Singletons / no-edge files keep their fallback module — so an empty edge
+    set reproduces the path-topology grouping exactly (safe degrade)."""
+    paths = list(file_paths)
+    path_set = set(paths)
+    adj: dict[str, set[str]] = {p: set() for p in paths}
+    for src, tgt in edges:
+        if src in path_set and tgt in path_set and src != tgt:
+            adj[src].add(tgt)
+            adj[tgt].add(src)
+
+    label: dict[str, str] = {p: p for p in paths}
+    for _ in range(max_iters):
+        changed = False
+        for node in sorted(paths):
+            neighbors = adj[node]
+            if not neighbors:
+                continue
+            counts: dict[str, int] = {}
+            for nb in neighbors:
+                counts[label[nb]] = counts.get(label[nb], 0) + 1
+            best = min(counts, key=lambda lbl: (-counts[lbl], lbl))
+            if label[node] != best:
+                label[node] = best
+                changed = True
+        if not changed:
+            break
+
+    members: dict[str, list[str]] = {}
+    for p in paths:
+        members.setdefault(label[p], []).append(p)
+
+    result: dict[str, str] = {}
+    for group in members.values():
+        if len(group) == 1:
+            result[group[0]] = fallback_modules.get(group[0], DEFAULT_MODULE)
+            continue
+        name = _modal_module(group, fallback_modules)
+        for p in group:
+            result[p] = name
     return result

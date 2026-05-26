@@ -1,7 +1,36 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from src.models.diff import FileDiff
 from src.models.conflict import ConflictAnalysis
+
+
+def _format_dependents_block(
+    dependents: Sequence[str],
+    referenced_symbols: frozenset[str] = frozenset(),
+    *,
+    max_listed: int = 8,
+) -> str:
+    """Phase B step 8: render a downstream-dependents warning, or ``""`` when
+    nothing depends on the file. Built from the dependency graph's EXTRACTED
+    in-edges so the executor preserves a file's public interface before
+    deleting or rewriting it."""
+    if not dependents:
+        return ""
+    listed = list(dependents)[:max_listed]
+    more = len(dependents) - len(listed)
+    files_line = ", ".join(listed) + (f" (+{more} more)" if more > 0 else "")
+    block = [
+        "# Downstream Dependents",
+        f"{len(dependents)} file(s) import this one: {files_line}.",
+        "Preserve its public interface — do NOT remove or rename exported "
+        "symbols these dependents rely on.",
+    ]
+    if referenced_symbols:
+        syms = ", ".join(sorted(referenced_symbols)[:max_listed])
+        block.append(f"Symbols other files import from here: {syms}.")
+    return "\n".join(block)
 
 
 EXECUTOR_SYSTEM = """You are a code merge executor. Your task is to apply merge decisions to files,
@@ -34,6 +63,8 @@ def build_semantic_merge_prompt(
     current_content: str,
     target_content: str,
     project_context: str,
+    dependents: Sequence[str] = (),
+    referenced_symbols: frozenset[str] = frozenset(),
 ) -> str:
     language = file_diff.language or "unknown"
     rec_val = (
@@ -42,6 +73,9 @@ def build_semantic_merge_prompt(
         else conflict_analysis.recommended_strategy
     )
 
+    dependents_block = _format_dependents_block(dependents, referenced_symbols)
+    dependents_section = f"\n{dependents_block}\n" if dependents_block else ""
+
     return f"""Perform a semantic merge of the following two versions of a file.
 
 # Project Context
@@ -49,7 +83,7 @@ def build_semantic_merge_prompt(
 
 # File: {file_diff.file_path}
 Language: {language}
-
+{dependents_section}
 # Conflict Analysis
 - Type: {conflict_analysis.conflict_type.value if hasattr(conflict_analysis.conflict_type, "value") else conflict_analysis.conflict_type}
 - Recommended strategy: {rec_val}
@@ -79,7 +113,11 @@ def build_deletion_analysis_prompt(
     file_path: str,
     lines_deleted: int,
     project_context: str,
+    dependents: Sequence[str] = (),
 ) -> str:
+    dependents_block = _format_dependents_block(dependents)
+    dependents_section = f"\n{dependents_block}\n" if dependents_block else ""
+
     return f"""Analyze whether the following file deletion from upstream should be applied to the fork.
 
 # Project Context
@@ -87,9 +125,10 @@ def build_deletion_analysis_prompt(
 
 # File being deleted: {file_path}
 Lines deleted: {lines_deleted}
-
+{dependents_section}
 Determine the most likely reason for deletion (e.g. refactoring cleanup, feature removal, file moved/renamed)
-and assess whether it is safe to apply this deletion to the fork.
+and assess whether it is safe to apply this deletion to the fork. If files above still depend on it,
+deletion is risky — prefer keeping the file unless the dependents are also being removed.
 
 Respond in this format:
 REASON: <one-line reason>

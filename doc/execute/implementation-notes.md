@@ -325,3 +325,255 @@ Phase A 在未装 `[ast]` 的环境里收益为零（又是死代码）。
 - 注:relevance 5 个评分维度(diff_overlap / conflict / security / reference / entry_point + base)现已**全部在生产中生效**——
   审计初期发现的 conflict/security/reference 三个死维度均已接通。
 - 验证：`pytest tests/unit/` **2689 passed**；`mypy src` 0 错；`ruff check src/` 通过；`test_agent_contracts.py` 37 passed。
+
+---
+
+## 7. Phase B — 冲突与执行消费（P1）实施笔记
+
+> 对应方案 §7 step 7/8/9。开始日期：2026-05-26。范围：conflict_analyst（blast-radius/God Node）、
+> executor（dependents_of 删除/改签名）、planner_judge（topo 顺序违规）。维护者把这里当成「方案没写、
+> 但实现必须决定」的真相记录。
+
+### 7.0 共享前提（实现前 grep 核实）
+
+- **三个 agent 访问 graph 的路径**：
+  - `conflict_analyst.analyze_file` —— 不经 `restricted_view`，graph 派生数据由 conflict_analysis phase 以参数传入。
+  - `executor.execute_semantic_merge` / `analyze_deletion` —— 收**原始 `MergeState`**（`executor_agent.py:371/882`），
+    直接 `state.dependency_graph`（Phase A+ 已在 :434 这么做）。
+  - `planner_judge.run` —— 走 `restricted_view`（`planner_judge_agent.py:232`）。
+- **由此推出 contract 改动面**：**只有 `planner_judge.yaml` 需要加 `dependency_graph`**。
+  conflict_analyst / executor 不经 restricted_view，加 input 反而是噪音（与 Phase A+ 笔记 §6 reference 修复结论一致）。
+- **DoD (b)「≥1 agent 契约 inputs 声明」**：Phase A 已由 `judge.yaml` 满足；Phase B 的 blast-radius / dependents
+  消费组件依附于「图已是 judge 契约输入 + 其余消费方走原始 state」这一既定模式。
+
+### 7.1 关键决策（方案未明确，由实现决定）
+
+#### DB1. blast-radius / God Node 注入「走 enriched_context」而非改 CA gate 签名
+方案 §7 step7 说「CA gate：注入 hunk blast-radius / God Node 命中」。`build_conflict_analysis_prompt`
+（CA-THREE-WAY）的 `project_context` 形参实际接收 `analyze_file` 拼好的 `enriched_context`
+（memory + forks_profile 块已是这么注入的）。
+- **决定**：把 blast-radius 谨慎块拼进 `enriched_context`，**不动 analyst_prompts.py 的签名**。
+  好处：chunked 与非 chunked 两条路径都用同一个 `enriched_context`，一处注入两路覆盖；零 prompt-builder 改动面。
+- **粒度**：方案写「hunk blast-radius」，但 edge 是**文件级**（提取器产文件→文件边）。实现用**文件级** impact_radius
+  近似 hunk 级——记为已知近似（hunk 级需把 edge 细化到符号行段，超 Phase B 范围）。
+
+#### DB2. `DependencyImpactHint` 模型 + `FileDependencyGraph.impact_hint()`
+为让「direct_dependents / impact_radius / is_god_node」可测、可复用，在 `models/dependency.py` 新增 frozen
+`DependencyImpactHint` 与 `impact_hint(fp, *, max_depth, god_node_min_dependents)`。God Node 判定下沉到模型，
+agent/phase 只调一次。`has_signal` 属性用于「无信号则不注入块」（图空安全降级）。
+
+#### DB3. God Node 阈值 = config `god_node_min_dependents`，默认 8
+方案 §6.4 称 God Node = 高 degree 节点，但**无标定值**。
+- **决定**：`DependencyGraphConfig.god_node_min_dependents: int = 8`（保守、可配，target-repo 无关）。
+  子图作用域上限 800 文件下，8 个直接 dependents 已属枢纽。**未经真实仓库标定**——线上偏多/偏少可在
+  `.merge/config.yaml` 调。仅用于「抬谨慎度」，绝不降风险（§5）。
+
+#### DB4. executor 注入「下游 dependents」——保接口 / 删前查
+- **E-SEMANTIC-MERGE**：`build_semantic_merge_prompt` 加 `dependents: Sequence[str]` + `referenced_symbols:
+  frozenset[str]`（均带默认空值，不破坏既有调用/测试）。非空时 prompt 增「Downstream Dependents」段，
+  要求**保留公共接口、勿删/改导出符号**。`execute_semantic_merge` 用 `state.dependency_graph.dependents_of(fp)`
+  + `referenced_symbols(fp)`（后者 Phase A+ 已取，复用 `referenced` 变量）。
+- **E-DELETION**：`build_deletion_analysis_prompt` 加 `dependents`。`analyze_deletion` 删前查 `dependents_of(fp)`，
+  非空 → prompt 提示「N 个文件仍 import 本文件，删除有风险」，并把计数写进 `UserDecisionItem.risk_context`
+  （人工决策卡可见）。
+- **与 sentinel 协同**：`analyze_deletion` 同时读 `state.sentinel_hits.get(fp, [])`，把 sentinel 命中数并入
+  risk_context 文案（dependents 是 AST 精确层、sentinel 是文本召回层，二者并列展示，不互相覆盖）。
+- **保真守卫不变**：`_foreign_chars` 仍拿全量源比对（dependents 只改 prompt 文案 = LLM 视图，行为变化面已被守卫兜底）。
+
+#### DB5. planner_judge topo 违规——`precheck_batch_topological_order`，镜像 `precheck_plan_integrity`
+- **违规判据**：扁平执行序 `order = [fp for batch in plan.phases for fp in batch.file_paths]`；位置 `pos[fp]`。
+  对每条 **EXTRACTED** 边 `source→target`（source 依赖 target），若 `pos[source] < pos[target]`（依赖者先于被依赖者合并）
+  ⇒ 违规，flag **source**。仅 EXTRACTED（§5 单调；INFERRED/AMBIGUOUS 不升 issue）。
+- **`issue_type="batch_ordering"`**：刻意选此名——`plan_review.py:61 SHORTCIRCUIT_SAFE_ISSUE_TYPES`
+  注释已把 `batch_ordering` 列为「非重分类可解决、需 LLM 复检」。故 topo issue 会**禁用短路**、强制 LLM 复检，
+  修不动则耗尽 `max_plan_revision_rounds` → AWAITING_HUMAN（CLAUDE.md 既定逃生口）。
+- **`suggested_classification == current_classification`（= source 当前 batch risk_level）**：topo 是**顺序**问题不是
+  风险重分类。planner 的 `_apply_judge_issues_to_plan` 按 `suggested_classification` 重分类——令 suggested==current
+  ⇒ 即使被 accept+apply 也**不改风险**（no-op 重分类），靠 `issue_type` 表达结构问题。
+  `_detect_cross_source_conflicts` 看方向差，current==suggested ⇒ dir=0 ⇒ 不产生假冲突。
+- **封顶 25 条**：大型 fork 跨模块边多，无界 flag 会拖慢收敛（§8 风险）。每个 source 一条 issue（提及至多 3 个它抢先的依赖），
+  总数封顶 25。**这是为压制噪音的人为上限**，可后续按真实仓库调。
+- **`_merge_with_precheck` 不改**：其 `" | precheck added "` marker 被 `plan_review.py` 解析器 +
+  `test_planner_judge_optimizations.py` 硬依赖；trailing 文案 "(MISMATCH/NOT-BATCHED, deterministic)" 被测试硬断言。
+  topo issue 并入同一 `precheck_issues` 列表透传即可（计数自然累加）。**已知瑕疵**：summary 括注在含 topo issue 时
+  文案略不精确（仍写 MISMATCH/NOT-BATCHED），但 issue 本身 `issue_type=batch_ordering` + reason 携带真相，审计无损。
+
+### 7.2 反死代码 DoD 对照（方案 §0）
+
+| 条件 | conflict_analyst | executor | planner_judge |
+|---|---|---|---|
+| (a) phase 构建/填充图 | initialize（Phase A 已建） | 同 | 同 |
+| (b) ≥1 契约 inputs 声明 | judge.yaml 已声明（共享） | 同 | **planner_judge.yaml 新增** |
+| (c) gate/逻辑真正读取 | enriched_context 注入 blast-radius | 两个 prompt 注入 dependents | precheck_batch_topological_order |
+| (d) 单测「图非空⇒行为改变」 | 注入块出现/缺席 | dependents 段出现/缺席 | 违规序产 issue、合规序不产 |
+
+### 7.3 临时假设 / 已知局限
+
+- blast-radius 文件级近似 hunk 级（DB1）；God Node 阈值未标定（DB3）；topo issue 封顶 25 为人为噪音上限（DB5）。
+- topo 违规不可自动修时会耗几个修订轮再 AWAITING_HUMAN（设计逃生口，非 bug）。
+- 跨模块 EXTRACTED 边在大 fork 上可能多 → topo issue 偏多；线上偏噪可调 `dependency_graph.enabled: false` 整体回退。
+
+### 7.4 变更文件清单
+
+- [x] `src/models/dependency.py`（+DependencyImpactHint +impact_hint）
+- [x] `src/models/config.py`（+god_node_min_dependents）
+- [x] `src/agents/conflict_analyst_agent.py`（analyze_file +impact_hint，注入 enriched_context；+`_format_blast_radius_block`）
+- [x] `src/core/phases/conflict_analysis.py`（传 impact_hint）
+- [x] `src/llm/prompts/executor_prompts.py`（两个 builder +dependents/referenced_symbols；+`_format_dependents_block`）
+- [x] `src/agents/executor_agent.py`（execute_semantic_merge 传 dependents/referenced；analyze_deletion 查 dependents + sentinel 协同写 risk_context）
+- [x] `src/agents/contracts/planner_judge.yaml`（+dependency_graph）
+- [x] `src/llm/prompts/planner_judge_prompts.py`（+precheck_batch_topological_order +`_MAX_TOPO_ISSUES`）
+- [x] `src/agents/planner_judge_agent.py`（run→review_plan 透传 dependency_graph + 并入 topo precheck）
+- [x] `src/core/phases/plan_review.py`（多轮修订路径 review_plan 传 dependency_graph——**主编排路径，不传则 topo 检查只在 agent.run 生效、修订轮失效**）
+- [x] `src/core/phases/auto_merge.py`（dispute 修订后 review_plan 传 dependency_graph）
+- [x] `tests/unit/test_dependency_graph_phase_b.py`（新建：模型/conflict_analyst/executor/planner_judge topo 16 用例）
+- [x] `tests/unit/test_dependency_graph_consumers.py`（contract 声明断言 +planner_judge）
+
+> **实现中追加的接线点（方案未列）**：`plan_review.py` 与 `auto_merge.py` 两处 `review_plan` 直呼。
+> planner_judge 的 topo 检查若只在 `run()` 入口透传 graph，多轮修订（PlanReviewPhase）和 dispute 修订
+> （auto_merge）会绕过 `run()` 直呼 `review_plan`、拿不到 graph → topo 检查在真实编排里失效。两处补传
+> `dependency_graph=state.dependency_graph` 才真正接通（DoD (c)）。
+
+### 7.5 实施过程记录（逐步追加）
+
+- 2026-05-26：完成调研、确认范围与上列决策、建 Phase B 笔记章节。
+- 2026-05-26：完成 step 7/8/9 代码 + 两处 review_plan 直呼补传 graph。新增/改测试：
+  `test_dependency_graph_phase_b.py`（16 passed）、`test_dependency_graph_consumers.py` contract 断言扩 planner_judge。
+- 2026-05-26：最终验证：`pytest tests/unit/` **2705 passed**（+16，旧 2689 无回归）；`mypy src` 165 文件 0 错（strict）；
+  `ruff check src/ tests/` 通过；`test_agent_contracts.py` 37 passed（planner_judge 新 input 已声明）。
+  - **维护须知**：
+    - God Node 阈值 `dependency_graph.god_node_min_dependents`（默认 8）**未经真实仓库标定**，仅抬 conflict_analyst
+      谨慎度；偏噪可调高，整体回退 `dependency_graph.enabled: false`。
+    - topo `batch_ordering` issue 走 precheck → 强制 LLM 复检（`SHORTCIRCUIT_SAFE_ISSUE_TYPES` 不含它）；
+      跨风险层/跨模块的结构性违规 planner 可能修不动 → 耗 `max_plan_revision_rounds` 轮后 AWAITING_HUMAN（设计逃生口）。
+      封顶 `_MAX_TOPO_ISSUES=25` 压噪，可按真实仓库调。
+    - `_merge_with_precheck` 未改：summary 括注在含 topo issue 时仍写 "(MISMATCH/NOT-BATCHED, deterministic)"
+      （已知瑕疵，issue 本身 issue_type/reason 携带真相，审计无损；改它会破 `test_planner_judge_optimizations.py`
+      硬断言与 `plan_review.py` 的 `" | precheck added "` marker 解析）。
+    - conflict_analyst / executor **未扩 contract**：二者经 phase 参数 / 原始 state 访问 graph，不经 restricted_view；
+      仅 planner_judge 因走 restricted_view 必须在 yaml 声明 `dependency_graph`。
+    - blast-radius 为**文件级**近似 hunk 级（edge 是文件→文件）；hunk 级需符号行段细化，超 Phase B 范围。
+
+---
+
+## 8. Phase C — 增强（P2/P3）实施笔记
+
+> 对应方案 §7 step 10/11（§6.3 import 别名/monorepo 解析、§6.4 社区检测 + God Node、§4 P3 memory/human_interface）。
+> 开始日期：2026-05-26。**用户确认范围（2026-05-26）**：5 个子项全做；社区检测用**轻量 stdlib label-propagation**
+> （零新依赖，图空降级路径式），**不引入 graspologic/networkx**（与 CLAUDE.md target-repo 无关 + 体积约束一致）。
+
+### 8.0 子项清单与接入路径（grep 核实）
+
+| 子项 | 接入点 | 访问 graph 方式 | contract 改动 |
+|---|---|---|---|
+| C1 God Node → planner 风险 | `planner._generate_plan` 新增 `_apply_god_node_risk` | 原始 state | 无（planner run 只做 contract 副作用断言） |
+| C2 图驱动社区检测 | `module_inference.infer_communities` + `planner._assign_modules` | 原始 state | 无 |
+| C3 import 别名/monorepo 解析 | `dep_extractors/alias_resolver.py` + `dependency_extractor` + `initialize` | n/a（提取期） | 无 |
+| C4 memory 沉淀 hub/surprising | `memory_extractor.extract` 加确定性 `_graph_insights` | restricted_view | **memory_extractor.yaml +dependency_graph +file_categories** |
+| C5 human_interface 展示 blast-radius | `HumanDecisionRequest` +字段；构建处填充 | 构建期原始 state | 无（请求预填，human_interface 只读已填请求） |
+
+### 8.1 关键决策
+
+#### DC1. God Node 风险提升落在 planner 的确定性后处理（C1）
+`compute_risk_score`（file_classifier）不接收 graph 且须保持 target-repo 无关 + 纯规则。**决定**：新增
+`planner._apply_god_node_risk(file_diffs, state)`，在 `_enhance_risk_scores` 之后、建计划之前跑：对**改动文件**取
+`impact_hint`，God Node（direct_dependents ≥ 阈值）则 `risk_score = min(1.0, max(old, old + god_node_risk_bump))`
+（§5 单调，只抬不降），再 `classify_file` 重导 risk_level。图空 / 非 God Node → 原样返回（安全降级）。
+- 配置：`DependencyGraphConfig.god_node_risk_bump: float = 0.15`（默认开启才算真消费者/DoD；仅 God Node 触发、罕见，
+  不影响图空的既有测试）。**未标定**，偏噪可调 0 关闭。
+- 纯函数：返回新 list（不可变），state 写仍在 `run()`。
+
+#### DC2. 社区检测 = stdlib label-propagation，opt-in 经 `ModuleConfig.mode == "graph"`（C2）
+`infer_modules` 用 container_dirs 路径拓扑。**决定**：`module_inference.infer_communities(graph, file_paths,
+fallback_modules)`：无向化 EXTRACTED+INFERRED 边 → 异步 label-propagation（确定性：初始 label=自身、每轮取邻居
+众数 label 平局取**最小 label**、max_iters 上限、节点按序遍历）→ 每个社区命名为该社区内**路径拓扑模块众数**
+（平局取最小），使名字仍人类可读且与 `module_depends_on` 排序兼容。无边节点回退其 `infer_modules` 模块。
+- 接入：`ModuleConfig.mode` 增 `"graph"`；`planner._assign_modules` 在 `mode=="graph"` 且 `graph.edges` 时调
+  `infer_communities`，否则原样 `infer_modules`。**默认 mode 仍 "auto"**（零行为变化、无回归）。
+- 为何不用 Leiden/graspologic：用户确认避免重依赖；label-propagation 纯 stdlib、O(边·迭代)、对"模块边界"这种
+  粗聚类足够（不追求模块度最优）。
+
+#### DC3. import 别名/monorepo 解析：新 `alias_resolver`，默认关闭（C3）
+**决定**：新增 `src/tools/dep_extractors/alias_resolver.py`，从 scope 内的配置文件解析三种生态：
+- **tsconfig.json / jsconfig.json**：`compilerOptions.baseUrl` + `paths`（`@app/*` → `src/app/*`）。容错解析
+  （allow `//` 注释 / 尾逗号？仅做最小：标准 JSON，失败则跳过该文件）。
+- **go.mod**：`module <prefix>` → 裸 import 以 `<prefix>/` 开头者去前缀映射到仓库相对路径。
+- **package.json**：`workspaces` globs（仅记录 workspace 根，用于裸 import 落到 workspace 包）。
+- 接入：`DependencyExtractor.extract_from_sources(sources, languages, alias_map=None)`；treesitter resolver 先试
+  alias_map 再试相对/裸。`initialize._build_dependency_graph` 在 `cfg.resolve_aliases` 时额外读仓库根的配置文件
+  （不计入 max_files scope）构建 alias_map。
+- 配置：`DependencyGraphConfig.resolve_aliases: bool = False`（§6.3 要求默认关、可配；保持 target-repo 无关）。
+- 默认关 → 既有行为逐字节不变。
+
+#### DC4. memory 的 graph 洞察走**确定性**而非 LLM（C4）
+God Node / surprising-connection 由图确定性可得，不必烧 LLM。**决定**：`memory_extractor.extract` 末尾追加
+`_graph_insights(view)`（确定性，`confidence_level=EXTRACTED`）：
+- **God Node**：改动文件中 direct_dependents ≥ 阈值者 → `CODEBASE_INSIGHT`（"hub 文件，N dependents，谨慎"）。
+- **surprising connection**：改动文件间**跨顶层目录**的 EXTRACTED 边 → `RELATIONSHIP`（"X 依赖 Y，跨目录耦合"）。
+  （轻量代理；不依赖 C2 社区，避免耦合 mode 开关。）
+- 与 LLM entries 合并、按 `content_hash` 去重、整体仍受 `max_insights` 上限。
+- contract：`memory_extractor.yaml` +`dependency_graph` +`file_categories`（extract 用 restricted_view，必须声明，
+  否则 `FieldNotInContract` 静默吞 → 死代码，正是 `project_judge_dead_contract_checks` 的坑）。
+
+#### DC5. human_interface 决策卡：请求预填字段，agent 不改 contract（C5）
+**决定**：`HumanDecisionRequest` 加 `dependents_count:int=0` / `blast_radius:int=0` / `is_god_node:bool=False`
+（默认 0/false → 向后兼容）。在**构建决策请求**处（`conflict_analysis._build_human_decision_request` 加可选
+`impact_hint` 参；`auto_merge` 直构造处）用 `state.dependency_graph.impact_hint` 填充，并把一行 blast-radius
+摘要追加进 `context_summary`（确保被渲染 = DoD c）。human_interface agent 只读已填请求 → **不需改其 contract**
+（数据在构建期已 baked in，与 analyst_recommendation 等字段同模式）。
+
+### 8.2 配置新增汇总
+- `DependencyGraphConfig.god_node_risk_bump: float = 0.15`（C1）
+- `DependencyGraphConfig.resolve_aliases: bool = False`（C3）
+- `ModuleConfig.mode` 增 `"graph"` 取值（C2，默认仍 "auto"）
+
+### 8.3 反死代码 DoD 对照
+| 子项 | (a) 构建 | (b) 契约声明 | (c) 真正读取 | (d) 图非空⇒行为变 |
+|---|---|---|---|---|
+| C1 | initialize | planner 原始 state（无需声明） | `_apply_god_node_risk` 抬分 | God Node 文件 risk 上调/重分类 |
+| C2 | initialize | planner 原始 state | `infer_communities` | mode=graph 下分组按真实边变化 |
+| C3 | 提取期 | n/a | resolver 用 alias_map | 别名 import 解析出边（开关开时） |
+| C4 | initialize | **memory_extractor.yaml 新增** | `_graph_insights` | 图非空产 hub/surprising memory |
+| C5 | initialize | 构建期原始 state（无需声明） | 请求字段 + context_summary | dependents/blast 字段非零、摘要出现 |
+
+### 8.4 变更文件清单
+- [x] `src/models/config.py`（+god_node_risk_bump +resolve_aliases；ModuleConfig.mode +"graph"）
+- [x] `src/agents/planner_agent.py`（+_apply_god_node_risk 接入 _generate_plan；_assign_modules graph 模式）
+- [x] `src/tools/module_inference.py`（+infer_communities label-propagation +_modal_module）
+- [x] `src/tools/dep_extractors/alias_resolver.py`（新建：AliasMap + build_alias_map，tsconfig/go.mod/package.json，JSONC 容错）
+- [x] `src/tools/dependency_extractor.py`（extract_from_sources +alias_map）
+- [x] `src/tools/dep_extractors/treesitter_extractor.py`（_resolve/extract_imports +alias_map，relative/go 失败再走 alias）
+- [x] `src/core/phases/initialize.py`（resolve_aliases 时 _collect_alias_configs 建 alias_map；os.walk 剪枝 +cap 400）
+- [x] `src/agents/memory_extractor_agent.py`（+_graph_insights 确定性洞察 + budget 共享）
+- [x] `src/agents/contracts/memory_extractor.yaml`（+dependency_graph +file_categories）
+- [x] `src/models/human.py`（HumanDecisionRequest +dependents_count/blast_radius/is_god_node）
+- [x] `src/core/phases/conflict_analysis.py`（_build_human_decision_request +impact_hint 填充 + 调用处传 hint）
+- [x] `src/core/phases/auto_merge.py`（O-L3 人工请求构造处填 blast-radius + context_summary 摘要）
+- [x] `tests/unit/test_dependency_graph_phase_c.py`（新建：5 子项 19 用例 + 安全降级）
+- [x] `tests/unit/test_dependency_graph_consumers.py`（contract 断言 +memory_extractor dependency_graph/file_categories）
+
+### 8.5 实施过程记录
+- 2026-05-26：确认范围（5 子项全做 + stdlib 社区检测）、建 Phase C 笔记章节。
+- 2026-05-26：实现 C1–C5 + 测试。实现中细节补充：
+  - **C2 fallback 命名**：`_assign_modules` 的 "graph" 分支用 `cfg.model_copy(update={"mode":"auto"})` 算 fallback
+    模块名——因 `infer_modules` 的 topology 分支仅 `mode in ("auto","graph")` 触发（已同步放开 "graph"），
+    但社区命名要的是 explicit>rewritten>topology 全链，用 auto 副本最稳。
+  - **C3 alias 仅作用于非 Python**：treesitter 提取器消费 alias_map；Python `ast` 提取器走自身 module_index 未接 alias
+    （Python import 别名罕见、且 `_resolve_module` 前缀搜索已较强）。记为范围限定。
+  - **C3 go 解析**：`AliasMap.resolve_go` 要求 `pkg_dir == rest`（精确目录等值），比 treesitter 内置 `_resolve_go`
+    的 `endswith` 更严，避免跨包误匹配；内置 endswith 作为无 alias 时的兜底保留。
+  - **C4 budget 共享**：`extract` 先取确定性 graph insights（封顶 max_insights），LLM 只填 `remaining`。
+    图空 ⇒ graph=[] ⇒ remaining=max_insights ⇒ 与旧行为逐字节一致；图满 ⇒ 可能跳过 LLM 调用（省成本，可接受）。
+  - **C5 不改 human_interface contract**：决策卡字段在**构建期**（conflict_analysis/auto_merge，原始 state）预填，
+    human_interface agent 只读已填请求 → 无需扩其 contract（与 analyst_recommendation 等字段同模式）。
+- 2026-05-26：最终验证：`pytest tests/unit/` **2724 passed**（+19 Phase C，旧 2705 无回归）；`mypy src` 166 文件 0 错；
+  `ruff check src/ tests/` 通过；`test_agent_contracts.py` 37 passed（memory_extractor 新 input 已声明）。
+  - **维护须知**：
+    - C1 `god_node_risk_bump`(默认 0.15)、`god_node_min_dependents`(8) 均**未标定**；偏噪调 0 / 调高阈值。仅抬不降(§5)。
+    - C2 社区检测 **opt-in**：`module_config.mode: graph`（默认 "auto" 行为不变）。label-propagation 确定性
+      （sorted 遍历、平局取 min label、max_iters=20）；不追模块度最优，只求粗聚类。AMBIGUOUS 边被 planner 滤除。
+    - C3 **opt-in**：`dependency_graph.resolve_aliases: true`。开启才 os.walk 收集配置(cap 400，剪 node_modules 等)；
+      默认关 → 零额外 IO、行为不变。仅 JS/TS/Go 受益（Python 未接 alias）。
+    - C4 graph insights `confidence_level=EXTRACTED`(AST 确定)，与 LLM inferred 区分；surprising = 跨顶层目录 EXTRACTED 边
+      （轻量代理，不依赖 C2 社区，避免耦合 mode 开关）。
+    - C5 字段默认 0/false → 向后兼容；图空时决策卡无 "Dependency impact" 行。

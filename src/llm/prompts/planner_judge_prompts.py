@@ -5,6 +5,7 @@ from pathlib import Path
 
 from src.models.plan import MergePlan
 from src.models.diff import FileDiff, FileChangeCategory, RiskLevel
+from src.models.dependency import ConfidenceLabel, FileDependencyGraph
 from src.models.plan_judge import PlanIssue
 from src.models.plan_review import PlannerIssueResponse, IssueResponseAction
 from src.tools.file_classifier import matches_any_pattern
@@ -264,6 +265,81 @@ def precheck_plan_integrity(
                     source="precheck",
                 )
             )
+    return issues
+
+
+# Phase B step 9: cap on topological-order issues per review. Cross-module
+# EXTRACTED edges can be numerous on a large fork; an unbounded flag set would
+# stall convergence (plan §8). This is a noise ceiling, not a correctness
+# bound — tune per target repo if real violations are being truncated.
+_MAX_TOPO_ISSUES = 25
+
+
+def precheck_batch_topological_order(
+    plan: MergePlan,
+    dependency_graph: FileDependencyGraph | None,
+) -> list[PlanIssue]:
+    """Deterministically flag plan batch orderings that merge a dependent
+    before the file it depends on (subclass before base, plan §7 step 9).
+
+    The flat merge order is ``[fp for batch in plan.phases for fp in
+    batch.file_paths]``. For each EXTRACTED edge ``source -> target`` (source
+    imports/inherits target, so target must merge first), a violation is when
+    ``source`` appears earlier than ``target`` in that order. Only EXTRACTED
+    edges raise an issue (risk monotonicity, plan §5); INFERRED / AMBIGUOUS are
+    ignored. One issue per offending source file, ``issue_type=batch_ordering``
+    (deliberately outside ``SHORTCIRCUIT_SAFE_ISSUE_TYPES`` so it forces an LLM
+    re-check rather than a reclassification short-circuit). ``suggested ==
+    current`` classification: the remedy is reordering, not reclassifying.
+
+    Empty / absent graph -> ``[]`` (safe degrade)."""
+    if dependency_graph is None or not dependency_graph.edges:
+        return []
+
+    order: list[str] = []
+    batch_risk_map: dict[str, RiskLevel] = {}
+    for batch in plan.phases:
+        for fp in batch.file_paths:
+            order.append(fp)
+            batch_risk_map[fp] = batch.risk_level
+    position = {fp: idx for idx, fp in enumerate(order)}
+
+    # source_file -> dependencies it is merged ahead of.
+    violations: dict[str, list[str]] = {}
+    for edge in dependency_graph.edges:
+        if edge.confidence != ConfidenceLabel.EXTRACTED:
+            continue
+        src, tgt = edge.source_file, edge.target_file
+        if src == tgt or src not in position or tgt not in position:
+            continue
+        if position[src] < position[tgt]:
+            deps = violations.setdefault(src, [])
+            if tgt not in deps:
+                deps.append(tgt)
+
+    issues: list[PlanIssue] = []
+    for src in sorted(violations):
+        if len(issues) >= _MAX_TOPO_ISSUES:
+            break
+        deps = sorted(violations[src])
+        listed = ", ".join(deps[:3]) + (" ..." if len(deps) > 3 else "")
+        rl = batch_risk_map[src]
+        issues.append(
+            PlanIssue(
+                file_path=src,
+                current_classification=rl,
+                # Reordering, not reclassification — keep the level unchanged so
+                # the planner does not silently move the file's risk batch.
+                suggested_classification=rl,
+                reason=(
+                    f"BATCH-ORDERING: '{src}' is merged before its dependency "
+                    f"({listed}). The dependency must merge first or the "
+                    "intermediate build may break — reorder the batches."
+                ),
+                issue_type="batch_ordering",
+                source="precheck",
+            )
+        )
     return issues
 
 

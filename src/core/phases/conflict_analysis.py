@@ -9,6 +9,7 @@ from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.models.conflict import ConflictAnalysis, ConflictType
 from src.models.config import ThresholdConfig
 from src.models.decision import MergeDecision
+from src.models.dependency import DependencyImpactHint
 from src.models.diff import FileChangeCategory, FileDiff, FileStatus, RiskLevel
 from src.models.human import HumanDecisionRequest, DecisionOption
 from src.models.plan import MergePhase
@@ -299,6 +300,7 @@ def _build_human_decision_request(
     upstream_ref: str | None = None,
     fork_ref: str | None = None,
     git_tool: "GitTool | None" = None,
+    impact_hint: "DependencyImpactHint | None" = None,
 ) -> HumanDecisionRequest:
     rec_val = analysis.recommended_strategy
 
@@ -345,6 +347,15 @@ def _build_human_decision_request(
     if analysis.rationale:
         context_summary = f"{context_summary} Rationale: {analysis.rationale}"
 
+    # Phase C §4: surface dependency blast radius on the card.
+    if impact_hint is not None and impact_hint.has_signal:
+        hub = " (dependency hub)" if impact_hint.is_god_node else ""
+        context_summary = (
+            f"{context_summary} Dependency impact: "
+            f"{impact_hint.direct_dependents} direct dependent(s), "
+            f"impact radius {impact_hint.impact_radius}{hub}."
+        )
+
     upstream_intents = [
         cp.upstream_intent.description
         for cp in analysis.conflict_points
@@ -384,6 +395,9 @@ def _build_human_decision_request(
         analyst_rationale=analysis.rationale,
         options=options,
         created_at=datetime.now(),
+        dependents_count=impact_hint.direct_dependents if impact_hint else 0,
+        blast_radius=impact_hint.impact_radius if impact_hint else 0,
+        is_god_node=impact_hint.is_god_node if impact_hint else False,
     )
 
 
@@ -789,6 +803,13 @@ class ConflictAnalysisPhase(Phase):
                 referenced_names=state.dependency_graph.referenced_symbols(
                     fd.file_path
                 ),
+                impact_hint=state.dependency_graph.impact_hint(
+                    fd.file_path,
+                    max_depth=state.config.dependency_graph.max_depth,
+                    god_node_min_dependents=(
+                        state.config.dependency_graph.god_node_min_dependents
+                    ),
+                ),
             )
             state.conflict_analyses[file_path] = analysis
 
@@ -841,6 +862,13 @@ class ConflictAnalysisPhase(Phase):
                     upstream_ref=state.config.upstream_ref,
                     fork_ref=state.config.fork_ref,
                     git_tool=ctx.git_tool,
+                    impact_hint=state.dependency_graph.impact_hint(
+                        file_path,
+                        max_depth=state.config.dependency_graph.max_depth,
+                        god_node_min_dependents=(
+                            state.config.dependency_graph.god_node_min_dependents
+                        ),
+                    ),
                 )
                 state.human_decision_requests[file_path] = req
             elif strategy == MergeDecision.SEMANTIC_MERGE:

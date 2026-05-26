@@ -1701,6 +1701,22 @@ class AutoMergePhase(Phase):
                 up_shape = "(diff metadata unavailable)"
                 fork_state = "Fork change unavailable"
 
+            # Phase C §4: dependency blast radius for the decision card.
+            _hint = state.dependency_graph.impact_hint(
+                file_path,
+                max_depth=state.config.dependency_graph.max_depth,
+                god_node_min_dependents=(
+                    state.config.dependency_graph.god_node_min_dependents
+                ),
+            )
+            _impact_note = (
+                f" Dependency impact: {_hint.direct_dependents} direct "
+                f"dependent(s), impact radius {_hint.impact_radius}"
+                f"{' (dependency hub)' if _hint.is_god_node else ''}."
+                if _hint.has_signal
+                else ""
+            )
+
             state.human_decision_requests[file_path] = HumanDecisionRequest(
                 file_path=file_path,
                 priority=5,
@@ -1709,7 +1725,7 @@ class AutoMergePhase(Phase):
                     f"AUTO_MERGE layer {layer_tag} batch judge sub-review did "
                     f"not reach consensus after {max_dispute} dispute rounds "
                     f"(O-L3). Executor's repairs did not resolve all "
-                    "remaining blocking issues."
+                    f"remaining blocking issues.{_impact_note}"
                 ),
                 upstream_change_summary=f"Upstream changed: {up_shape}",
                 fork_change_summary=(
@@ -1746,6 +1762,9 @@ class AutoMergePhase(Phase):
                     ),
                 ],
                 created_at=now,
+                dependents_count=_hint.direct_dependents,
+                blast_radius=_hint.impact_radius,
+                is_god_node=_hint.is_god_node,
             )
 
     async def _b_class_sanity_check(
@@ -1957,7 +1976,11 @@ class AutoMergePhase(Phase):
             )
 
             verdict = await planner_judge.review_plan(
-                revised_plan, file_diffs, 0, lang=ctx.config.output.language
+                revised_plan,
+                file_diffs,
+                0,
+                lang=ctx.config.output.language,
+                dependency_graph=state.dependency_graph,
             )
             state.plan_judge_verdict = verdict
 

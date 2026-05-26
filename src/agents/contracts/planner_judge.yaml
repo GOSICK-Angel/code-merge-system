@@ -4,6 +4,7 @@ inputs:
   - merge_plan
   - file_diffs
   - config
+  - dependency_graph
 output_schema: PlanJudgeVerdict
 gates:
   - PJ-SYSTEM

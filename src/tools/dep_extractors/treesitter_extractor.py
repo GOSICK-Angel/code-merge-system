@@ -28,6 +28,7 @@ from src.models.dependency import (
     DependencyEdge,
     DependencyKind,
 )
+from src.tools.dep_extractors.alias_resolver import AliasMap
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +60,13 @@ def extract_imports(
     source: str,
     language: str,
     path_set: set[str],
+    alias_map: AliasMap | None = None,
 ) -> list[DependencyEdge]:
     """Return static-import edges for ``file_path`` resolvable in ``path_set``.
 
     Degrades to ``[]`` when tree-sitter is unavailable or the grammar for
-    ``language`` cannot be loaded.
+    ``language`` cannot be loaded. When ``alias_map`` is supplied (Phase C
+    §6.3), aliased / bare specifiers are resolved through it before giving up.
     """
     parser = _load_parser(language)
     if parser is None:
@@ -78,7 +81,7 @@ def extract_imports(
     imports = _collect_imports(tree.root_node, source, language)
     edges: list[DependencyEdge] = []
     for raw, symbols in imports:
-        target = _resolve(file_path, raw, language, path_set)
+        target = _resolve(file_path, raw, language, path_set, alias_map)
         if not target or target == file_path:
             continue
         if symbols:
@@ -219,10 +222,17 @@ def _resolve(
     spec: str,
     language: str,
     path_set: set[str],
+    alias_map: AliasMap | None = None,
 ) -> str | None:
     if language == "go":
-        return _resolve_go(spec, path_set)
-    return _resolve_js_relative(source_file, spec, path_set)
+        target = _resolve_go(spec, path_set)
+        if target is None and alias_map is not None:
+            return alias_map.resolve_go(spec, path_set)
+        return target
+    target = _resolve_js_relative(source_file, spec, path_set)
+    if target is None and alias_map is not None and not spec.startswith("."):
+        return alias_map.resolve_js(spec, path_set)
+    return target
 
 
 def _resolve_js_relative(

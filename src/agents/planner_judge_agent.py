@@ -19,9 +19,11 @@ from src.llm.prompts.planner_judge_prompts import (
     build_segment_plan_review_prompt,
     compute_segment_signature,
     is_segment_obviously_safe,
+    precheck_batch_topological_order,
     precheck_plan_integrity,
     REVIEW_SEGMENT_SIZE,
 )
+from src.models.dependency import FileDependencyGraph
 from src.models.plan_review import PlannerIssueResponse
 from src.llm.context import estimate_tokens
 from src.llm.response_parser import parse_plan_judge_verdict
@@ -236,7 +238,13 @@ class PlannerJudgeAgent(BaseAgent):
         file_diffs: list[FileDiff] = view.file_diffs
 
         lang = view.config.output.language
-        verdict = await self.review_plan(view.merge_plan, file_diffs, 0, lang=lang)
+        verdict = await self.review_plan(
+            view.merge_plan,
+            file_diffs,
+            0,
+            lang=lang,
+            dependency_graph=view.dependency_graph,
+        )
 
         return AgentMessage(
             sender=AgentType.PLANNER_JUDGE,
@@ -261,6 +269,7 @@ class PlannerJudgeAgent(BaseAgent):
         out_segment_results: dict[int, SegmentReviewSnapshot] | None = None,
         extra_safelist_patterns: list[str] | None = None,
         lockfile_max_lines: int = 1000,
+        dependency_graph: FileDependencyGraph | None = None,
     ) -> PlanJudgeVerdict:
         system = get_planner_judge_system(lang)
 
@@ -271,10 +280,20 @@ class PlannerJudgeAgent(BaseAgent):
         # MISMATCH (classifier disagrees with batch) and NOT-BATCHED
         # (classifier had a verdict, plan dropped the file). Removed from
         # LLM prompts; LLM only handles semantic / path-name reasoning.
+        # Phase B step 9: batch_ordering (topo violation) issues are appended
+        # from the EXTRACTED dependency edges; empty graph -> none.
         precheck_issues = precheck_plan_integrity(plan, file_diffs)
+        topo_issues = precheck_batch_topological_order(plan, dependency_graph)
+        if topo_issues:
+            self.logger.info(
+                "Plan precheck found %d batch_ordering (topo) issue(s) "
+                "(deterministic, EXTRACTED edges)",
+                len(topo_issues),
+            )
+            precheck_issues = precheck_issues + topo_issues
         if precheck_issues:
             self.logger.info(
-                "Plan precheck found %d MISMATCH/NOT-BATCHED issues "
+                "Plan precheck found %d total integrity issue(s) "
                 "(deterministic, no LLM call)",
                 len(precheck_issues),
             )

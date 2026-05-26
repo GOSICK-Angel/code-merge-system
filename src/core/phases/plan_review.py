@@ -332,6 +332,7 @@ class PlanReviewPhase(Phase):
                     lockfile_max_lines=(
                         state.config.plan_review.safelist_lockfile_max_lines
                     ),
+                    dependency_graph=state.dependency_graph,
                 )
             if verdict.result == PlanJudgeResult.REVISION_NEEDED and not verdict.issues:
                 verdict = verdict.model_copy(

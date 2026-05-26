@@ -266,3 +266,11 @@ def test_dependency_graph_declared_in_consumer_contracts() -> None:
 
     assert "dependency_graph" in load_contract("planner").inputs
     assert "dependency_graph" in load_contract("judge").inputs
+    # Phase B step 9: planner_judge reads it via restricted_view for the
+    # batch_ordering (topo) precheck, so it must be contract-declared too.
+    assert "dependency_graph" in load_contract("planner_judge").inputs
+    # Phase C C4: memory_extractor reads it via restricted_view for the
+    # deterministic God Node / surprising-connection insights.
+    mem = load_contract("memory_extractor")
+    assert "dependency_graph" in mem.inputs
+    assert "file_categories" in mem.inputs

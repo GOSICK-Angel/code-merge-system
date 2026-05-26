@@ -11,6 +11,7 @@ from src.models.plan import MergePhase
 from src.models.diff import FileDiff
 from src.models.conflict import ConflictAnalysis, ConflictType
 from src.models.decision import MergeDecision
+from src.models.dependency import DependencyImpactHint
 from src.models.state import MergeState
 from src.llm.prompt_builders import AgentPromptBuilder
 from src.llm.prompts.analyst_prompts import (
@@ -38,6 +39,35 @@ _STRATEGY_PRECEDENCE: tuple[MergeDecision, ...] = (
     MergeDecision.TAKE_TARGET,
     MergeDecision.TAKE_CURRENT,
 )
+
+
+def _format_blast_radius_block(hint: DependencyImpactHint | None) -> str:
+    """Render a dependency blast-radius caution block, or ``""`` when there is
+    no signal. Phase B step 7: a non-empty graph makes the analyst more
+    conservative for hub files (risk monotonicity, plan §5 — caution only goes
+    up). Injected into ``enriched_context`` so both the chunked and the
+    single-shot analysis paths see it."""
+    if hint is None or not hint.has_signal:
+        return ""
+    lines = [
+        "## Dependency Impact",
+        f"- Direct dependents (files importing this one): {hint.direct_dependents}",
+        f"- Transitive impact radius (files affected by a break): {hint.impact_radius}",
+    ]
+    if hint.is_god_node:
+        lines.append(
+            "- GOD NODE: this file is a dependency hub. A regression here "
+            "ripples widely — strongly prefer preserving its public interface; "
+            "avoid take_target when it would drop fork-side API the dependents "
+            "rely on, and lean toward semantic_merge or escalate_human over a "
+            "blind side-pick."
+        )
+    else:
+        lines.append(
+            "- Be conservative about changing this file's public interface; "
+            "the dependents above may break if exported symbols are removed."
+        )
+    return "\n".join(lines)
 
 
 class ConflictAnalystAgent(BaseAgent):
@@ -145,6 +175,7 @@ class ConflictAnalystAgent(BaseAgent):
         chunk_size_chars: int | None = None,
         min_chunked_confidence: float | None = None,
         referenced_names: frozenset[str] = frozenset(),
+        impact_hint: DependencyImpactHint | None = None,
     ) -> ConflictAnalysis:
         # U1.A: build_staged_content runs regardless of memory_store
         # availability. Only the memory-text injection remains gated.
@@ -175,6 +206,16 @@ class ConflictAnalystAgent(BaseAgent):
                     if enriched_context
                     else profile_block
                 )
+
+        # Phase B step 7: dependency blast-radius / God Node caution. Empty
+        # graph -> empty block -> no behavior change (safe degrade).
+        blast_block = _format_blast_radius_block(impact_hint)
+        if blast_block:
+            enriched_context = (
+                f"{blast_block}\n\n{enriched_context}"
+                if enriched_context
+                else blast_block
+            )
 
         # U1: chunked path when either side exceeds chunk_size_chars * 2
         # (default 40KB). Reuses src/tools/chunk_processor.split_by_semantic_boundary

@@ -34,7 +34,8 @@ from src.tools.file_classifier import (
     compute_risk_score,
     classify_file,
 )
-from src.tools.module_inference import infer_modules
+from src.tools.module_inference import infer_communities, infer_modules
+from src.models.dependency import ConfidenceLabel
 from src.llm.prompts.gate_registry import get_gate
 from src.core.parallel_file_runner import (
     ParallelFileRunner,
@@ -118,6 +119,10 @@ class PlannerAgent(BaseAgent):
                 rename_pairs=state.rename_pairs or None,
                 fanout_map=self._compute_fanout_map(all_file_diffs, state),
             )
+
+        # Phase C: deterministic God Node risk bump (runs regardless of
+        # llm_assist mode). Empty graph / bump=0 -> unchanged.
+        all_file_diffs = self._apply_god_node_risk(all_file_diffs, state)
 
         if state.file_categories:
             return self._build_layered_plan(all_file_diffs, state), all_file_diffs
@@ -432,9 +437,24 @@ class PlannerAgent(BaseAgent):
                 state.forks_profile.rewritten_modules if state.forks_profile else []
             )
         ]
-        module_map: dict[str, str | None] = dict(
-            infer_modules(paths, cfg, rewritten or None)
-        )
+        graph = getattr(state, "dependency_graph", None)
+        if cfg.mode == "graph" and graph is not None and graph.edges:
+            # Phase C §6.4: graph-driven communities replace path topology.
+            # Name communities via the path-topology fallback (mode="auto"
+            # copy so explicit/rewritten/topology naming still applies).
+            fallback = infer_modules(
+                paths, cfg.model_copy(update={"mode": "auto"}), rewritten or None
+            )
+            edges = [
+                (e.source_file, e.target_file)
+                for e in graph.edges
+                if e.confidence != ConfidenceLabel.AMBIGUOUS
+            ]
+            module_map: dict[str, str | None] = dict(
+                infer_communities(edges, paths, fallback)
+            )
+        else:
+            module_map = dict(infer_modules(paths, cfg, rewritten or None))
         ordered = self._order_modules(
             {m for m in module_map.values() if m is not None}, cfg
         )
@@ -1676,6 +1696,39 @@ class PlannerAgent(BaseAgent):
         score = compute_risk_score(file_diff, config.file_classifier)
         updated = file_diff.model_copy(update={"risk_score": score})
         return classify_file(updated, config.file_classifier)
+
+    def _apply_god_node_risk(
+        self, file_diffs: list[FileDiff], state: MergeState
+    ) -> list[FileDiff]:
+        """Phase C §6.4: raise the risk_score of changed files that are
+        dependency-graph God Nodes (high direct-dependent count), then
+        re-derive risk_level. Monotonic — only raises risk (plan §5). Empty
+        graph or ``god_node_risk_bump == 0`` leaves the list unchanged
+        (byte-identical, safe degrade)."""
+        cfg = state.config.dependency_graph
+        bump = cfg.god_node_risk_bump
+        graph = getattr(state, "dependency_graph", None)
+        if bump <= 0.0 or graph is None or not graph.edges:
+            return file_diffs
+
+        result: list[FileDiff] = []
+        changed = False
+        for fd in file_diffs:
+            hint = graph.impact_hint(
+                fd.file_path,
+                max_depth=cfg.max_depth,
+                god_node_min_dependents=cfg.god_node_min_dependents,
+            )
+            if hint.is_god_node:
+                new_score = min(1.0, fd.risk_score + bump)
+                if new_score > fd.risk_score:
+                    bumped = fd.model_copy(update={"risk_score": new_score})
+                    new_level = classify_file(bumped, state.config.file_classifier)
+                    result.append(bumped.model_copy(update={"risk_level": new_level}))
+                    changed = True
+                    continue
+            result.append(fd)
+        return result if changed else file_diffs
 
 
 def _parse_meta_review_json(raw: str) -> dict[str, str]:

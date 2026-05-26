@@ -34,3 +34,8 @@ class HumanDecisionRequest(BaseModel):
     reviewer_notes: str | None = None
     decided_at: datetime | None = None
     is_batch_decision: bool = False
+    # Phase C §4: dependency-graph blast radius shown on the decision card to
+    # help the reviewer weigh impact. Zero/false when the graph is empty.
+    dependents_count: int = 0
+    blast_radius: int = 0
+    is_god_node: bool = False

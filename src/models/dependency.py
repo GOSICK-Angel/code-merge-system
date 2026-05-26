@@ -29,6 +29,23 @@ class DependencyEdge(BaseModel, frozen=True):
     confidence: ConfidenceLabel = ConfidenceLabel.EXTRACTED
 
 
+class DependencyImpactHint(BaseModel, frozen=True):
+    """Per-file blast-radius summary consumed by conflict_analyst / executor.
+
+    Built by ``FileDependencyGraph.impact_hint``; carries the direct dependent
+    count, the transitive impact-radius size, and a God Node flag (direct
+    dependents above a configurable threshold). Used only to *raise* caution in
+    LLM prompts (risk monotonicity, plan §5) — never to lower risk."""
+
+    direct_dependents: int = 0
+    impact_radius: int = 0
+    is_god_node: bool = False
+
+    @property
+    def has_signal(self) -> bool:
+        return self.direct_dependents > 0 or self.impact_radius > 0
+
+
 class FileDependencyGraph(BaseModel, frozen=True):
     edges: tuple[DependencyEdge, ...] = ()
     file_count: int = 0
@@ -92,3 +109,25 @@ class FileDependencyGraph(BaseModel, frozen=True):
             if not frontier:
                 break
         return visited
+
+    def impact_hint(
+        self,
+        file_path: str,
+        *,
+        max_depth: int = 3,
+        god_node_min_dependents: int = 8,
+    ) -> DependencyImpactHint:
+        """Summarise ``file_path``'s blast radius for prompt-level caution.
+
+        ``direct_dependents`` counts files importing it directly;
+        ``impact_radius`` is the transitive dependent set size bounded by
+        ``max_depth``; ``is_god_node`` is True when direct dependents reach
+        ``god_node_min_dependents``. An empty graph yields a zeroed hint whose
+        ``has_signal`` is False, so consumers inject nothing (safe degrade)."""
+        direct = len(self.dependents_of(file_path))
+        radius = len(self.impact_radius(file_path, max_depth=max_depth))
+        return DependencyImpactHint(
+            direct_dependents=direct,
+            impact_radius=radius,
+            is_god_node=direct >= god_node_min_dependents,
+        )

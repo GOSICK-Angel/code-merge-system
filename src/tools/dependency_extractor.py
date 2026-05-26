@@ -22,6 +22,7 @@ from src.tools.dep_extractors import (
     python_extractor,
     treesitter_extractor,
 )
+from src.tools.dep_extractors.alias_resolver import AliasMap
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class DependencyExtractor:
     def extract_from_sources(
         files: dict[str, str],
         languages: Iterable[str] | None = None,
+        alias_map: AliasMap | None = None,
     ) -> FileDependencyGraph:
         if not files:
             return FileDependencyGraph(file_count=0)
@@ -52,7 +54,7 @@ class DependencyExtractor:
             else:
                 edges.extend(
                     treesitter_extractor.extract_imports(
-                        file_path, source, lang, path_set
+                        file_path, source, lang, path_set, alias_map
                     )
                 )
 

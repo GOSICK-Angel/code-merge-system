@@ -1364,8 +1364,26 @@ class InitializePhase(Phase):
         if not sources:
             return
 
+        alias_map = None
+        if cfg.resolve_aliases:
+            from src.tools.dep_extractors.alias_resolver import build_alias_map
+
+            configs = _collect_alias_configs(repo_path)
+            alias_map = build_alias_map(configs)
+            if alias_map.is_empty:
+                alias_map = None
+            else:
+                logger.info(
+                    "Dependency graph: alias resolution on (%d config file(s), "
+                    "go_module=%s, %d tsconfig path(s), %d workspace pkg(s))",
+                    len(configs),
+                    alias_map.go_module or "-",
+                    len(alias_map.ts_paths),
+                    len(alias_map.pkg_names),
+                )
+
         graph = DependencyExtractor.extract_from_sources(
-            sources, languages=cfg.languages
+            sources, languages=cfg.languages, alias_map=alias_map
         )
         state.dependency_graph = graph
         logger.info(
@@ -1374,3 +1392,36 @@ class InitializePhase(Phase):
             graph.file_count,
             sum(1 for e in graph.edges if e.confidence == ConfidenceLabel.EXTRACTED),
         )
+
+
+_ALIAS_CONFIG_SKIP_DIRS = {
+    "node_modules",
+    ".git",
+    "vendor",
+    "dist",
+    "build",
+    ".venv",
+    "__pycache__",
+}
+
+
+def _collect_alias_configs(repo_path: Path, *, cap: int = 400) -> dict[str, str]:
+    """Collect tsconfig/jsconfig/go.mod/package.json contents repo-wide for
+    alias resolution (Phase C §6.3). Prunes vendored / build dirs and caps the
+    count to bound the opt-in walk. Returns ``{repo-relative path: content}``."""
+    configs: dict[str, str] = {}
+    for root, dirs, files in os.walk(repo_path):
+        dirs[:] = [d for d in dirs if d not in _ALIAS_CONFIG_SKIP_DIRS]
+        for fn in files:
+            if len(configs) >= cap:
+                return configs
+            if fn in ("go.mod", "package.json") or fn.startswith(
+                ("tsconfig", "jsconfig")
+            ):
+                content = _safe_read_text(Path(root) / fn)
+                if content is not None:
+                    rel = str((Path(root) / fn).relative_to(repo_path)).replace(
+                        os.sep, "/"
+                    )
+                    configs[rel] = content
+    return configs

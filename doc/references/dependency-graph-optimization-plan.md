@@ -6,7 +6,11 @@
 > **状态（2026-05-26 更新）**：**Phase A 已落地**（提交 `58600ac`，2026-05-25）——多语言提取 + initialize 构建 +
 > planner topo/fanout + judge EXTRACTED 漏改 + config 开关，§0 反死代码 DoD 四条均满足。**Phase A+（计划外）**：
 > tree-sitter 实装后 edge `target_symbol` 已填充,新增「依赖图符号 → staging relevance」消费方(提交 `d1aa956`)。
-> **Phase B / C 待做**。进度详见 §7 标记与 `doc/execute/implementation-notes.md`。原始日期：2026-05-25。
+> **Phase B 已落地**（2026-05-26）——conflict_analyst blast-radius/God Node + executor dependents_of + planner_judge
+> topo 违规 precheck（单测 +16）。**Phase C 已落地**（2026-05-26）——import 别名/monorepo 解析（opt-in）+ stdlib
+> label-propagation 社区检测（opt-in，未引 Leiden 重依赖）+ God Node planner 风险 + memory_extractor hub/surprising
+> 沉淀 + human_interface blast-radius 决策卡（单测 +19，2724 passed）。**全部三阶段完成**。进度详见 §7 标记与
+> `doc/execute/implementation-notes.md` §7/§8。原始日期：2026-05-25。
 
 ---
 
@@ -190,17 +194,34 @@ God Node（高 degree 节点）→ 命中的改动文件风险提升。
   `relevance._reference_score`：文件中被其他文件 import 的公共符号，即使不在 diff 内也保 SIGNATURE+，不被压缩丢弃。
 - 关联：同轮还接通了 relevance 的 `security` / `conflict` 维度（详见 `doc/execute/implementation-notes.md` §6）。
 
-### Phase B — 冲突与执行消费（P1）⬜ 待做
-7. `conflict_analyst.yaml` + CA gate：注入 hunk blast-radius / God Node 命中。
-8. `executor.yaml` + E-DELETION/E-SEMANTIC-MERGE：删除/改签名前查 `dependents_of`，与 sentinel 协同。
-9. `planner_judge.yaml` + PJ-PLAN-REVIEW：topo 顺序违规检查。
-> 注：conflict_analyst / executor 本轮已因 Phase A+ 的 staging 而读取 `state.dependency_graph`（走原始 state /
-> phase 传参，未经 `restricted_view`，故无需扩二者 contract）；但 §4 表设想的 **blast-radius / dependents_of**
-> 消费（step 7/8）本身仍未实现。
+### Phase B — 冲突与执行消费（P1）✅ 已完成（2026-05-26）
+7. ✅ conflict_analyst：blast-radius / God Node 经 `enriched_context` 注入 CA-THREE-WAY（`DependencyImpactHint` +
+   `FileDependencyGraph.impact_hint`；config `god_node_min_dependents` 默认 8）。**未改 analyst_prompts 签名**——
+   走 enriched_context 一处注入覆盖 chunked/非 chunked 两路。
+8. ✅ executor：`build_semantic_merge_prompt` / `build_deletion_analysis_prompt` 加「Downstream Dependents」段
+   （`dependents_of` 驱动）；`execute_semantic_merge` 传 dependents+referenced_symbols 保接口；`analyze_deletion`
+   删前查 dependents、与 `sentinel_hits` 协同写入 `UserDecisionItem.risk_context`。
+9. ✅ planner_judge：`planner_judge.yaml` +`dependency_graph`（唯一需改 contract，因走 restricted_view）；
+   新增确定性 `precheck_batch_topological_order`（仅 EXTRACTED 边、扁平执行序倒置、`issue_type=batch_ordering`、
+   `suggested==current` 不触发重分类、封顶 25）；`run`/`PlanReviewPhase`/dispute 三处 `review_plan` 均透传 graph。
+> 注：conflict_analyst / executor 经 phase 参数 / 原始 state 访问图（未经 `restricted_view`），**无需扩二者 contract**；
+> 仅 planner_judge 因 restricted_view 须声明。详见 `doc/execute/implementation-notes.md` §7。
+> 已知近似/局限：blast-radius 为文件级（非 hunk 级）；God Node 阈值未标定；topo 封顶 25 为噪音上限。
 
-### Phase C — 增强（P2/P3，可选）⬜ 待做
-10. import 别名/monorepo 解析（§6.3）；Leiden 社区 + God Node（§6.4）。
-11. memory_extractor 沉淀 hub/surprising；human_interface 决策卡展示依赖摘要。
+### Phase C — 增强（P2/P3）✅ 已完成（2026-05-26）
+10. ✅ import 别名/monorepo 解析（§6.3）：新 `alias_resolver`（tsconfig paths/baseUrl + go.mod module +
+    package.json workspace 名），`dependency_graph.resolve_aliases` 默认关、可配；treesitter resolver 接 alias_map。
+    ✅ 社区检测（§6.4）：**未引 Leiden/graspologic（用户确认避免重依赖）**，改用纯 stdlib label-propagation
+    `infer_communities`，经 `module_config.mode: "graph"` opt-in（默认 "auto" 不变），图空降级路径式。
+    ✅ God Node 风险（§6.4）：`planner._apply_god_node_risk` 在风险评分后抬 God Node 改动文件的 risk_score
+    （`god_node_risk_bump` 默认 0.15，§5 只抬不降）并重分类。
+11. ✅ memory_extractor：确定性 `_graph_insights` 沉淀 God Node（CODEBASE_INSIGHT）+ 跨目录耦合（RELATIONSHIP，
+    surprising-connection 代理），`confidence_level=EXTRACTED`，与 LLM 洞察共享 per-phase 预算；契约加
+    `dependency_graph`+`file_categories`。
+    ✅ human_interface：`HumanDecisionRequest` 加 `dependents_count/blast_radius/is_god_node`，在决策卡构建期
+    （conflict_analysis / auto_merge）预填并把 blast-radius 摘要写进 `context_summary`。
+> 依赖取舍：社区检测用 stdlib label-propagation 而非 Leiden（零新依赖、target-repo 无关）。
+> 别名解析 + 社区检测均 **opt-in 默认关/auto**，图空/未开 → 行为逐字节不变。详见 `implementation-notes.md` §8。
 
 ---
 

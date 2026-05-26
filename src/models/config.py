@@ -483,7 +483,7 @@ class ModuleConfig(BaseModel):
     """
 
     enabled: bool = True
-    mode: Literal["auto", "config", "off"] = "auto"
+    mode: Literal["auto", "config", "off", "graph"] = "auto"
     container_dirs: list[str] = Field(
         default_factory=lambda: [
             "packages",
@@ -712,6 +712,28 @@ class DependencyGraphConfig(BaseModel):
         default=3,
         ge=1,
         description="Hop limit for impact_radius traversal used by consumers.",
+    )
+    god_node_min_dependents: int = Field(
+        default=8,
+        ge=1,
+        description="Direct-dependent count at which a file is treated as a "
+        "God Node — conflict_analyst raises merge caution for it. Conservative "
+        "default; not calibrated against a specific repo, tune per target.",
+    )
+    god_node_risk_bump: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        description="Additive risk_score bump applied by the planner to a "
+        "changed file that is a God Node (Phase C). Monotonic — only raises "
+        "risk, never lowers. Set 0.0 to disable.",
+    )
+    resolve_aliases: bool = Field(
+        default=False,
+        description="When True, parse tsconfig/jsconfig paths, go.mod module "
+        "and package.json workspaces from the repo to resolve aliased / bare "
+        "imports into graph edges (Phase C §6.3). Default off to stay "
+        "target-repo agnostic; enable only for repos using those ecosystems.",
     )
     extra_scan_globs: list[str] = Field(
         default_factory=list,
