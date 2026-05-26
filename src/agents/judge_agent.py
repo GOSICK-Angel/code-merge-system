@@ -168,6 +168,7 @@ class JudgeAgent(BaseAgent):
                 project_context=state.config.project_context,
                 check_strategy=check_strategy,
                 prior_round_issues=prior_issues_by_file.get(file_path, []),
+                referenced_names=state.dependency_graph.referenced_symbols(file_path),
             )
 
         # U5: per-file fan-out — dict.keys() is nominally disjoint, but
@@ -225,6 +226,7 @@ class JudgeAgent(BaseAgent):
         project_context: str = "",
         check_strategy: JudgeCheckStrategy = JudgeCheckStrategy.UPSTREAM_MATCH,
         prior_round_issues: list[JudgeIssue] | None = None,
+        referenced_names: frozenset[str] = frozenset(),
     ) -> list[JudgeIssue]:
         issues: list[JudgeIssue] = []
 
@@ -276,6 +278,7 @@ class JudgeAgent(BaseAgent):
                 diff_ranges,
                 budget_tokens,
                 is_security_sensitive=original_diff.is_security_sensitive,
+                referenced_names=referenced_names,
             )
 
         # O-M1: dispute-round prior review block. Append before LLM call so

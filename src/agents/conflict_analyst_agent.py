@@ -144,6 +144,7 @@ class ConflictAnalystAgent(BaseAgent):
         forks_profile: ForksProfile | None = None,
         chunk_size_chars: int | None = None,
         min_chunked_confidence: float | None = None,
+        referenced_names: frozenset[str] = frozenset(),
     ) -> ConflictAnalysis:
         # U1.A: build_staged_content runs regardless of memory_store
         # availability. Only the memory-text injection remains gated.
@@ -208,6 +209,7 @@ class ConflictAnalystAgent(BaseAgent):
                 diff_ranges,
                 content_budget_tokens // 2,
                 is_security_sensitive=file_diff.is_security_sensitive,
+                referenced_names=referenced_names,
             )
         if target_content:
             target_content = builder.build_staged_content(
@@ -216,6 +218,7 @@ class ConflictAnalystAgent(BaseAgent):
                 target_ranges,
                 content_budget_tokens // 2,
                 is_security_sensitive=file_diff.is_security_sensitive,
+                referenced_names=referenced_names,
             )
         if base_content:
             base_content = builder.build_staged_content(
@@ -224,6 +227,7 @@ class ConflictAnalystAgent(BaseAgent):
                 diff_ranges,
                 content_budget_tokens // 4,
                 is_security_sensitive=file_diff.is_security_sensitive,
+                referenced_names=referenced_names,
             )
 
         prompt = build_conflict_analysis_prompt(

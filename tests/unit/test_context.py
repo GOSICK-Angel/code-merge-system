@@ -329,3 +329,32 @@ class TestBuildStagedContent:
 
         assert "func_99" in sensitive  # tail signature kept by file-level boost
         assert "func_99" not in plain  # head-truncated fallback loses the tail
+
+    def test_build_staged_content_referenced_symbol_survives(self):
+        """A symbol other files import (referenced_names) is boosted above the
+        DROP threshold, so it survives staged compression even with no diff
+        anchor. Without the reference signal the same tail symbol is lost to the
+        head-truncated fallback — proving the dependency-graph signal is wired
+        through to relevance scoring."""
+        builder = self._make_builder()
+        bodies = [f"def func_{i}():\n" + "    x = 1\n" * 20 for i in range(50)]
+        bodies.append("def keep_me():\n" + "    y = 2\n" * 20)
+        content = "\n".join(bodies)
+        assert content.count("\n") >= 200
+
+        with_ref = builder.build_staged_content(
+            content=content,
+            file_path="m.py",
+            diff_ranges=[],
+            budget_tokens=2000,
+            referenced_names=frozenset({"keep_me"}),
+        )
+        without_ref = builder.build_staged_content(
+            content=content,
+            file_path="m.py",
+            diff_ranges=[],
+            budget_tokens=2000,
+        )
+
+        assert "keep_me" in with_ref  # referenced tail symbol kept (signature)
+        assert "keep_me" not in without_ref  # head-truncated fallback drops tail

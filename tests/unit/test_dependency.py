@@ -216,3 +216,37 @@ class TestFileDependencyGraph:
         graph = self._make_graph()
         with pytest.raises(Exception):
             graph.file_count = 99
+
+
+class TestReferencedSymbols:
+    def test_collects_inbound_target_symbols(self):
+        graph = FileDependencyGraph(
+            edges=(
+                DependencyEdge(
+                    source_file="a.py",
+                    target_file="b.py",
+                    kind=DependencyKind.IMPORTS,
+                    target_symbol="foo",
+                ),
+                DependencyEdge(
+                    source_file="c.py",
+                    target_file="b.py",
+                    kind=DependencyKind.IMPORTS,
+                    target_symbol="bar",
+                ),
+                DependencyEdge(
+                    source_file="a.py",
+                    target_file="b.py",
+                    kind=DependencyKind.IMPORTS,
+                ),  # module import, no symbol — skipped
+                DependencyEdge(
+                    source_file="a.py",
+                    target_file="d.py",
+                    kind=DependencyKind.IMPORTS,
+                    target_symbol="baz",
+                ),
+            )
+        )
+        assert graph.referenced_symbols("b.py") == frozenset({"foo", "bar"})
+        assert graph.referenced_symbols("d.py") == frozenset({"baz"})
+        assert graph.referenced_symbols("missing.py") == frozenset()

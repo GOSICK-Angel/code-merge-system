@@ -287,10 +287,28 @@ Phase A 在未装 `[ast]` 的环境里收益为零（又是死代码）。
   - 回归测试：`test_chunker.py::TestSignatureCutoff`(Python 注解/TS 返回类型/Go body/dict 默认值/无终止符) +
     `TestSignatureExtractionEndToEnd`(IndentChunker + tree-sitter 端到端保完整注解签名)。
 
+- **修复(reference)：接通 `_reference_score`——依赖图符号 → staging（C 档:三 agent + 多语言）**
+  （`dependency` / `python_extractor` / `treesitter_extractor` / `prompt_builders` + 三个 agent + conflict_analysis phase）。
+  - **两个前置障碍**:(1) 提取器从不填 `target_symbol`(边全 file→file,symbol 恒空)→ 直接喂 = 空集假接通;
+    (2) graph 未透传到 staging(`build_staged_content` 无参数、`analyze_file` 连 state 都没有)。
+  - **改法**:① 提取器填符号——Python `ImportFrom` 按 alias 建多重边填 `target_symbol`(`import X`/`*` 留空);
+    tree-sitter 提取 named import/export 标识符(`import {foo,bar}`)填 symbol,default/namespace/Go 整包不填(本地别名≠目标符号)。
+    ② `FileDependencyGraph.referenced_symbols(fp)` = `{e.target_symbol for e in edges if e.target_file==fp and e.target_symbol}`。
+    ③ `build_staged_content` 加 `referenced_names: frozenset[str]` → `ScoringContext.referenced_names`(字段早已存在、`_reference_score`
+    早已读它,只是从无填充)。④ judge.review_file / executor.execute_semantic_merge / conflict_analyst.analyze_file 三处用
+    `state.dependency_graph.referenced_symbols(fp)` 填(conflict_analyst 经 phase 传参)。
+  - **边模型决策**:复用现有 `target_symbol` 单值 + 多重边(零模型改动)。多重边使 `topological_order` 的 in_degree 虚高,
+    但 Kahn 算法 adj/in_degree 对称抵消、拓扑结果不变(已分析);`dependents_of`/`impact_radius` 用 set 去重不受影响。
+  - **无需扩 executor/conflict_analyst contract**:二者经原始 state(`execute_semantic_merge`)/新参数(`analyze_file` 由 phase 传)
+    访问 graph,不经 `restricted_view` → 不触发 `FieldNotInContract`(contract test 37 passed 确认)。judge.yaml 早已声明。
+  - **效果**:审/合并文件 F 时,F 中被其他文件 import 的公共符号(即使不在 diff 内)+0.3 → 至少 SIGNATURE,不被 DROP。
+  - 回归测试:`test_dependency.py::TestReferencedSymbols`、`test_dep_extractors.py::TestImportSymbols`(Python named/module/star +
+    tree-sitter named)、`test_context.py::test_build_staged_content_referenced_symbol_survives`(被引用尾部符号存活、无信号时被头截断丢)。
+
 - **未修（已知、较轻，留作后续）**：
   - 问题④ **base 侧**：`base_content` staging 仍用 current 侧行段(见上,won't-fix,`DiffHunk` 无 base 坐标)。
-  - **relevance `_conflict_score` / `_reference_score` 仍是死维度**：`conflict_ranges`(需冲突标记行来源)、`referenced_names`
-    (需依赖图/引用来源)从无生产填充。可后续接(依赖图 Phase A 的 `impact_radius` 可喂 referenced_names)。
+  - **relevance `_conflict_score` 仍是死维度**：`conflict_ranges`(冲突标记行)从无生产填充。可后续接(三路合并时把
+    冲突标记行段喂入);reference 维度已于本轮接通。
   - budget 用 `//4` 而非 `/3.5`（轻微欠预算）；staging 无 AST/无锚点时兜底仍是头截断（评估后认为收益小未做 diff-anchored 窗口）。
   - executor 整文件分块合并按设计保留（不能丢块）。
-- 验证：`pytest tests/unit/` **2680 passed**；`mypy src` 0 错；`ruff check src/` 通过。
+- 验证：`pytest tests/unit/` **2686 passed**；`mypy src` 0 错；`ruff check src/` 通过；`test_agent_contracts.py` 37 passed。

@@ -431,6 +431,7 @@ class ExecutorAgent(BaseAgent):
 
         diff_ranges = _extract_diff_ranges(file_diff)
         target_ranges = _extract_diff_ranges(file_diff, side="target")
+        referenced = state.dependency_graph.referenced_symbols(file_diff.file_path)
         content_budget = builder.compute_content_budget(
             EXECUTOR_SYSTEM + enriched_context
         )
@@ -441,6 +442,7 @@ class ExecutorAgent(BaseAgent):
             diff_ranges,
             budget_tokens // 2,
             is_security_sensitive=file_diff.is_security_sensitive,
+            referenced_names=referenced,
         )
         target_content = builder.build_staged_content(
             target_content,
@@ -448,6 +450,7 @@ class ExecutorAgent(BaseAgent):
             target_ranges,
             budget_tokens // 2,
             is_security_sensitive=file_diff.is_security_sensitive,
+            referenced_names=referenced,
         )
 
         prompt = build_semantic_merge_prompt(

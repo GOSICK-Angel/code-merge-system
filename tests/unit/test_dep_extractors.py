@@ -110,3 +110,38 @@ class TestTreeSitterTypescript:
             and e.target_file == "myrepo/pkg/util/util.go"
             for e in graph.edges
         )
+
+
+class TestImportSymbols:
+    def test_python_named_import_fills_target_symbol(self):
+        files = {
+            "pkg/a.py": "from pkg.b import foo, bar\n",
+            "pkg/b.py": "def foo():\n    pass\n\n\ndef bar():\n    pass\n",
+        }
+        graph = DependencyExtractor.extract_from_sources(files)
+        assert graph.referenced_symbols("pkg/b.py") == frozenset({"foo", "bar"})
+
+    def test_python_module_import_has_no_symbol(self):
+        files = {
+            "pkg/a.py": "import pkg.b\n",
+            "pkg/b.py": "x = 1\n",
+        }
+        graph = DependencyExtractor.extract_from_sources(files)
+        assert graph.referenced_symbols("pkg/b.py") == frozenset()
+
+    def test_python_star_import_has_no_symbol(self):
+        files = {
+            "pkg/a.py": "from pkg.b import *\n",
+            "pkg/b.py": "y = 2\n",
+        }
+        graph = DependencyExtractor.extract_from_sources(files)
+        assert graph.referenced_symbols("pkg/b.py") == frozenset()
+
+    @pytest.mark.skipif(not _HAS_TS, reason="tree-sitter not installed")
+    def test_typescript_named_import_fills_target_symbol(self):
+        files = {
+            "a.ts": 'import { foo, bar } from "./mod";\n',
+            "mod.ts": "export function foo() {}\nexport function bar() {}\n",
+        }
+        graph = DependencyExtractor.extract_from_sources(files)
+        assert graph.referenced_symbols("mod.ts") == frozenset({"foo", "bar"})

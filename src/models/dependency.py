@@ -39,6 +39,21 @@ class FileDependencyGraph(BaseModel, frozen=True):
     def dependencies_of(self, file_path: str) -> list[str]:
         return list({e.target_file for e in self.edges if e.source_file == file_path})
 
+    def referenced_symbols(self, file_path: str) -> frozenset[str]:
+        """Symbols defined in ``file_path`` that other files import/use.
+
+        Collected from the ``target_symbol`` of every inbound edge
+        (``target_file == file_path``). Empty symbols (module-level imports,
+        side-effect imports, languages that don't expose named imports) are
+        skipped. Relevance scoring boosts chunks whose name appears here, so a
+        public symbol stays FULL under staged compression even when it sits
+        outside the diff."""
+        return frozenset(
+            e.target_symbol
+            for e in self.edges
+            if e.target_file == file_path and e.target_symbol
+        )
+
     def topological_order(self, files: list[str]) -> list[str]:
         file_set = set(files)
         in_degree: dict[str, int] = {f: 0 for f in files}

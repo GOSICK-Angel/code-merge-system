@@ -101,14 +101,27 @@ def extract_imports(
                 confidence = ConfidenceLabel.EXTRACTED
 
             if target and target != file_path:
-                edges.append(
-                    DependencyEdge(
-                        source_file=file_path,
-                        target_file=target,
-                        kind=DependencyKind.IMPORTS,
-                        confidence=confidence,
+                symbols = [a.name for a in node.names if a.name and a.name != "*"]
+                if symbols:
+                    edges.extend(
+                        DependencyEdge(
+                            source_file=file_path,
+                            target_file=target,
+                            kind=DependencyKind.IMPORTS,
+                            target_symbol=sym,
+                            confidence=confidence,
+                        )
+                        for sym in symbols
                     )
-                )
+                else:
+                    edges.append(
+                        DependencyEdge(
+                            source_file=file_path,
+                            target_file=target,
+                            kind=DependencyKind.IMPORTS,
+                            confidence=confidence,
+                        )
+                    )
 
     return edges
 

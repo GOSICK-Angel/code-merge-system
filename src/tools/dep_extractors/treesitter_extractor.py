@@ -75,11 +75,24 @@ def extract_imports(
         logger.debug("tree-sitter parse failed for %s", file_path)
         return []
 
-    import_strings = _collect_import_strings(tree.root_node, source, language)
+    imports = _collect_imports(tree.root_node, source, language)
     edges: list[DependencyEdge] = []
-    for raw in import_strings:
+    for raw, symbols in imports:
         target = _resolve(file_path, raw, language, path_set)
-        if target and target != file_path:
+        if not target or target == file_path:
+            continue
+        if symbols:
+            edges.extend(
+                DependencyEdge(
+                    source_file=file_path,
+                    target_file=target,
+                    kind=DependencyKind.IMPORTS,
+                    target_symbol=sym,
+                    confidence=ConfidenceLabel.EXTRACTED,
+                )
+                for sym in symbols
+            )
+        else:
             edges.append(
                 DependencyEdge(
                     source_file=file_path,
@@ -128,11 +141,18 @@ def _grammar_language(grammar: Any, language: str) -> Any:
     return grammar.language()
 
 
-def _collect_import_strings(root, source: str, language: str) -> list[str]:  # type: ignore[no-untyped-def]
+def _collect_imports(root, source: str, language: str) -> list[tuple[str, list[str]]]:  # type: ignore[no-untyped-def]
+    """Return ``(module_path, [named_symbols])`` per static import.
+
+    ``named_symbols`` are the identifiers of named imports/exports
+    (``import { foo, bar } from "./m"``) — these match the *exported symbol
+    names* in the target file (i.e. chunk names). Default / namespace imports
+    bind a local alias that need not equal the target symbol, so they are
+    omitted (the edge is still created, just without a symbol)."""
     wanted = _IMPORT_NODE_TYPES.get(language, set())
     if not wanted:
         return []
-    results: list[str] = []
+    results: list[tuple[str, list[str]]] = []
     stack = [root]
     while stack:
         node = stack.pop()
@@ -140,9 +160,32 @@ def _collect_import_strings(root, source: str, language: str) -> list[str]:  # t
         if node_type in wanted:
             literal = _first_string_literal(node, source)
             if literal:
-                results.append(literal)
+                results.append((literal, _named_import_symbols(node, source)))
         stack.extend(getattr(node, "children", []))
     return results
+
+
+_SPECIFIER_NODE_TYPES = {"import_specifier", "export_specifier"}
+
+
+def _named_import_symbols(node, source: str) -> list[str]:  # type: ignore[no-untyped-def]
+    """Imported names from ``import_specifier`` / ``export_specifier`` nodes.
+
+    Takes the first identifier of each specifier — the imported name, before
+    any ``as`` alias (``foo as f`` → ``foo``)."""
+    symbols: list[str] = []
+    stack = list(getattr(node, "children", []))
+    while stack:
+        child = stack.pop()
+        ctype = getattr(child, "type", "")
+        if ctype in _SPECIFIER_NODE_TYPES:
+            for sub in getattr(child, "children", []):
+                if getattr(sub, "type", "") in ("identifier", "property_identifier"):
+                    symbols.append(_node_text(sub, source))
+                    break
+        else:
+            stack.extend(getattr(child, "children", []))
+    return symbols
 
 
 def _first_string_literal(node, source: str) -> str | None:  # type: ignore[no-untyped-def]

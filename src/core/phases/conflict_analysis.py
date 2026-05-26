@@ -786,6 +786,9 @@ class ConflictAnalysisPhase(Phase):
                 current_content=current_content,
                 target_content=target_content,
                 project_context=state.config.project_context,
+                referenced_names=state.dependency_graph.referenced_symbols(
+                    fd.file_path
+                ),
             )
             state.conflict_analyses[file_path] = analysis
 
