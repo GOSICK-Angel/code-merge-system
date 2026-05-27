@@ -10,7 +10,8 @@
 > topo 违规 precheck（单测 +16）。**Phase C 已落地**（2026-05-26）——import 别名/monorepo 解析（opt-in）+ stdlib
 > label-propagation 社区检测（opt-in，未引 Leiden 重依赖）+ God Node planner 风险 + memory_extractor hub/surprising
 > 沉淀 + human_interface blast-radius 决策卡（单测 +19，2724 passed）。**全部三阶段完成**。进度详见 §7 标记与
-> `doc/execute/implementation-notes.md` §7/§8。原始日期：2026-05-25。
+> `doc/execute/implementation-notes.md` §7/§8。**下一步：实测验证**——§10 列预计收益（消费方 × 指标），
+> §11 给 A/B 消融验证方案（`dependency_graph.enabled` 开关消融、对照 Ground Truth 差分）。原始日期：2026-05-25。
 
 ---
 
@@ -254,4 +255,221 @@ God Node（高 degree 节点）→ 命中的改动文件风险提升。
   （直接守护 §0 铁律，防止再次退化为死代码）。
 - 集成（本地真实 forgejo，见 `feedback_verify_real_forgejo`）：在含跨文件签名分裂的
   C-class 样本上验证 topo 定序与 judge 漏改检测的端到端效果。
+
+---
+
+## 10. 预计带来的收益（按消费方 × 指标）
+
+> 收益方向一律用 `doc/evaluation/metrics.md` 既有指标口径表述。依赖图遵守 §5 风险单调性——
+> 只能**抬高**正确性/谨慎度，理论上不引入新错合（`WMR=0` 是硬约束，不可被任何消费方破坏）。
+> 下表是**假设（hypothesis）**，方向与机制明确，幅度待 §11 实测证实/证伪。
+
+| 消费方 | 阶段 | 机制 | 主要受益指标（方向） | 需监控的代价 |
+|---|---|---|---|---|
+| planner topo 排序 | A4 | 基类先于子类的 batch 序 → 多文件语义合并中间态不破 | `CRA`↑、多文件子集 `OA`↑；并可能减少 topo 争议 → `plan_revision_rounds`↓ | — |
+| planner fanout 维度 | A3 | 真实 `impact_radius` 扇出喂 `compute_complexity` → 风险标定更准 | Under-escalation↓ | — |
+| planner God Node 抬分 | C1 | hub 文件 `+god_node_risk_bump` → 合理升级 | Under-escalation↓、该子集 `WMR`↓ | Over-escalation（守 ≤15%） |
+| judge 漏改硬 issue | A5 | EXTRACTED 边查接口变更后**真实未更新的 dependents** | **`MMR`↓（核心杠杆）**、`Recall_Mi`↑（接口/签名类）、`JA`↑ | judge/修订轮数 → cost、wall_time |
+| conflict_analyst blast-radius | B7 | 高爆炸半径/God Node 冲突 → 更保守解法 | `CRA`↑、AUTO_RISKY 子集 `WMR`↓ | — |
+| executor 删除守卫 | B8 | 删符号前查 `dependents_of`，fork-only 仍依赖则不删 | **`WDR`↓** | — |
+| executor 签名感知 | B8 | 改签名前查下游 caller → 保接口 | `CRA`↑、`MMR`↓ | — |
+| planner_judge topo precheck | B9 | batch 逆序判 `batch_ordering` issue → 修订收敛到合法序 | Plan Dispute Precision↑ | `plan_revision_rounds` P95（topo 噪音） |
+| 符号 → staging relevance | A+ | 被外部 import 的公共符号即使不在 diff 也保留进 staged content → reviewer 上下文更全 | 减少截断致误判（间接 `OA`/`CRA`↑） | — |
+| memory_extractor hub/surprising | C4 | 跨运行沉淀 God Node/跨目录耦合 | 投机，单次 eval 不可测；可能跳过部分 LLM insight（cost 微降） | — |
+| human_interface 决策卡 | C5 | 展示 dependents 数/爆炸半径 | `human_minutes_per_run`↓、人工决策质量↑（主观） | — |
+
+**成本与稳健侧净效应（需实测）**：
+
+- 边提取零 LLM（§2），构建本身近乎**成本中性**；
+- judge 漏改硬 issue + planner_judge topo issue 可能**增加修订/复检轮** → `cost_usd_per_run` / `wall_time` 上行，
+  硬约束 `cost_p95 ≤ baseline×1.15`、`wall_time_p95 ≤ ×1.20`（acceptance.md §2）；
+- C4 graph insights 走确定性，可**跳过**部分 LLM insight 调用 → 成本微降；
+- 图构建确定性（temperature 无关）→ `DET` 应持平或上行。
+
+---
+
+## 11. 验证方式：实际代码合并（A/B 消融）
+
+核心方法 = **同评估集、单一开关消融**。所有消费方由总闸 `dependency_graph.enabled` + 三个 opt-in 子开关
+（`module_config.mode: graph`、`dependency_graph.resolve_aliases`、`dependency_graph.god_node_*`）控制，且实现保证
+**「图空/未开 → 行为逐字节不变」**（见 §7.3 / §8.5 安全降级、各 DoD (d)）。这使开关成为**干净的消融杠杆**：
+关 vs 开跑同一数据集，指标差值即依赖图净贡献。
+
+### 11.1 实验矩阵
+
+| Arm | 配置 | 用途 |
+|---|---|---|
+| **Control** | `dependency_graph.enabled: false` | 基线（= 当前主分支行为） |
+| **Treatment-core** | `enabled: true`，子开关默认（`mode: auto`、`resolve_aliases: false`） | A / B / 部分 C 的净收益 |
+| **Treatment-full** | `+ module_config.mode: graph` `+ resolve_aliases: true`（仅生态命中的 repo） | C2/C3 增量收益 |
+
+**逐消费方归因（可选）**：在 Treatment 基础上单独回退某子开关定位贡献者——
+`god_node_risk_bump: 0`（关 C1）、`mode: auto`（关 C2）、`resolve_aliases: false`（关 C3），对比指标位移。
+
+### 11.2 数据集与样本
+
+- **真实 forgejo**（`feedback_verify_real_forgejo` / `reference_forgejo_eval`）：fork=`test/fork`、upstream=`origin/forgejo`、
+  base=`160377405c`；3 个 C-class + Tier-1 样本 `t1-0031..0033`（golden 在分支 `eval/golden-forgejo-auth`）。
+- **C-class 跨文件签名分裂样本**（§9 集成项）：依赖图最对口的场景——上游改基类/接口签名、下游 fork 文件未跟随，
+  验证 judge 漏改硬 issue + executor 下游感知 + planner topo 定序的端到端效果。
+- 如有 dify fork 长跨度样本（`project_dify_plugins`）：补 Tier-2 真实复杂度口径。
+- 运行前先加载密钥：`merge validate` 不自动读 `.merge/.env`（`feedback_validate_env`），需先
+  `set -a && source <repo>/.merge/.env && set +a`。
+
+### 11.3 度量与采集
+
+按 `metrics.md` 口径对 Ground Truth 差分，逐指标记录 Control vs Treatment：
+
+- **聚焦指标**（依赖图直接作用）：`MMR`（行级）、`WDR`、`CRA`、`Recall_Mi`（接口/签名类）、`JA`、Under/Over-escalation。
+- **守门指标**（不可回退）：`WMR=0`、`SSER=100%`、`DCRR=100%`、`SRSR=100%`；
+  `cost_p95 ≤ baseline×1.15`、`wall_time_p95 ≤ ×1.20`、`plan_revision_rounds P95 ≤ max-1`、`DET ≥ 90%`。
+
+**消费方触发计数**（确认「图非空真的改变了输出」= DoD (d) 的**集成级**证据，而非仅单测）——
+从 `checkpoint.json` / 三份报告中抽取：
+
+- judge：dependency-graph 漏改 issue 条数；
+- planner：因 God Node 重分类的文件数、batch 序与 Control 的差异数；
+- planner_judge：`issue_type=batch_ordering` 条数；
+- conflict_analyst：注入 blast-radius 块的文件数；
+- executor：因 dependents 改变删除/合并决策的文件数；
+- human_interface：决策卡 blast-radius 摘要出现数。
+
+任一消费方在全集上触发计数为 0 → 该消费方在本数据集「形同死代码」，需换样本或核查接线（呼应 `feedback_dead_code_check`）。
+
+### 11.4 判定标准
+
+- **通过（净收益成立）**：聚焦指标中至少 `MMR` / `CRA` / `WDR` 之一有可测改善，其余聚焦指标无显著回退，
+  且所有守门指标维持硬阈值。
+- **可接受代价**：`cost` / `wall_time` / `plan_revision_rounds` 上行但在阈值内。
+- **失败/回退信号**：守门指标破线（尤其 `WMR>0`、`cost` 超 1.15×、topo 顶格致 `AWAITING_HUMAN` 激增）→
+  先调子开关（提高 `god_node_min_dependents` / 降 `god_node_risk_bump` / `mode: auto` / 降 `_MAX_TOPO_ISSUES`），
+  仍不行则 `enabled: false` 整体回退（§7.3 逃生口）。
+
+### 11.5 执行顺序（建议）
+
+1. **冒烟**：forgejo 上各跑一次 Control / Treatment-core，diff 三份报告，确认每个消费方 ≥1 次触发（§11.3 计数）——先证「活」。
+2. **小集 A/B**：3 个 C-class + `t1-0031..0033` 各跑 N=3（`DET` 口径），算聚焦指标位移。
+3. **归因**（若收益显著）：按 §11.1 单开关回退定位主要贡献者。
+4. **记录**：结果落 `eval_acceptance_<sha>.json`（acceptance.md §3 schema），基线历史表追加一行；
+   用本轮真实数据回填 §7.3/§8.5 标注「未标定」的阈值（`god_node_min_dependents=8` / `god_node_risk_bump=0.15` /
+   `_MAX_TOPO_ISSUES=25`）的标定建议。
+
+### 11.6 实测冒烟结果（2026-05-26，forgejo）
+
+> §11.5 step 1 的首次实测。目标仓库 forgejo（Go+JS），`test/fork` 合 `origin/forgejo`，base `160377405c`，
+> 124 文件 / 32 commits。为干净隔离图效应，本轮用 `llm_assist.mode: off` + 全 agent `temperature: 0`
+> 把 planning 变为**纯确定性**（risk_score 不再经 LLM 重打分）；模型 mimo-v2.5-pro。
+
+**前提（决定性）——非 Python 仓库必须装 `[ast]` extra**：首次跑时 `tree_sitter*` 未安装，依赖图在 Go 仓库
+**全程为空**（`treesitter_extractor` 优雅降级返回 0 边），所有消费方空转。`pip install -e ".[ast]"` 后图才非空。
+→ **运维结论**：对 Go/TS/JS fork，依赖图开关之外还须确保 `[ast]` 已装，否则 feature 静默失效（应在 `merge validate`
+或首跑 wizard 增加一条「图已开但 tree-sitter 缺失」告警——见下「附带发现」）。
+
+**确定性 A/B（Control `enabled:false` vs Treatment `enabled:true`，均 llm_assist off + temp 0）：**
+
+| 维度 | Control（图关） | Treatment（图开） | 归因 |
+|---|---|---|---|
+| 依赖图边 | 0 | **53**（file_count 161，含反向邻居）；2 God Node：`services/context/context_cookie.go`=42 deps、`web_src/js/.../common-global.js`=10 | 图构建（Go+JS 提取均生效） |
+| 风险分布 | 109 auto_safe / 15 auto_risky | **109 / 15（完全相同）** | 确定性下图**不重分类任何文件** |
+| `context_cookie.go` risk | 0.14 | **0.29（精确 +0.15）** | **C1 God Node 抬分**（未跨 0.3 档→level 不变，§5 单调只抬不跨） |
+| planner_judge | **approved，0 issue** | **revision_needed，6 个 `batch_ordering`** | **B9 topo precheck**（确定性、无 LLM） |
+| 计划落点 | 自动放行（→AUTO_MERGING） | **STALLED → AWAITING_HUMAN** | topo 逼出人工检查点 |
+
+**消费方触发证据（全部在真实合并上观测到）：**
+
+| 消费方 | 触发 | 证据 |
+|---|---|---|
+| 图构建 | ✅ | 0→53 边、2 God Node、Go+JS 提取 |
+| planner C1 God Node | ✅ 确定 | `context_cookie.go` +0.15 |
+| planner_judge B9 topo | ✅ 确定 | 6 `batch_ordering`；Control 0 |
+| conflict_analyst B7 | ✅ | 3 个真实冲突文件（`user.go`/`auth_token.go`/`oauth.go`）注入 impact_hint（blast=0，因非 hub，God Node 本次未冲突） |
+| executor B8 | ✅ | auto_merge 2 轮 dispute 修复轮 |
+| human_interface C5 | ✅ | 决策卡 `dependents_count/blast_radius/is_god_node` 字段已填（叶子文件值 0，字段在线） |
+| judge A5（`_check_dependency_graph_impacts`→`dependency_missed_update`） | ⚠️ 接线运行、**本数据集 0 命中** | judge verdict=FAIL，3 个漏改由**既有文本 grep**（`reverse_impact_unhandled`：`GenerateAuthToken`/`Callout`/`Verify` 签名变更）抓到，**非图**——印证 §8「图=精确层、grep=召回兜底」，本次 grep 兜底生效 |
+
+**确定性（DET）**：Treatment plan 阶段 N=3 逐字节一致（53 边 / 109-15 / cookie 0.29 / 6 topo）——图构建、God Node 抬分、
+topo precheck 均非 LLM，确定性由构造保证。
+
+**关键澄清（A3 fanout 之前的「降级」是噪音不是图）**：temp=0.2 + llm_assist auto 时曾见 17 文件 risk_score 变动、
+含 1 个 human 文件降级跌破 0.6——经本轮确定性复跑证实，那是 **fanout 改变 LLM tier 路由后 rescore 的噪音**，
+**非图的确定性效果**（llm_assist off 时 fanout 对 risk_score 零影响、风险分布两臂相同）。即 A3 仅在 llm_assist 开时
+经 LLM 间接生效，本身不构成 §5 单调性违反。
+
+**附带发现（非依赖图问题，但本轮暴露）：**
+1. **CLI 驱动器盲区**：`--auto-decisions` / `resume` 的 `detect_current_phase` 仅在有 per-file pending 项时识别
+   `PLAN_REVIEW`；而依赖图 topo issue 造成的「**0 pending 的非收敛 STALLED 计划**」识别不出 → 自动驱动器无法推过
+   （本轮靠 `resume` 的 fallback 注入 `plan_approval: approve` 才推进）。建议给 `detect_current_phase` 补一条
+   「STALLED 计划且 `plan_human_review is None`」→ `PLAN_REVIEW` 分支。
+2. **B9 topo issue 非 actionable**：planner 对 6 条 topo 建议**逐条拒绝**（「只引文件路径、无具体 diff 证据，且
+   conflict_count=0/非安全敏感」）→ 计划必 STALLED → 人工。即 topo 信号目前只能**逼出人工签字**、无法被 planner
+   消化为自动重排序——价值有限，符合 §7.3「逃生口」但偏保守。
+3. **端点抖动**：mimo-v2.5-pro 响应在 1.5s ↔ 143s ↔ 完全挂起间剧烈波动，致整管线（judge 批量评审）一度挂死。
+   **确定性 plan 阶段（仅 ~3 调用）是当前最可靠的图效应度量口径**；整管线 A/B 受端点稳定性与本数据集 0 文本冲突双重限制。
+
+**成本**：plan 阶段 ~$0.005–0.014/run（mimo，可忽略；与记忆中 Claude 单 run $96 不同量级）。
+
+**结论**：依赖图在真实 forgejo 合并上**确定性地改变了系统行为**——最显著者为 planner_judge 把一个本会**自动放行**的
+计划判成 **revision/STALLED 并逼出人工检查点**（B9），以及 God Node 风险确定性抬升（C1）。conflict_analyst/executor/
+human_interface 三消费方均触发但因本数据集（God Node 未冲突、叶子文件、0 文本冲突）效果值偏小；judge 图漏改检查（A5）
+接线正常但本数据集无触发条件，漏改由文本 grep 兜底捕获。**下一步**应换一个「上游改 hub 文件签名 + 下游 fork 未跟随」
+的 C-class 样本，才能看到 B7 blast-radius 非平凡值与 A5 `dependency_missed_update` 的真实命中。
+
+### 11.7 受控 C-class 复验：hub 签名变更 + 下游未跟随（B7/A5 真实命中）
+
+> 承 §11.6 的「下一步」。forgejo 数据集恰好 God Node 干净合并、0 文本冲突，使 B7/A5 取不到非平凡值。这里用一个
+> **最小受控 Python 仓库**（`/Users/angel/AI/merge-test/hub-cclass`）精确构造目标拓扑，隔离验证这两个消费方。
+> Python 走 stdlib-ast 提取（不依赖 tree-sitter，确定性最强）；llm_assist off + temp 0。
+
+**样本拓扑**：`auth/token.py` 定义 hub 函数 `verify_token`，被 `handlers/h1.py`..`h10.py` 各 import+调用（10 入边
+→ God Node，阈值 8）。`test/upstream` 把签名改为 `verify_token(token, audience)`（**method_signature 接口变更**）；
+`test/fork` 仅改 hub docstring（→ 与上游 **C-class** 冲突）并给每个 handler 加无关注释（→ E-class fork-only 修改），
+**handlers 的调用点不跟随新签名**（仍单参）。
+
+**关键 scope 发现**：handlers 是 **E 类（`current_only_change`，fork-only 修改）**，而 `_build_dependency_graph` 的
+actionable 集只含 `{B, C, D_MISSING}` → handlers **默认不入图 scope**，首跑 `edges=0`、A5 无从触发。需用
+`dependency_graph.extra_scan_globs: ["handlers/*.py"]` 把它们拉进 scope，才建出 10 条边。
+→ **潜在局限**：一个被改动 hub 的纯 fork-modified（E 类）/未改动（A 类）下游，默认不在子图作用域内，A5 会漏检；
+真实仓库若依赖此类下游覆盖，需配 `extra_scan_globs` 或扩 actionable 集。已记入「附带发现」。
+
+**B7（conflict_analyst blast-radius）真实命中**：hub 选 `llm_auto_merge` 路由进 conflict_analyst，phase 在
+`analyze_file(..., impact_hint=state.dependency_graph.impact_hint("auth/token.py"))` 传入 hint
+（`direct_dependents=10, impact_radius=10, is_god_node=True`），`_format_blast_radius_block` 注入 enriched_context：
+
 ```
+## Dependency Impact
+- Direct dependents (files importing this one): 10
+- Transitive impact radius (files affected by a break): 10
+- GOD NODE: this file is a dependency hub. A regression here ripples widely — strongly prefer
+  preserving its public interface; ... lean toward semantic_merge or escalate_human over a blind side-pick.
+```
+
+conflict_analyst 据此 **`recommended_strategy=semantic_merge`**（rationale 点明签名变更）——blast-radius 提示**实际改变了
+解法选择**（非盲目 take_target）。✅ B7 非平凡命中。
+
+**A5（judge `dependency_missed_update`）真实命中**：实跑驱动到 `JUDGE_REVIEWING` 时 run.log 记录
+`Executor accepts all issues; repairing 10 items (round 1/2)`；用真实生产代码
+`JudgeAgent._check_dependency_graph_impacts(state)` 在该 run 状态上确定性复算，得 **10 个 `dependency_missed_update`**
+（h1–h10 各一，`HIGH` / `must_fix_before_merge=True`），描述：
+
+> `'handlers/h1.py' imports 'auth/token.py' (EXTRACTED dependency) and still references 'verify_token',
+> whose signature changed upstream ('token' -> 'token, audience'). The dependent was not taken from
+> upstream, so it may not be updated for the new signature.`
+
+此处 `reverse_impacts={}`（文本 grep 未覆盖 E 类 handlers），所以这 10 个命中是 **EXTRACTED 依赖图独有的召回**——
+正是 §11.6 中 forgejo 缺失的「图相对 grep 的边际价值」。✅ A5 非平凡命中。
+
+**小结**：在对口拓扑（改动 hub + 在 scope 内的过时下游）上，B7 给出 God Node 谨慎并改变解法、A5 精确召回 10 个
+未更新下游——二者均按设计产出非平凡硬信号。两个数据集合起来印证 §8 分工：**图=精确层**（hub 集中、下游在 scope 时精准命中），
+**文本 grep=召回兜底**（下游分散/超出子图时由 reverse_impacts 抓）。
+
+### 11.8 本轮代码改动（持久化 tree-sitter 守卫）
+
+§11.6 暴露的「`[ast]` 缺失致图静默空图」不能只靠环境装包兜底。已加持久代码守卫（防再次静默失效）：
+
+- `src/tools/dep_extractors/treesitter_extractor.py`：新增 `missing_grammar_languages(languages)`（复用 `_GRAMMAR_MODULE`，
+  排除 stdlib-ast 的 `python`）。
+- `src/cli/main.py`：`validate_command` 新增 `validate_config_warnings()`——图开且文法缺失时打印**非致命黄色告警** +
+  `pip install ".[ast]"` 提示（图关则静默）。
+- `src/core/phases/initialize.py` `_build_dependency_graph`：同条件 `logger.warning` + `ctx.notify`，真实 run 也暴露降级。
+- 测试：`tests/unit/test_dep_extractors.py::TestMissingGrammarLanguages`（4 例）；`mypy src` 干净、`ruff` 通过、
+  `test_cli.py` 22 例无回归。
