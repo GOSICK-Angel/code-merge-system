@@ -358,7 +358,7 @@ class TestOrchestratorAwaitingHumanDispatch:
         state.status = SystemStatus.AWAITING_HUMAN
         state.plan_human_review = PlanHumanReview(
             decision=PlanHumanDecision.APPROVE,
-            reviewer_name="tui_user",
+            reviewer_name="web_user",
         )
         # Empty pending_user_decisions means HumanReviewPhase's O-L4 guard
         # ("any item.user_choice is None") doesn't fire — the path under

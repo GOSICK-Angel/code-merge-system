@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class MergeWSBridge:
-    """Bridges MergeState changes to WebSocket TUI clients."""
+    """Bridges MergeState changes to WebSocket Web UI clients."""
 
     DEBOUNCE_SECONDS = 0.3
     ACTIVITY_BUFFER_MAX = 200
@@ -95,7 +95,7 @@ class MergeWSBridge:
             await self._server.wait_closed()
 
     async def wait_for_client(self, timeout: float = 30.0) -> bool:
-        """Block until at least one TUI client connects."""
+        """Block until at least one Web UI client connects."""
         try:
             await asyncio.wait_for(self._client_connected.wait(), timeout=timeout)
             return True
@@ -103,12 +103,12 @@ class MergeWSBridge:
             return False
 
     async def wait_for_plan_review(self) -> None:
-        """Block until a plan review decision arrives from the TUI."""
+        """Block until a plan review decision arrives from the Web UI."""
         await self._plan_review_received.wait()
         self._plan_review_received.clear()
 
     async def wait_for_human_decisions(self) -> None:
-        """Block until all pending conflict decisions are submitted from the TUI."""
+        """Block until all pending conflict decisions are submitted from the Web UI."""
         await self._human_decisions_received.wait()
         self._human_decisions_received.clear()
 
@@ -167,7 +167,7 @@ class MergeWSBridge:
     async def _handler(self, ws: ServerConnection) -> None:
         self._clients.add(ws)
         self._client_connected.set()
-        logger.info("TUI client connected (%d total)", len(self._clients))
+        logger.info("Web UI client connected (%d total)", len(self._clients))
         try:
             await self._send_snapshot(ws)
             async for raw in ws:
@@ -180,7 +180,7 @@ class MergeWSBridge:
             logger.debug("Client disconnected (remote=%s)", ws.remote_address)
         finally:
             self._clients.discard(ws)
-            logger.info("TUI client disconnected (%d remaining)", len(self._clients))
+            logger.info("Web UI client disconnected (%d remaining)", len(self._clients))
 
     async def _send_snapshot(self, ws: ServerConnection) -> None:
         if self._mode == "setup":
@@ -675,13 +675,13 @@ class MergeWSBridge:
 
         self._state.plan_human_review = PlanHumanReview(
             decision=pd,
-            reviewer_name="tui_user",
+            reviewer_name="web_user",
             reviewer_notes=notes,
             item_decisions=list(self._state.pending_user_decisions),
             decided_at=datetime.now(),
         )
         self._plan_review_received.set()
-        logger.info("TUI plan review decision: %s", decision_str)
+        logger.info("Web UI plan review decision: %s", decision_str)
 
     def _apply_user_plan_decisions(self, items: list[dict[str, Any]]) -> None:
         assert self._state is not None, "user_plan_decisions unreachable in setup mode"
@@ -733,11 +733,11 @@ class MergeWSBridge:
                 if it.item_id == item_id
             )
             self._state.pending_user_decisions[idx] = updated
-        logger.info("TUI user plan decisions received: %d items", len(items))
+        logger.info("Web UI user plan decisions received: %d items", len(items))
 
         self._state.plan_human_review = PlanHumanReview(
             decision=PlanHumanDecision.APPROVE,
-            reviewer_name="tui_user",
+            reviewer_name="web_user",
             reviewer_notes=None,
             item_decisions=list(self._state.pending_user_decisions),
             decided_at=datetime.now(),

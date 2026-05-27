@@ -379,7 +379,6 @@ MergeConfig
 ```bash
 merge <target-branch>              # 默认在浏览器打开 Web UI；首次运行自动触发 setup 向导
 merge <target-branch> --no-web     # 纯文本输出模式
-merge <target-branch> --no-tui     # deprecated alias of --no-web（保留至下个 major）
 merge <target-branch> --ci         # CI 模式：无交互，JSON 摘要到 stdout
 merge <target-branch> --dry-run    # 仅分析，不写文件
 merge <target-branch> -r           # 强制重新触发配置向导

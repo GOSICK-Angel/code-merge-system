@@ -53,7 +53,7 @@ CodeMergeSystem 的目标是把「长期分叉的 fork 如何安全合并 upstre
 ### 2.1 架构分层（10 秒版）
 
 ```
-CLI / TUI
+CLI / Web UI
     ↓
 Orchestrator（~400 LOC 纯分派器） + Coordinator（异常回环路由）
     ↓

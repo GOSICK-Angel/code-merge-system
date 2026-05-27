@@ -91,7 +91,9 @@
 
 ---
 
-## Part 5 — TUI 术语债清理（迁移残留，非死代码）
+## Part 5 — TUI 术语债清理（迁移残留，非死代码）✅ 已完成（2026-05-27）
+
+> 落地说明：(1) `ws_bridge.py` 10 处 "TUI" 字样全部重命名为 "Web UI"，并把 `reviewer_name="tui_user"` 改为 `"web_user"`（同步 `test_budget_cap.py` 与 `web/src/views/PlanReview.test.tsx` 两处 fixture）。(2) `--tui` 决议为**立即删除**：`resume_command` 的 `--tui` option / `tui` 参数 / deprecation 分支全删，`test_resume_web_dispatch.py` 去掉 `--tui` 参数化用例与 DeprecationWarning 断言（`--no-tui` 早已不在任何命令上）。(3) 文档批量 TUI→Web：`architecture.md`/`web-ui.md`/`modules/cli.md`/`modules/core.md`/`modules/onboarding.md`/`README.md`(doc & 仓库根)/`migration-aware-merge.md`/`share/agent-engineering-sharing.md`/explain-arch skill 全部更新；`web-ui-redesign-handoff.md`、`docs/web-ui-redesign-tests.md`、`test-report/**` 按 `test_cleanup_residue.py` 约定作为历史记录保留。`ruff`/`mypy`/`pytest tests/unit/`（2682 passed）+ web `PlanReview` vitest 全绿。
 
 迁移到 Web UI 后已**无终端 TUI**：`src` 无 Ink 导入/终端渲染，`web/` 是纯 React 18 + Vite，`web/src` 零 Ink 引用。残留的是迁移术语债——**代码是活的，只是名字/文档没改**，按重命名/文档处理，不是删除：
 
@@ -113,7 +115,7 @@
 | 2 | Part 3 删除（被取代/弃用项，含抢救 `_truncate_text`）| 低（已确认无引用）| **P0** ✅ 完成（2026-05-27）|
 | 3 | Part 1 截断→压缩（1.1 边界感知兜底 + 1.2 注入 summary client）| 中（影响所有 LLM 调用上下文）| **P1** |
 | 4 | Part 4.1 完成 HookManager LLM 钩子 + 4.2 与 MessageBus 去重 | 中 | **P1** ✅ 完成（2026-05-27；4.1=d5742ce，4.2=本轮）|
-| 5 | Part 5 TUI 术语债：ws_bridge 重命名（低风险）+ `--tui` flag 去留 + 文档批量更新 | 低（重命名/文档）| **P2** |
+| 5 | Part 5 TUI 术语债：ws_bridge 重命名（低风险）+ `--tui` flag 去留 + 文档批量更新 | 低（重命名/文档）| **P2** ✅ 完成（2026-05-27；`--tui` 决议=立即删除）|
 | 6 | Part 4.3 内存 API：核查发现提案 P1 已落地（get_relevant_context 取代），按被取代删除 | 低 | **P2** ✅ 完成（2026-05-27）|
 
 ## 风险与约束

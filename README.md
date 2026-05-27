@@ -85,7 +85,7 @@ merge upstream/main --dry-run
 
 ### 2. dry-run 跑出合并计划
 
-向导通过后系统在浏览器打开 Web UI（`--no-web` 切纯文本输出；`--no-tui` 为 deprecated alias）。你会看到 8 个 phase 依次推进：
+向导通过后系统在浏览器打开 Web UI（`--no-web` 切纯文本输出）。你会看到 8 个 phase 依次推进：
 
 ```
 INITIALIZE  → 三方分类、风险打分、forks-profile 路由
@@ -160,7 +160,6 @@ merge resume --run-id <id> --decisions .merge/runs/<id>/decisions.yaml
 merge <target-branch>                         # 一站式（默认浏览器 Web UI）
 merge <target-branch> --dry-run               # 只跑到 plan，不动文件
 merge <target-branch> --no-web                # 纯文本输出
-merge <target-branch> --no-tui                # deprecated alias of --no-web
 merge <target-branch> -r                      # 强制重新跑配置向导
 
 # === 续跑 / 决策 ===

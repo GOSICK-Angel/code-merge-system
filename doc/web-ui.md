@@ -14,8 +14,8 @@
 
 | 锚点 | 含义 |
 |---|---|
-| `src/cli/main.py:75-195` | `merge_command`：默认走 Web；`--no-tui` / `--tui` 为 deprecated alias（DeprecationWarning + stderr 提示）；新增 `--no-web` / `--no-browser` / `--web-port`（默认 5173） / `--ws-port`（默认 8765） |
-| `src/cli/main.py:198-291` | `resume_command`：`--web` 走浏览器；`--tui` deprecated alias |
+| `src/cli/main.py` | `merge_command`：无参默认走 Web（浏览器）；`--ci` 非交互；`--web-port`（默认 5173） / `--ws-port`（默认 8765） / `--auto-decisions` |
+| `src/cli/main.py` | `resume_command`：`--web` 走浏览器，否则纯 Orchestrator 路径；`--no-browser` / `--web-port` / `--ws-port` |
 | `src/cli/commands/web.py:1-175` | `web_command_impl` / `web_resume_impl` / `_run_web` / `_resolve_web_dist` / `_bridge_cancelled` |
 | `src/cli/commands/web.py:27-39` | `_resolve_web_dist()`：先 `importlib.resources.files("src.web") / "dist"`，失败 fallback 到 `<repo>/web/dist` |
 

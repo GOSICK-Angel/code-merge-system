@@ -56,7 +56,7 @@ PHASE_MAP = {
 > 注意：PLAN_REVISING / PLAN_DISPUTE_PENDING / PAUSED 不直接映射 Phase —— 它们是 `PlanReviewPhase` / `AutoMergePhase` 内部回环使用的中间状态。
 
 ### 2.3 `_PHASE_ACTIVITY`
-每个状态对应一个 `(agent, before_msg, after_msg)` 三元组，驱动 TUI 实时显示当前活动。
+每个状态对应一个 `(agent, before_msg, after_msg)` 三元组，驱动 Web UI 实时显示当前活动。
 
 ---
 

@@ -1,13 +1,11 @@
 """resume routing tests: ensure `resume` CLI dispatches to the Web UI for
-both `--web` (canonical) and the deprecated `--tui` alias, and continues
-using the plain Orchestrator path otherwise. The Web implementation
-itself (websocket bridge, static server) is covered by its own
-integration tests — here we only verify the wiring and alias warning.
+`--web` and continues using the plain Orchestrator path otherwise. The Web
+implementation itself (websocket bridge, static server) is covered by its
+own integration tests — here we only verify the wiring.
 """
 
 from __future__ import annotations
 
-import warnings
 from pathlib import Path
 
 import pytest
@@ -67,17 +65,11 @@ def stub_orch(monkeypatch):
     return captured
 
 
-@pytest.mark.parametrize(
-    "flag,expect_deprecation",
-    [("--web", False), ("--tui", True)],
-    ids=["web-canonical", "tui-alias"],
-)
 def test_web_flag_dispatches_to_web_resume(
-    tmp_path: Path, monkeypatch, stub_orch, flag: str, expect_deprecation: bool
+    tmp_path: Path, monkeypatch, stub_orch
 ) -> None:
-    """`--web` (canonical) and `--tui` (deprecated alias) must both route
-    resume into ``web_resume_impl``. ``--tui`` must additionally emit a
-    DeprecationWarning + stderr deprecation notice."""
+    """`--web` must route resume into ``web_resume_impl`` instead of the
+    plain Orchestrator path."""
     state = _make_state(tmp_path)
     saved = _save(tmp_path, state)
     monkeypatch.chdir(tmp_path)
@@ -104,23 +96,21 @@ def test_web_flag_dispatches_to_web_resume(
     from src.cli.main import cli
 
     runner = CliRunner()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        result = runner.invoke(
-            cli,
-            [
-                "resume",
-                "--checkpoint",
-                str(saved),
-                flag,
-                "--ws-port",
-                "9000",
-                "--web-port",
-                "5173",
-                "--no-browser",
-            ],
-            catch_exceptions=False,
-        )
+    result = runner.invoke(
+        cli,
+        [
+            "resume",
+            "--checkpoint",
+            str(saved),
+            "--web",
+            "--ws-port",
+            "9000",
+            "--web-port",
+            "5173",
+            "--no-browser",
+        ],
+        catch_exceptions=False,
+    )
 
     assert result.exit_code == 0, result.output
     assert captured_web["called"] is True
@@ -130,18 +120,12 @@ def test_web_flag_dispatches_to_web_resume(
     assert captured_web["state"].run_id == state.run_id
     assert stub_orch["calls"] == 0
 
-    if expect_deprecation:
-        assert any(
-            issubclass(w.category, DeprecationWarning) and "--tui" in str(w.message)
-            for w in caught
-        ), [str(w.message) for w in caught]
-
 
 def test_no_web_flag_uses_orchestrator_path(
     tmp_path: Path, monkeypatch, stub_orch
 ) -> None:
-    """Without `--web` / `--tui`, resume must use the plain Orchestrator
-    path (no Web UI launched)."""
+    """Without `--web`, resume must use the plain Orchestrator path
+    (no Web UI launched)."""
     state = _make_state(tmp_path)
     saved = _save(tmp_path, state)
     monkeypatch.chdir(tmp_path)

@@ -41,7 +41,8 @@ class HumanReviewPhase(Phase):
 
         # Case 0: judge review already ran and paused for human acknowledgement.
         # If the user set `state.judge_resolution` via the CLI (resume
-        # --decisions), route accordingly so --no-tui users are not deadlocked.
+        # --decisions), route accordingly so non-Web (CI/headless) users are
+        # not deadlocked.
         if (
             not _has_pending_conflict_decisions
             and state.judge_verdict is not None

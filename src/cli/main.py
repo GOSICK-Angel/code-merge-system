@@ -221,14 +221,6 @@ def _run_ci(repo_path: str, auto_decisions: str | None) -> None:
     "overridden to keep resume consistent with the frozen plan.",
 )
 @click.option(
-    "--tui",
-    "tui",
-    is_flag=True,
-    default=False,
-    hidden=True,
-    help="(deprecated) alias of --web",
-)
-@click.option(
     "--web",
     is_flag=True,
     default=False,
@@ -258,28 +250,12 @@ def resume_command(
     checkpoint: str | None,
     decisions: str | None,
     reload_config: bool,
-    tui: bool,
     web: bool,
     no_browser: bool,
     web_port: int,
     ws_port: int,
 ) -> None:
     """Resume execution from a checkpoint"""
-    import warnings
-
-    if tui:
-        warnings.warn(
-            "`--tui` is deprecated; use `--web` instead. "
-            "This alias will be removed in a future release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        click.echo(
-            "[deprecation] --tui is deprecated; use --web instead.",
-            err=True,
-        )
-        web = web or tui
-
     _load_repo_env(".")
     from src.cli.commands.resume import resume_command_impl
 

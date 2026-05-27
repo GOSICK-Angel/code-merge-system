@@ -28,7 +28,6 @@ src/cli/
 ```bash
 merge <branch>                   # 默认 → 浏览器打开 Web UI
 merge <branch> --no-web          # 纯文本输出
-merge <branch> --no-tui          # deprecated alias of --no-web（保留至下个 major）
 merge <branch> --no-browser      # 启动 Web UI 但不自动打开浏览器，仅打印 URL
 merge <branch> --ci              # CI 模式：无交互，JSON 摘要到 stdout
 merge <branch> --dry-run         # 仅分析，不写文件
@@ -194,7 +193,7 @@ merge resume --run-id <id> --decisions decisions.yaml
 
 ## 4. 测试
 
-- CLI 主命令测试：`tests/unit/test_cli.py`、`tests/unit/test_cli_flow.py`、`tests/unit/test_resume_web_dispatch.py`，用 `CliRunner` 驱动 Click，参数化覆盖 web 默认 / `--no-web` / deprecated `--no-tui` alias / `--ci` 与 resume `--web` / deprecated `--tui` alias
+- CLI 主命令测试：`tests/unit/test_cli.py`、`tests/unit/test_cli_flow.py`、`tests/unit/test_resume_web_dispatch.py`，用 `CliRunner` 驱动 Click，覆盖 web 默认 / `--no-web` / `--ci` 与 resume `--web` 路由
 - Web UI 前端：`cd web && npm run build` 做 TypeScript 类型检查；`npm test` 跑 vitest 覆盖 store / view 单测
 - 后端 Web 层：`tests/unit/test_serializers.py` / `tests/unit/test_ws_bridge_extensions.py` / `tests/unit/test_ws_bridge_threading.py` / `tests/unit/test_static_server.py` 覆盖 serialize / cancel / replay / 路径穿越
 - 清理回归：`tests/unit/test_cleanup_residue.py` 防止 TUI 残留再次混入 src/ / tests/ / 用户文档

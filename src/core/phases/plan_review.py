@@ -402,7 +402,7 @@ class PlanReviewPhase(Phase):
                     ),
                 )
                 # Build one UserDecisionItem per actionable file so the
-                # CLI/TUI can surface them as pending decisions even though
+                # CLI/Web UI can surface them as pending decisions even though
                 # the judge never assigned HUMAN_REQUIRED.
                 user_items = self._build_fallback_decision_items(state)
                 state.pending_user_decisions = user_items
@@ -827,7 +827,7 @@ class PlanReviewPhase(Phase):
 
     # When LLM is unavailable we still need explicit user approval, but we
     # cap how many decision items we surface. A 1500-file plan would
-    # otherwise produce 1500 pending decisions and the CLI/TUI is unusable.
+    # otherwise produce 1500 pending decisions and the CLI/Web UI is unusable.
     _FALLBACK_MAX_ITEMS: int = 200
 
     def _build_fallback_decision_items(

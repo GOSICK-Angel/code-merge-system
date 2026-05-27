@@ -86,7 +86,7 @@ mypy src                        # 应全绿（strict mode）
 | 确定性工具（Gate/扫描器/Git） | [`tools.md`](tools.md) |
 | LLM 路由/压缩/缓存 | [`llm.md`](llm.md) |
 | 三层记忆系统 | [`memory.md`](memory.md) |
-| CLI + TUI + Web UI | [`cli.md`](cli.md) |
+| CLI + Web UI | [`cli.md`](cli.md) |
 | 六大丢失模式 + P0/P1/P2 加固项 | [`../multi-agent-optimization-from-merge-experience.md`](../multi-agent-optimization-from-merge-experience.md) |
 | 迁移感知合并 | [`../migration-aware-merge.md`](../migration-aware-merge.md) |
 | 风险等级枚举 | [`../risk-levels.md`](../risk-levels.md) |

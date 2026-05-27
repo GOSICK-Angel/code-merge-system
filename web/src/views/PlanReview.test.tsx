@@ -273,7 +273,7 @@ describe("PlanReview submit lock + timeout warning", () => {
                 ...s.snapshot,
                 planHumanReview: {
                   decision: "approve",
-                  reviewer_name: "tui_user",
+                  reviewer_name: "web_user",
                   reviewer_notes: null,
                   decided_at: "2026-05-19T09:40:00",
                   item_decisions_count: 0,
@@ -318,7 +318,7 @@ describe("PlanReview round 2 — plan approved, fresh items pending", () => {
     },
     planHumanReview: {
       decision: "approve",
-      reviewer_name: "tui_user",
+      reviewer_name: "web_user",
       reviewer_notes: null,
       decided_at: "2026-05-19T10:37:57",
       item_decisions_count: 2,
