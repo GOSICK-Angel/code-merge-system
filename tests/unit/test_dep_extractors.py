@@ -145,3 +145,41 @@ class TestImportSymbols:
         }
         graph = DependencyExtractor.extract_from_sources(files)
         assert graph.referenced_symbols("mod.ts") == frozenset({"foo", "bar"})
+
+
+class TestMissingGrammarLanguages:
+    """The guard that surfaces a silently-degraded graph (no [ast] extra)."""
+
+    def test_python_never_reported(self):
+        from src.tools.dep_extractors.treesitter_extractor import (
+            missing_grammar_languages,
+        )
+
+        assert missing_grammar_languages(["python"]) == []
+
+    def test_unknown_language_reported(self):
+        from src.tools.dep_extractors.treesitter_extractor import (
+            missing_grammar_languages,
+        )
+
+        assert missing_grammar_languages(["cobol"]) == ["cobol"]
+
+    @pytest.mark.skipif(not _HAS_TS, reason="tree-sitter not installed")
+    def test_installed_grammars_not_reported(self):
+        from src.tools.dep_extractors.treesitter_extractor import (
+            missing_grammar_languages,
+        )
+
+        assert missing_grammar_languages(["python", "go", "typescript"]) == []
+
+    def test_missing_core_reports_all_non_python(self, monkeypatch):
+        import src.tools.dep_extractors.treesitter_extractor as tse
+
+        def fake_find_spec(name: str):
+            return None if name == "tree_sitter" else object()
+
+        monkeypatch.setattr(tse.importlib.util, "find_spec", fake_find_spec)
+        assert tse.missing_grammar_languages(["python", "go", "javascript"]) == [
+            "go",
+            "javascript",
+        ]

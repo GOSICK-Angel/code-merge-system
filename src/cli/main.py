@@ -419,6 +419,8 @@ def validate_command(config: str) -> None:
 
     errors = validate_config_and_env(merge_config)
 
+    warnings = validate_config_warnings(merge_config)
+
     if errors:
         console.print("[red]Validation errors:[/red]")
         for err in errors:
@@ -428,6 +430,30 @@ def validate_command(config: str) -> None:
         console.print(
             "[green]Config is valid. All required environment variables are set.[/green]"
         )
+        for warn in warnings:
+            console.print(f"[yellow]⚠ {warn}[/yellow]")
+
+
+def validate_config_warnings(config: MergeConfig) -> list[str]:
+    """Non-fatal advisories that should not fail validation but do warn the
+    operator about silently degraded behavior."""
+    warnings: list[str] = []
+
+    if config.dependency_graph.enabled:
+        from src.tools.dep_extractors.treesitter_extractor import (
+            missing_grammar_languages,
+        )
+
+        missing = missing_grammar_languages(config.dependency_graph.languages)
+        if missing:
+            warnings.append(
+                f"dependency_graph.enabled=true but tree-sitter grammar(s) for "
+                f"{missing} are unavailable — the graph will silently yield no "
+                f"edges for these languages and every graph consumer becomes a "
+                f'no-op. Install with: pip install ".[ast]"'
+            )
+
+    return warnings
 
 
 def validate_config_and_env(config: MergeConfig) -> list[str]:

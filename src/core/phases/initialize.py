@@ -1328,6 +1328,20 @@ class InitializePhase(Phase):
         cfg = state.config.dependency_graph
         ctx.notify("orchestrator", "Building file dependency graph")
 
+        from src.tools.dep_extractors.treesitter_extractor import (
+            missing_grammar_languages,
+        )
+
+        missing_grammars = missing_grammar_languages(cfg.languages)
+        if missing_grammars:
+            warning = (
+                "Dependency graph enabled but tree-sitter grammar(s) "
+                f"missing for {missing_grammars} — edges for these languages "
+                'will be empty (graph degraded). Install with: pip install ".[ast]"'
+            )
+            logger.warning(warning)
+            ctx.notify("orchestrator", f"⚠ {warning}")
+
         actionable = {
             FileChangeCategory.B,
             FileChangeCategory.C,

@@ -18,6 +18,7 @@ std) produce no edge.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import logging
 import posixpath
 from collections.abc import Iterable
@@ -41,6 +42,32 @@ _GRAMMAR_MODULE: dict[str, str] = {
 }
 
 _PARSER_CACHE: dict[str, Any] = {}
+
+
+def missing_grammar_languages(languages: Iterable[str]) -> list[str]:
+    """Return configured non-Python languages whose tree-sitter grammar
+    cannot be loaded.
+
+    When a grammar (or the ``tree_sitter`` core) is unavailable, the public
+    extractor silently degrades to an empty edge list for that language — so a
+    JS/TS/Go fork yields a graph with no edges and every downstream consumer
+    becomes a no-op without any error. Callers (``merge validate`` and the
+    initialize-phase build) use this to surface the degradation instead. The
+    ``[ast]`` extra installs the missing grammars.
+
+    ``python`` is never reported: it is handled by the stdlib-``ast``
+    extractor and needs no tree-sitter binding.
+    """
+    has_core = importlib.util.find_spec("tree_sitter") is not None
+    missing: list[str] = []
+    for language in languages:
+        if language == "python":
+            continue
+        module = _GRAMMAR_MODULE.get(language)
+        if module is None or not has_core or importlib.util.find_spec(module) is None:
+            missing.append(language)
+    return missing
+
 
 # Tree-sitter node types carrying an import path string, per language.
 _IMPORT_NODE_TYPES: dict[str, set[str]] = {
