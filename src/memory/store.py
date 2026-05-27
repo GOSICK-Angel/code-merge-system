@@ -200,12 +200,6 @@ class MemoryStore:
             return MemoryStore(new_memory)
         return self
 
-    def consolidate(self) -> MemoryStore:
-        """Merge similar entries to reduce count while preserving information."""
-        consolidated = _consolidate_entries(list(self._memory.entries))
-        new_memory = self._memory.model_copy(update={"entries": consolidated})
-        return MemoryStore(new_memory)
-
     def to_memory(self) -> MergeMemory:
         return self._memory.model_copy(deep=True)
 

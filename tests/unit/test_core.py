@@ -243,17 +243,6 @@ class TestStateMachine:
         for target in SystemStatus:
             assert sm.can_transition(SystemStatus.FAILED, target) is False
 
-    def test_get_valid_transitions_initialized(self):
-        sm = StateMachine()
-        valid = sm.get_valid_transitions(SystemStatus.INITIALIZED)
-        assert SystemStatus.PLANNING in valid
-        assert SystemStatus.FAILED in valid
-
-    def test_get_valid_transitions_completed_empty(self):
-        sm = StateMachine()
-        valid = sm.get_valid_transitions(SystemStatus.COMPLETED)
-        assert valid == []
-
     def test_transition_appends_message_to_state(self):
         sm = StateMachine()
         state = _make_state()
@@ -288,10 +277,9 @@ class TestStateMachine:
 
     def test_paused_can_transition_to_most_states(self):
         sm = StateMachine()
-        valid = sm.get_valid_transitions(SystemStatus.PAUSED)
-        assert SystemStatus.PLANNING in valid
-        assert SystemStatus.AUTO_MERGING in valid
-        assert SystemStatus.FAILED in valid
+        assert sm.can_transition(SystemStatus.PAUSED, SystemStatus.PLANNING)
+        assert sm.can_transition(SystemStatus.PAUSED, SystemStatus.AUTO_MERGING)
+        assert sm.can_transition(SystemStatus.PAUSED, SystemStatus.FAILED)
 
     def test_all_statuses_have_entry_in_valid_transitions(self):
         for status in SystemStatus:

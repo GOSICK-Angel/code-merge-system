@@ -31,7 +31,6 @@ from src.models.plan_review import (
 )
 from src.tools.file_classifier import (
     compute_complexity,
-    compute_risk_score,
     classify_file,
 )
 from src.tools.module_inference import infer_communities, infer_modules
@@ -1691,11 +1690,6 @@ class PlannerAgent(BaseAgent):
             system=system,
         )
         return _parse_meta_review_json(str(raw))
-
-    def _classify_file(self, file_diff: FileDiff, config: MergeConfig) -> RiskLevel:
-        score = compute_risk_score(file_diff, config.file_classifier)
-        updated = file_diff.model_copy(update={"risk_score": score})
-        return classify_file(updated, config.file_classifier)
 
     def _apply_god_node_risk(
         self, file_diffs: list[FileDiff], state: MergeState

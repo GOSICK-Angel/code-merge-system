@@ -365,11 +365,6 @@ class SQLiteMemoryStore:
                 )
         return self
 
-    def consolidate(self) -> "SQLiteMemoryStore":
-        with self._conn() as conn:
-            self._maybe_consolidate(conn)
-        return self
-
     # ------------------------------------------------------------------
     # Serialisation
     # ------------------------------------------------------------------

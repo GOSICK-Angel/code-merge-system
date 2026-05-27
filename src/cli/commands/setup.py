@@ -11,8 +11,8 @@ Public entry points:
 - ``build_default_payload(repo_path)`` — synthesise a ``SetupPayload``
   for ``merge --ci`` when no ``.merge/config.yaml`` exists yet, so CI
   never blocks on prompts.
-- ``draft_forks_profile_file(...)`` / ``migrate_merge_record(...)`` —
-  one-shot helpers reused by the launcher.
+- ``draft_forks_profile_file(...)`` — one-shot helper reused by the
+  launcher.
 
 The previous terminal-interactive wizard (``_interactive_setup`` /
 ``_repeat_run_flow`` / ``detect_or_setup``) was removed in PR-3 once
@@ -864,33 +864,3 @@ def draft_forks_profile_file(
     profile_path.parent.mkdir(parents=True, exist_ok=True)
     profile_path.write_text(text, encoding="utf-8")
     return profile_path
-
-
-def migrate_merge_record(repo_path: str = ".") -> None:
-    """Move MERGE_RECORD/*.md into .merge/plans/ (one-time migration).
-
-    Safe to call repeatedly — skips files that already exist in the
-    destination and leaves the source directory untouched afterwards.
-    """
-    import shutil
-
-    src_dir = Path(repo_path).resolve() / "MERGE_RECORD"
-    if not src_dir.is_dir():
-        return
-
-    plans_dir = get_project_merge_dir(repo_path) / "plans"
-    plans_dir.mkdir(parents=True, exist_ok=True)
-
-    moved: list[str] = []
-    for md_file in src_dir.glob("*.md"):
-        dest = plans_dir / md_file.name
-        if dest.exists():
-            continue
-        shutil.move(str(md_file), str(dest))
-        moved.append(md_file.name)
-
-    if moved:
-        console.print(
-            f"  [green]Migrated {len(moved)} plan file(s)[/green] "
-            f"from MERGE_RECORD/ → .merge/plans/"
-        )

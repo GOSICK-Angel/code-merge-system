@@ -45,7 +45,13 @@
 
 ---
 
-## Part 3 — 直接删除（被取代 / 弃用 / 无依据，已确认无异议）
+## Part 3 — 直接删除（被取代 / 弃用 / 无依据，已确认无异议）✅ 已完成（2026-05-27）
+
+> 落地说明（执行时对盘点快照的修正）：
+> - **`_SAFETY_MARGIN` 保留**——它被仍在用的 `TokenBudget.available`(context.py:54) 引用，并非随 `ContextAssembler` 一起删的死常量；本次仅删 `ContextAssembler` 类，`_SAFETY_MARGIN`/`_truncate_text`/`TokenBudget`/`ContextSection` 全部保留。
+> - **`config.github` 关联面按"清 config 字段"窄口径处理**——删 `GitHubConfig` 类与 `MergeConfig.github` 字段、随之失效的 `config_data["github"]` 写入与 `CURATED_PATHS` 条目；`SetupPayload.github_token` → `.env GITHUB_TOKEN` 收集与 Web UI 输入框属另一独立特性面，本轮未拆（如需清理另起一轮跨栈改动）。
+> - `PhaseRunner` 整类（仅 run_* 方法）连同零流量的 `PhaseContext.phase_runner` 字段一并移除，12 个测试构造点同步更新。
+> - 删除分三次提交；每次 `ruff check src/` + `mypy src` + `pytest tests/unit/` 全绿（最终 2707 passed）。
 
 | 单元 | 成因 | 备注 |
 |---|---|---|
@@ -102,7 +108,7 @@
 | 阶段 | 内容 | 风险 | 优先级 |
 |---|---|---|---|
 | 1 | Part 2 judge 契约修复（2 行 + 回归测试）| 极低，纯收益 | **P0** ✅ 完成（f9b60ae）|
-| 2 | Part 3 删除（被取代/弃用项，含抢救 `_truncate_text`）| 低（已确认无引用）| **P0** |
+| 2 | Part 3 删除（被取代/弃用项，含抢救 `_truncate_text`）| 低（已确认无引用）| **P0** ✅ 完成（2026-05-27）|
 | 3 | Part 1 截断→压缩（1.1 边界感知兜底 + 1.2 注入 summary client）| 中（影响所有 LLM 调用上下文）| **P1** |
 | 4 | Part 4.1 完成 HookManager LLM 钩子 + 4.2 与 MessageBus 去重 | 中 | **P1** |
 | 5 | Part 5 TUI 术语债：ws_bridge 重命名（低风险）+ `--tui` flag 去留 + 文档批量更新 | 低（重命名/文档）| **P2** |

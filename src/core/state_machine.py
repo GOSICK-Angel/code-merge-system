@@ -79,9 +79,6 @@ class StateMachine:
         """Register a callback invoked after every state transition."""
         self._observers.append(observer)
 
-    def remove_observer(self, observer: StateObserver) -> None:
-        self._observers = [o for o in self._observers if o is not observer]
-
     def transition(self, state: MergeState, target: SystemStatus, reason: str) -> None:
         current = state.status
         if not self.can_transition(current, target):
@@ -111,6 +108,3 @@ class StateMachine:
     def can_transition(self, current: SystemStatus, target: SystemStatus) -> bool:
         allowed = VALID_TRANSITIONS.get(current, [])
         return target in allowed
-
-    def get_valid_transitions(self, current: SystemStatus) -> list[SystemStatus]:
-        return VALID_TRANSITIONS.get(current, [])

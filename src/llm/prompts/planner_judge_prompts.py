@@ -143,29 +143,6 @@ def file_is_obviously_safe(
     return True
 
 
-def filter_obviously_safe_files(
-    file_diffs: list[FileDiff],
-    batch_risk_map: dict[str, str],
-    extra_safelist_patterns: list[str] | None = None,
-    lockfile_max_lines: int = 1000,
-) -> tuple[list[FileDiff], list[FileDiff]]:
-    """Partition ``file_diffs`` into (safe, needs_llm) using the same
-    rules as ``is_segment_obviously_safe`` but per-file. Order is
-    preserved within each partition so the LLM still sees the original
-    file ordering — important for batch-ordering heuristics in the
-    review prompt."""
-    safe: list[FileDiff] = []
-    needs_llm: list[FileDiff] = []
-    for fd in file_diffs:
-        if file_is_obviously_safe(
-            fd, batch_risk_map, extra_safelist_patterns, lockfile_max_lines
-        ):
-            safe.append(fd)
-        else:
-            needs_llm.append(fd)
-    return safe, needs_llm
-
-
 def is_segment_obviously_safe(
     segment: list[FileDiff],
     batch_risk_map: dict[str, str],

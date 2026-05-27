@@ -215,15 +215,6 @@ class TestMemoryConsolidation:
         )
         assert store.entry_count <= count_before
 
-    def test_explicit_consolidate(self):
-        store = MemoryStore()
-        for i in range(20):
-            store = store.add_entry(
-                _make_entry(content=f"p{i}", tags=["t"], confidence=0.7)
-            )
-        consolidated_store = store.consolidate()
-        assert consolidated_store.entry_count <= store.entry_count
-
     def test_merge_collects_all_file_paths(self):
         group = [
             _make_entry(file_paths=["a.py", "b.py"]),
