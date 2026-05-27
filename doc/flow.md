@@ -67,7 +67,7 @@ class Phase(ABC):
     async def run(state, ctx)       # 串联上述三步，Orchestrator 调用它
 ```
 
-`PhaseContext` 是只读的依赖容器：`config / git_tool / gate_runner / state_machine / message_bus / checkpoint / phase_runner / memory_store / summarizer / trace_logger / emit / hooks / cost_tracker / agents / coordinator`。其中 `coordinator: Coordinator | None` 供 Phase 咨询异常路由决策（见 §4 各 Phase 详细描述）。
+`PhaseContext` 是只读的依赖容器：`config / git_tool / gate_runner / state_machine / checkpoint / memory_store / summarizer / memory_hit_tracker / trace_logger / emit / hooks / cost_tracker / agents / coordinator`。其中 `coordinator: Coordinator | None` 供 Phase 咨询异常路由决策（见 §4 各 Phase 详细描述）。
 
 `PhaseOutcome` 告诉 Orchestrator 下一步：
 

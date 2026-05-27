@@ -133,7 +133,7 @@ GENERATING_REPORT  → ReportGenerationPhase → COMPLETED
 ```
 src/
 ├── cli/              # Click CLI + commands/（run / resume / init / setup / web）
-├── core/             # Orchestrator · StateMachine · Checkpoint · MessageBus · Hooks · Coordinator
+├── core/             # Orchestrator · StateMachine · Checkpoint · Hooks · Coordinator
 │   └── phases/       # 8 个 Phase 类 + PhaseContext · PhaseOutcome
 ├── agents/           # 9 类 Agent + BaseAgent + Registry + contracts/（岗位说明书）
 ├── llm/              # 客户端 · 路由 · 凭据池 · 上下文 · 压缩 · 分块 · prompts/

@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Literal
 from src.models.config import MergeConfig
 from src.models.state import MergeState, SystemStatus
 from src.core.state_machine import StateMachine
-from src.core.message_bus import MessageBus
 from src.core.checkpoint import Checkpoint
 from src.tools.git_tool import GitTool
 from src.tools.gate_runner import GateRunner
@@ -59,7 +58,6 @@ class PhaseContext:
     git_tool: GitTool
     gate_runner: GateRunner
     state_machine: StateMachine
-    message_bus: MessageBus
     checkpoint: Checkpoint
     memory_store: MemoryStore
     summarizer: PhaseSummarizer

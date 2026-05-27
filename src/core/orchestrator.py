@@ -38,7 +38,6 @@ from src.cli.paths import (
     is_dev_mode,
 )
 from src.core.checkpoint import Checkpoint
-from src.core.message_bus import MessageBus
 from src.core.phases import (
     AutoMergePhase,
     ConflictAnalysisPhase,
@@ -160,7 +159,6 @@ class Orchestrator:
         self.git_tool = GitTool(config.repo_path)
         self.gate_runner = GateRunner(Path(config.repo_path).resolve())
         self.state_machine = StateMachine()
-        self.message_bus = MessageBus()
         run_dir = Path(config.output.debug_directory) / "checkpoints"
         self.checkpoint = Checkpoint(
             run_dir, debug_checkpoints=config.output.debug_checkpoints
@@ -448,7 +446,6 @@ class Orchestrator:
             git_tool=self.git_tool,
             gate_runner=self.gate_runner,
             state_machine=self.state_machine,
-            message_bus=self.message_bus,
             checkpoint=self.checkpoint,
             memory_store=self._memory_store,  # type: ignore[arg-type]
             summarizer=self._summarizer,

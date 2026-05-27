@@ -119,7 +119,7 @@ merge upstream --no-web --dry-run
 | 想改 | 从哪里入手 |
 |---|---|
 | 新增一个 Agent | `agents.md` §6 |
-| 新增一个 Phase | `core.md` §10 |
+| 新增一个 Phase | `core.md` §8 |
 | 新增一个加固扫描器 | `tools.md` §5 |
 | 新增 baseline parser（比如新语言的 test runner） | 加文件到 `src/tools/baseline_parsers/`，文件名作为 `GateCommandConfig.baseline_parser` |
 | 接入新 LLM Provider | `llm.md` §12 |

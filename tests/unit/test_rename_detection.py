@@ -149,7 +149,6 @@ class TestInitializePhaseStoresRenamePairs:
         from src.core.phases.initialize import InitializePhase
         from src.core.phases.base import PhaseContext
         from src.core.state_machine import StateMachine
-        from src.core.message_bus import MessageBus
         from src.memory.store import MemoryStore
         from src.memory.summarizer import PhaseSummarizer
 
@@ -174,7 +173,6 @@ class TestInitializePhaseStoresRenamePairs:
             git_tool=mock_git,
             gate_runner=MagicMock(),
             state_machine=StateMachine(),
-            message_bus=MessageBus(),
             checkpoint=MagicMock(),
             memory_store=MemoryStore(),
             summarizer=PhaseSummarizer(),

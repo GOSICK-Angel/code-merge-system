@@ -82,7 +82,6 @@ def _make_ctx(**overrides):
         "git_tool": MagicMock(),
         "gate_runner": MagicMock(),
         "state_machine": MagicMock(),
-        "message_bus": MagicMock(),
         "checkpoint": MagicMock(),
         "memory_store": MagicMock(),
         "summarizer": MagicMock(),

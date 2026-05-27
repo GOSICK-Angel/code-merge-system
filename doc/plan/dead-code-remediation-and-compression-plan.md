@@ -70,16 +70,17 @@
 
 核查 `doc/references/` 后确认：成因三确为**参考开源项目做架构优化的半成品**。部分提案已完成（`guardrails.py` 已接 planning.py；`Coordinator` O-D 已接 orchestrator/auto_merge），以下是**值得保留并完成**的：
 
-### 4.1 🔧 完成 LLM 生命周期钩子（HookManager）— 高价值，有完整设计
+### 4.1 🔧 完成 LLM 生命周期钩子（HookManager）— 高价值，有完整设计 ✅ 已完成（d5742ce）
 - **出处**：[openai-agents-python-analysis.md](../references/openai-agents-python-analysis.md) §2.1（+ hermes §Hook 系统）。
-- **现状**：`hooks.py` 的 `HookManager` + `HOOK_LLM_START/HOOK_LLM_END` 常量已建，但 `base_agent` 未 emit、`orchestrator` 无 `_inject_hooks`——半成品。
-- **完成动作**（文档已给出 ~40 行方案）：`base_agent._call_llm_with_retry` 成功/失败分支 emit `agent:llm_start/end`；`orchestrator` 仿 `_inject_memory` 增 `_inject_hooks`。
+- **状态（2026-05-27 核查）**：已落地。`base_agent._call_llm_with_retry` 在调用前 emit `agent:llm_start`（base_agent.py:639），成功分支 emit `agent:llm_end success=True`（:733），不可重试失败与重试耗尽分支 emit `agent:llm_end success=False`（:835 / :915）；`orchestrator._inject_hooks`（orchestrator.py:690）仿 `_inject_memory`，在 run 起始调用（:261）把同一 `HookManager` 注入每个 agent。
 - **收益**：监控/成本统计/Web UI 进度订阅 LLM 事件**无需侵入 agent 代码**。
 
-### 4.2 ⚖️ 统一 MessageBus 与 Hook（去重）
+### 4.2 ⚖️ 统一 MessageBus 与 Hook（去重）✅ 已完成（2026-05-27）
 - **出处**：[claude-code-game-studios-analysis.md](../references/claude-code-game-studios-analysis.md) §7 误以为 MessageBus 是工作中的 agent 消息底座；hermes §184 指出其 `try/except: pass` 静默吞错。
 - **现状**：`MessageBus` 被实例化并贯穿传入每个 phase(base.py:63)，但 `.publish/.subscribe` **零调用**——线性流水线用 `MergeState` 做共享底座，不需要 pub/sub 消息。
-- **动作**：**二选一**——(a) 若做 4.1 的事件化，把 MessageBus 折叠进 HookManager（一套事件机制，去重）；(b) 否则删除 MessageBus 及其 PhaseContext 字段。倾向 (a)：事件订阅与生命周期钩子是同一需求。
+- **落地（采方案 a 的归宿）**：4.1 已使 HookManager 成为活的事件机制，而 MessageBus 全链路零 pub/sub 流量、无消息可迁移，故"折叠进 HookManager"实质 = 删除冗余的 MessageBus、留 HookManager 作单一事件机制。已删 `src/core/message_bus.py`、`PhaseContext.message_bus` 字段、orchestrator 实例化/传参、`src.core.__init__` 导出；删除 MessageBus 专属单测（`test_core.py::TestMessageBus`、`test_error_classifier.py::TestMessageBusErrorLogging`）并清理 ~12 处 `PhaseContext` 构造点的 `message_bus=` 实参。
+- **保留**：`src/models/message.py`（`AgentMessage`/`MessageType`/`AgentType`）是各 agent `run()` 的返回契约，属活代码，**不动**。
+- **回归**：新增 `tests/unit/test_phase4_messagebus_dedup.py` 守护去重不变量（模块移除、`__init__` 不再导出、`PhaseContext` 无 `message_bus` 且以 `hooks` 为单一事件机制、消息模型仍可导入）。`mypy src` + `ruff check src/` 全绿，`pytest tests/unit/` 2694 passed。
 
 ### 4.3 🌱 内存按需加载 + 效果反馈（query_by_path / query_by_tags / query_by_type / entry_outcome）
 - **出处**：[enhanced-context-memory-proposal.md](../references/enhanced-context-memory-proposal.md)（:352 `query_by_path` 按需加载）+ [mempalace-analysis.md](../references/mempalace-analysis.md)。
@@ -110,7 +111,7 @@
 | 1 | Part 2 judge 契约修复（2 行 + 回归测试）| 极低，纯收益 | **P0** ✅ 完成（f9b60ae）|
 | 2 | Part 3 删除（被取代/弃用项，含抢救 `_truncate_text`）| 低（已确认无引用）| **P0** ✅ 完成（2026-05-27）|
 | 3 | Part 1 截断→压缩（1.1 边界感知兜底 + 1.2 注入 summary client）| 中（影响所有 LLM 调用上下文）| **P1** |
-| 4 | Part 4.1 完成 HookManager LLM 钩子 + 4.2 与 MessageBus 去重 | 中 | **P1** |
+| 4 | Part 4.1 完成 HookManager LLM 钩子 + 4.2 与 MessageBus 去重 | 中 | **P1** ✅ 完成（2026-05-27；4.1=d5742ce，4.2=本轮）|
 | 5 | Part 5 TUI 术语债：ws_bridge 重命名（低风险）+ `--tui` flag 去留 + 文档批量更新 | 低（重命名/文档）| **P2** |
 | 6 | Part 4.3 内存 API：等 enhanced-context-memory 提案立项再定 | — | **P2/待定** |
 

@@ -5,14 +5,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.checkpoint import Checkpoint
-from src.core.message_bus import MessageBus
 from src.core.state_machine import StateMachine, VALID_TRANSITIONS
 from src.models.config import MergeConfig, ThresholdConfig
 from src.models.conflict import ConflictAnalysis, ConflictType
 from src.models.decision import MergeDecision
 from src.models.diff import FileDiff, FileChangeCategory, FileStatus, RiskLevel
 from src.models.judge import ExecutorRebuttal, JudgeVerdict, VerdictType
-from src.models.message import AgentMessage, AgentType, MessageType
 from src.models.plan import MergePlan, MergePhase, PhaseFileBatch, RiskSummary
 from src.models.plan_judge import PlanJudgeResult, PlanJudgeVerdict
 from src.models.state import MergeState, SystemStatus
@@ -90,24 +88,6 @@ def _make_file_diff(
         lines_added=5,
         lines_deleted=3,
         is_security_sensitive=is_security_sensitive,
-    )
-
-
-def _make_agent_message(
-    sender: AgentType = AgentType.PLANNER,
-    receiver: AgentType = AgentType.ORCHESTRATOR,
-    phase: MergePhase = MergePhase.ANALYSIS,
-    message_type: MessageType = MessageType.INFO,
-    subject: str = "test",
-    payload: dict | None = None,
-) -> AgentMessage:
-    return AgentMessage(
-        sender=sender,
-        receiver=receiver,
-        phase=phase,
-        message_type=message_type,
-        subject=subject,
-        payload=payload or {},
     )
 
 
@@ -442,153 +422,6 @@ class TestCheckpoint:
             _signal.signal(_signal.SIGTERM, original_term)
 
 
-class TestMessageBus:
-    def test_publish_stores_message(self):
-        bus = MessageBus()
-        msg = _make_agent_message()
-        bus.publish(msg)
-        assert msg in bus._messages
-
-    def test_publish_puts_message_in_queue(self):
-        bus = MessageBus()
-        msg = _make_agent_message()
-        bus.publish(msg)
-        assert not bus._queue.empty()
-
-    def test_subscribe_and_callback_called_on_publish(self):
-        bus = MessageBus()
-        received = []
-        bus.subscribe(AgentType.ORCHESTRATOR, lambda m: received.append(m))
-        msg = _make_agent_message(receiver=AgentType.ORCHESTRATOR)
-        bus.publish(msg)
-        assert len(received) == 1
-        assert received[0] is msg
-
-    def test_subscribe_callback_not_called_for_different_receiver(self):
-        bus = MessageBus()
-        received = []
-        bus.subscribe(AgentType.PLANNER, lambda m: received.append(m))
-        msg = _make_agent_message(receiver=AgentType.ORCHESTRATOR)
-        bus.publish(msg)
-        assert len(received) == 0
-
-    def test_publish_broadcast_calls_all_subscribers_except_sender(self):
-        bus = MessageBus()
-        planner_received = []
-        executor_received = []
-        bus.subscribe(AgentType.PLANNER, lambda m: planner_received.append(m))
-        bus.subscribe(AgentType.EXECUTOR, lambda m: executor_received.append(m))
-        msg = _make_agent_message(
-            sender=AgentType.ORCHESTRATOR,
-            receiver=AgentType.BROADCAST,
-        )
-        bus.publish(msg)
-        assert len(planner_received) == 1
-        assert len(executor_received) == 1
-
-    def test_publish_broadcast_does_not_call_sender_subscriber(self):
-        bus = MessageBus()
-        sender_received = []
-        bus.subscribe(AgentType.ORCHESTRATOR, lambda m: sender_received.append(m))
-        msg = _make_agent_message(
-            sender=AgentType.ORCHESTRATOR,
-            receiver=AgentType.BROADCAST,
-        )
-        bus.publish(msg)
-        assert len(sender_received) == 0
-
-    def test_get_messages_returns_all_without_filter(self):
-        bus = MessageBus()
-        m1 = _make_agent_message(receiver=AgentType.PLANNER)
-        m2 = _make_agent_message(receiver=AgentType.EXECUTOR)
-        bus.publish(m1)
-        bus.publish(m2)
-        results = bus.get_messages()
-        assert len(results) == 2
-
-    def test_get_messages_filters_by_receiver(self):
-        bus = MessageBus()
-        m1 = _make_agent_message(receiver=AgentType.PLANNER)
-        m2 = _make_agent_message(receiver=AgentType.EXECUTOR)
-        bus.publish(m1)
-        bus.publish(m2)
-        results = bus.get_messages(receiver=AgentType.PLANNER)
-        assert len(results) == 1
-        assert results[0] is m1
-
-    def test_get_messages_includes_broadcast_for_any_receiver(self):
-        bus = MessageBus()
-        broadcast_msg = _make_agent_message(receiver=AgentType.BROADCAST)
-        bus.publish(broadcast_msg)
-        results = bus.get_messages(receiver=AgentType.PLANNER)
-        assert broadcast_msg in results
-
-    def test_get_messages_unprocessed_only(self):
-        bus = MessageBus()
-        m1 = _make_agent_message()
-        m2 = _make_agent_message()
-        bus.publish(m1)
-        bus.publish(m2)
-        bus.mark_processed(m1.message_id)
-        results = bus.get_messages(unprocessed_only=True)
-        assert m1 not in results
-        assert m2 in results
-
-    def test_mark_processed_sets_flag(self):
-        bus = MessageBus()
-        msg = _make_agent_message()
-        bus.publish(msg)
-        bus.mark_processed(msg.message_id)
-        assert bus._messages[0].is_processed is True
-
-    def test_mark_processed_unknown_id_does_nothing(self):
-        bus = MessageBus()
-        msg = _make_agent_message()
-        bus.publish(msg)
-        bus.mark_processed("unknown-id")
-        assert bus._messages[0].is_processed is False
-
-    def test_clear_empties_messages_and_queue(self):
-        bus = MessageBus()
-        bus.publish(_make_agent_message())
-        bus.clear()
-        assert len(bus._messages) == 0
-        assert bus._queue.empty()
-
-    async def test_wait_for_message_returns_published_message(self):
-        bus = MessageBus()
-        msg = _make_agent_message()
-        bus.publish(msg)
-        result = await bus.wait_for_message(timeout=1.0)
-        assert result is msg
-
-    async def test_wait_for_message_times_out(self):
-        bus = MessageBus()
-        result = await bus.wait_for_message(timeout=0.05)
-        assert result is None
-
-    def test_subscriber_exception_does_not_propagate(self):
-        bus = MessageBus()
-
-        def bad_callback(m):
-            raise RuntimeError("oops")
-
-        bus.subscribe(AgentType.ORCHESTRATOR, bad_callback)
-        msg = _make_agent_message(receiver=AgentType.ORCHESTRATOR)
-        bus.publish(msg)
-
-    def test_multiple_subscribers_for_same_agent_type(self):
-        bus = MessageBus()
-        calls_a = []
-        calls_b = []
-        bus.subscribe(AgentType.JUDGE, lambda m: calls_a.append(m))
-        bus.subscribe(AgentType.JUDGE, lambda m: calls_b.append(m))
-        msg = _make_agent_message(receiver=AgentType.JUDGE)
-        bus.publish(msg)
-        assert len(calls_a) == 1
-        assert len(calls_b) == 1
-
-
 class TestOrchestratorSelectMergeStrategy:
     def test_low_confidence_escalates_human(self):
         from src.core.orchestrator import _select_merge_strategy
@@ -775,7 +608,6 @@ class TestPhaseClasses:
     def _make_ctx(config, **overrides):
         from src.core.phases.base import PhaseContext
         from src.core.state_machine import StateMachine
-        from src.core.message_bus import MessageBus
         from src.core.checkpoint import Checkpoint
         from src.memory.store import MemoryStore
         from src.memory.summarizer import PhaseSummarizer
@@ -785,7 +617,6 @@ class TestPhaseClasses:
             git_tool=MagicMock(),
             gate_runner=MagicMock(),
             state_machine=StateMachine(),
-            message_bus=MessageBus(),
             checkpoint=MagicMock(),
             memory_store=MemoryStore(),
             summarizer=PhaseSummarizer(),
