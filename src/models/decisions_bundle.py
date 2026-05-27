@@ -130,15 +130,22 @@ class DecisionsBundle(BaseModel):
 def parse_bundle(raw: dict[str, Any]) -> DecisionsBundle:
     """Parse YAML dict into a DecisionsBundle, accepting V1 or V2 shape.
 
-    V1 detection: no top-level ``version`` field, no ``rounds`` list.
-    V1 documents are wrapped into a single-round bundle whose phase is
-    inferred from which top-level keys are present.
+    V2 detection keys on the presence of a ``rounds`` list, NOT on
+    ``version: 2``. Requiring the version sentinel made a ``rounds:``
+    document that merely omitted it collapse silently into a single empty
+    ``plan_review`` round — dropping every decision with no error. The
+    ``version`` field is now an optional annotation; ``rounds`` alone
+    selects the V2 path.
+
+    V1 documents (no ``rounds`` list) are wrapped into a single-round
+    bundle whose phase is inferred from which top-level keys are present.
     """
     if not isinstance(raw, dict):
         raise ValueError("decisions YAML root must be a mapping")
-    version = raw.get("version")
-    if version == 2 and "rounds" in raw:
-        return DecisionsBundle.model_validate(raw)
+    if "rounds" in raw:
+        if not isinstance(raw["rounds"], list):
+            raise ValueError("decisions YAML 'rounds' must be a list")
+        return DecisionsBundle.model_validate({"version": 2, **raw})
     return DecisionsBundle(rounds=[_v1_to_round(raw)])
 
 
