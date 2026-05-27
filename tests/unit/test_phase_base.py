@@ -27,7 +27,6 @@ def _make_context(**overrides):
         "state_machine": MagicMock(),
         "message_bus": MagicMock(),
         "checkpoint": MagicMock(),
-        "phase_runner": MagicMock(),
         "memory_store": MagicMock(),
         "summarizer": MagicMock(),
     }

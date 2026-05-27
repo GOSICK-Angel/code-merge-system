@@ -40,7 +40,6 @@ def _make_config(tmp_path: Path, **fc_overrides) -> MergeConfig:
 def _make_ctx(config: MergeConfig, git_tool=None) -> PhaseContext:
     from src.core.state_machine import StateMachine
     from src.core.message_bus import MessageBus
-    from src.core.phase_runner import PhaseRunner
     from src.memory.store import MemoryStore
     from src.memory.summarizer import PhaseSummarizer
 
@@ -51,7 +50,6 @@ def _make_ctx(config: MergeConfig, git_tool=None) -> PhaseContext:
         state_machine=StateMachine(),
         message_bus=MessageBus(),
         checkpoint=MagicMock(),
-        phase_runner=PhaseRunner(),
         memory_store=MemoryStore(),
         summarizer=PhaseSummarizer(),
         trace_logger=None,
@@ -186,9 +184,7 @@ class TestForceDecisionPolicy:
         assert mock_git.get_file_bytes.call_count == 0
 
     def test_force_take_target_deletes_when_upstream_absent(self, tmp_path):
-        config = _make_config(
-            tmp_path, always_take_upstream_patterns=["dead/**"]
-        )
+        config = _make_config(tmp_path, always_take_upstream_patterns=["dead/**"])
         mock_git = MagicMock()
         mock_git.get_file_bytes.return_value = None
         ctx = _make_ctx(config, git_tool=mock_git)
@@ -199,18 +195,14 @@ class TestForceDecisionPolicy:
 
         state = MergeState(config=config)
         phase = InitializePhase()
-        phase._apply_forced_decisions(
-            state, ctx, {"dead/old.go": FileChangeCategory.B}
-        )
+        phase._apply_forced_decisions(state, ctx, {"dead/old.go": FileChangeCategory.B})
 
         assert not target.exists()
         rec = state.file_decision_records["dead/old.go"]
         assert "deleted" in rec.rationale
 
     def test_force_take_target_appends_trailing_newline_for_text(self, tmp_path):
-        config = _make_config(
-            tmp_path, always_take_upstream_patterns=[".github/**"]
-        )
+        config = _make_config(tmp_path, always_take_upstream_patterns=[".github/**"])
         mock_git = MagicMock()
         mock_git.get_file_bytes.return_value = b"name: ci\non: push"
         ctx = _make_ctx(config, git_tool=mock_git)
@@ -225,9 +217,7 @@ class TestForceDecisionPolicy:
         assert written == b"name: ci\non: push\n"
 
     def test_force_take_target_preserves_binary_content(self, tmp_path):
-        config = _make_config(
-            tmp_path, always_take_upstream_patterns=["assets/**"]
-        )
+        config = _make_config(tmp_path, always_take_upstream_patterns=["assets/**"])
         binary_blob = b"\x89PNG\r\n\x1a\n\x00\x00ihdr"
         mock_git = MagicMock()
         mock_git.get_file_bytes.return_value = binary_blob
@@ -242,9 +232,7 @@ class TestForceDecisionPolicy:
         assert (tmp_path / "assets/logo.png").read_bytes() == binary_blob
 
     def test_force_take_target_does_not_double_newline(self, tmp_path):
-        config = _make_config(
-            tmp_path, always_take_upstream_patterns=["docs/**"]
-        )
+        config = _make_config(tmp_path, always_take_upstream_patterns=["docs/**"])
         mock_git = MagicMock()
         mock_git.get_file_bytes.return_value = b"already terminated\n"
         ctx = _make_ctx(config, git_tool=mock_git)

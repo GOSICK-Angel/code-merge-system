@@ -12,7 +12,6 @@ from src.models.state import MergeState, SystemStatus
 from src.core.state_machine import StateMachine
 from src.core.message_bus import MessageBus
 from src.core.checkpoint import Checkpoint
-from src.core.phase_runner import PhaseRunner
 from src.tools.git_tool import GitTool
 from src.tools.gate_runner import GateRunner
 from src.tools.trace_logger import TraceLogger
@@ -62,7 +61,6 @@ class PhaseContext:
     state_machine: StateMachine
     message_bus: MessageBus
     checkpoint: Checkpoint
-    phase_runner: PhaseRunner
     memory_store: MemoryStore
     summarizer: PhaseSummarizer
     memory_hit_tracker: MemoryHitTracker | None = None

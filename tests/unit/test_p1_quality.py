@@ -572,7 +572,6 @@ class TestRepairLoopOrchestration:
         from src.core.phases.base import PhaseContext
         from src.core.state_machine import StateMachine
         from src.core.message_bus import MessageBus
-        from src.core.phase_runner import PhaseRunner
         from src.memory.store import MemoryStore
         from src.memory.summarizer import PhaseSummarizer
 
@@ -583,7 +582,6 @@ class TestRepairLoopOrchestration:
             state_machine=StateMachine(),
             message_bus=MessageBus(),
             checkpoint=MagicMock(),
-            phase_runner=PhaseRunner(),
             memory_store=MemoryStore(),
             summarizer=PhaseSummarizer(),
             trace_logger=None,

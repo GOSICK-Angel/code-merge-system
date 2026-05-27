@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import logging
 from enum import IntEnum
 from typing import Literal
 
 from pydantic import BaseModel
-
-logger = logging.getLogger(__name__)
 
 MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "claude-opus-4-6": 200_000,
@@ -96,96 +93,3 @@ def _truncate_text(text: str, max_chars: int, strategy: str) -> str:
         return marker + text[-available:]
     half = available // 2
     return text[:half] + marker + text[-half:]
-
-
-class ContextAssembler:
-    def __init__(self, budget: TokenBudget) -> None:
-        self._budget = budget
-        self._sections: list[ContextSection] = []
-
-    def add_section(self, section: ContextSection) -> None:
-        self._sections.append(section)
-
-    def build(self) -> tuple[str, TokenBudget]:
-        sorted_sections = sorted(self._sections, key=lambda s: s.priority)
-
-        section_tokens: list[tuple[ContextSection, int]] = []
-        for section in sorted_sections:
-            tokens = estimate_tokens(section.content)
-            section_tokens.append((section, tokens))
-
-        total_tokens = sum(t for _, t in section_tokens)
-        budget = self._budget
-
-        if total_tokens <= budget.available:
-            joined = [s.content for s, _ in section_tokens]
-            return "\n\n".join(joined), budget.consume(total_tokens)
-
-        excess = total_tokens - budget.available
-
-        for priority in reversed(list(ContextPriority)):
-            if excess <= 0:
-                break
-            if priority == ContextPriority.CRITICAL:
-                continue
-
-            for i, (section, tokens) in enumerate(section_tokens):
-                if excess <= 0:
-                    break
-                if section.priority != priority:
-                    continue
-
-                if not section.can_truncate:
-                    section_tokens[i] = (section, 0)
-                    excess -= tokens
-                    continue
-
-                if section.min_tokens > 0 and tokens > section.min_tokens:
-                    target_chars = int(section.min_tokens * _CHARS_PER_TOKEN)
-                    truncated_content = _truncate_text(
-                        section.content, target_chars, section.truncation_strategy
-                    )
-                    new_section = section.model_copy(
-                        update={"content": truncated_content}
-                    )
-                    new_tokens = estimate_tokens(truncated_content)
-                    section_tokens[i] = (new_section, new_tokens)
-                    excess -= tokens - new_tokens
-                elif section.min_tokens == 0 and not section.can_truncate:
-                    section_tokens[i] = (section, 0)
-                    excess -= tokens
-                else:
-                    target_tokens = max(0, tokens - excess)
-                    if target_tokens < section.min_tokens:
-                        section_tokens[i] = (section, 0)
-                        excess -= tokens
-                    else:
-                        target_chars = int(target_tokens * _CHARS_PER_TOKEN)
-                        truncated_content = _truncate_text(
-                            section.content,
-                            target_chars,
-                            section.truncation_strategy,
-                        )
-                        new_section = section.model_copy(
-                            update={"content": truncated_content}
-                        )
-                        new_tokens = estimate_tokens(truncated_content)
-                        section_tokens[i] = (new_section, new_tokens)
-                        excess -= tokens - new_tokens
-
-        parts: list[str] = []
-        final_tokens = 0
-        for section, tokens in section_tokens:
-            if tokens == 0 and section.priority != ContextPriority.CRITICAL:
-                continue
-            parts.append(section.content)
-            final_tokens += tokens
-
-        if final_tokens > budget.available:
-            logger.warning(
-                "Context (%d tokens) still exceeds budget (%d) after truncation",
-                final_tokens,
-                budget.available,
-            )
-
-        return "\n\n".join(parts), budget.consume(final_tokens)

@@ -3,9 +3,6 @@
 import pytest
 
 from src.llm.context import (
-    ContextAssembler,
-    ContextPriority,
-    ContextSection,
     TokenBudget,
     _truncate_text,
     estimate_tokens,
@@ -105,118 +102,6 @@ class TestTruncateText:
         assert "[truncated]" in result
         assert result.startswith("A")
         assert result.endswith("B")
-
-
-class TestContextAssembler:
-    def test_all_sections_fit(self):
-        budget = TokenBudget(
-            model="claude-opus-4-6",
-            context_window=200_000,
-            reserved_for_output=8_192,
-        )
-        assembler = ContextAssembler(budget)
-        assembler.add_section(
-            ContextSection(
-                name="system",
-                content="You are a helpful AI.",
-                priority=ContextPriority.CRITICAL,
-            )
-        )
-        assembler.add_section(
-            ContextSection(
-                name="user", content="Hello world", priority=ContextPriority.HIGH
-            )
-        )
-        result, final_budget = assembler.build()
-        assert "You are a helpful AI." in result
-        assert "Hello world" in result
-        assert final_budget.used > 0
-
-    def test_low_priority_dropped_first(self):
-        budget = TokenBudget(
-            model="gpt-4",
-            context_window=100,
-            reserved_for_output=10,
-        )
-        assembler = ContextAssembler(budget)
-        assembler.add_section(
-            ContextSection(
-                name="critical",
-                content="MUST KEEP",
-                priority=ContextPriority.CRITICAL,
-            )
-        )
-        assembler.add_section(
-            ContextSection(
-                name="optional",
-                content="x" * 500,
-                priority=ContextPriority.OPTIONAL,
-                can_truncate=True,
-            )
-        )
-        result, _ = assembler.build()
-        assert "MUST KEEP" in result
-
-    def test_priority_ordering(self):
-        budget = TokenBudget(
-            model="claude-opus-4-6",
-            context_window=200_000,
-            reserved_for_output=8_192,
-        )
-        assembler = ContextAssembler(budget)
-        assembler.add_section(
-            ContextSection(name="low", content="LOW", priority=ContextPriority.LOW)
-        )
-        assembler.add_section(
-            ContextSection(
-                name="critical", content="CRITICAL", priority=ContextPriority.CRITICAL
-            )
-        )
-        assembler.add_section(
-            ContextSection(name="high", content="HIGH", priority=ContextPriority.HIGH)
-        )
-        result, _ = assembler.build()
-        crit_pos = result.index("CRITICAL")
-        high_pos = result.index("HIGH")
-        low_pos = result.index("LOW")
-        assert crit_pos < high_pos < low_pos
-
-    def test_empty_assembler(self):
-        budget = TokenBudget(
-            model="gpt-4o",
-            context_window=10_000,
-            reserved_for_output=2_000,
-        )
-        assembler = ContextAssembler(budget)
-        result, final_budget = assembler.build()
-        assert result == ""
-        assert final_budget.used == 0
-
-    def test_truncation_strategy_applied(self):
-        budget = TokenBudget(
-            model="gpt-4",
-            context_window=50,
-            reserved_for_output=5,
-        )
-        assembler = ContextAssembler(budget)
-        assembler.add_section(
-            ContextSection(
-                name="critical",
-                content="OK",
-                priority=ContextPriority.CRITICAL,
-            )
-        )
-        assembler.add_section(
-            ContextSection(
-                name="big",
-                content="X" * 500,
-                priority=ContextPriority.LOW,
-                can_truncate=True,
-                truncation_strategy="middle",
-            )
-        )
-        result, _ = assembler.build()
-        assert "OK" in result
 
 
 class TestBuildStagedContent:

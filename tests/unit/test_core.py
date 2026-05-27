@@ -1,4 +1,3 @@
-import asyncio
 import json
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -7,7 +6,6 @@ import pytest
 
 from src.core.checkpoint import Checkpoint
 from src.core.message_bus import MessageBus
-from src.core.phase_runner import PhaseRunner
 from src.core.state_machine import StateMachine, VALID_TRANSITIONS
 from src.models.config import MergeConfig, ThresholdConfig
 from src.models.conflict import ConflictAnalysis, ConflictType
@@ -603,120 +601,6 @@ class TestMessageBus:
         assert len(calls_b) == 1
 
 
-class TestPhaseRunner:
-    async def test_run_sequential_processes_all_items(self):
-        runner = PhaseRunner(batch_size=10, max_concurrency=5)
-
-        async def handler(x):
-            return x * 2
-
-        results = await runner.run_sequential([1, 2, 3], handler)
-        assert sorted(results) == [2, 4, 6]
-
-    async def test_run_sequential_returns_results_in_order(self):
-        runner = PhaseRunner(batch_size=10, max_concurrency=5)
-        order = []
-
-        async def handler(x):
-            order.append(x)
-            return x
-
-        results = await runner.run_sequential([10, 20, 30], handler)
-        assert results == [10, 20, 30]
-        assert order == [10, 20, 30]
-
-    async def test_run_sequential_empty_list(self):
-        runner = PhaseRunner()
-        results = await runner.run_sequential([], lambda x: None)
-        assert results == []
-
-    async def test_run_parallel_processes_all_items(self):
-        runner = PhaseRunner(batch_size=10, max_concurrency=5)
-
-        async def handler(x):
-            return x * 2
-
-        results = await runner.run_parallel([1, 2, 3, 4, 5], handler)
-        assert sorted(results) == [2, 4, 6, 8, 10]
-
-    async def test_run_parallel_empty_list(self):
-        runner = PhaseRunner()
-
-        async def handler(x):
-            return x
-
-        results = await runner.run_parallel([], handler)
-        assert results == []
-
-    async def test_run_parallel_respects_max_concurrency(self):
-        runner = PhaseRunner(max_concurrency=2)
-        active = []
-        peak = [0]
-
-        async def handler(x):
-            active.append(x)
-            peak[0] = max(peak[0], len(active))
-            await asyncio.sleep(0.01)
-            active.pop()
-            return x
-
-        await runner.run_parallel(list(range(10)), handler)
-        assert peak[0] <= 2
-
-    async def test_run_parallel_captures_exceptions(self):
-        runner = PhaseRunner()
-
-        async def handler(x):
-            if x == 2:
-                raise ValueError("bad item")
-            return x
-
-        results = await runner.run_parallel([1, 2, 3], handler)
-        errors = [r for r in results if isinstance(r, Exception)]
-        assert len(errors) == 1
-        assert isinstance(errors[0], ValueError)
-
-    async def test_run_batched_parallel_processes_all(self):
-        runner = PhaseRunner(batch_size=3, max_concurrency=2)
-
-        async def handler(x):
-            return x + 1
-
-        results = await runner.run_batched(list(range(9)), handler, parallel=True)
-        assert sorted(results) == list(range(1, 10))
-
-    async def test_run_batched_sequential_processes_all(self):
-        runner = PhaseRunner(batch_size=3, max_concurrency=5)
-
-        async def handler(x):
-            return x * 2
-
-        results = await runner.run_batched(list(range(6)), handler, parallel=False)
-        assert sorted(results) == [0, 2, 4, 6, 8, 10]
-
-    async def test_run_batched_calls_on_batch_complete(self):
-        runner = PhaseRunner(batch_size=2, max_concurrency=2)
-        batch_callbacks = []
-
-        async def on_batch(batch_results):
-            batch_callbacks.append(batch_results)
-
-        async def handler(x):
-            return x
-
-        await runner.run_batched([1, 2, 3, 4], handler, on_batch_complete=on_batch)
-        assert len(batch_callbacks) == 2
-
-    async def test_run_batched_empty_list(self):
-        runner = PhaseRunner()
-
-        async def handler(x):
-            return x
-
-        results = await runner.run_batched([], handler)
-        assert results == []
-
-
 class TestOrchestratorSelectMergeStrategy:
     def test_low_confidence_escalates_human(self):
         from src.core.orchestrator import _select_merge_strategy
@@ -905,7 +789,6 @@ class TestPhaseClasses:
         from src.core.state_machine import StateMachine
         from src.core.message_bus import MessageBus
         from src.core.checkpoint import Checkpoint
-        from src.core.phase_runner import PhaseRunner
         from src.memory.store import MemoryStore
         from src.memory.summarizer import PhaseSummarizer
 
@@ -916,7 +799,6 @@ class TestPhaseClasses:
             state_machine=StateMachine(),
             message_bus=MessageBus(),
             checkpoint=MagicMock(),
-            phase_runner=PhaseRunner(),
             memory_store=MemoryStore(),
             summarizer=PhaseSummarizer(),
             trace_logger=None,

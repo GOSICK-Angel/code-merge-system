@@ -39,7 +39,6 @@ from src.cli.paths import (
 )
 from src.core.checkpoint import Checkpoint
 from src.core.message_bus import MessageBus
-from src.core.phase_runner import PhaseRunner
 from src.core.phases import (
     AutoMergePhase,
     ConflictAnalysisPhase,
@@ -166,7 +165,6 @@ class Orchestrator:
         self.checkpoint = Checkpoint(
             run_dir, debug_checkpoints=config.output.debug_checkpoints
         )
-        self.phase_runner = PhaseRunner(batch_size=10, max_concurrency=5)
 
         # --- agents (B3: registry-based creation with DI override) ---
         agent_map = agents or AgentRegistry.create_all(config, git_tool=self.git_tool)
@@ -452,7 +450,6 @@ class Orchestrator:
             state_machine=self.state_machine,
             message_bus=self.message_bus,
             checkpoint=self.checkpoint,
-            phase_runner=self.phase_runner,
             memory_store=self._memory_store,  # type: ignore[arg-type]
             summarizer=self._summarizer,
             memory_hit_tracker=self._memory_hit_tracker,

@@ -84,7 +84,6 @@ def _make_ctx(**overrides):
         "state_machine": MagicMock(),
         "message_bus": MagicMock(),
         "checkpoint": MagicMock(),
-        "phase_runner": MagicMock(),
         "memory_store": MagicMock(),
         "summarizer": MagicMock(),
     }
