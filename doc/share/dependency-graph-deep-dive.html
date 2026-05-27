@@ -1,0 +1,663 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>文件依赖图 · 让代码合并更聪明</title>
+<style>
+  :root {
+    --bg: #0b0e14; --bg2: #131722; --bg3: #1b2130; --line: #283044;
+    --txt: #c9d1d9; --dim: #8b949e; --hi: #f0f6fc;
+    --purple: #a371f7; --cyan: #39d0d8; --green: #3fb950; --yellow: #d8a128;
+    --red: #f85149; --blue: #58a6ff; --radius: 14px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: radial-gradient(1200px 600px at 80% -10%, #1a2030 0%, var(--bg) 55%);
+    color: var(--txt); font-family: var(--sans); line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--cyan); text-decoration: none; }
+  code, pre, .mono { font-family: var(--mono); }
+
+  #progress {
+    position: fixed; top: 0; left: 0; height: 3px; width: 0;
+    background: linear-gradient(90deg, var(--purple), var(--cyan));
+    z-index: 100; transition: width .1s linear;
+  }
+  nav {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(11,14,20,.82); backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+    display: flex; gap: 4px; padding: 10px 20px; flex-wrap: wrap; align-items: center;
+  }
+  nav .brand { font-weight: 700; color: var(--hi); margin-right: auto; font-size: 15px; }
+  nav .brand span { color: var(--purple); }
+  nav a { color: var(--dim); padding: 6px 12px; border-radius: 8px; font-size: 13px; transition: all .2s; }
+  nav a:hover, nav a.active { color: var(--hi); background: var(--bg3); }
+
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 20px; }
+  section { padding: 64px 0 24px; }
+  section > .wrap > h2 { font-size: 28px; color: var(--hi); margin: 0 0 6px; display: flex; align-items: center; gap: 12px; }
+  section > .wrap > h2 .num { font-family: var(--mono); font-size: 15px; color: var(--purple); border: 1px solid var(--purple); border-radius: 8px; padding: 2px 9px; }
+  .lead { color: var(--dim); font-size: 16px; margin: 0 0 28px; max-width: 760px; }
+
+  header.hero { padding: 80px 0 40px; text-align: center; }
+  header.hero h1 { font-size: clamp(34px, 6vw, 56px); margin: 0 0 14px; color: var(--hi); line-height: 1.15; letter-spacing: -.5px; }
+  header.hero h1 .grad { background: linear-gradient(90deg, var(--purple), var(--cyan)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  header.hero p.sub { font-size: 18px; color: var(--dim); max-width: 720px; margin: 0 auto 36px; }
+  .stats { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+  .stat { background: var(--bg2); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 22px; min-width: 130px; }
+  .stat .v { font-size: 30px; font-weight: 800; color: var(--hi); font-family: var(--mono); }
+  .stat .v.p { color: var(--purple); } .stat .v.c { color: var(--cyan); }
+  .stat .v.g { color: var(--green); } .stat .v.y { color: var(--yellow); }
+  .stat .k { font-size: 13px; color: var(--dim); margin-top: 2px; }
+
+  .grid { display: grid; gap: 16px; }
+  .grid.c2 { grid-template-columns: repeat(2, 1fr); }
+  .grid.c3 { grid-template-columns: repeat(3, 1fr); }
+  .grid.c4 { grid-template-columns: repeat(4, 1fr); }
+  @media (max-width: 760px) { .grid.c2, .grid.c3, .grid.c4 { grid-template-columns: 1fr; } }
+  .card { background: var(--bg2); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; transition: transform .2s, border-color .2s; }
+  .card:hover { transform: translateY(-3px); border-color: #3a445c; }
+  .card h3 { margin: 0 0 8px; color: var(--hi); font-size: 17px; }
+  .card p { margin: 0; color: var(--dim); font-size: 14px; }
+  .card .ic { font-size: 24px; display: block; margin-bottom: 8px; }
+  .card .tag { display: inline-block; font-size: 11px; font-family: var(--mono); padding: 2px 8px; border-radius: 6px; margin-bottom: 10px; }
+  .tag.g { background: rgba(63,185,80,.15); color: var(--green); }
+  .tag.y { background: rgba(216,161,40,.15); color: var(--yellow); }
+  .tag.p { background: rgba(163,113,247,.15); color: var(--purple); }
+  .tag.c { background: rgba(57,208,216,.15); color: var(--cyan); }
+
+  .pill { display: inline-block; font-family: var(--mono); font-size: 12px; background: var(--bg3); border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px; color: var(--cyan); }
+
+  .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
+  .tabs button { background: var(--bg2); border: 1px solid var(--line); color: var(--dim); padding: 10px 18px; border-radius: 10px; cursor: pointer; font-size: 14px; font-family: var(--sans); transition: all .2s; font-weight: 600; }
+  .tabs button:hover { color: var(--hi); }
+  .tabs button.active { color: var(--hi); border-color: var(--purple); background: rgba(163,113,247,.12); }
+  .tabpane { display: none; animation: fade .35s ease; }
+  .tabpane.active { display: block; }
+  @keyframes fade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+  ul.clean { list-style: none; padding: 0; margin: 14px 0; }
+  ul.clean li { padding: 8px 0 8px 26px; position: relative; border-bottom: 1px dashed var(--line); font-size: 15px; }
+  ul.clean li:last-child { border-bottom: none; }
+  ul.clean li::before { content: "\2726"; position: absolute; left: 0; color: var(--purple); }
+  ul.clean li b { color: var(--hi); }
+
+  .life { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 760px) { .life { grid-template-columns: 1fr; } }
+  .chips { display: flex; flex-direction: column; gap: 8px; }
+  .chip { text-align: left; background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; cursor: pointer; color: var(--txt); font-family: var(--sans); font-size: 14px; transition: all .2s; display: flex; gap: 10px; align-items: center; }
+  .chip:hover { border-color: var(--cyan); }
+  .chip.active { border-color: var(--cyan); background: rgba(57,208,216,.1); }
+  .chip .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .chip b { color: var(--hi); }
+  .chip .ph { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--dim); }
+  .detail { background: var(--bg2); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; min-height: 220px; position: sticky; top: 70px; }
+  .detail h3 { margin: 0 0 4px; color: var(--hi); }
+  .detail .role { color: var(--cyan); font-size: 13px; font-family: var(--mono); margin-bottom: 12px; }
+  .detail p { color: var(--txt); margin: 0; }
+
+  .demo { background: var(--bg2); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; margin: 18px 0; }
+  .demo h3 { margin: 0 0 4px; color: var(--hi); display: flex; gap: 10px; align-items: center; }
+  .demo h3 .ico { font-size: 22px; }
+  .demo .hint { color: var(--dim); font-size: 14px; margin: 0 0 16px; }
+  .ctrls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+  button.btn { background: linear-gradient(90deg, var(--purple), #7d54d4); color: #fff; border: none; padding: 9px 18px; border-radius: 9px; cursor: pointer; font-size: 14px; font-weight: 600; font-family: var(--sans); transition: filter .2s; }
+  button.btn:hover { filter: brightness(1.12); }
+  button.btn.ghost { background: var(--bg3); border: 1px solid var(--line); color: var(--txt); }
+  button.btn:disabled { opacity: .4; cursor: not-allowed; }
+  .roundinfo { font-family: var(--mono); font-size: 13px; color: var(--cyan); }
+
+  svg text { font-family: var(--mono); }
+  select { background: var(--bg3); color: var(--hi); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; font-family: var(--mono); font-size: 13px; }
+  .resolve-steps { margin-top: 16px; }
+  .step { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px dashed var(--line); align-items: baseline; opacity: 0; transform: translateX(-8px); animation: stepin .4s forwards; }
+  @keyframes stepin { to { opacity: 1; transform: none; } }
+  .step .n { font-family: var(--mono); color: var(--purple); flex: none; width: 22px; }
+  .step .t { font-size: 14px; }
+  .step .t .mono { color: var(--cyan); }
+  .verdict { margin-top: 14px; padding: 12px 16px; border-radius: 10px; font-size: 14px; }
+  .verdict.ok { background: rgba(63,185,80,.12); border: 1px solid var(--green); color: #aff0bd; }
+  .verdict.no { background: rgba(248,81,73,.1); border: 1px solid var(--red); color: #ffc4c0; }
+
+  .conf-btns { display: flex; gap: 10px; flex-wrap: wrap; }
+  .conf-btns button { flex: 1; min-width: 150px; padding: 14px; border-radius: 10px; cursor: pointer; border: 2px solid var(--line); background: var(--bg3); color: var(--dim); font-family: var(--mono); font-size: 14px; transition: all .2s; font-weight: 700; }
+  .conf-btns button.active { color: var(--hi); }
+  .conf-btns button[data-c=ex].active { border-color: var(--green); background: rgba(63,185,80,.14); }
+  .conf-btns button[data-c=in].active { border-color: var(--yellow); background: rgba(216,161,40,.14); }
+  .conf-btns button[data-c=am].active { border-color: var(--red); background: rgba(248,81,73,.14); }
+  #confOut { margin-top: 16px; }
+
+  table.spec { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 14px; }
+  table.spec th, table.spec td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+  table.spec th { color: var(--dim); font-weight: 600; font-size: 13px; }
+  table.spec td:first-child { color: var(--hi); white-space: nowrap; }
+  table.spec td .mono { color: var(--cyan); }
+
+  footer { border-top: 1px solid var(--line); margin-top: 40px; padding: 30px 0 60px; color: var(--dim); font-size: 13px; }
+  .kbd { font-family: var(--mono); background: var(--bg3); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; font-size: 12px; }
+  .note { font-size: 13px; color: var(--dim); border-left: 3px solid var(--purple); padding: 6px 0 6px 14px; margin: 14px 0; }
+</style>
+</head>
+<body>
+<div id="progress"></div>
+
+<nav>
+  <div class="brand">文件依赖图<span>·</span>更聪明的合并</div>
+  <a href="#value">能为你做什么</a>
+  <a href="#concept">它是什么</a>
+  <a href="#life">方案设计</a>
+  <a href="#tech">核心技术</a>
+  <a href="#demo">互动演示</a>
+  <a href="#principles">设计原则</a>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>一张「谁依赖谁」的图<br/>让代码合并<span class="grad">更聪明、更安全</span></h1>
+    <p class="sub">
+      把上游更新合并进你的 fork，最怕「顺序错了、接口断了、改漏了」。
+      这套方案用一张文件依赖图，在合并的每个环节做出更稳的决策——
+      跨多种语言、结果可复现、所有增强都能按需开关。
+    </p>
+    <div class="stats">
+      <div class="stat"><div class="v p">5</div><div class="k">种语言依赖提取</div></div>
+      <div class="stat"><div class="v c">7</div><div class="k">个协作环节受益</div></div>
+      <div class="stat"><div class="v g">0</div><div class="k">额外重型依赖</div></div>
+      <div class="stat"><div class="v y">100%</div><div class="k">结果可复现</div></div>
+    </div>
+  </div>
+</header>
+
+<!-- ============ VALUE ============ -->
+<section id="value">
+  <div class="wrap">
+    <h2><span class="num">01</span>它能为你做什么</h2>
+    <p class="lead">不谈底层实现，先看它在一次真实合并里替你把住的几道关。</p>
+    <div class="grid c3">
+      <div class="card"><span class="ic">🧭</span><h3>合并前 · 定序</h3>
+        <p>让被很多文件依赖的「基础文件」先合并，避免合到一半时因为依赖还没到位而构建失败。</p></div>
+      <div class="card"><span class="ic">🛡️</span><h3>合并中 · 保接口</h3>
+        <p>在改动「被大量引用」的代码前提醒：保留对外接口，别让下游一片飘红。</p></div>
+      <div class="card"><span class="ic">🔍</span><h3>合并后 · 查漏改</h3>
+        <p>上游改了某个接口，自动找出那些还在用旧用法、却忘了一起更新的文件。</p></div>
+      <div class="card"><span class="ic">🎯</span><h3>审查 · 聪明聚焦</h3>
+        <p>审查大文件时，只展开真正相关的代码片段（含被外部引用的公共符号），省时也省成本。</p></div>
+      <div class="card"><span class="ic">🧑‍⚖️</span><h3>人工 · 给依据</h3>
+        <p>需要人来定夺时，决策卡直接告诉你「这文件牵一发动多少」，判断更快更稳。</p></div>
+      <div class="card"><span class="ic">🌐</span><h3>通用 · 可配置</h3>
+        <p>Python / JavaScript / TypeScript / Go 通用；所有增强默认安全，可一键开关。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CONCEPT ============ -->
+<section id="concept">
+  <div class="wrap">
+    <h2><span class="num">02</span>它到底是什么</h2>
+    <p class="lead">两个最关键的概念：依赖图本身，以及它「只增不减风险」的安全守则。</p>
+    <div class="grid c2">
+      <div class="card">
+        <h3>① 一张文件依赖图</h3>
+        <p style="margin-bottom:12px"><b>节点</b>是文件，<b>边</b>表示「A 引用 / 继承 / 调用 B」。
+        它不分析整个仓库，只聚焦本次<b>改动文件及其邻居</b>，构建成本可控，并随合并进度自动保存、断点续跑。</p>
+        <svg viewBox="0 0 360 170" width="100%" height="170">
+          <defs><marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+            <path d="M0,0 L7,3 L0,6 Z" fill="#8b949e"/></marker></defs>
+          <line x1="90" y1="40" x2="175" y2="85" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah)"/>
+          <line x1="90" y1="130" x2="175" y2="90" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah)"/>
+          <line x1="280" y1="60" x2="200" y2="82" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah)"/>
+          <line x1="280" y1="120" x2="200" y2="90" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah)"/>
+          <g font-size="11" fill="#0b0e14" text-anchor="middle">
+            <circle cx="60" cy="36" r="22" fill="#58a6ff"/><text x="60" y="40">view</text>
+            <circle cx="60" cy="134" r="22" fill="#58a6ff"/><text x="60" y="138">api</text>
+            <circle cx="188" cy="86" r="26" fill="#a371f7"/><text x="188" y="83" fill="#fff">db.py</text><text x="188" y="96" fill="#fff" font-size="9">hub</text>
+            <circle cx="305" cy="56" r="22" fill="#39d0d8"/><text x="305" y="60">util</text>
+            <circle cx="305" cy="116" r="22" fill="#39d0d8"/><text x="305" y="120">log</text>
+          </g>
+        </svg>
+        <p style="font-size:13px"><span class="pill">db.py</span> 被很多文件依赖 = <b style="color:var(--purple)">枢纽文件（God Node）</b>，改它影响面最大、最该谨慎。</p>
+      </div>
+      <div class="card">
+        <h3>② 只增不减的安全守则</h3>
+        <p style="margin-bottom:14px">每条边都带一个<b>可信度标签</b>。核心守则：依赖图只会<b style="color:var(--green)">提高</b>谨慎度，
+        <b style="color:var(--red)">绝不</b>因为「图里没找到关系」就放松风险——宁可多审，不可漏审。点下面切换看每一档怎么用：</p>
+        <div class="conf-btns">
+          <button data-c="ex" class="active">确定</button>
+          <button data-c="in">推断</button>
+          <button data-c="am">不确定</button>
+        </div>
+        <div id="confOut"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ LIFECYCLE ============ -->
+<section id="life">
+  <div class="wrap">
+    <h2><span class="num">03</span>方案设计 · 建一次，全局共享</h2>
+    <p class="lead">
+      整套方案的核心设计：依赖图<b>只在开始时构建一次</b>，之后作为一份<b>只读的共享资产</b>，
+      被合并流程里 7 个不同环节各取所需。一处构建、多处复用，互不干扰。点任一环节看它怎么用图：
+    </p>
+    <div class="life">
+      <div class="chips" id="chips"></div>
+      <div class="detail" id="detail"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ TECH ============ -->
+<section id="tech">
+  <div class="wrap">
+    <h2><span class="num">04</span>核心技术点</h2>
+    <p class="lead">支撑上面这些能力的四组关键技术，以及为什么这样设计。</p>
+    <div class="tabs" id="techTabs">
+      <button class="active">多语言依赖提取</button>
+      <button>定序与风险评估</button>
+      <button>执行期防护</button>
+      <button>聚焦与可选增强</button>
+    </div>
+
+    <div class="tabpane active">
+      <ul class="clean">
+        <li><b>多语言、按扩展名路由</b>：JavaScript / TypeScript / TSX / Go 用业界成熟的 <span class="pill">tree-sitter</span> 语法解析；Python 用语言内置的 AST。装不上解析器时自动降级、不报错。</li>
+        <li><b>只建子图，不扫全仓</b>：合并是一次性、聚焦改动的操作，所以只解析「改动文件 + 它的若干跳邻居」，几百个文件级别，秒级完成。</li>
+        <li><b>精确到符号</b>：不止知道「文件 A 依赖文件 B」，还知道「A 用到了 B 里的哪个函数 / 类」——这让后续的「聚焦」和「漏改检查」更准。</li>
+        <li><b>每条边带可信度</b>：AST 能确定的标「确定」，调用推断的标「推断」，动态 / 反射调用的标「不确定」——下游据此决定能不能据它做自动决策。</li>
+      </ul>
+    </div>
+
+    <div class="tabpane">
+      <ul class="clean">
+        <li><b>拓扑排序定序</b>：按依赖关系排合并顺序——被依赖的基础文件 / 基类，排在依赖它们的文件之前，避免中间状态构建不过。</li>
+        <li><b>影响半径与枢纽识别</b>：统计一个文件被多少文件（直接 + 间接）依赖。影响面越大，合并复杂度评分越高；超过阈值即<b>枢纽文件</b>，自动加一档风险。</li>
+        <li><b>顺序复核</b>：计划生成后再独立复核一遍，若发现「依赖者被排在被依赖者前面」这类危险顺序，会标记出来要求修正。</li>
+      </ul>
+      <div class="note">设计取舍：依赖顺序只作为<b>同等风险内的次级排序</b>，不会推翻「安全的先合」这一主原则；风险评分也只做加法，不会因为图而调低。</div>
+    </div>
+
+    <div class="tabpane">
+      <ul class="clean">
+        <li><b>保接口</b>：执行合并时，先查「谁在依赖这个文件」；若改签名 / 删文件，会提示保留对外接口、列出受影响的下游。</li>
+        <li><b>漏改防护</b>：上游改了某接口后，沿依赖关系找出仍在用它、却没被一起更新的文件，标记为需要处理。</li>
+        <li><b>谨慎度注入</b>：当冲突发生在枢纽文件、影响面很大时，引导分析走更保守的合并策略。</li>
+        <li><b>人工决策卡</b>：交给人定夺时，卡片标出「N 个依赖者 / 影响半径 M / 是否枢纽」，让人快速掂量分量。</li>
+      </ul>
+    </div>
+
+    <div class="tabpane">
+      <ul class="clean">
+        <li><b>上下文智能聚焦</b>：审查大文件时只展开真正相关的代码块；那些被其他文件引用的公共符号即便不在本次改动里，也会被保留，不会被压缩掉。</li>
+        <li><b>图驱动模块划分</b>（可选）：用真实的依赖边界把文件聚成模块，比单纯按目录结构更贴合实际——见下方互动演示。</li>
+        <li><b>别名 / monorepo 路径解析</b>（可选）：识别 tsconfig 路径别名、go.mod 模块、monorepo 工作区，把别名 import 也连成依赖边——见下方互动演示。</li>
+        <li><b>经验沉淀</b>（可选）：把「这是枢纽文件」「这两个目录意外耦合」等结论记成持久经验，下次合并可直接复用。</li>
+      </ul>
+      <div class="note">带「可选」的能力默认关闭，开启与否都不影响主流程的稳定性——这正是下一节「设计原则」要讲的。</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ DEMOS ============ -->
+<section id="demo">
+  <div class="wrap">
+    <h2><span class="num">05</span>亲手玩：两个核心算法</h2>
+    <p class="lead">下面两个演示跑的是<b>和系统里同款</b>的真实算法逻辑，不是录像——点一点就懂。</p>
+
+    <div class="demo">
+      <h3><span class="ico">🧬</span>图驱动模块划分 · 标签传播</h3>
+      <p class="hint">
+        每个文件先各成一组，每轮「随大流」——把自己的归属改成<b>邻居里最多见的那一组</b>。
+        互相引用密集的文件会自然聚到一起。点「下一轮」看它如何收敛成清晰的模块：
+      </p>
+      <svg id="lpSvg" viewBox="0 0 640 280" width="100%" height="280"></svg>
+      <div class="ctrls">
+        <button class="btn" id="lpStep">下一轮 ▶</button>
+        <button class="btn ghost" id="lpReset">重置</button>
+        <span class="roundinfo" id="lpInfo"></span>
+      </div>
+      <p style="font-size:13px;color:var(--dim);margin-top:12px">
+        收敛后每组按成员的<b>所在目录</b>取个好认的名字。整个过程确定可复现；没有依赖边时则退回按目录分组——安全降级。
+      </p>
+    </div>
+
+    <div class="demo">
+      <h3><span class="ico">🔗</span>别名 / monorepo import 解析</h3>
+      <p class="hint">
+        现代项目大量用别名或裸路径 import（比如 <span class="pill">@app/util</span>）。
+        不解析的话，这些其实是内部依赖的关系就被当成第三方丢掉了。选一条 import，看它如何被还原成仓库里的真实文件：
+      </p>
+      <div class="ctrls" style="margin-top:0;margin-bottom:6px">
+        <select id="aliasSel"></select>
+      </div>
+      <div style="font-size:13px;color:var(--dim)">已识别的映射规则：
+        <span class="pill">@app/* → src/app/*</span>
+        <span class="pill">@/* → src/*</span>
+        <span class="pill">go.mod: github.com/org/repo</span>
+        <span class="pill">工作区包 @org/ui → packages/ui</span>
+      </div>
+      <div class="resolve-steps" id="aliasOut"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PRINCIPLES ============ -->
+<section id="principles">
+  <div class="wrap">
+    <h2><span class="num">06</span>四条贯穿始终的设计原则</h2>
+    <p class="lead">这些原则让一套「通用」的合并工具敢于引入依赖图，而不必担心拖慢或锁死在某一个项目上。</p>
+    <div class="grid c2">
+      <div class="card"><span class="tag c">原则</span><h3>🛡️ 安全降级</h3><p>图为空、配置缺失、解析失败、解析器没装——统统回退到原有行为，绝不报错。最多少一点增益，绝不多一个问题。</p></div>
+      <div class="card"><span class="tag c">原则</span><h3>🎚️ 默认中性、可开关</h3><p>模块划分、别名解析等增强默认关闭。不开启时，行为与没有依赖图时完全一致，保持对任意项目通用。</p></div>
+      <div class="card"><span class="tag c">原则</span><h3>📦 零额外重依赖</h3><p>模块划分用标准库实现的「标签传播」，而非引入庞大的图计算库；别名解析也只用内置能力。体积小、好理解。</p></div>
+      <div class="card"><span class="tag c">原则</span><h3>🎯 结果可复现</h3><p>排序、聚类、解析全部确定——同样的输入永远得到同样的结果，支持断点续跑，不会两次跑出不同的计划。</p></div>
+    </div>
+
+    <h3 style="color:var(--hi);margin-top:34px">技术选型一览</h3>
+    <table class="spec">
+      <tr><th>能力</th><th>采用的技术</th></tr>
+      <tr><td>多语言依赖提取</td><td><span class="mono">tree-sitter</span>（JS/TS/Go）+ Python 内置 AST，缺失自动降级</td></tr>
+      <tr><td>合并定序</td><td>依赖图拓扑排序，作为同风险内的次级排序键</td></tr>
+      <tr><td>枢纽识别</td><td>影响半径（传递依赖计数）+ 可配置阈值</td></tr>
+      <tr><td>模块划分</td><td>标准库实现的标签传播，非重型图库</td></tr>
+      <tr><td>别名解析</td><td>tsconfig 路径 / go.mod 模块 / 工作区包名</td></tr>
+      <tr><td>持久化</td><td>随合并 checkpoint 自动保存与恢复</td></tr>
+    </table>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>本页基于项目的「文件依赖图全局优化方案」整理而成，面向使用者与技术爱好者。</p>
+    <p>单文件、零外部依赖，可直接分享 / 离线打开。在「核心技术」一节聚焦后，可用 <span class="kbd">←</span> <span class="kbd">→</span> 切换标签。</p>
+  </div>
+</footer>
+
+<script>
+/* ---- tiny DOM helpers (build nodes via createElement/textContent, XSS-safe) ---- */
+function E(tag, props) {
+  var e = document.createElement(tag);
+  if (props) for (var k in props) {
+    if (k === 'class') e.className = props[k];
+    else if (k === 'style') e.style.cssText = props[k];
+    else if (k === 'text') e.textContent = props[k];
+    else e.setAttribute(k, props[k]);
+  }
+  for (var i = 2; i < arguments.length; i++) {
+    var c = arguments[i];
+    if (c == null) continue;
+    e.appendChild(typeof c === 'object' ? c : document.createTextNode(String(c)));
+  }
+  return e;
+}
+function SVGE(tag, props) {
+  var e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (var k in props) e.setAttribute(k, props[k]);
+  return e;
+}
+function clearNode(n) { while (n.firstChild) n.removeChild(n.firstChild); }
+function mono(t) { return E('span', { class: 'mono', text: t }); }
+
+/* ---- progress + nav active ---- */
+var prog = document.getElementById('progress');
+var navLinks = Array.prototype.slice.call(document.querySelectorAll('nav a'));
+var secs = navLinks.map(function (a) { return document.querySelector(a.getAttribute('href')); });
+function onScroll() {
+  var h = document.documentElement;
+  prog.style.width = (h.scrollTop / (h.scrollHeight - h.clientHeight) * 100) + '%';
+  var idx = 0;
+  secs.forEach(function (s, i) { if (s && s.getBoundingClientRect().top < 160) idx = i; });
+  navLinks.forEach(function (a, i) { a.classList.toggle('active', i === idx); });
+}
+addEventListener('scroll', onScroll); onScroll();
+
+/* ---- confidence demo ---- */
+var confData = {
+  ex: { color: 'var(--green)', title: '确定 · 解析器精确得出', src: '来源：import / 继承 / 类型注解，能精确确定的关系',
+        acts: ['提高风险等级', '强制按依赖顺序合并', '漏改 → 标记为必须处理', '枢纽文件额外加风险', '用于模块划分'] },
+  in: { color: 'var(--yellow)', title: '推断 · 调用关系推断', src: '来源：从调用关系推断，较可靠但非百分百确定',
+        acts: ['温和提示：略微抬高风险', '作为参考写入分析', '参与模块划分', '不单独阻断自动决策'] },
+  am: { color: 'var(--red)', title: '不确定 · 动态 / 反射', src: '来源：动态调用、反射等难以静态确定的关系',
+        acts: ['仅作记录', '至多在人工决策卡里展示', '模块划分时被排除', '绝不影响自动决策'] }
+};
+var confOut = document.getElementById('confOut');
+function renderConf(c) {
+  var d = confData[c];
+  clearNode(confOut);
+  confOut.appendChild(E('div', { style: 'font-family:var(--mono);font-size:13px;font-weight:700;color:' + d.color, text: d.title }));
+  confOut.appendChild(E('div', { style: 'font-size:13px;color:var(--dim);margin:4px 0 10px', text: d.src }));
+  d.acts.forEach(function (a) { confOut.appendChild(E('div', { style: 'padding:5px 0;font-size:14px', text: '→ ' + a })); });
+}
+document.querySelectorAll('.conf-btns button').forEach(function (b) {
+  b.addEventListener('click', function () {
+    document.querySelectorAll('.conf-btns button').forEach(function (x) { x.classList.remove('active'); });
+    b.classList.add('active'); renderConf(b.dataset.c);
+  });
+});
+renderConf('ex');
+
+/* ---- lifecycle ---- */
+var agents = [
+  { n: '规划合并顺序', ph: '规划', col: 'var(--purple)', role: '合并前定序 + 风险',
+    d: '用依赖关系决定合并顺序——被依赖的基础文件先合；识别被很多文件依赖的「枢纽文件」并相应抬高它的风险与复杂度。' },
+  { n: '计划复核', ph: '计划复核', col: 'var(--purple)', role: '校验合并顺序',
+    d: '独立复核合并计划，如果顺序会让某个文件先于它所依赖的文件合并，自动标记出来要求修正。' },
+  { n: '冲突分析', ph: '冲突分析', col: 'var(--cyan)', role: '提高谨慎度',
+    d: '分析冲突时，如果文件是枢纽、影响面大，会更保守地权衡，倾向更安全的解法（只会更谨慎，不会更冒进）。' },
+  { n: '执行合并', ph: '自动合并', col: 'var(--cyan)', role: '保接口 / 删前查',
+    d: '真正改动文件时，先看谁在依赖它——改签名或删文件前提示保留对外接口，并列出受影响的下游。' },
+  { n: '合并复核', ph: '合并复核', col: 'var(--green)', role: '查漏改',
+    d: '合并后，如果某个接口变了，沿依赖关系找出仍在使用它、却没被一起更新的文件并标记出来。' },
+  { n: '经验沉淀', ph: '全程', col: 'var(--yellow)', role: '记住枢纽',
+    d: '把「这是枢纽文件」「这两个目录意外耦合」等结论记成持久经验，未来运行可直接复用。' },
+  { n: '人工复核', ph: '人工复核', col: 'var(--blue)', role: '决策卡展示',
+    d: '当需要人来定夺时，决策卡会标出「这文件有多少依赖者、影响半径多大、是否枢纽」，帮你快速判断。' }
+];
+var chips = document.getElementById('chips');
+var detail = document.getElementById('detail');
+function renderDetail(a) {
+  clearNode(detail);
+  detail.appendChild(E('h3', { text: a.n }));
+  detail.appendChild(E('div', { class: 'role', text: a.role + ' · ' + a.ph }));
+  detail.appendChild(E('p', { text: a.d }));
+}
+agents.forEach(function (a, i) {
+  var b = E('button', { class: 'chip' + (i === 0 ? ' active' : '') },
+    E('span', { class: 'dot', style: 'background:' + a.col }),
+    E('b', { text: a.n }),
+    E('span', { class: 'ph', text: a.ph }));
+  b.addEventListener('click', function () {
+    document.querySelectorAll('.chip').forEach(function (x) { x.classList.remove('active'); });
+    b.classList.add('active'); renderDetail(a);
+  });
+  chips.appendChild(b);
+});
+renderDetail(agents[0]);
+
+/* ---- tech tabs + keyboard ---- */
+var tabBtns = Array.prototype.slice.call(document.querySelectorAll('#techTabs button'));
+var panes = Array.prototype.slice.call(document.querySelectorAll('#tech .tabpane'));
+var curTab = 0;
+function activateTab(i) {
+  curTab = i;
+  tabBtns.forEach(function (b, j) { b.classList.toggle('active', i === j); });
+  panes.forEach(function (p, j) { p.classList.toggle('active', i === j); });
+}
+tabBtns.forEach(function (b, i) { b.addEventListener('click', function () { activateTab(i); }); });
+addEventListener('keydown', function (e) {
+  if (e.key === 'ArrowRight') activateTab(Math.min(tabBtns.length - 1, curTab + 1));
+  if (e.key === 'ArrowLeft') activateTab(Math.max(0, curTab - 1));
+});
+
+/* ---- label propagation demo (real algorithm) ---- */
+var lpFiles = ['api/handler', 'api/service', 'core/db', 'ui/button', 'ui/form', 'ui/modal'];
+var lpPos = {
+  'api/handler': [110, 70], 'api/service': [110, 200], 'core/db': [230, 135],
+  'ui/button': [430, 70], 'ui/form': [540, 135], 'ui/modal': [430, 200]
+};
+var lpEdges = [
+  ['api/handler', 'api/service'], ['api/service', 'core/db'], ['api/handler', 'core/db'],
+  ['ui/button', 'ui/form'], ['ui/form', 'ui/modal'], ['ui/button', 'ui/modal']
+];
+var palette = ['#a371f7', '#39d0d8', '#3fb950', '#d8a128', '#f85149', '#58a6ff'];
+function lpSnapshots() {
+  var adj = {}; lpFiles.forEach(function (f) { adj[f] = []; });
+  lpEdges.forEach(function (p) { adj[p[0]].push(p[1]); adj[p[1]].push(p[0]); });
+  var label = {}; lpFiles.forEach(function (f) { label[f] = f; });
+  var snaps = [Object.assign({}, label)];
+  for (var r = 0; r < 20; r++) {
+    var changed = false;
+    var next = Object.assign({}, label);
+    lpFiles.slice().sort().forEach(function (node) {
+      var nb = adj[node]; if (!nb.length) return;
+      var counts = {};
+      nb.forEach(function (x) { counts[next[x]] = (counts[next[x]] || 0) + 1; });
+      var best = null, bc = -1;
+      Object.keys(counts).sort().forEach(function (l) { if (counts[l] > bc) { bc = counts[l]; best = l; } });
+      if (next[node] !== best) { next[node] = best; changed = true; }
+    });
+    label = next; snaps.push(Object.assign({}, label));
+    if (!changed) break;
+  }
+  return snaps;
+}
+var snaps = lpSnapshots();
+var lpRound = 0;
+var lpSvg = document.getElementById('lpSvg');
+function drawLP() {
+  var labels = snaps[lpRound];
+  var mapping = {};
+  var vals = Object.keys(labels).map(function (k) { return labels[k]; });
+  var uniq = vals.filter(function (v, i, a) { return a.indexOf(v) === i; }).sort();
+  uniq.forEach(function (l, i) { mapping[l] = palette[i % palette.length]; });
+  clearNode(lpSvg);
+  lpEdges.forEach(function (p) {
+    var a = lpPos[p[0]], b = lpPos[p[1]];
+    lpSvg.appendChild(SVGE('line', { x1: a[0], y1: a[1], x2: b[0], y2: b[1], stroke: '#283044', 'stroke-width': '2' }));
+  });
+  lpFiles.forEach(function (f) {
+    var pos = lpPos[f], c = mapping[labels[f]];
+    var circ = SVGE('circle', { cx: pos[0], cy: pos[1], r: 26, fill: c, stroke: '#0b0e14', 'stroke-width': '3' });
+    circ.appendChild(SVGE('animate', { attributeName: 'r', values: '20;26', dur: '0.3s' }));
+    lpSvg.appendChild(circ);
+    var t1 = SVGE('text', { x: pos[0], y: pos[1] + 4, 'text-anchor': 'middle', 'font-size': '11', fill: '#0b0e14', 'font-weight': '700' });
+    t1.textContent = f.split('/')[1]; lpSvg.appendChild(t1);
+    var t2 = SVGE('text', { x: pos[0], y: pos[1] + 44, 'text-anchor': 'middle', 'font-size': '10', fill: '#8b949e' });
+    t2.textContent = f.split('/')[0] + '/'; lpSvg.appendChild(t2);
+  });
+  var conv = lpRound >= snaps.length - 1;
+  document.getElementById('lpInfo').textContent =
+    '第 ' + lpRound + ' 轮 · ' + uniq.length + ' 个模块' + (conv && lpRound > 0 ? ' · 已收敛 ✓' : '');
+  document.getElementById('lpStep').disabled = conv;
+}
+document.getElementById('lpStep').addEventListener('click', function () { if (lpRound < snaps.length - 1) { lpRound++; drawLP(); } });
+document.getElementById('lpReset').addEventListener('click', function () { lpRound = 0; drawLP(); });
+drawLP();
+
+/* ---- alias resolution demo (mirrors the resolver logic) ---- */
+var aliasMap = {
+  tsPaths: [['@app/', ['src/app/']], ['@/', ['src/']]],
+  goModule: 'github.com/org/repo',
+  pkgNames: { '@org/ui': 'packages/ui' }
+};
+var pathSet = ['src/app/util.ts', 'src/app/main.ts', 'src/shared/log.ts', 'packages/ui/button.tsx', 'pkg/store/store.go'];
+var JS_EXTS = ['.ts', '.tsx', '.js', '.jsx'];
+function matchPrefix(spec, prefix) {
+  var p = prefix.replace(/\/$/, '');
+  if (spec === p) return '';
+  if (spec.indexOf(p + '/') === 0) return spec.slice(p.length + 1);
+  return null;
+}
+function tryExts(cand) {
+  if (pathSet.indexOf(cand) >= 0) return cand;
+  for (var i = 0; i < JS_EXTS.length; i++) if (pathSet.indexOf(cand + JS_EXTS[i]) >= 0) return cand + JS_EXTS[i];
+  return null;
+}
+var examples = [
+  { spec: "@app/util", lang: 'ts', label: "import { foo } from '@app/util'" },
+  { spec: "@/shared/log", lang: 'ts', label: "import log from '@/shared/log'" },
+  { spec: "@org/ui/button", lang: 'ts', label: "import { Button } from '@org/ui/button'" },
+  { spec: "github.com/org/repo/pkg/store", lang: 'go', label: 'import "github.com/org/repo/pkg/store"' },
+  { spec: "./util", lang: 'rel', label: "import { foo } from './util'   (相对路径)" },
+  { spec: "lodash", lang: 'ts', label: "import _ from 'lodash'   (第三方)" }
+];
+function resolveAlias(ex) {
+  var steps = [], hit = null;
+  if (ex.lang === 'rel') {
+    steps.push({ parts: [{ t: '相对路径（以 . 开头）→ 直接按目录解析，' }, { b: '无需别名规则' }] });
+    steps.push({ parts: [{ t: '同目录拼接 + 补扩展名 → 命中' }], result: 'src/app/util.ts' });
+    return { steps: steps, hit: 'src/app/util.ts（按目录直接解析）' };
+  }
+  if (ex.lang === 'go') {
+    steps.push({ parts: [{ t: 'Go 裸 import，先按目录尝试 → 未命中' }] });
+    var grest = matchPrefix(ex.spec, aliasMap.goModule);
+    steps.push({ parts: [{ t: '去掉 go.mod 模块前缀 ' }, { m: aliasMap.goModule }, { t: ' → 剩下 ' }, { m: grest }] });
+    pathSet.forEach(function (fp) { if (fp.slice(-3) === '.go' && fp.replace(/\/[^/]+$/, '') === grest) hit = fp; });
+    steps.push({ parts: [{ t: '按包目录精确匹配 .go 文件' }], result: hit });
+    return { steps: steps, hit: hit };
+  }
+  steps.push({ parts: [{ t: '裸路径（不以 . 开头）→ 按目录解析为空，' }, { b: '启用别名规则' }] });
+  for (var i = 0; i < aliasMap.tsPaths.length; i++) {
+    var prefix = aliasMap.tsPaths[i][0], targets = aliasMap.tsPaths[i][1];
+    var rest = matchPrefix(ex.spec, prefix);
+    if (rest === null) continue;
+    steps.push({ parts: [{ t: '① 命中路径别名 ' }, { m: prefix + '*' }, { t: ' → 剩下 ' }, { m: rest }] });
+    for (var j = 0; j < targets.length; j++) {
+      var cand = (targets[j] + rest).replace(/\/+/g, '/');
+      var r = tryExts(cand);
+      steps.push({ parts: [{ t: '替换为 ' }, { m: cand }, { t: ' + 补扩展名' }], result: r });
+      if (r) return { steps: steps, hit: r };
+    }
+  }
+  for (var name in aliasMap.pkgNames) {
+    var root = aliasMap.pkgNames[name];
+    var prest = matchPrefix(ex.spec, name);
+    if (prest === null) continue;
+    var pcand = prest ? (root + '/' + prest) : root;
+    steps.push({ parts: [{ t: '② 命中工作区包名 ' }, { m: name }, { t: ' → 目录 ' }, { m: root }] });
+    var pr = tryExts(pcand);
+    steps.push({ parts: [{ t: '解析 ' }, { m: pcand }, { t: ' + 补扩展名' }], result: pr });
+    if (pr) return { steps: steps, hit: pr };
+  }
+  steps.push({ parts: [{ t: '别名规则均未命中 → 判定为第三方依赖' }] });
+  return { steps: steps, hit: null };
+}
+var aliasSel = document.getElementById('aliasSel');
+examples.forEach(function (e, i) { aliasSel.appendChild(E('option', { value: i, text: e.label })); });
+function renderAlias(i) {
+  var ex = examples[i], res = resolveAlias(ex), out = document.getElementById('aliasOut');
+  clearNode(out);
+  res.steps.forEach(function (st, k) {
+    var t = E('span', { class: 't' });
+    st.parts.forEach(function (p) {
+      if (p.m != null) t.appendChild(mono(p.m));
+      else if (p.b != null) t.appendChild(E('b', { text: p.b }));
+      else t.appendChild(document.createTextNode(p.t));
+    });
+    if (st.result) {
+      t.appendChild(document.createTextNode(' → '));
+      t.appendChild(E('span', { class: 'mono', style: 'color:var(--green)', text: st.result + ' ✓' }));
+    }
+    out.appendChild(E('div', { class: 'step', style: 'animation-delay:' + (k * .08) + 's' },
+      E('span', { class: 'n', text: String(k + 1) }), t));
+  });
+  if (res.hit) {
+    out.appendChild(E('div', { class: 'verdict ok' },
+      '✓ 成功连成依赖边：', mono(ex.spec), document.createTextNode(' → '), mono(res.hit)));
+  } else {
+    out.appendChild(E('div', { class: 'verdict no', text: '✗ 不是仓库内文件 → 判为第三方依赖，不连边（正确行为）' }));
+  }
+}
+aliasSel.addEventListener('change', function () { renderAlias(+aliasSel.value); });
+renderAlias(0);
+</script>
+</body>
+</html>
