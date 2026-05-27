@@ -407,9 +407,6 @@ def apply_setup_payload(payload: SetupPayload, repo_path: str = ".") -> MergeCon
     if payload.llm_assist_mode is not None:
         config_data.setdefault("llm_assist", {})["mode"] = payload.llm_assist_mode
 
-    if payload.github_token:
-        config_data["github"] = {"enabled": True, "token_env": "GITHUB_TOKEN"}
-
     # Comprehensive-editor overrides win over the generated skeleton. They
     # carry only non-curated keys (the UI excludes provider/agents/core
     # thresholds), so this never clobbers the curated build above.

@@ -50,7 +50,6 @@ CURATED_PATHS: frozenset[str] = frozenset(
         "fork_ref",
         "project_context",
         "agents",
-        "github",
         # Legacy global ``llm`` block — never read at run time (the real
         # per-agent config lives under ``agents``). Hidden from the editor
         # so it can't be mistaken for the model config; provider/model live

@@ -463,13 +463,6 @@ class ComplexityConfig(BaseModel):
     w_fanout: float = Field(default=0.10, ge=0.0, le=1.0)
 
 
-class GitHubConfig(BaseModel):
-    enabled: bool = False
-    token_env: str = "GITHUB_TOKEN"
-    repo: str = ""
-    pr_number: int | None = None
-
-
 class MergeLayerConfig(BaseModel):
     enabled: bool = True
     custom_layers: list[dict[str, Any]] = Field(default_factory=list)
@@ -1032,7 +1025,6 @@ class MergeConfig(BaseModel):
     syntax_check: SyntaxCheckConfig = Field(default_factory=SyntaxCheckConfig)
     llm_assist: LLMAssistConfig = Field(default_factory=LLMAssistConfig)
     complexity: ComplexityConfig = Field(default_factory=ComplexityConfig)
-    github: GitHubConfig = Field(default_factory=GitHubConfig)
     layer_config: MergeLayerConfig = Field(default_factory=MergeLayerConfig)
     module_config: ModuleConfig = Field(default_factory=ModuleConfig)
     customizations: list[CustomizationEntry] = Field(default_factory=list)

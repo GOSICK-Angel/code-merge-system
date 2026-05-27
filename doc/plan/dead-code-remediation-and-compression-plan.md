@@ -33,7 +33,10 @@
 
 ---
 
-## Part 2 — 修复 judge 质量门静默失效（Tier 1，是 bug）
+## Part 2 — 修复 judge 质量门静默失效（Tier 1，是 bug）✅ 已完成（f9b60ae）
+
+> 状态（2026-05-27 核查）：契约字段 `sentinel_hits`/`shadow_conflicts` 已在 `judge.yaml` inputs（第 17-18 行）；回归测试 `test_p2_hardening.py::TestJudgeAgentP2Checks::test_dead_checks_revived_under_judge_contract` 走真实 `restricted_view` 契约路径断言两类 issue 触发。本节为历史记录。
+
 
 `_check_sentinel_hits`(judge_agent.py:897) 与 shadow_conflicts 检查(judge_agent.py:714) 读 `getattr(state, x, 默认)`，但 `sentinel_hits`/`shadow_conflicts` **不在 `judge.yaml` inputs**。`FieldNotInContract` 继承 `AttributeError`(contract.py:90) → `restricted_view`(judge_agent.py:60) 下 getattr 吞异常返回空默认 → 检查永不触发。数据确被填充（executor_agent.py:124 / planner_agent.py:190）。
 
@@ -98,7 +101,7 @@
 
 | 阶段 | 内容 | 风险 | 优先级 |
 |---|---|---|---|
-| 1 | Part 2 judge 契约修复（2 行 + 回归测试）| 极低，纯收益 | **P0** |
+| 1 | Part 2 judge 契约修复（2 行 + 回归测试）| 极低，纯收益 | **P0** ✅ 完成（f9b60ae）|
 | 2 | Part 3 删除（被取代/弃用项，含抢救 `_truncate_text`）| 低（已确认无引用）| **P0** |
 | 3 | Part 1 截断→压缩（1.1 边界感知兜底 + 1.2 注入 summary client）| 中（影响所有 LLM 调用上下文）| **P1** |
 | 4 | Part 4.1 完成 HookManager LLM 钩子 + 4.2 与 MessageBus 去重 | 中 | **P1** |

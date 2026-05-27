@@ -5,8 +5,8 @@ Covers:
   default_provider auto-pick / explicit-when-ambiguous, agent_choices
   references a disabled provider.
 - ``apply_setup_payload``: writes only enabled providers' env vars,
-  honours per-agent overrides, github block only when token set,
-  threshold overrides on top of factory defaults.
+  honours per-agent overrides, threshold overrides on top of factory
+  defaults.
 - ``build_default_payload``: env-only build picks the right
   default_provider and enables/disables the right providers.
 - ``detect_setup_context``: per-provider key hint priority chain,
@@ -196,14 +196,6 @@ class TestApplySetupPayload:
         assert "OPENAI_API_KEY" not in env_text
         assert "OPENAI_MODELS" not in env_text
         assert "github" not in raw
-
-    def test_github_block_set_when_token_supplied(self, tmp_path: Path) -> None:
-        payload = _payload(github_token="ghp_xxx")
-        apply_setup_payload(payload, str(tmp_path))
-        raw = yaml.safe_load(
-            (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
-        )
-        assert raw["github"] == {"enabled": True, "token_env": "GITHUB_TOKEN"}
 
     def test_cross_provider_fallback_protects_every_agent(self, tmp_path: Path) -> None:
         # With both providers enabled, every agent gets a *cross-provider*
