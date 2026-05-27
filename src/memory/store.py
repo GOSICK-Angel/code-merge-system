@@ -5,7 +5,6 @@ from collections import defaultdict
 
 from src.memory.models import (
     MemoryEntry,
-    MemoryEntryType,
     MergeMemory,
     PhaseSummary,
 )
@@ -56,32 +55,6 @@ class MemoryStore:
         seed the L0 profile so subsequent phases observe the entry.
         """
         self._memory.codebase_profile[key] = value
-
-    def query_by_path(self, file_path: str, limit: int = 5) -> list[MemoryEntry]:
-        results: list[MemoryEntry] = []
-        for entry in self._memory.entries:
-            for fp in entry.file_paths:
-                if file_path.startswith(fp) or fp.startswith(file_path):
-                    results.append(entry)
-                    break
-        results.sort(key=lambda e: (e.confidence, e.created_at), reverse=True)
-        return results[:limit]
-
-    def query_by_tags(self, tags: list[str], limit: int = 5) -> list[MemoryEntry]:
-        tag_set = set(tags)
-        results: list[MemoryEntry] = []
-        for entry in self._memory.entries:
-            if tag_set & set(entry.tags):
-                results.append(entry)
-        results.sort(key=lambda e: (e.confidence, e.created_at), reverse=True)
-        return results[:limit]
-
-    def query_by_type(
-        self, entry_type: MemoryEntryType, limit: int = 10
-    ) -> list[MemoryEntry]:
-        results = [e for e in self._memory.entries if e.entry_type == entry_type]
-        results.sort(key=lambda e: (e.confidence, e.created_at), reverse=True)
-        return results[:limit]
 
     def get_phase_summary(self, phase: str) -> PhaseSummary | None:
         return self._memory.phase_summaries.get(phase)

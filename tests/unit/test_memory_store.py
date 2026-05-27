@@ -68,8 +68,7 @@ class TestMemoryStoreAdd:
                     confidence=0.1,
                 )
             )
-        results = store.query_by_type(MemoryEntryType.PATTERN, limit=MAX_ENTRIES)
-        contents = " ".join(r.content for r in results)
+        contents = " ".join(e.content for e in store.to_memory().entries)
         assert "high confidence" in contents
 
 
@@ -106,45 +105,6 @@ class TestMemoryStoreQuery:
             )
         )
         return store
-
-    def test_query_by_path_exact(self):
-        store = self._build_store()
-        results = store.query_by_path("api/models/user.py")
-        assert len(results) >= 1
-        assert any("api models" in r.content for r in results)
-
-    def test_query_by_path_prefix(self):
-        store = self._build_store()
-        results = store.query_by_path("api/models/")
-        assert len(results) >= 1
-
-    def test_query_by_path_no_match(self):
-        store = self._build_store()
-        results = store.query_by_path("frontend/components/button.tsx")
-        assert len(results) == 0
-
-    def test_query_by_tags(self):
-        store = self._build_store()
-        results = store.query_by_tags(["vendor"])
-        assert len(results) == 1
-        assert "vendor" in results[0].content
-
-    def test_query_by_tags_intersection(self):
-        store = self._build_store()
-        results = store.query_by_tags(["python", "vendor"])
-        assert len(results) == 2
-
-    def test_query_by_type(self):
-        store = self._build_store()
-        results = store.query_by_type(MemoryEntryType.PATTERN)
-        assert len(results) == 1
-        results = store.query_by_type(MemoryEntryType.DECISION)
-        assert len(results) == 1
-
-    def test_query_by_type_limit(self):
-        store = self._build_store()
-        results = store.query_by_type(MemoryEntryType.PATTERN, limit=0)
-        assert len(results) == 0
 
     def test_get_relevant_context(self):
         store = self._build_store()

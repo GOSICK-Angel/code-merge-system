@@ -82,10 +82,11 @@
 - **保留**：`src/models/message.py`（`AgentMessage`/`MessageType`/`AgentType`）是各 agent `run()` 的返回契约，属活代码，**不动**。
 - **回归**：新增 `tests/unit/test_phase4_messagebus_dedup.py` 守护去重不变量（模块移除、`__init__` 不再导出、`PhaseContext` 无 `message_bus` 且以 `hooks` 为单一事件机制、消息模型仍可导入）。`mypy src` + `ruff check src/` 全绿，`pytest tests/unit/` 2694 passed。
 
-### 4.3 🌱 内存按需加载 + 效果反馈（query_by_path / query_by_tags / query_by_type / entry_outcome）
+### 4.3 🌱 内存按需加载 + 效果反馈（query_by_path / query_by_tags / query_by_type / entry_outcome）✅ 已完成（2026-05-27，按被取代删除）
 - **出处**：[enhanced-context-memory-proposal.md](../references/enhanced-context-memory-proposal.md)（:352 `query_by_path` 按需加载）+ [mempalace-analysis.md](../references/mempalace-analysis.md)。
-- **现状**：`query_by_path/by_tags/by_type` + `entry_outcome` 已建未接；实际检索走更简单的 `get_memory_context`。
-- **动作**：**对照 enhanced-context-memory 提案决定**——`query_by_path`（按路径按需加载）是提案核心检索路径，若推进该提案则保留并接通；`entry_outcome`（命中效果反馈闭环）随提案的 memory 有效性度量一并评估。**这一组的去留绑定 enhanced-context-memory 提案是否立项**，不在本轮单独删。
+- **核查结论（2026-05-27，推翻 2026-05-25 快照）**：提案的 **P1 分层加载其实已落地**——`get_memory_context`(base_agent) → `LayeredMemoryLoader.load_for_agent`(layered_loader.py) → `MemoryStore.get_relevant_context`(store.py:89)，且 L2 的「按需加载」由 `get_relevant_context`（路径重叠×置信度评分，含 Jaccard）实现，**没有走 `query_by_path`**。命中效果反馈闭环也已活：`record_outcome`(judge_review.py:173/175 写) → `_entry_outcomes` → `harmful_entry_ids`(layered_loader `_build_l2` 跳过有害条目) + `summary()["outcomes"]`（报告）。因此「绑定提案立项再定」的前提不成立——提案**已立项且实现，只是选用了更强的 `get_relevant_context`/`harmful_entry_ids` 把这 4 个符号取代了**。
+- **动作（采被取代删除）**：删 `MemoryStore`/`SQLiteMemoryStore` 的 `query_by_{path,tags,type}` 与 `MemoryHitTracker.entry_outcome()`（其 docstring 自承「useful for tests / external scoring」=无生产消费者）。保留 `get_relevant_context` / `record_outcome` / `_entry_outcomes` / `harmful_entry_ids` / `summary` / 剪枝。删 `store.py` 随之孤立的 `MemoryEntryType` 导入。
+- **回归**：新增 `tests/unit/test_phase4_3_memory_api_dedup.py` 守护「方法移除 + 活检索/反馈面仍在」。专测被移除接口的用例删除；以 `query_by_*`/`entry_outcome` 作探针验证**活行为**（bootstrap / 项目内存跨 run 持久化 / remove_superseded / record_outcome 信用）的用例改走 `to_memory().entries` / `summary()["outcomes"]`，保留覆盖。`ruff check/format src/` + `mypy src` 全绿，`pytest tests/unit/` 2683 passed，覆盖率 85.27%。
 - 注：提案 :565 描述的 300+ 去重（`_consolidate_entries`）**已在生产自动执行**，不在此列；其冗余公开包装 `consolidate()` 已归入 Part 3 删除。
 
 ---
@@ -113,7 +114,7 @@
 | 3 | Part 1 截断→压缩（1.1 边界感知兜底 + 1.2 注入 summary client）| 中（影响所有 LLM 调用上下文）| **P1** |
 | 4 | Part 4.1 完成 HookManager LLM 钩子 + 4.2 与 MessageBus 去重 | 中 | **P1** ✅ 完成（2026-05-27；4.1=d5742ce，4.2=本轮）|
 | 5 | Part 5 TUI 术语债：ws_bridge 重命名（低风险）+ `--tui` flag 去留 + 文档批量更新 | 低（重命名/文档）| **P2** |
-| 6 | Part 4.3 内存 API：等 enhanced-context-memory 提案立项再定 | — | **P2/待定** |
+| 6 | Part 4.3 内存 API：核查发现提案 P1 已落地（get_relevant_context 取代），按被取代删除 | 低 | **P2** ✅ 完成（2026-05-27）|
 
 ## 风险与约束
 - Part 1 压缩改动影响所有 agent 的上下文装配——需在真实 forgejo 仓库验证 Judge 不再误判 truncation（见 `feedback_verify_real_forgejo`），不能只靠单测。

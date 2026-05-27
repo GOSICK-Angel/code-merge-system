@@ -202,14 +202,6 @@ class MemoryHitTracker:
             "top_harmful": harmful,
         }
 
-    def entry_outcome(self, entry_id: str) -> dict[str, int]:
-        """Return per-entry counters; useful for tests / external scoring."""
-        with self._lock:
-            counters = self._entry_outcomes.get(entry_id)
-            if counters is None:
-                return {"pass": 0, "fail": 0}
-            return dict(counters)
-
     def harmful_entry_ids(
         self,
         threshold: float = -0.5,

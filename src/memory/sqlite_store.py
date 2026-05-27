@@ -222,43 +222,6 @@ class SQLiteMemoryStore:
     # Query API
     # ------------------------------------------------------------------
 
-    def query_by_path(self, file_path: str, limit: int = 5) -> list[MemoryEntry]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM memory_entries ORDER BY confidence DESC, created_at DESC"
-            ).fetchall()
-        results = []
-        for row in rows:
-            for fp in json.loads(row["file_paths"]):
-                if file_path.startswith(fp) or fp.startswith(file_path):
-                    results.append(_row_to_entry(row))
-                    break
-        results.sort(key=lambda e: (e.confidence, e.created_at), reverse=True)
-        return results[:limit]
-
-    def query_by_tags(self, tags: list[str], limit: int = 5) -> list[MemoryEntry]:
-        tag_set = set(tags)
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM memory_entries ORDER BY confidence DESC, created_at DESC"
-            ).fetchall()
-        results = [
-            _row_to_entry(r) for r in rows if tag_set & set(json.loads(r["tags"]))
-        ]
-        results.sort(key=lambda e: (e.confidence, e.created_at), reverse=True)
-        return results[:limit]
-
-    def query_by_type(
-        self, entry_type: MemoryEntryType, limit: int = 10
-    ) -> list[MemoryEntry]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM memory_entries WHERE entry_type = ? "
-                "ORDER BY confidence DESC, created_at DESC LIMIT ?",
-                (entry_type.value, limit),
-            ).fetchall()
-        return [_row_to_entry(r) for r in rows]
-
     def get_phase_summary(self, phase: str) -> PhaseSummary | None:
         with self._conn() as conn:
             row = conn.execute(

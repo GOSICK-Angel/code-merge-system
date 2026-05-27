@@ -420,7 +420,7 @@ class TestStaleMemoryCleanup:
         assert store.entry_count == 2
         cleaned = store.remove_superseded("auto_merge")
         assert cleaned.entry_count == 1
-        entries = cleaned.query_by_type(MemoryEntryType.PATTERN, limit=10)
+        entries = cleaned.to_memory().entries
         assert entries[0].content == "merge result"
 
     def test_no_removal_for_first_phase(self):
@@ -484,7 +484,7 @@ class TestStaleMemoryCleanup:
         )
         cleaned = store.remove_superseded("conflict_analysis")
         assert cleaned.entry_count == 1
-        entries = cleaned.query_by_type(MemoryEntryType.PATTERN, limit=10)
+        entries = cleaned.to_memory().entries
         assert entries[0].content == "conflict"
 
     def test_unknown_phase_no_removal(self):
