@@ -531,6 +531,37 @@ export function ConflictResolution({ clientRef }: Props): JSX.Element {
                   </div>
                 </div>
               )}
+              {current.grounding_warnings &&
+                current.grounding_warnings.length > 0 && (
+                  <div
+                    className="intent-rationale"
+                    style={{
+                      marginTop: 8,
+                      borderLeft: "3px solid #d97706",
+                      paddingLeft: 8,
+                      background: "rgba(217, 119, 6, 0.08)",
+                    }}
+                  >
+                    <div
+                      className="intent-label"
+                      style={{ color: "#d97706" }}
+                    >
+                      ⚠ unverified symbols (
+                      {current.grounding_warnings.length})
+                    </div>
+                    <div className="intent-body" style={{ fontSize: 11 }}>
+                      the analyst's rationale references{" "}
+                      {current.grounding_warnings.map((s, i) => (
+                        <span key={s}>
+                          {i > 0 ? ", " : ""}
+                          <code>{s}</code>
+                        </span>
+                      ))}{" "}
+                      — not found in either fork or upstream. verify before
+                      acting on the recommendation.
+                    </div>
+                  </div>
+                )}
             </Card>
           )}
 

@@ -360,3 +360,55 @@ describe("ConflictResolution status pill (Fix 8)", () => {
     expect(container.textContent).toContain("AUTO_MERGING");
   });
 });
+
+// PR-A Slice 4: surface fabricated qualified references the analyst's
+// rationale invented (zod run produced "use core._isoWeek if available"
+// with no such symbol on either side). The reviewer must see the warning
+// before clicking APPLY RECOMMENDED.
+describe("ConflictResolution grounding warnings (PR-A)", () => {
+  it("renders an UNVERIFIED SYMBOLS banner when analyst rationale invents a ref", () => {
+    const flaggedSnapshot: MergeStateSnapshot = {
+      ...baseSnapshot,
+      humanDecisionRequests: {
+        "a.py": {
+          ...baseSnapshot.humanDecisionRequests["a.py"],
+          analyst_rationale: "use core._isoWeek if available",
+          grounding_warnings: ["core._isoWeek"],
+        },
+      },
+    };
+    useRunStore.setState({ snapshot: flaggedSnapshot });
+    act(() => useConflictDraftStore.getState().selectFile("a.py"));
+
+    const ref = makeClientRef();
+    const { container } = render(
+      <ConflictResolution
+        clientRef={
+          ref as unknown as React.MutableRefObject<
+            ReturnType<typeof useWsClient>["current"]
+          >
+        }
+      />,
+    );
+    const text = container.textContent ?? "";
+    expect(text).toMatch(/unverified symbols?/i);
+    expect(text).toContain("core._isoWeek");
+  });
+
+  it("does not render the banner when grounding_warnings is empty", () => {
+    useRunStore.setState({ snapshot: baseSnapshot });
+    act(() => useConflictDraftStore.getState().selectFile("a.py"));
+
+    const ref = makeClientRef();
+    const { container } = render(
+      <ConflictResolution
+        clientRef={
+          ref as unknown as React.MutableRefObject<
+            ReturnType<typeof useWsClient>["current"]
+          >
+        }
+      />,
+    );
+    expect(container.textContent ?? "").not.toMatch(/unverified symbols?/i);
+  });
+});

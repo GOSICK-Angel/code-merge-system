@@ -35,6 +35,26 @@ _MEMBER_ACCESS_EXTS = frozenset(
 _QUALIFIED_REF = re.compile(r"\b([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)\b")
 
 
+def scan_rationale_for_hallucinations(
+    rationale: str,
+    sources: list[str],
+    file_path: str,
+    limit: int = 5,
+) -> list[str]:
+    """Scan analyst rationale prose for fabricated ``base.member`` references.
+
+    PR-A: the conflict_analyst's free-text rationale occasionally invents a
+    symbol on a real imported object (the zod run produced ``core._isoWeek``
+    where neither fork nor upstream defines it). Semantics match
+    :func:`find_invented_member_accesses` — a real ``base`` is required so
+    brand-new imports and English noise stay quiet — only the input is prose
+    rather than merged code. ``file_path`` gates the language: rationale for
+    JSON/YAML/Markdown files is skipped because ``.`` is not member access
+    there and natural prose ``version.major`` would false-positive.
+    """
+    return find_invented_member_accesses(rationale, sources, file_path, limit)
+
+
 def find_invented_member_accesses(
     merged: str,
     sources: list[str],

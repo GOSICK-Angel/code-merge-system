@@ -51,3 +51,4 @@ class ConflictAnalysis(BaseModel):
     analysis_notes: str = ""
     is_chunked: bool = False
     chunk_count: int = Field(default=1, ge=1)
+    grounding_warnings: list[str] = Field(default_factory=list)

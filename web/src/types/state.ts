@@ -105,6 +105,7 @@ export interface HumanDecisionRequest {
   custom_content: string | null;
   reviewer_notes: string | null;
   related_files: string[];
+  grounding_warnings?: string[];
 }
 
 export type JudgeIssueSeverity =

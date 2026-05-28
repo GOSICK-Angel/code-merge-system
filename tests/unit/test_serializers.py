@@ -273,6 +273,48 @@ class TestHelperBranches:
         assert out["created_at"] is None
         assert out["category_summary"] is None
 
+    def test_serialize_human_request_includes_grounding_warnings(self) -> None:
+        # PR-A Slice 6: WS payload must carry grounding_warnings so the
+        # UI can render the UNVERIFIED SYMBOLS banner. Hand-rolled
+        # whitelist serializer silently dropped the field on the real
+        # zod run even though backend model + checkpoint had it.
+        req = SimpleNamespace(
+            file_path="schemas.ts",
+            priority=5,
+            conflict_points=[],
+            context_summary="ctx",
+            upstream_change_summary="u",
+            fork_change_summary="f",
+            analyst_recommendation=SimpleNamespace(value="semantic_merge"),
+            analyst_confidence=0.82,
+            analyst_rationale="use core._isoWeek if available",
+            options=[],
+            human_decision=None,
+            grounding_warnings=["core._isoWeek"],
+        )
+        out = serialize_human_request(req)
+        assert out["grounding_warnings"] == ["core._isoWeek"]
+
+    def test_serialize_human_request_grounding_defaults_empty(self) -> None:
+        # Backward compat: requests without the attribute (legacy
+        # checkpoints or future SimpleNamespace fakes) serialize as []
+        # rather than crashing.
+        req = SimpleNamespace(
+            file_path="a.py",
+            priority=1,
+            conflict_points=[],
+            context_summary="ctx",
+            upstream_change_summary="u",
+            fork_change_summary="f",
+            analyst_recommendation=SimpleNamespace(value="take_target"),
+            analyst_confidence=0.7,
+            analyst_rationale="r",
+            options=[],
+            human_decision=None,
+        )
+        out = serialize_human_request(req)
+        assert out["grounding_warnings"] == []
+
     def test_serialize_human_request_buckets_severity(self) -> None:
         req = SimpleNamespace(
             file_path="a.py",

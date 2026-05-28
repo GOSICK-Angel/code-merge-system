@@ -26,6 +26,7 @@ from src.models.forks_profile import ForksProfile
 from src.tools.chunk_processor import split_by_semantic_boundary
 from src.tools.forks_profile_loader import format_analyst_context
 from src.tools.git_tool import GitTool
+from src.tools.hallucinated_symbol_guard import scan_rationale_for_hallucinations
 
 
 # U1 reducer constants (doc/large-scale-file-processing-optimization.md §5.1.1).
@@ -217,13 +218,20 @@ class ConflictAnalystAgent(BaseAgent):
                 else blast_block
             )
 
+        # PR-A: capture original (unstaged) fork/upstream content for the
+        # post-LLM rationale grounding scan. ``build_staged_content`` below
+        # rewrites these names, so scanning against the staged versions
+        # would false-positive on symbols that exist in trimmed-out lines.
+        original_current = current_content or ""
+        original_target = target_content or ""
+
         # U1: chunked path when either side exceeds chunk_size_chars * 2
         # (default 40KB). Reuses src/tools/chunk_processor.split_by_semantic_boundary
         # (facts.md D2 / plan P1-2).
         chunk_size = chunk_size_chars if chunk_size_chars is not None else 20000
         max_len = max(len(current_content or ""), len(target_content or ""))
         if max_len > chunk_size * 2:
-            return await self._chunked_analyze_file(
+            chunked = await self._chunked_analyze_file(
                 file_diff,
                 base_content,
                 current_content or "",
@@ -235,6 +243,9 @@ class ConflictAnalystAgent(BaseAgent):
                     if min_chunked_confidence is not None
                     else 0.85
                 ),
+            )
+            return _with_grounding_warnings(
+                chunked, original_current, original_target, file_diff.file_path
             )
 
         diff_ranges = _extract_diff_ranges(file_diff)
@@ -282,8 +293,11 @@ class ConflictAnalystAgent(BaseAgent):
 
         try:
             raw = await self._call_llm_with_retry(messages, system=ANALYST_SYSTEM)
-            return parse_conflict_analysis(
+            parsed = parse_conflict_analysis(
                 str(raw), file_diff.file_path, self.llm_config.model
+            )
+            return _with_grounding_warnings(
+                parsed, original_current, original_target, file_diff.file_path
             )
         except Exception as e:
             self.logger.error(
@@ -521,6 +535,16 @@ class ConflictAnalystAgent(BaseAgent):
                 missing,
             )
 
+        # PR-A: the production conflict_analysis phase routes through this
+        # batched entry point, so the rationale grounding scan must run
+        # here too (analyze_file's wrapper would otherwise stay dormant in
+        # real runs). file_three_way carries (base, fork, upstream) per file.
+        for fp, analysis in list(analyses.items()):
+            _, fork_c, upstream_c = file_three_way.get(fp, (None, None, None))
+            analyses[fp] = _with_grounding_warnings(
+                analysis, fork_c or "", upstream_c or "", fp
+            )
+
         return analyses
 
     async def propose_decision_options(
@@ -565,6 +589,28 @@ class ConflictAnalystAgent(BaseAgent):
         from src.models.state import SystemStatus
 
         return state.status == SystemStatus.ANALYZING_CONFLICTS
+
+
+def _with_grounding_warnings(
+    analysis: ConflictAnalysis,
+    fork_content: str,
+    upstream_content: str,
+    file_path: str,
+) -> ConflictAnalysis:
+    """PR-A: attach fabricated qualified references from the rationale.
+
+    Returns a new ``ConflictAnalysis`` (immutable update) so callers can
+    treat the return value as the canonical, ground-checked result.
+    """
+    rationale = analysis.rationale or ""
+    if not rationale:
+        return analysis
+    warnings = scan_rationale_for_hallucinations(
+        rationale, [fork_content, upstream_content], file_path
+    )
+    if not warnings:
+        return analysis
+    return analysis.model_copy(update={"grounding_warnings": warnings})
 
 
 def _extract_diff_ranges(

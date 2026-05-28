@@ -39,3 +39,4 @@ class HumanDecisionRequest(BaseModel):
     dependents_count: int = 0
     blast_radius: int = 0
     is_god_node: bool = False
+    grounding_warnings: list[str] = Field(default_factory=list)

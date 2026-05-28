@@ -198,6 +198,7 @@ def serialize_human_request(req: Any) -> dict[str, Any]:
         "custom_content": getattr(req, "custom_content", None),
         "reviewer_notes": getattr(req, "reviewer_notes", None),
         "related_files": list(getattr(req, "related_files", []) or []),
+        "grounding_warnings": list(getattr(req, "grounding_warnings", []) or []),
     }
 
 
