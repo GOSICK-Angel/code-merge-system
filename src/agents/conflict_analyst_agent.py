@@ -28,6 +28,7 @@ from src.tools.forks_profile_loader import format_analyst_context
 from src.tools.git_tool import GitTool
 from src.tools.diff_facts import DiffFacts, compute_diff_facts
 from src.tools.diff_facts_grounding import check_rationale_against_facts
+from src.tools.native_3way import NativeMergeOutcome, predict_native_3way_outcome
 from src.tools.hallucinated_symbol_guard import scan_rationale_for_hallucinations
 from src.tools.import_symbol_harvester import harvest_imports_for_file
 from src.tools.required_new_apis import extract_required_new_apis
@@ -236,6 +237,15 @@ class ConflictAnalystAgent(BaseAgent):
         # contradict those facts.
         diff_facts = compute_diff_facts(base_content, original_current, original_target)
 
+        # Native-3way outcome: the LLM previously read ``conflict_count=0``
+        # (computed against the original refs, which are clean) as
+        # "no conflict" and gave up on specifics. Compute the actual
+        # ``git merge-file`` outcome on the raw content and pass it
+        # explicitly to the prompt so it sees ground truth.
+        native_3way_outcome: NativeMergeOutcome = predict_native_3way_outcome(
+            base_content, original_current, original_target
+        )
+
         # U1: chunked path when either side exceeds chunk_size_chars * 2
         # (default 40KB). Reuses src/tools/chunk_processor.split_by_semantic_boundary
         # (facts.md D2 / plan P1-2).
@@ -315,6 +325,7 @@ class ConflictAnalystAgent(BaseAgent):
             enriched_context,
             imported_symbols=imported_symbols,
             diff_facts=diff_facts,
+            native_3way_outcome=native_3way_outcome,
         )
         messages = [{"role": "user", "content": prompt}]
 
@@ -519,6 +530,11 @@ class ConflictAnalystAgent(BaseAgent):
             for fp, (base, fork, upstream) in file_three_way.items()
         }
 
+        native_3way_outcome_by_file: dict[str, NativeMergeOutcome] = {
+            fp: predict_native_3way_outcome(base, fork, upstream)
+            for fp, (base, fork, upstream) in file_three_way.items()
+        }
+
         prompt = build_commit_round_prompt(
             round_commits,
             file_three_way,
@@ -526,6 +542,7 @@ class ConflictAnalystAgent(BaseAgent):
             project_context,
             imported_symbols_by_file=imported_symbols_by_file or None,
             diff_facts_by_file=diff_facts_by_file,
+            native_3way_outcome_by_file=native_3way_outcome_by_file,
         )
         file_paths = list(file_three_way.keys())
 

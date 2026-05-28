@@ -5,6 +5,7 @@ from typing import Any
 
 from src.models.diff import FileDiff
 from src.tools.diff_facts import DiffFacts
+from src.tools.native_3way import NativeMergeOutcome
 
 _ROUND_PER_VERSION_CHARS = 1000
 # Per-side diff budget for commit-round prompts. Two sides (fork, upstream)
@@ -68,6 +69,7 @@ def build_commit_round_prompt(
     project_context: str = "",
     imported_symbols_by_file: dict[str, dict[str, list[str]]] | None = None,
     diff_facts_by_file: dict[str, DiffFacts] | None = None,
+    native_3way_outcome_by_file: dict[str, NativeMergeOutcome] | None = None,
 ) -> str:
     commit_summary = "\n".join(
         f"  - {c['sha'][:8]}: {c.get('message', '')}  ({len(c.get('files', []))} files)"
@@ -123,9 +125,22 @@ def build_commit_round_prompt(
             facts_section = _format_diff_facts_block(per_file_facts).replace(
                 "# Deterministic Diff Facts", "### Deterministic Diff Facts"
             )
+        native_section = ""
+        per_file_outcome = (
+            (native_3way_outcome_by_file or {}).get(fp)
+            if native_3way_outcome_by_file
+            else None
+        )
+        if per_file_outcome is not None:
+            native_section = (
+                "### Native 3-way merge\n"
+                + _NATIVE_3WAY_BLOCK_TEXT[per_file_outcome]
+                + "\n"
+            )
         file_sections.append(
             f"## {fp}  (language: {lang})\n"
             f"{surface_section}"
+            f"{native_section}"
             f"{facts_section}"
             f"### Fork changes (merge-base → fork)\n{fork_block}\n"
             f"### Upstream changes (merge-base → upstream)\n{upstream_block}"
@@ -215,6 +230,33 @@ Prefer recommendations that combine symbols already present on either
 side over recommendations that need new API surface."""
 
 
+_NATIVE_3WAY_BLOCK_TEXT: dict[str, str] = {
+    "conflict": (
+        "Native 3-way merge: CONFLICT (git merge-file would produce "
+        "`<<<<<<<` markers). This is why you are being asked to resolve at "
+        "the semantic level — the absence of markers in the raw fork / "
+        "upstream content shown above is expected (those refs are clean "
+        "branches), not evidence the file is conflict-free."
+    ),
+    "clean": (
+        "Native 3-way merge: CLEAN (git merge-file would resolve without "
+        "markers). The file landed here despite that — verify whether "
+        "TAKE_TARGET on the merged content is appropriate."
+    ),
+    "missing": (
+        "Native 3-way merge: MISSING (at least one of base / fork / upstream "
+        "lacks the file — likely add-on-one-side. TAKE_TARGET or TAKE_CURRENT "
+        "is usually the right call, not semantic_merge."
+    ),
+}
+
+
+def _format_native_3way_block(outcome: NativeMergeOutcome | None) -> str:
+    if outcome is None:
+        return ""
+    return _NATIVE_3WAY_BLOCK_TEXT[outcome] + "\n"
+
+
 def _format_diff_facts_block(
     diff_facts: "DiffFacts | None",
 ) -> str:
@@ -278,6 +320,7 @@ def build_conflict_analysis_prompt(
     project_context: str,
     imported_symbols: dict[str, list[str]] | None = None,
     diff_facts: "DiffFacts | None" = None,
+    native_3way_outcome: NativeMergeOutcome | None = None,
 ) -> str:
     language = file_diff.language or "unknown"
     base_section = (
@@ -334,6 +377,7 @@ def build_conflict_analysis_prompt(
 
     surface_block = _format_imported_symbol_surface(imported_symbols)
     facts_block = _format_diff_facts_block(diff_facts)
+    native_block = _format_native_3way_block(native_3way_outcome)
 
     return f"""Analyze this Git merge conflict and provide a structured analysis.
 
@@ -345,12 +389,12 @@ Path: {file_diff.file_path}
 Language: {language}
 Fork-side change (base→fork): +{fork_added} / -{fork_deleted}
 Upstream-side change (base→upstream): +{upstream_added} / -{upstream_deleted}
-Conflict count: {file_diff.conflict_count}
+Pre-existing markers in refs: {file_diff.conflict_count} (counts `<<<<<<<` already in the displayed content — usually 0 for clean refs)
 
 # Change-volume signal
 {size_signal}
 
-{facts_block}{surface_block}# Three-way Diff
+{native_block}{facts_block}{surface_block}# Three-way Diff
 
 ## Common ancestor version (merge-base)
 {base_section}

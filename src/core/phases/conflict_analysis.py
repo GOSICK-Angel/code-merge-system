@@ -794,10 +794,10 @@ class ConflictAnalysisPhase(Phase):
             )
 
             base_content = target_content = current_content = None
-            if conflict_analyst.git_tool and hasattr(state, "_merge_base"):
+            if conflict_analyst.git_tool and state.merge_base_commit:
                 base_content, current_content, target_content = (
                     conflict_analyst.git_tool.get_three_way_diff(
-                        state._merge_base or "",
+                        state.merge_base_commit,
                         state.config.fork_ref,
                         state.config.upstream_ref,
                         file_path,
