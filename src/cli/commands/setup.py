@@ -22,6 +22,7 @@ remain because ``init_context.py`` still needs them.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -274,6 +275,50 @@ ENABLE_WORKING_BRANCH_HINT: str = (
 )
 
 
+def _detect_package_manager(repo: Path) -> str:
+    """Pick the JS package manager from the lockfile, defaulting to npm."""
+    if (repo / "pnpm-lock.yaml").is_file():
+        return "pnpm"
+    if (repo / "yarn.lock").is_file():
+        return "yarn"
+    return "npm"
+
+
+def _detect_build_check_command(repo_path: str) -> str:
+    """Best-effort, target-agnostic compile/type-check command for the repo root.
+
+    Returns a shell command suitable for ``build_check.command`` (a non-zero
+    exit means the merged tree does not build), or ``""`` when no recognised
+    toolchain is found — the gate then stays disabled for manual fill-in.
+
+    Only toolchains whose detected command passes on a clean tree are wired:
+    ``tsc --noEmit`` / ``go build`` / ``cargo check``. Python (``mypy`` /
+    ``pytest``) is deliberately excluded — it routinely fails on un-clean trees
+    and would block every merge.
+    """
+    repo = Path(repo_path)
+
+    pkg = repo / "package.json"
+    if pkg.is_file():
+        try:
+            scripts = json.loads(pkg.read_text(encoding="utf-8")).get("scripts", {})
+        except (OSError, ValueError):
+            scripts = {}
+        if isinstance(scripts, dict):
+            pm = _detect_package_manager(repo)
+            for script in ("typecheck", "type-check", "build"):
+                if script in scripts:
+                    return f"{pm} run {script}"
+
+    if (repo / "tsconfig.json").is_file():
+        return "npx tsc --noEmit"
+    if (repo / "go.mod").is_file():
+        return "go build ./..."
+    if (repo / "Cargo.toml").is_file():
+        return "cargo check"
+    return ""
+
+
 def _default_config_data(payload: SetupPayload, repo_path: str) -> dict[str, Any]:
     """Build the ``.merge/config.yaml`` dict from a validated payload.
 
@@ -309,6 +354,17 @@ def _default_config_data(payload: SetupPayload, repo_path: str) -> dict[str, Any
     }
     if payload.request_timeout_seconds is not None:
         data["request_timeout_seconds"] = payload.request_timeout_seconds
+    # 方案1: auto-fill the post-judge compile gate so an uncompilable merge
+    # artifact is caught instead of reported as a green COMPLETED. Only emitted
+    # when a toolchain is detected; existing config.yaml files are untouched.
+    build_check_command = _detect_build_check_command(repo_path)
+    if build_check_command:
+        data["build_check"] = {
+            "enabled": True,
+            "command": build_check_command,
+            "working_dir": ".",
+            "timeout_seconds": 600,
+        }
     return data
 
 
