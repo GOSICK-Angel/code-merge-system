@@ -423,12 +423,24 @@ def _validate_evidence_grounded(
     evidence_excerpt: str | None,
     merged_content: str | None,
     description: str,
+    fork_content: str | None = None,
 ) -> tuple[IssueSeverity, str]:
     """P-γ-4 F-judge-source-of-truth: when merged_content is supplied and the
     LLM's evidence_excerpt does not appear in it, the issue is hallucinated.
     Downgrade CRITICAL/HIGH to MEDIUM and annotate the description so the
     trail is visible in reports. Skipped when merged_content is None or the
     stripped excerpt is empty (legacy grounding rule already handles those).
+
+    Bug-fix (zod validation, 2026-05-28): when the file is still the unmodified
+    fork blob (a real merge failure mode — part1 surfaced item dispatch gap,
+    take_target user choice never actualized), a correct Judge finding that
+    cites upstream content (e.g. "Upstream changes have not been applied") was
+    incorrectly downgraded as hallucinated because the cited upstream lines are
+    legitimately absent from merged_content. With ``fork_content`` supplied,
+    treat the evidence as grounded when (a) merged_content equals fork_content
+    (file is verbatim fork blob — the finding is provably true) or (b) the
+    stripped excerpt appears in fork_content (Judge is citing real fork-side
+    content that should have been overwritten but wasn't).
     """
     if merged_content is None:
         return level, description
@@ -441,6 +453,11 @@ def _validate_evidence_grounded(
         return level, description
     if stripped in merged_content:
         return level, description
+    if fork_content is not None:
+        if merged_content == fork_content:
+            return level, description
+        if stripped in fork_content:
+            return level, description
     return IssueSeverity.MEDIUM, description + _HALLUCINATED_SUFFIX
 
 
@@ -448,6 +465,7 @@ def parse_file_review_issues(
     raw: str | dict[str, Any],
     default_file_path: str,
     merged_content: str | None = None,
+    fork_content: str | None = None,
 ) -> list[JudgeIssue]:
     data = _extract_json(raw)
     issues: list[JudgeIssue] = []
@@ -467,7 +485,7 @@ def parse_file_review_issues(
             level, affected_lines, evidence_excerpt, description
         )
         level, description = _validate_evidence_grounded(
-            level, evidence_excerpt, merged_content, description
+            level, evidence_excerpt, merged_content, description, fork_content
         )
 
         issues.append(
@@ -563,11 +581,17 @@ def parse_batch_file_review_issues(
     raw: str | dict[str, Any],
     file_paths: list[str],
     merged_contents: dict[str, str] | None = None,
+    fork_contents: dict[str, str] | None = None,
 ) -> dict[str, list[JudgeIssue]]:
     if merged_contents is not None and not isinstance(merged_contents, dict):
         raise TypeError(
             "merged_contents must be a dict[str, str] or None; "
             f"got {type(merged_contents).__name__}"
+        )
+    if fork_contents is not None and not isinstance(fork_contents, dict):
+        raise TypeError(
+            "fork_contents must be a dict[str, str] or None; "
+            f"got {type(fork_contents).__name__}"
         )
 
     result: dict[str, list[JudgeIssue]] = {fp: [] for fp in file_paths}
@@ -583,6 +607,7 @@ def parse_batch_file_review_issues(
         per_file_content = (
             merged_contents.get(fp) if merged_contents is not None else None
         )
+        per_file_fork = fork_contents.get(fp) if fork_contents is not None else None
         for item in file_entry.get("issues", []):
             level_raw = item.get("issue_level", "medium")
             try:
@@ -597,7 +622,7 @@ def parse_batch_file_review_issues(
                 level, affected_lines, evidence_excerpt, description
             )
             level, description = _validate_evidence_grounded(
-                level, evidence_excerpt, per_file_content, description
+                level, evidence_excerpt, per_file_content, description, per_file_fork
             )
             result[fp].append(
                 JudgeIssue(

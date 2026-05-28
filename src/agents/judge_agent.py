@@ -157,6 +157,11 @@ class JudgeAgent(BaseAgent):
                 abs_path = self.git_tool.repo_path / file_path
                 if abs_path.exists():
                     merged_content = _safe_read_text(abs_path) or ""
+            fork_content: str | None = None
+            if self.git_tool is not None:
+                fork_content = self.git_tool.get_file_content(
+                    state.config.fork_ref, file_path
+                )
             check_strategy = _resolve_check_strategy(
                 file_path,
                 record,
@@ -171,6 +176,7 @@ class JudgeAgent(BaseAgent):
                 check_strategy=check_strategy,
                 prior_round_issues=prior_issues_by_file.get(file_path, []),
                 referenced_names=state.dependency_graph.referenced_symbols(file_path),
+                fork_content=fork_content,
             )
 
         # U5: per-file fan-out — dict.keys() is nominally disjoint, but
@@ -229,6 +235,7 @@ class JudgeAgent(BaseAgent):
         check_strategy: JudgeCheckStrategy = JudgeCheckStrategy.UPSTREAM_MATCH,
         prior_round_issues: list[JudgeIssue] | None = None,
         referenced_names: frozenset[str] = frozenset(),
+        fork_content: str | None = None,
     ) -> list[JudgeIssue]:
         issues: list[JudgeIssue] = []
 
@@ -315,7 +322,10 @@ class JudgeAgent(BaseAgent):
         try:
             raw = await self._call_llm_with_retry(messages, system=JUDGE_SYSTEM)
             llm_issues = parse_file_review_issues(
-                str(raw), file_path, merged_content=merged_content
+                str(raw),
+                file_path,
+                merged_content=merged_content,
+                fork_content=fork_content,
             )
             issues.extend(llm_issues)
         except Exception as e:
@@ -1626,6 +1636,7 @@ class JudgeAgent(BaseAgent):
         self,
         chunk: list[tuple[str, str, "FileDecisionRecord", FileDiff]],
         state: ReadOnlyStateView,
+        fork_contents: dict[str, str] | None = None,
     ) -> list[JudgeIssue]:
         from src.llm.prompts.judge_prompts import build_batch_file_review_prompt
 
@@ -1659,7 +1670,10 @@ class JudgeAgent(BaseAgent):
             )
             merged_contents = {fp: content for fp, content, _, _ in chunk}
             per_file = parse_batch_file_review_issues(
-                str(raw), file_paths, merged_contents=merged_contents
+                str(raw),
+                file_paths,
+                merged_contents=merged_contents,
+                fork_contents=fork_contents,
             )
             for issues_list in per_file.values():
                 all_issues.extend(issues_list)
@@ -1720,8 +1734,17 @@ class JudgeAgent(BaseAgent):
             for i in range(0, len(risky_files), self._BATCH_SIZE)
         ]
 
+        fork_contents: dict[str, str] = {}
+        if self.git_tool is not None:
+            for fp, _, _, _ in risky_files:
+                fc = self.git_tool.get_file_content(state.config.fork_ref, fp)
+                if fc is not None:
+                    fork_contents[fp] = fc
+
         async def _process_chunk(idx: int) -> list[JudgeIssue]:
-            return await self._review_files_batch_llm(chunks[idx], state)
+            return await self._review_files_batch_llm(
+                chunks[idx], state, fork_contents=fork_contents
+            )
 
         # U5: judge batches chunks risky_files by size, so each chunk's
         # file_path set should be disjoint from every other chunk's; assert
