@@ -63,6 +63,62 @@ def _validate_enum(value: str, enum_class: Any, field_name: str) -> str:
     )
 
 
+_SEMANTIC_COMPATIBILITY_VALUES: tuple[str, ...] = (
+    "compatible",
+    "incompatible",
+    "orthogonal",
+)
+_INTENT_DESCRIPTION_MIN_LEN = 10
+
+
+def _read_semantic_compatibility(
+    data: dict[str, Any],
+) -> tuple[str | None, list[str]]:
+    """Extract analyst's semantic_compatibility label, with warnings.
+
+    PR-B Slice 3: missing or unknown values are non-fatal — we record a
+    grounding_warning so the reviewer sees the gap without aborting the
+    round. Same channel as PR-A's fabrication warnings.
+    """
+    warnings: list[str] = []
+    raw = data.get("semantic_compatibility")
+    if raw is None:
+        warnings.append(
+            "semantic_compatibility missing from analyst output — "
+            "cannot tell if the two sides are compatible / incompatible / orthogonal."
+        )
+        return None, warnings
+    if not isinstance(raw, str) or raw not in _SEMANTIC_COMPATIBILITY_VALUES:
+        warnings.append(
+            f"semantic_compatibility value {raw!r} is not one of "
+            f"{_SEMANTIC_COMPATIBILITY_VALUES}; dropped to None."
+        )
+        return None, warnings
+    return raw, warnings
+
+
+def _check_intent_description_quality(upstream_desc: str, fork_desc: str) -> list[str]:
+    """Flag vague / boilerplate intent descriptions.
+
+    PR-B Slice 3: short descriptions are a strong signal the LLM didn't
+    actually engage with the diff (the "comparable changes" anti-pattern
+    seen on the zod E2E). We surface this to the reviewer rather than
+    silently accept it.
+    """
+    warnings: list[str] = []
+    if len(upstream_desc.strip()) < _INTENT_DESCRIPTION_MIN_LEN:
+        warnings.append(
+            f"upstream_intent.description is short/vague ({upstream_desc!r}) — "
+            "analyst likely did not engage with the specific change."
+        )
+    if len(fork_desc.strip()) < _INTENT_DESCRIPTION_MIN_LEN:
+        warnings.append(
+            f"fork_intent.description is short/vague ({fork_desc!r}) — "
+            "analyst likely did not engage with the specific change."
+        )
+    return warnings
+
+
 def _normalize_plan_judge_json(data: dict[str, Any]) -> dict[str, Any]:
     """Map non-standard LLM output keys to the expected schema."""
     if "result" not in data:
@@ -177,6 +233,11 @@ def parse_conflict_analysis(
     )
 
     sanitized_rationale = sanitize_hedging(data.get("rationale", ""))
+    semantic_compat, compat_warnings = _read_semantic_compatibility(data)
+    intent_warnings = _check_intent_description_quality(
+        upstream_intent.description, fork_intent.description
+    )
+    grounding_warnings = compat_warnings + intent_warnings
     conflict_point = ConflictPoint(
         file_path=file_path,
         hunk_id=str(uuid4()),
@@ -187,6 +248,7 @@ def parse_conflict_analysis(
         suggested_decision=recommended,
         confidence=confidence,
         rationale=sanitized_rationale,
+        semantic_compatibility=semantic_compat,  # type: ignore[arg-type]
     )
 
     return ConflictAnalysis(
@@ -199,6 +261,8 @@ def parse_conflict_analysis(
         is_security_sensitive=bool(data.get("is_security_sensitive", False)),
         rationale=sanitized_rationale,
         confidence=confidence,
+        grounding_warnings=grounding_warnings,
+        semantic_compatibility=semantic_compat,  # type: ignore[arg-type]
     )
 
 
@@ -554,6 +618,11 @@ def parse_commit_round_analyses(
             confidence=float(fk_data.get("confidence", 0.5)),
         )
         sanitized_rationale = sanitize_hedging(entry.get("rationale", ""))
+        semantic_compat, compat_warnings = _read_semantic_compatibility(entry)
+        intent_warnings = _check_intent_description_quality(
+            upstream_intent.description, fork_intent.description
+        )
+        grounding_warnings = compat_warnings + intent_warnings
         conflict_point = ConflictPoint(
             file_path=fp,
             hunk_id=str(_uuid4()),
@@ -564,6 +633,7 @@ def parse_commit_round_analyses(
             suggested_decision=recommended,
             confidence=confidence,
             rationale=sanitized_rationale,
+            semantic_compatibility=semantic_compat,  # type: ignore[arg-type]
         )
         result[fp] = ConflictAnalysis(
             file_path=fp,
@@ -575,6 +645,8 @@ def parse_commit_round_analyses(
             is_security_sensitive=bool(entry.get("is_security_sensitive", False)),
             rationale=sanitized_rationale,
             confidence=confidence,
+            grounding_warnings=grounding_warnings,
+            semantic_compatibility=semantic_compat,  # type: ignore[arg-type]
         )
 
     return result

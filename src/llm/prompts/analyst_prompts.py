@@ -132,7 +132,19 @@ def build_commit_round_prompt(
         + "\n\n".join(file_sections)
         + """
 
-For every file above provide a conflict analysis. Return JSON:
+For every file above provide a conflict analysis. Rationale and intent
+descriptions must be SPECIFIC — name the affected functions / fields /
+regions. Do NOT write boilerplate like "comparable small changes",
+"both sides made similar edits", "minor refactor". The
+`semantic_compatibility` field is REQUIRED and must be one of:
+  - "compatible"   — both edits address related concerns and CAN be
+                     combined (typical companion to semantic_merge)
+  - "incompatible" — the two edits contradict each other on the same
+                     contract / invariant; merge needs a human decision
+                     (forces escalate_human downstream)
+  - "orthogonal"   — the edits do not interact; either take_* is safe
+
+Return JSON:
 {
   "files": [
     {
@@ -141,6 +153,7 @@ For every file above provide a conflict analysis. Return JSON:
       "recommended_strategy": "take_target | take_current | semantic_merge | escalate_human",
       "confidence": 0.85,
       "can_coexist": true,
+      "semantic_compatibility": "compatible | incompatible | orthogonal",
       "is_security_sensitive": false,
       "rationale": "concise explanation",
       "upstream_intent": {"description": "...", "intent_type": "bugfix | refactor | feature | upgrade | config", "confidence": 0.9},
@@ -319,6 +332,22 @@ Analyze this conflict and output:
 5. recommended_strategy: take_current, take_target, semantic_merge, escalate_human
 6. confidence: overall confidence (0.0 to 1.0)
 7. rationale: reasoning explanation
+8. semantic_compatibility: required three-state field describing how the
+   two sides interact:
+   - "compatible"   — both edits address related concerns and CAN be
+                      combined (typical companion to semantic_merge)
+   - "incompatible" — the two edits contradict each other on the same
+                      contract / invariant; the merge needs a human
+                      decision (forces escalate_human downstream)
+   - "orthogonal"   — the edits do not interact (different fields,
+                      different code paths); either take_* is safe
+
+Rationale and intent descriptions must be SPECIFIC about the actual code
+changes — name the affected functions / fields / regions. Do NOT write
+boilerplate like "comparable small changes", "both sides made similar
+edits", "minor refactor". If the change really is trivial, say WHAT it
+is (e.g. "fork renamed `parseDate` to `parseISODate`; upstream added a
+`strict` parameter to the same function").
 
 Return JSON:
 {{
@@ -334,6 +363,7 @@ Return JSON:
     "confidence": 0.8
   }},
   "can_coexist": true,
+  "semantic_compatibility": "compatible | incompatible | orthogonal",
   "recommended_strategy": "semantic_merge",
   "confidence": 0.75,
   "rationale": "Detailed explanation of the analysis and recommendation",

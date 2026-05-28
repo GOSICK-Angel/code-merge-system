@@ -200,6 +200,7 @@ def serialize_human_request(req: Any) -> dict[str, Any]:
         "related_files": list(getattr(req, "related_files", []) or []),
         "grounding_warnings": list(getattr(req, "grounding_warnings", []) or []),
         "required_new_apis": list(getattr(req, "required_new_apis", []) or []),
+        "semantic_compatibility": getattr(req, "semantic_compatibility", None),
     }
 
 

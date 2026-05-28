@@ -210,6 +210,9 @@ def _select_merge_strategy(
     if analysis.is_security_sensitive:
         return MergeDecision.ESCALATE_HUMAN
 
+    if analysis.semantic_compatibility == "incompatible":
+        return MergeDecision.ESCALATE_HUMAN
+
     if analysis.conflict_type == ConflictType.LOGIC_CONTRADICTION:
         if analysis.confidence < 0.90:
             return MergeDecision.ESCALATE_HUMAN
@@ -403,6 +406,7 @@ def _build_human_decision_request(
         is_god_node=impact_hint.is_god_node if impact_hint else False,
         grounding_warnings=list(analysis.grounding_warnings),
         required_new_apis=list(analysis.required_new_apis),
+        semantic_compatibility=analysis.semantic_compatibility,
     )
 
 

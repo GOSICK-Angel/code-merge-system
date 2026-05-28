@@ -1,8 +1,10 @@
 from datetime import datetime
 from uuid import uuid4
+
 from pydantic import BaseModel, Field
+
+from src.models.conflict import ConflictPoint, SemanticCompatibility
 from src.models.decision import MergeDecision
-from src.models.conflict import ConflictPoint
 
 
 class DecisionOption(BaseModel):
@@ -41,3 +43,4 @@ class HumanDecisionRequest(BaseModel):
     is_god_node: bool = False
     grounding_warnings: list[str] = Field(default_factory=list)
     required_new_apis: list[str] = Field(default_factory=list)
+    semantic_compatibility: SemanticCompatibility | None = None

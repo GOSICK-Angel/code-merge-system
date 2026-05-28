@@ -523,6 +523,54 @@ export function ConflictResolution({ clientRef }: Props): JSX.Element {
                   </div>
                 </div>
               </div>
+              {current.semantic_compatibility && (
+                <div style={{ marginTop: 8 }}>
+                  <span
+                    style={{
+                      display: "inline-block",
+                      padding: "2px 8px",
+                      fontSize: 10,
+                      fontWeight: 600,
+                      letterSpacing: 0.5,
+                      textTransform: "uppercase",
+                      borderRadius: 3,
+                      color: (
+                        {
+                          compatible: "#15803d",
+                          incompatible: "#b91c1c",
+                          orthogonal: "#525252",
+                        } as const
+                      )[current.semantic_compatibility],
+                      background: (
+                        {
+                          compatible: "rgba(21, 128, 61, 0.12)",
+                          incompatible: "rgba(185, 28, 28, 0.12)",
+                          orthogonal: "rgba(82, 82, 82, 0.12)",
+                        } as const
+                      )[current.semantic_compatibility],
+                      border: `1px solid ${
+                        (
+                          {
+                            compatible: "#15803d",
+                            incompatible: "#b91c1c",
+                            orthogonal: "#525252",
+                          } as const
+                        )[current.semantic_compatibility]
+                      }`,
+                    }}
+                  >
+                    {
+                      (
+                        {
+                          compatible: "✓ compatible",
+                          incompatible: "✗ incompatible",
+                          orthogonal: "⊥ orthogonal",
+                        } as const
+                      )[current.semantic_compatibility]
+                    }
+                  </span>
+                </div>
+              )}
               {current.analyst_rationale && (
                 <div className="intent-rationale">
                   <div className="intent-label">why this recommendation</div>

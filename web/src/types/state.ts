@@ -107,6 +107,7 @@ export interface HumanDecisionRequest {
   related_files: string[];
   grounding_warnings?: string[];
   required_new_apis?: string[];
+  semantic_compatibility?: "compatible" | "incompatible" | "orthogonal";
 }
 
 export type JudgeIssueSeverity =

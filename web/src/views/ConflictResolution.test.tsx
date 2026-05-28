@@ -446,3 +446,60 @@ describe("ConflictResolution grounding warnings (PR-A)", () => {
     expect(container.textContent ?? "").not.toMatch(/unverified symbols?/i);
   });
 });
+
+// PR-B Slice 5: semantic_compatibility chip exposes the analyst's
+// three-state interaction verdict directly above the rationale, so the
+// reviewer sees "incompatible" before reading the recommendation.
+describe("ConflictResolution semantic_compatibility chip (PR-B)", () => {
+  const renderWith = (
+    value: "compatible" | "incompatible" | "orthogonal" | undefined,
+  ) => {
+    const snapshot: MergeStateSnapshot = {
+      ...baseSnapshot,
+      humanDecisionRequests: {
+        "a.py": {
+          ...baseSnapshot.humanDecisionRequests["a.py"],
+          semantic_compatibility: value,
+        },
+      },
+    };
+    useRunStore.setState({ snapshot });
+    act(() => useConflictDraftStore.getState().selectFile("a.py"));
+    const ref = makeClientRef();
+    return render(
+      <ConflictResolution
+        clientRef={
+          ref as unknown as React.MutableRefObject<
+            ReturnType<typeof useWsClient>["current"]
+          >
+        }
+      />,
+    );
+  };
+
+  it("renders a green compatible chip", () => {
+    const { container } = renderWith("compatible");
+    expect(container.textContent ?? "").toMatch(/compatible/i);
+  });
+
+  it("renders a red incompatible chip", () => {
+    const { container } = renderWith("incompatible");
+    expect(container.textContent ?? "").toMatch(/incompatible/i);
+  });
+
+  it("renders a grey orthogonal chip", () => {
+    const { container } = renderWith("orthogonal");
+    expect(container.textContent ?? "").toMatch(/orthogonal/i);
+  });
+
+  it("does not render the chip when semantic_compatibility is absent", () => {
+    const { container } = renderWith(undefined);
+    const text = container.textContent ?? "";
+    // The trichotomy words appear nowhere on the page when missing —
+    // not in prompts, not in chips. Guards against silently rendering
+    // a "compatible" default.
+    expect(text).not.toMatch(/^\s*compatible\b/im);
+    expect(text).not.toMatch(/\bincompatible\b/i);
+    expect(text).not.toMatch(/\borthogonal\b/i);
+  });
+});
