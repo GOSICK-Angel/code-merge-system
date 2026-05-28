@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 from src.llm.client import ParseError
+from src.llm.rationale_sanitizer import sanitize_hedging
 from src.models.plan_judge import PlanJudgeVerdict, PlanJudgeResult, PlanIssue
 from src.models.conflict import (
     ConflictAnalysis,
@@ -165,16 +166,17 @@ def parse_conflict_analysis(
     fork_data = data.get("fork_intent", {})
 
     upstream_intent = ChangeIntent(
-        description=upstream_data.get("description", ""),
+        description=sanitize_hedging(upstream_data.get("description", "")),
         intent_type=upstream_data.get("intent_type", "unknown"),
         confidence=float(upstream_data.get("confidence", 0.5)),
     )
     fork_intent = ChangeIntent(
-        description=fork_data.get("description", ""),
+        description=sanitize_hedging(fork_data.get("description", "")),
         intent_type=fork_data.get("intent_type", "unknown"),
         confidence=float(fork_data.get("confidence", 0.5)),
     )
 
+    sanitized_rationale = sanitize_hedging(data.get("rationale", ""))
     conflict_point = ConflictPoint(
         file_path=file_path,
         hunk_id=str(uuid4()),
@@ -184,7 +186,7 @@ def parse_conflict_analysis(
         can_coexist=bool(data.get("can_coexist", False)),
         suggested_decision=recommended,
         confidence=confidence,
-        rationale=data.get("rationale", ""),
+        rationale=sanitized_rationale,
     )
 
     return ConflictAnalysis(
@@ -195,7 +197,7 @@ def parse_conflict_analysis(
         conflict_type=conflict_type,
         can_coexist=bool(data.get("can_coexist", False)),
         is_security_sensitive=bool(data.get("is_security_sensitive", False)),
-        rationale=data.get("rationale", ""),
+        rationale=sanitized_rationale,
         confidence=confidence,
     )
 
@@ -542,15 +544,16 @@ def parse_commit_round_analyses(
         up_data = entry.get("upstream_intent", {})
         fk_data = entry.get("fork_intent", {})
         upstream_intent = ChangeIntent(
-            description=up_data.get("description", ""),
+            description=sanitize_hedging(up_data.get("description", "")),
             intent_type=up_data.get("intent_type", "unknown"),
             confidence=float(up_data.get("confidence", 0.5)),
         )
         fork_intent = ChangeIntent(
-            description=fk_data.get("description", ""),
+            description=sanitize_hedging(fk_data.get("description", "")),
             intent_type=fk_data.get("intent_type", "unknown"),
             confidence=float(fk_data.get("confidence", 0.5)),
         )
+        sanitized_rationale = sanitize_hedging(entry.get("rationale", ""))
         conflict_point = ConflictPoint(
             file_path=fp,
             hunk_id=str(_uuid4()),
@@ -560,7 +563,7 @@ def parse_commit_round_analyses(
             can_coexist=bool(entry.get("can_coexist", False)),
             suggested_decision=recommended,
             confidence=confidence,
-            rationale=entry.get("rationale", ""),
+            rationale=sanitized_rationale,
         )
         result[fp] = ConflictAnalysis(
             file_path=fp,
@@ -570,7 +573,7 @@ def parse_commit_round_analyses(
             conflict_type=conflict_type,
             can_coexist=bool(entry.get("can_coexist", False)),
             is_security_sensitive=bool(entry.get("is_security_sensitive", False)),
-            rationale=entry.get("rationale", ""),
+            rationale=sanitized_rationale,
             confidence=confidence,
         )
 
