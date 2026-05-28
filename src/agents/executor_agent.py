@@ -542,6 +542,9 @@ class ExecutorAgent(BaseAgent):
         from src.tools.duplicate_symbol_check import (
             remove_duplicate_top_level_symbols,
         )
+        from src.tools.hallucinated_symbol_guard import (
+            find_invented_member_accesses,
+        )
 
         file_path = file_diff.file_path
         chunk_size = state.config.chunk_size_chars
@@ -627,6 +630,24 @@ class ExecutorAgent(BaseAgent):
                 f"SEMANTIC_MERGE_INFIDELITY: chunked merge output introduced "
                 f"character(s) {foreign!r} present in neither fork nor "
                 f"upstream — likely LLM corruption of an opaque blob.",
+            )
+        invented_refs = find_invented_member_accesses(
+            merged_content, [current_content, target_content], file_path
+        )
+        if invented_refs:
+            logger.warning(
+                "Chunked merge for %s references symbol(s) %s absent from both "
+                "sources — likely hallucinated; escalating",
+                file_path,
+                invented_refs,
+            )
+            return create_escalate_record(
+                file_path,
+                f"SEMANTIC_MERGE_INFIDELITY: chunked merge introduced "
+                f"cross-module reference(s) {invented_refs} present in neither "
+                f"fork nor upstream — likely a hallucinated symbol (the analyst "
+                f"may have pre-warned a new dependency is required). Escalating "
+                f"for human resolution.",
             )
         current_phase_str = (
             state.current_phase.value
