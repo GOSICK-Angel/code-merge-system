@@ -257,3 +257,66 @@ Acceptance: CPC ≥ 85%。低于阈值意味着结论强依赖具体模型，不
 | DET 低 | 结论靠运气 | 复查温度参数 / 模型路由 / cache 设置 |
 
 任何单一指标都可能被 game。Acceptance 用复合阈值（见 acceptance.md）。
+
+---
+
+## 8. 确定性产物校验门槛（LLM-free，0527 批次落地）
+
+这一组指标全部由确定性静态检查产出，不依赖 LLM、不依赖 Ground Truth，可在每次
+run 末尾直接计算。它们对应 0527 修复批次，目的是"产物可证伪即不放行"——把曾经
+"无法编译却 COMPLETED"的失败模式转成显式信号。
+
+> 信号通路：report 阶段的 finding 写入 `state.errors` → `ci_reporter.build_ci_summary`
+> 把 COMPLETED 降为 `partial_failure`（退出码 `EXIT_PARTIAL_FAILURE=30`）；judge 阶段
+> 的确定性 veto 直接把 verdict 拉到 FAIL（`parse_judge_verdict` 由 issue 计数决定，
+> 忽略 LLM）。
+
+### 8.1 重复顶层符号数（Duplicate Top-level Symbols, DUP）
+
+```
+DUP = Σ_f  | 文件 f 中声明 >1 次的顶层 value 符号 |
+```
+
+数据源：`duplicate_symbol_check.find_duplicate_symbols` 跑遍 merged 产物。三道防线
+共同保证 DUP=0：executor `remove_duplicate_top_level_symbols` 接缝去重（方案3.1）、
+judge 确定性 veto（方案5）、report 校验聚合（方案2）。Acceptance: **DUP = 0**。
+
+### 8.2 加性导出保留率（Additive Export Retention, AERR）
+
+```
+AERR = | { fork 新增的顶层导出符号 s : s 仍存在于 merged 产物 } | / | fork 新增导出符号总数 |
+```
+
+数据源：`feature_preservation.added_exported_symbols` / `missing_symbols`（base→fork
+diff 得到 fork 新增导出，断言其在 merged 中存活）。覆盖"regexes.ts 丢 cidrv6Mapped 仍
+PASS"的假 PASS。Acceptance: **AERR = 100%**。
+
+### 8.3 幻觉跨模块引用数（Hallucinated Member Accesses, HMR）
+
+```
+HMR = Σ_f  | merged 中 base.member 引用：两源都无该引用且 base. 在某源出现 |
+```
+
+数据源：`hallucinated_symbol_guard.find_invented_member_accesses`（方案3.2）。命中即
+executor 升级人工。覆盖"捏造 core._isoWeek"。Acceptance: **HMR = 0**（命中必须以 H=true
+体现，而非静默提交）。
+
+### 8.4 未决升级零丢弃（Dropped Escalations, DESC）
+
+```
+DESC = | { f : 决策仍 ESCALATE_HUMAN 且 source≠HUMAN 且 f 从未进人工闸口 } |
+```
+
+数据源：report 阶段 `_assert_no_dropped_escalations`（方案6 part2）。覆盖"内部
+escalate(0.0) 文件绕过闸口静默丢失"。Acceptance: **DESC = 0**（用户在闸口主动跳过的
+不计入）。
+
+### 8.5 编译门禁通过率（Build-Check Pass Rate, BCP）
+
+```
+BCP = | 配置了 build_check 且退出码 0 的 run | / | 配置了 build_check 的 run |
+```
+
+数据源：judge 阶段 `_run_build_check`（command 由 setup 自动探测填充，方案1）。非零退出
+把 Judge PASS 降级 FAIL+veto。Acceptance（Soft）: **BCP = 100%**（仅统计已配置 command 的
+run；未探测到工具链的目标不计入分母）。

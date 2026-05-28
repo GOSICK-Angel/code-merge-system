@@ -18,6 +18,10 @@
 | `Recall_Mi` 任一类语义丢失召回 | **≥ 95%** | Tier-3 | 6 类各自分别校验 |
 | `RR` 报告完整率 | **= 100%** | 全量 | plan / merge_report / plan_review 三份齐全 |
 | `RCR` Rationale 完整率 | **= 100%** | 全量 | rationale ≥ 30 字符 |
+| `DUP` 重复顶层符号数 | **= 0** | 全量（merged 产物，确定性）| metrics §8.1；接缝去重 + judge veto 双保险 |
+| `AERR` 加性导出保留率 | **= 100%** | 全量（base→fork 新增导出）| metrics §8.2；fork 新增导出不得丢失 |
+| `HMR` 幻觉跨模块引用数 | **= 0** | 全量（确定性）| metrics §8.3；命中须 H=true 而非静默提交 |
+| `DESC` 未决升级丢弃数 | **= 0** | 全量（确定性）| metrics §8.4；绕过闸口的 escalate 不得静默丢 |
 
 ---
 
@@ -34,6 +38,7 @@
 | `cost_usd_per_run` P95 | **≤ 上一基线 × 1.15** | 全量 | 防止成本悄悄回退 |
 | `wall_time_seconds` P95 | **≤ 上一基线 × 1.20** | 全量 | |
 | `P95 plan_revision_rounds` | **≤ `max_plan_revision_rounds - 1`** | 全量 | 见 metrics.md §4.4 |
+| `BCP` 编译门禁通过率 | **= 100%** | 配置了 build_check 的 run | metrics §8.5；未探测到工具链的目标不计入分母 |
 
 ---
 
