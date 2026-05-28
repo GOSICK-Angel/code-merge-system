@@ -10,6 +10,7 @@ from src.core.phases._gate_helpers import (
     run_gates,
 )
 from src.core.read_only_state_view import ReadOnlyStateView
+from src.models.decision import DecisionSource
 from src.models.judge import (
     IssueSeverity,
     IssueResolvability,
@@ -21,6 +22,11 @@ from src.models.plan import MergePhase
 from src.models.state import MergeState, PhaseResult, SystemStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _is_human_decided(state: MergeState, file_path: str) -> bool:
+    record = state.file_decision_records.get(file_path)
+    return record is not None and record.decision_source == DecisionSource.HUMAN
 
 
 class JudgeReviewPhase(Phase):
@@ -112,13 +118,29 @@ class JudgeReviewPhase(Phase):
                     r for r in rebuttal.repair_instructions if r.is_repairable
                 ]
                 if repairable and round_num < max_rounds - 1:
+                    non_human_repairable = [
+                        r
+                        for r in repairable
+                        if not _is_human_decided(state, r.file_path)
+                    ]
+                    if not non_human_repairable:
+                        logger.info(
+                            "All %d repair target(s) are operator-decided "
+                            "(executor.repair would no-op them); "
+                            "short-circuiting further Judge rounds",
+                            len(repairable),
+                        )
+                        break
                     logger.info(
-                        "Executor accepts all issues; repairing %d items (round %d/%d)",
+                        "Executor accepts all issues; repairing %d/%d items "
+                        "(round %d/%d; %d human-locked skipped)",
+                        len(non_human_repairable),
                         len(repairable),
                         round_num + 1,
                         max_rounds,
+                        len(repairable) - len(non_human_repairable),
                     )
-                    await executor.repair(repairable, state)
+                    await executor.repair(non_human_repairable, state)
                     ctx.checkpoint.save(state, f"phase5_repair_{round_num}")
                 continue
 
