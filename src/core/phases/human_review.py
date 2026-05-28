@@ -80,6 +80,35 @@ class HumanReviewPhase(Phase):
         # decidable in-run; the O-L4 guard then holds AWAITING_HUMAN until decided.
         _surface_internal_escalations(state)
 
+        # Bug 1 fix (zod validation, 2026-05-28): surfaced items that come
+        # back with user_choice filled must be actualized here. Without this,
+        # the run path (resume answers plan + conflict rounds, Case 1 fires,
+        # transitions to JUDGE_REVIEWING) never re-enters AUTO_MERGING — so
+        # the O-L5 dispatcher in auto_merge.py never fires and the underlying
+        # FileDecisionRecord stays ESCALATE_HUMAN/auto_executor. The DROPPED
+        # backstop catches it as partial_failure, but the user's take_target
+        # answer was effectively lost. Dispatch surfaced + decided items here.
+        from src.tools.user_choice_dispatcher import dispatch_user_choice
+
+        surfaced_decided = [
+            it
+            for it in state.pending_user_decisions
+            if it.risk_context == "internal_escalation" and it.user_choice is not None
+        ]
+        if surfaced_decided:
+            dispatched = await dispatch_user_choice(
+                state,
+                ctx.git_tool,
+                surfaced_decided,
+                phase="human_review",
+            )
+            if dispatched:
+                logger.info(
+                    "Bug-1 fix: dispatched %d surfaced internal-escalation "
+                    "user_choice(s) to FileDecisionRecord",
+                    len(dispatched),
+                )
+
         # O-6: if conflict decisions are still pending, go to Case 1 first.
         _has_pending_conflict_decisions = bool(
             state.human_decision_requests
