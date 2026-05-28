@@ -316,6 +316,7 @@ class JudgeAgent(BaseAgent):
             max_content_chars=max_content_chars,
             memory_context=memory_context,
             check_strategy=check_strategy,
+            fork_content=fork_content,
         )
         messages = [{"role": "user", "content": prompt}]
 

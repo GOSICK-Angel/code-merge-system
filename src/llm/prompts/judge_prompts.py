@@ -22,6 +22,24 @@ def _memory_section(memory_context: str) -> str:
     return f"\n{memory_context}\n\n"
 
 
+def _fork_section(
+    fork_content: str | None,
+    merged_content: str,
+    language: str,
+    max_content_chars: int | None,
+) -> str:
+    if fork_content is None or fork_content == merged_content:
+        return ""
+    return (
+        f"\n# Fork Original (pre-merge content of this file on fork_ref)\n"
+        f"Use this to distinguish intentional fork customisations (e.g. \n"
+        f"fork-only fields, renamed identifiers) from real merge defects.\n"
+        f"```{language}\n"
+        f"{_truncate_content(fork_content, max_content_chars)}\n"
+        f"```\n"
+    )
+
+
 _UPSTREAM_MATCH_TASKS = """\
 1. Check for remaining conflict markers (<<<<<<, =======, >>>>>>>)
 2. Check that the merged result matches the upstream version — no upstream features missing
@@ -60,6 +78,7 @@ def build_file_review_prompt(
     max_content_chars: int | None = None,
     memory_context: str = "",
     check_strategy: "JudgeCheckStrategy | None" = None,
+    fork_content: str | None = None,
 ) -> str:
     language = original_diff.language or "unknown"
     decision_val = (
@@ -71,6 +90,10 @@ def build_file_review_prompt(
         decision_record.decision_source.value
         if hasattr(decision_record.decision_source, "value")
         else decision_record.decision_source
+    )
+
+    fork_section = _fork_section(
+        fork_content, merged_content, language, max_content_chars
     )
 
     return f"""Review the following merged file for correctness and completeness.
@@ -96,7 +119,7 @@ Language: {language}
 ```{language}
 {_truncate_content(merged_content, max_content_chars)}
 ```
-{_memory_section(memory_context)}
+{fork_section}{_memory_section(memory_context)}
 # Review Tasks
 {_review_tasks_section(check_strategy)}
 
