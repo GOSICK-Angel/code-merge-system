@@ -1251,6 +1251,10 @@ class AutoMergePhase(Phase):
                     seen.add(loss.file_path)
 
         if unhandled_conflict_files:
+            unhandled_conflict_files = self._filter_phantom_files(
+                unhandled_conflict_files, state, ctx
+            )
+
             fork_only_stripped: list[str] = []
             filtered_conflict_files: list[str] = []
             for fp in unhandled_conflict_files:
@@ -1518,6 +1522,65 @@ class AutoMergePhase(Phase):
                 blast_radius=_hint.impact_radius,
                 is_god_node=_hint.is_god_node,
             )
+
+    def _filter_phantom_files(
+        self,
+        unhandled: list[str],
+        state: MergeState,
+        ctx: PhaseContext,
+    ) -> list[str]:
+        """Strip phantom files — paths absent from BOTH upstream and fork HEADs.
+
+        A non-replayable commit may name a file that was added then deleted
+        within the upstream window (and that the fork never adopted). Routing
+        such a path to conflict_analysis synthesizes a two-sided-None FileDiff,
+        which the analyst hallucinates as "no changes / take_target"; executor
+        then escalates with "Could not fetch target content", leaving the file
+        stuck at the human gate. Detect the case here and emit a SKIP record
+        instead so the path never reaches the analyst.
+
+        Returns the input list with phantom paths removed.
+        """
+        if ctx.git_tool is None:
+            return unhandled
+
+        phantom: list[str] = []
+        kept: list[str] = []
+        for fp in unhandled:
+            upstream_has = ctx.git_tool.file_exists_at_ref(
+                state.config.upstream_ref, fp
+            )
+            fork_has = ctx.git_tool.file_exists_at_ref(state.config.fork_ref, fp)
+            if not upstream_has and not fork_has:
+                phantom.append(fp)
+            else:
+                kept.append(fp)
+
+        if phantom:
+            logger.info(
+                "Filtered %d phantom file(s) absent from both upstream and "
+                "fork HEAD (upstream add-then-delete within window; fork "
+                "never adopted) — emitting SKIP records; sample=%s",
+                len(phantom),
+                phantom[:5],
+            )
+            for fp in phantom:
+                state.file_decision_records[fp] = FileDecisionRecord(
+                    file_path=fp,
+                    file_status=FileStatus.DELETED,
+                    decision=MergeDecision.SKIP,
+                    decision_source=DecisionSource.AUTO_EXECUTOR,
+                    confidence=1.0,
+                    rationale=(
+                        "Phantom file: absent from both upstream and fork "
+                        "HEAD (upstream add-then-delete within window + "
+                        "fork already absent) — no-op."
+                    ),
+                    phase="auto_merge",
+                    agent="phantom_filter",
+                    timestamp=datetime.now(),
+                )
+        return kept
 
     async def _b_class_sanity_check(
         self,
