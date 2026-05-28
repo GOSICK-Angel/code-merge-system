@@ -88,6 +88,7 @@ async def _analyze_round_with_bisect(
     per_file_instructions: dict[str, str] | None = None,
     max_depth: int = 2,
     _depth: int = 0,
+    fork_ref: str | None = None,
 ) -> dict[str, ConflictAnalysis]:
     """Run analyze_commit_round; if it returns 0 analyses for a multi-commit
     round, recursively bisect the commit list and merge results. Bounded by
@@ -99,6 +100,7 @@ async def _analyze_round_with_bisect(
         file_languages,
         project_context=project_context,
         per_file_instructions=per_file_instructions,
+        fork_ref=fork_ref,
     )
 
     can_bisect = _depth < max_depth and len(round_commits) >= 2
@@ -135,6 +137,7 @@ async def _analyze_round_with_bisect(
             per_file_instructions=per_file_instructions,
             max_depth=max_depth,
             _depth=_depth + 1,
+            fork_ref=fork_ref,
         )
         merged.update(sub_analyses)
     return merged
@@ -695,6 +698,7 @@ class ConflictAnalysisPhase(Phase):
                     file_languages,
                     project_context=state.config.project_context,
                     per_file_instructions=per_file_instructions or None,
+                    fork_ref=state.config.fork_ref,
                 )
                 parsed_count = len(analyses)
                 requested_count = len(round_llm_files)
@@ -812,6 +816,7 @@ class ConflictAnalysisPhase(Phase):
                         state.config.dependency_graph.god_node_min_dependents
                     ),
                 ),
+                fork_ref=state.config.fork_ref,
             )
             state.conflict_analyses[file_path] = analysis
 

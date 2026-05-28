@@ -65,6 +65,7 @@ def build_commit_round_prompt(
     file_three_way: dict[str, tuple[str | None, str | None, str | None]],
     file_languages: dict[str, str],
     project_context: str = "",
+    imported_symbols_by_file: dict[str, dict[str, list[str]]] | None = None,
 ) -> str:
     commit_summary = "\n".join(
         f"  - {c['sha'][:8]}: {c.get('message', '')}  ({len(c.get('files', []))} files)"
@@ -98,8 +99,23 @@ def build_commit_round_prompt(
             if upstream_diff
             else "*(upstream made no changes vs merge-base)*"
         )
+        surface = (
+            (imported_symbols_by_file or {}).get(fp)
+            if imported_symbols_by_file
+            else None
+        )
+        surface_section = ""
+        if surface:
+            surface_lines = ["### Imported Symbol Surface"]
+            for path, names in surface.items():
+                if names:
+                    surface_lines.append(f"- `{path}` exports: {', '.join(names)}")
+                else:
+                    surface_lines.append(f"- `{path}` exports: (no exports detected)")
+            surface_section = "\n".join(surface_lines) + "\n"
         file_sections.append(
             f"## {fp}  (language: {lang})\n"
+            f"{surface_section}"
             f"### Fork changes (merge-base → fork)\n{fork_block}\n"
             f"### Upstream changes (merge-base → upstream)\n{upstream_block}"
         )
@@ -175,12 +191,42 @@ Prefer recommendations that combine symbols already present on either
 side over recommendations that need new API surface."""
 
 
+def _format_imported_symbol_surface(
+    imported_symbols: dict[str, list[str]] | None,
+) -> str:
+    """Render the analyst's view of what each namespace import exposes.
+
+    PR-D-B: pairs with the GROUNDING RULES (PR-D-A) — the rules tell
+    the LLM not to fabricate, this block tells it what it may use.
+    Empty input renders the empty string so existing callers see no
+    behaviour change.
+    """
+    if not imported_symbols:
+        return ""
+    lines = [
+        "# Imported Symbol Surface",
+        (
+            "These are the symbols each imported module actually exposes "
+            "(read at the same ref as the diff above). A name not in this "
+            "list does not exist on that module — do not reference it; if "
+            "you genuinely need it, use REQUIRES NEW API."
+        ),
+    ]
+    for path, names in imported_symbols.items():
+        if names:
+            lines.append(f"- `{path}` exports: {', '.join(names)}")
+        else:
+            lines.append(f"- `{path}` exports: (no exports detected)")
+    return "\n".join(lines) + "\n"
+
+
 def build_conflict_analysis_prompt(
     file_diff: FileDiff,
     base_content: str | None,
     current_content: str | None,
     target_content: str | None,
     project_context: str,
+    imported_symbols: dict[str, list[str]] | None = None,
 ) -> str:
     language = file_diff.language or "unknown"
     base_section = (
@@ -235,6 +281,8 @@ def build_conflict_analysis_prompt(
                 f"take_current if one side's change clearly subsumes the other."
             )
 
+    surface_block = _format_imported_symbol_surface(imported_symbols)
+
     return f"""Analyze this Git merge conflict and provide a structured analysis.
 
 # Project Context
@@ -250,7 +298,7 @@ Conflict count: {file_diff.conflict_count}
 # Change-volume signal
 {size_signal}
 
-# Three-way Diff
+{surface_block}# Three-way Diff
 
 ## Common ancestor version (merge-base)
 {base_section}

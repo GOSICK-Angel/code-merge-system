@@ -48,6 +48,16 @@ class TestExtractRequiredNewApis:
         rationale = "REQUIRES NEW API: schemas.$ZodISOWeek for the class."
         assert extract_required_new_apis(rationale) == ["schemas.$ZodISOWeek"]
 
+    def test_backtick_wrapped_symbol(self) -> None:
+        # Observed in zod E2E: the LLM tends to wrap the symbol in
+        # backticks (markdown code style) — the extractor must look
+        # through the wrapping rather than treating the backtick as
+        # part of the name.
+        rationale = (
+            "REQUIRES NEW API: `core._isoWeek` — needed to follow upstream's pattern."
+        )
+        assert extract_required_new_apis(rationale) == ["core._isoWeek"]
+
     def test_duplicate_sentinels_deduped(self) -> None:
         rationale = (
             "REQUIRES NEW API: core._isoWeek — first mention.\n"

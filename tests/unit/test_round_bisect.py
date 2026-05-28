@@ -27,6 +27,7 @@ class _FakeAnalyst:
         file_languages,
         project_context: str = "",
         per_file_instructions=None,
+        fork_ref=None,
     ):
         self.call_count += 1
         if self.fail_when(round_commits):

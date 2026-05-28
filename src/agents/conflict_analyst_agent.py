@@ -27,6 +27,7 @@ from src.tools.chunk_processor import split_by_semantic_boundary
 from src.tools.forks_profile_loader import format_analyst_context
 from src.tools.git_tool import GitTool
 from src.tools.hallucinated_symbol_guard import scan_rationale_for_hallucinations
+from src.tools.import_symbol_harvester import harvest_imports_for_file
 from src.tools.required_new_apis import extract_required_new_apis
 
 
@@ -178,6 +179,7 @@ class ConflictAnalystAgent(BaseAgent):
         min_chunked_confidence: float | None = None,
         referenced_names: frozenset[str] = frozenset(),
         impact_hint: DependencyImpactHint | None = None,
+        fork_ref: str | None = None,
     ) -> ConflictAnalysis:
         # U1.A: build_staged_content runs regardless of memory_store
         # availability. Only the memory-text injection remains gated.
@@ -244,6 +246,12 @@ class ConflictAnalystAgent(BaseAgent):
                     if min_chunked_confidence is not None
                     else 0.85
                 ),
+                imported_symbols=_safe_harvest(
+                    file_diff.file_path,
+                    original_current,
+                    fork_ref,
+                    self.git_tool,
+                ),
             )
             return _with_grounding_warnings(
                 chunked, original_current, original_target, file_diff.file_path
@@ -283,12 +291,17 @@ class ConflictAnalystAgent(BaseAgent):
                 referenced_names=referenced_names,
             )
 
+        imported_symbols = _safe_harvest(
+            file_diff.file_path, original_current, fork_ref, self.git_tool
+        )
+
         prompt = build_conflict_analysis_prompt(
             file_diff,
             base_content,
             current_content,
             target_content,
             enriched_context,
+            imported_symbols=imported_symbols,
         )
         messages = [{"role": "user", "content": prompt}]
 
@@ -324,6 +337,7 @@ class ConflictAnalystAgent(BaseAgent):
         *,
         chunk_size: int,
         min_chunked_confidence: float,
+        imported_symbols: dict[str, list[str]] | None = None,
     ) -> ConflictAnalysis:
         """Split large file into chunks, fan-out LLM calls, aggregate deterministically."""
         file_path = file_diff.file_path
@@ -370,6 +384,7 @@ class ConflictAnalystAgent(BaseAgent):
                 cur_chunk,
                 tgt_chunk,
                 enriched_context,
+                imported_symbols=imported_symbols,
             )
             messages = [{"role": "user", "content": prompt}]
             raw = await self._call_llm_with_retry(messages, system=ANALYST_SYSTEM)
@@ -471,12 +486,23 @@ class ConflictAnalystAgent(BaseAgent):
         file_languages: dict[str, str],
         project_context: str = "",
         per_file_instructions: dict[str, str] | None = None,
+        fork_ref: str | None = None,
     ) -> dict[str, "ConflictAnalysis"]:
         if not file_three_way:
             return {}
 
+        imported_symbols_by_file: dict[str, dict[str, list[str]]] = {}
+        for fp, (_, fork_c, _) in file_three_way.items():
+            harvested = _safe_harvest(fp, fork_c, fork_ref, self.git_tool)
+            if harvested:
+                imported_symbols_by_file[fp] = harvested
+
         prompt = build_commit_round_prompt(
-            round_commits, file_three_way, file_languages, project_context
+            round_commits,
+            file_three_way,
+            file_languages,
+            project_context,
+            imported_symbols_by_file=imported_symbols_by_file or None,
         )
         file_paths = list(file_three_way.keys())
 
@@ -590,6 +616,25 @@ class ConflictAnalystAgent(BaseAgent):
         from src.models.state import SystemStatus
 
         return state.status == SystemStatus.ANALYZING_CONFLICTS
+
+
+def _safe_harvest(
+    file_path: str,
+    source_content: str | None,
+    ref: str | None,
+    git_tool: Any,
+) -> dict[str, list[str]]:
+    """PR-D-B: prompt-time view of which symbols each namespace import
+    exposes. Any failure (missing ref/tool, parse glitch, git read
+    error) degrades to ``{}`` — analysis must never fail because of
+    best-effort prompt context.
+    """
+    if not source_content or not ref or git_tool is None:
+        return {}
+    try:
+        return harvest_imports_for_file(file_path, source_content, ref, git_tool)
+    except Exception:
+        return {}
 
 
 def _with_grounding_warnings(

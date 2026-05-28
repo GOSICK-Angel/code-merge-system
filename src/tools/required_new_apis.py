@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 
-_SENTINEL = re.compile(r"REQUIRES NEW API:\s*([A-Za-z_$][\w$.]*)")
+_SENTINEL = re.compile(r"REQUIRES NEW API:\s*[`'\"]?\s*([A-Za-z_$][\w$.]*)")
 
 
 def extract_required_new_apis(rationale: str) -> list[str]:
