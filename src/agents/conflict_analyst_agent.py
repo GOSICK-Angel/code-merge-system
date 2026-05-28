@@ -26,6 +26,8 @@ from src.models.forks_profile import ForksProfile
 from src.tools.chunk_processor import split_by_semantic_boundary
 from src.tools.forks_profile_loader import format_analyst_context
 from src.tools.git_tool import GitTool
+from src.tools.diff_facts import DiffFacts, compute_diff_facts
+from src.tools.diff_facts_grounding import check_rationale_against_facts
 from src.tools.hallucinated_symbol_guard import scan_rationale_for_hallucinations
 from src.tools.import_symbol_harvester import harvest_imports_for_file
 from src.tools.required_new_apis import extract_required_new_apis
@@ -228,6 +230,12 @@ class ConflictAnalystAgent(BaseAgent):
         original_current = current_content or ""
         original_target = target_content or ""
 
+        # PR-C: deterministic per-side verb counts derived from the full
+        # untrimmed three-way content. Injected into the prompt so the LLM
+        # sees ground truth and used post-hoc to flag rationale verbs that
+        # contradict those facts.
+        diff_facts = compute_diff_facts(base_content, original_current, original_target)
+
         # U1: chunked path when either side exceeds chunk_size_chars * 2
         # (default 40KB). Reuses src/tools/chunk_processor.split_by_semantic_boundary
         # (facts.md D2 / plan P1-2).
@@ -254,7 +262,11 @@ class ConflictAnalystAgent(BaseAgent):
                 ),
             )
             return _with_grounding_warnings(
-                chunked, original_current, original_target, file_diff.file_path
+                chunked,
+                original_current,
+                original_target,
+                file_diff.file_path,
+                diff_facts=diff_facts,
             )
 
         diff_ranges = _extract_diff_ranges(file_diff)
@@ -302,6 +314,7 @@ class ConflictAnalystAgent(BaseAgent):
             target_content,
             enriched_context,
             imported_symbols=imported_symbols,
+            diff_facts=diff_facts,
         )
         messages = [{"role": "user", "content": prompt}]
 
@@ -311,7 +324,11 @@ class ConflictAnalystAgent(BaseAgent):
                 str(raw), file_diff.file_path, self.llm_config.model
             )
             return _with_grounding_warnings(
-                parsed, original_current, original_target, file_diff.file_path
+                parsed,
+                original_current,
+                original_target,
+                file_diff.file_path,
+                diff_facts=diff_facts,
             )
         except Exception as e:
             self.logger.error(
@@ -497,12 +514,18 @@ class ConflictAnalystAgent(BaseAgent):
             if harvested:
                 imported_symbols_by_file[fp] = harvested
 
+        diff_facts_by_file: dict[str, DiffFacts] = {
+            fp: compute_diff_facts(base, fork, upstream)
+            for fp, (base, fork, upstream) in file_three_way.items()
+        }
+
         prompt = build_commit_round_prompt(
             round_commits,
             file_three_way,
             file_languages,
             project_context,
             imported_symbols_by_file=imported_symbols_by_file or None,
+            diff_facts_by_file=diff_facts_by_file,
         )
         file_paths = list(file_three_way.keys())
 
@@ -569,7 +592,11 @@ class ConflictAnalystAgent(BaseAgent):
         for fp, analysis in list(analyses.items()):
             _, fork_c, upstream_c = file_three_way.get(fp, (None, None, None))
             analyses[fp] = _with_grounding_warnings(
-                analysis, fork_c or "", upstream_c or "", fp
+                analysis,
+                fork_c or "",
+                upstream_c or "",
+                fp,
+                diff_facts=diff_facts_by_file.get(fp),
             )
 
         return analyses
@@ -642,6 +669,7 @@ def _with_grounding_warnings(
     fork_content: str,
     upstream_content: str,
     file_path: str,
+    diff_facts: DiffFacts | None = None,
 ) -> ConflictAnalysis:
     """PR-A + PR-D-A.2: classify symbols the rationale references but
     that aren't in either source.
@@ -670,11 +698,17 @@ def _with_grounding_warnings(
     )
     fabricated = [s for s in all_invented if s not in declared_set]
 
-    if not declared and not fabricated:
+    verb_warnings = (
+        check_rationale_against_facts(rationale, diff_facts) if diff_facts else []
+    )
+
+    merged_warnings = fabricated + verb_warnings
+
+    if not declared and not merged_warnings:
         return analysis
     return analysis.model_copy(
         update={
-            "grounding_warnings": fabricated,
+            "grounding_warnings": list(analysis.grounding_warnings) + merged_warnings,
             "required_new_apis": declared,
         }
     )

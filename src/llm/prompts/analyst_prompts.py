@@ -4,6 +4,7 @@ import difflib
 from typing import Any
 
 from src.models.diff import FileDiff
+from src.tools.diff_facts import DiffFacts
 
 _ROUND_PER_VERSION_CHARS = 1000
 # Per-side diff budget for commit-round prompts. Two sides (fork, upstream)
@@ -66,6 +67,7 @@ def build_commit_round_prompt(
     file_languages: dict[str, str],
     project_context: str = "",
     imported_symbols_by_file: dict[str, dict[str, list[str]]] | None = None,
+    diff_facts_by_file: dict[str, DiffFacts] | None = None,
 ) -> str:
     commit_summary = "\n".join(
         f"  - {c['sha'][:8]}: {c.get('message', '')}  ({len(c.get('files', []))} files)"
@@ -113,9 +115,18 @@ def build_commit_round_prompt(
                 else:
                     surface_lines.append(f"- `{path}` exports: (no exports detected)")
             surface_section = "\n".join(surface_lines) + "\n"
+        facts_section = ""
+        per_file_facts = (
+            (diff_facts_by_file or {}).get(fp) if diff_facts_by_file else None
+        )
+        if per_file_facts:
+            facts_section = _format_diff_facts_block(per_file_facts).replace(
+                "# Deterministic Diff Facts", "### Deterministic Diff Facts"
+            )
         file_sections.append(
             f"## {fp}  (language: {lang})\n"
             f"{surface_section}"
+            f"{facts_section}"
             f"### Fork changes (merge-base → fork)\n{fork_block}\n"
             f"### Upstream changes (merge-base → upstream)\n{upstream_block}"
         )
@@ -204,6 +215,32 @@ Prefer recommendations that combine symbols already present on either
 side over recommendations that need new API surface."""
 
 
+def _format_diff_facts_block(
+    diff_facts: "DiffFacts | None",
+) -> str:
+    """Render PR-C ground-truth verb counts the LLM must match.
+
+    Empty input returns an empty string so legacy callers see no
+    behaviour change. The block is intentionally short — the model has
+    plenty of other context, this is a 3-line truth check.
+    """
+    if not diff_facts:
+        return ""
+    f = diff_facts["fork_side"]
+    u = diff_facts["upstream_side"]
+    return (
+        "# Deterministic Diff Facts\n"
+        "Counts derived from a difflib opcode pass on the actual three-way "
+        "content. Use these exact verbs in your rationale — do not say "
+        '"added" when the operation is a modify-in-place, and do not say '
+        '"both added" when one side modified.\n'
+        f"- FORK side (base→fork): {f['added']} added group(s), "
+        f"{f['removed']} removed group(s), {f['modified']} modified group(s)\n"
+        f"- UPSTREAM side (base→upstream): {u['added']} added group(s), "
+        f"{u['removed']} removed group(s), {u['modified']} modified group(s)\n"
+    )
+
+
 def _format_imported_symbol_surface(
     imported_symbols: dict[str, list[str]] | None,
 ) -> str:
@@ -240,6 +277,7 @@ def build_conflict_analysis_prompt(
     target_content: str | None,
     project_context: str,
     imported_symbols: dict[str, list[str]] | None = None,
+    diff_facts: "DiffFacts | None" = None,
 ) -> str:
     language = file_diff.language or "unknown"
     base_section = (
@@ -295,6 +333,7 @@ def build_conflict_analysis_prompt(
             )
 
     surface_block = _format_imported_symbol_surface(imported_symbols)
+    facts_block = _format_diff_facts_block(diff_facts)
 
     return f"""Analyze this Git merge conflict and provide a structured analysis.
 
@@ -311,7 +350,7 @@ Conflict count: {file_diff.conflict_count}
 # Change-volume signal
 {size_signal}
 
-{surface_block}# Three-way Diff
+{facts_block}{surface_block}# Three-way Diff
 
 ## Common ancestor version (merge-base)
 {base_section}
