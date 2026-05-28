@@ -9,7 +9,10 @@ variable"). The check is language-aware, deterministic, and LLM-free.
 
 from __future__ import annotations
 
-from src.tools.duplicate_symbol_check import find_duplicate_symbols
+from src.tools.duplicate_symbol_check import (
+    find_duplicate_symbols,
+    remove_duplicate_top_level_symbols,
+)
 
 
 class TestTypeScript:
@@ -96,3 +99,53 @@ class TestOtherLanguages:
 
     def test_empty_content_returns_empty(self):
         assert find_duplicate_symbols("", "x.ts") == []
+
+
+class TestRemoveDuplicateTopLevelSymbols:
+    def test_removes_second_const_keeps_first(self):
+        content = (
+            "export const A = first();\n"
+            "export const A = second();\n"
+            "export const B = 2;\n"
+        )
+        out = remove_duplicate_top_level_symbols(content, "x.ts")
+        assert out == "export const A = first();\nexport const B = 2;\n"
+        assert find_duplicate_symbols(out, "x.ts") == []
+
+    def test_drops_full_span_of_duplicate_block(self):
+        # The duplicate class body (indented + trailing blank) goes with it.
+        content = (
+            "export class A {\n"
+            "  x = 1;\n"
+            "}\n"
+            "export class A {\n"
+            "  x = 1;\n"
+            "}\n"
+            "export const keep = 1;\n"
+        )
+        out = remove_duplicate_top_level_symbols(content, "x.ts")
+        assert out == "export class A {\n  x = 1;\n}\nexport const keep = 1;\n"
+
+    def test_preserves_preamble_and_unique_decls(self):
+        content = (
+            "import x from 'y';\n"
+            "export const a = 1;\n"
+            "export const b = 2;\n"
+            "export const a = 3;\n"
+        )
+        out = remove_duplicate_top_level_symbols(content, "x.ts")
+        assert out == ("import x from 'y';\nexport const a = 1;\nexport const b = 2;\n")
+
+    def test_clean_file_unchanged(self):
+        content = "export const a = 1;\nexport class B {}\n"
+        assert remove_duplicate_top_level_symbols(content, "x.ts") == content
+
+    def test_unsupported_ext_unchanged(self):
+        content = "Title\nTitle\n"
+        assert remove_duplicate_top_level_symbols(content, "README.md") == content
+
+    def test_python_duplicate_def(self):
+        content = "def f():\n    return 1\n\ndef f():\n    return 2\n"
+        out = remove_duplicate_top_level_symbols(content, "m.py")
+        assert out == "def f():\n    return 1\n\n"
+        assert find_duplicate_symbols(out, "m.py") == []

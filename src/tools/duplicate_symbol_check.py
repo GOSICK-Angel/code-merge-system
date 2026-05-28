@@ -127,3 +127,48 @@ def find_duplicate_symbols(content: str, file_path: str) -> list[DuplicateSymbol
         for (kind, name) in order
         if len(seen[(kind, name)]) > 1
     ]
+
+
+def remove_duplicate_top_level_symbols(content: str, file_path: str) -> str:
+    """Drop later re-declarations of a top-level symbol, keeping the first.
+
+    方案3.1 seam-dedup: ``merge_chunks`` only concatenates per-chunk LLM output,
+    so adjacent chunks that re-emit the same ``const`` / ``class`` produce a
+    file with two top-level declarations of one name — uncompilable. Each
+    declaration's span runs from its column-0 declaration line to the next
+    top-level declaration (or EOF); for a symbol declared more than once the
+    first span is kept and the rest removed.
+
+    Keep-*first* rather than the plan's "prefer the upstream-bearing version"
+    because ``merge_chunks`` has no diff context to tell which copy carries the
+    upstream change; the deterministic choice still yields a compilable file
+    and the judge / build gate catch any remaining semantic gap. A no-op
+    (returns ``content`` unchanged) for unsupported file types or when nothing
+    is declared twice, so clean merges are never touched.
+    """
+    patterns = _PATTERNS_BY_EXT.get(Path(file_path).suffix.lower())
+    if not patterns or not content:
+        return content
+
+    dups = find_duplicate_symbols(content, file_path)
+    if not dups:
+        return content
+
+    drop_starts = {ln for d in dups for ln in d.lines[1:]}  # keep first occurrence
+
+    lines = content.splitlines(keepends=True)
+    decl_starts = [
+        idx
+        for idx, raw in enumerate(lines, start=1)
+        if raw and not raw[0].isspace() and _match_line(raw, patterns) is not None
+    ]
+    span_end = {
+        start: (decl_starts[i + 1] if i + 1 < len(decl_starts) else len(lines) + 1)
+        for i, start in enumerate(decl_starts)
+    }
+
+    dropped: set[int] = set()
+    for start in drop_starts:
+        dropped.update(range(start, span_end[start]))
+
+    return "".join(raw for idx, raw in enumerate(lines, start=1) if idx not in dropped)

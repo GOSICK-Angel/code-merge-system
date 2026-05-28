@@ -539,6 +539,9 @@ class ExecutorAgent(BaseAgent):
             merge_chunks,
             split_by_semantic_boundary,
         )
+        from src.tools.duplicate_symbol_check import (
+            remove_duplicate_top_level_symbols,
+        )
 
         file_path = file_diff.file_path
         chunk_size = state.config.chunk_size_chars
@@ -603,6 +606,14 @@ class ExecutorAgent(BaseAgent):
                 )
 
         merged_content = merge_chunks(merged_chunks)
+        deduped = remove_duplicate_top_level_symbols(merged_content, file_path)
+        if deduped != merged_content:
+            logger.info(
+                "Chunked merge for %s: removed duplicate top-level "
+                "declaration(s) at chunk seam",
+                file_path,
+            )
+            merged_content = deduped
         foreign = _foreign_chars(merged_content, current_content, target_content)
         if foreign is not None:
             logger.warning(
