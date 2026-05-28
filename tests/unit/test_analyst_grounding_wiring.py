@@ -135,6 +135,95 @@ class TestAnalystGroundingWiring:
         assert result.grounding_warnings == []
 
 
+class TestAnalystGroundingSeparatesRequiredApis:
+    """PR-D-A.2: when the rationale uses the ``REQUIRES NEW API:``
+    sentinel, the symbol must land in ``required_new_apis`` (info) and
+    NOT in ``grounding_warnings`` (warn) — otherwise the reviewer sees
+    the same fact twice with conflicting severity."""
+
+    def setup_method(self) -> None:
+        self.agent = _make_agent()
+
+    def test_sentinel_symbol_lands_in_required_not_warnings(self) -> None:
+        fd = _make_file_diff()
+        analysis = _make_analysis_with_rationale(
+            "Fork adds .week(). REQUIRES NEW API: core._isoWeek — would "
+            "need to be added to core/api.ts. Alternative: keep iso.week."
+        )
+
+        with (
+            patch.object(
+                self.agent,
+                "_call_llm_with_retry",
+                new=AsyncMock(return_value="{}"),
+            ),
+            patch(
+                "src.agents.conflict_analyst_agent.parse_conflict_analysis",
+                return_value=analysis,
+            ),
+        ):
+            result = asyncio.get_event_loop().run_until_complete(
+                self.agent.analyze_file(fd, None, _FORK, _UPSTREAM)
+            )
+
+        assert result.required_new_apis == ["core._isoWeek"]
+        assert result.grounding_warnings == []
+
+    def test_fabricated_symbol_without_sentinel_still_warns(self) -> None:
+        fd = _make_file_diff()
+        analysis = _make_analysis_with_rationale(
+            # No sentinel — this is genuine sneaky fabrication and must
+            # still raise the warning channel.
+            "Upstream refactored to core._iso*; fork's .week() should "
+            "use core._isoWeek transparently."
+        )
+
+        with (
+            patch.object(
+                self.agent,
+                "_call_llm_with_retry",
+                new=AsyncMock(return_value="{}"),
+            ),
+            patch(
+                "src.agents.conflict_analyst_agent.parse_conflict_analysis",
+                return_value=analysis,
+            ),
+        ):
+            result = asyncio.get_event_loop().run_until_complete(
+                self.agent.analyze_file(fd, None, _FORK, _UPSTREAM)
+            )
+
+        assert result.required_new_apis == []
+        assert result.grounding_warnings == ["core._isoWeek"]
+
+    def test_mixed_sentinel_and_fabrication(self) -> None:
+        fd = _make_file_diff()
+        # One symbol declared via sentinel; another sneakily fabricated.
+        # Each lands in its own bucket.
+        analysis = _make_analysis_with_rationale(
+            "REQUIRES NEW API: core._isoWeek — declared.\n"
+            "Also we can probably use core._bogusOther directly."
+        )
+
+        with (
+            patch.object(
+                self.agent,
+                "_call_llm_with_retry",
+                new=AsyncMock(return_value="{}"),
+            ),
+            patch(
+                "src.agents.conflict_analyst_agent.parse_conflict_analysis",
+                return_value=analysis,
+            ),
+        ):
+            result = asyncio.get_event_loop().run_until_complete(
+                self.agent.analyze_file(fd, None, _FORK, _UPSTREAM)
+            )
+
+        assert result.required_new_apis == ["core._isoWeek"]
+        assert result.grounding_warnings == ["core._bogusOther"]
+
+
 class TestAnalystGroundingWiringCommitRound:
     """The production conflict_analysis phase calls ``analyze_commit_round``
     (a multi-file batched analysis), not ``analyze_file`` — so grounding

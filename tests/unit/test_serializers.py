@@ -295,6 +295,43 @@ class TestHelperBranches:
         out = serialize_human_request(req)
         assert out["grounding_warnings"] == ["core._isoWeek"]
 
+    def test_serialize_human_request_includes_required_new_apis(self) -> None:
+        # PR-D-A.2: distinct info channel for symbols the LLM declared
+        # via REQUIRES NEW API sentinel.
+        req = SimpleNamespace(
+            file_path="schemas.ts",
+            priority=5,
+            conflict_points=[],
+            context_summary="ctx",
+            upstream_change_summary="u",
+            fork_change_summary="f",
+            analyst_recommendation=SimpleNamespace(value="semantic_merge"),
+            analyst_confidence=0.7,
+            analyst_rationale="REQUIRES NEW API: core._isoWeek — declared.",
+            options=[],
+            human_decision=None,
+            required_new_apis=["core._isoWeek"],
+        )
+        out = serialize_human_request(req)
+        assert out["required_new_apis"] == ["core._isoWeek"]
+
+    def test_serialize_human_request_required_apis_default_empty(self) -> None:
+        req = SimpleNamespace(
+            file_path="a.py",
+            priority=1,
+            conflict_points=[],
+            context_summary="ctx",
+            upstream_change_summary="u",
+            fork_change_summary="f",
+            analyst_recommendation=SimpleNamespace(value="take_target"),
+            analyst_confidence=0.7,
+            analyst_rationale="r",
+            options=[],
+            human_decision=None,
+        )
+        out = serialize_human_request(req)
+        assert out["required_new_apis"] == []
+
     def test_serialize_human_request_grounding_defaults_empty(self) -> None:
         # Backward compat: requests without the attribute (legacy
         # checkpoints or future SimpleNamespace fakes) serialize as []

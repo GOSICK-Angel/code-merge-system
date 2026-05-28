@@ -531,6 +531,37 @@ export function ConflictResolution({ clientRef }: Props): JSX.Element {
                   </div>
                 </div>
               )}
+              {current.required_new_apis &&
+                current.required_new_apis.length > 0 && (
+                  <div
+                    className="intent-rationale"
+                    style={{
+                      marginTop: 8,
+                      borderLeft: "3px solid #2563eb",
+                      paddingLeft: 8,
+                      background: "rgba(37, 99, 235, 0.08)",
+                    }}
+                  >
+                    <div
+                      className="intent-label"
+                      style={{ color: "#2563eb" }}
+                    >
+                      ⓘ requires new api ({current.required_new_apis.length})
+                    </div>
+                    <div className="intent-body" style={{ fontSize: 11 }}>
+                      the analyst declared that the recommended merge needs new
+                      api surface:{" "}
+                      {current.required_new_apis.map((s, i) => (
+                        <span key={s}>
+                          {i > 0 ? ", " : ""}
+                          <code>{s}</code>
+                        </span>
+                      ))}{" "}
+                      — evaluate whether to add this api, accept the
+                      alternative the analyst proposed, or escalate.
+                    </div>
+                  </div>
+                )}
               {current.grounding_warnings &&
                 current.grounding_warnings.length > 0 && (
                   <div

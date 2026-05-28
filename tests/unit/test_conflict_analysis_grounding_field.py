@@ -37,3 +37,23 @@ class TestGroundingWarningsField:
         assert dumped["grounding_warnings"] == ["core._isoWeek", "lib.bogus"]
         restored = ConflictAnalysis.model_validate(dumped)
         assert restored.grounding_warnings == ["core._isoWeek", "lib.bogus"]
+
+
+class TestRequiredNewApisField:
+    """PR-D-A.2: distinguish LLM-declared 'REQUIRES NEW API' symbols
+    from genuinely fabricated ones — the former is informational, the
+    latter is a warning."""
+
+    def test_default_empty(self) -> None:
+        assert _make_analysis().required_new_apis == []
+
+    def test_accepts_list(self) -> None:
+        a = _make_analysis(required_new_apis=["core._isoWeek"])
+        assert a.required_new_apis == ["core._isoWeek"]
+
+    def test_round_trip_preserves_field(self) -> None:
+        a = _make_analysis(required_new_apis=["core._isoWeek"])
+        dumped = a.model_dump()
+        assert dumped["required_new_apis"] == ["core._isoWeek"]
+        restored = ConflictAnalysis.model_validate(dumped)
+        assert restored.required_new_apis == ["core._isoWeek"]

@@ -395,6 +395,40 @@ describe("ConflictResolution grounding warnings (PR-A)", () => {
     expect(text).toContain("core._isoWeek");
   });
 
+  it("renders a REQUIRES NEW API info bar when LLM declared a sentinel", () => {
+    const declaredSnapshot: MergeStateSnapshot = {
+      ...baseSnapshot,
+      humanDecisionRequests: {
+        "a.py": {
+          ...baseSnapshot.humanDecisionRequests["a.py"],
+          analyst_rationale: "REQUIRES NEW API: core._isoWeek — declared.",
+          required_new_apis: ["core._isoWeek"],
+        },
+      },
+    };
+    useRunStore.setState({ snapshot: declaredSnapshot });
+    act(() => useConflictDraftStore.getState().selectFile("a.py"));
+
+    const ref = makeClientRef();
+    const { container } = render(
+      <ConflictResolution
+        clientRef={
+          ref as unknown as React.MutableRefObject<
+            ReturnType<typeof useWsClient>["current"]
+          >
+        }
+      />,
+    );
+    const text = container.textContent ?? "";
+    // Structured info bar with count header — distinguishes the dedicated
+    // bar from the raw rationale string which also contains the phrase.
+    expect(text).toMatch(/requires new api(s|\s*\()/i);
+    expect(text).toContain("core._isoWeek");
+    // The info bar must NOT also trigger the warn bar — that would be
+    // the pre-D-A.2 behaviour where the sentinel symbol was double-counted.
+    expect(text).not.toMatch(/unverified symbols?/i);
+  });
+
   it("does not render the banner when grounding_warnings is empty", () => {
     useRunStore.setState({ snapshot: baseSnapshot });
     act(() => useConflictDraftStore.getState().selectFile("a.py"));

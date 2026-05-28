@@ -46,3 +46,23 @@ def test_decision_card_propagates_grounding_warnings() -> None:
 def test_decision_card_default_empty_when_no_warnings() -> None:
     req = _build_human_decision_request(_fd(), _analysis())
     assert req.grounding_warnings == []
+
+
+def test_decision_card_propagates_required_new_apis() -> None:
+    analysis = ConflictAnalysis(
+        file_path="hub.ts",
+        conflict_points=[],
+        overall_confidence=0.7,
+        recommended_strategy=MergeDecision.SEMANTIC_MERGE,
+        conflict_type=ConflictType.REFACTOR_VS_FEATURE,
+        rationale="REQUIRES NEW API: core._isoWeek — declared.",
+        confidence=0.7,
+        required_new_apis=["core._isoWeek"],
+    )
+    req = _build_human_decision_request(_fd(), analysis)
+    assert req.required_new_apis == ["core._isoWeek"]
+
+
+def test_decision_card_default_required_apis_empty() -> None:
+    req = _build_human_decision_request(_fd(), _analysis())
+    assert req.required_new_apis == []

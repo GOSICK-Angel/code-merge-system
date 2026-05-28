@@ -27,6 +27,7 @@ from src.tools.chunk_processor import split_by_semantic_boundary
 from src.tools.forks_profile_loader import format_analyst_context
 from src.tools.git_tool import GitTool
 from src.tools.hallucinated_symbol_guard import scan_rationale_for_hallucinations
+from src.tools.required_new_apis import extract_required_new_apis
 
 
 # U1 reducer constants (doc/large-scale-file-processing-optimization.md §5.1.1).
@@ -597,7 +598,17 @@ def _with_grounding_warnings(
     upstream_content: str,
     file_path: str,
 ) -> ConflictAnalysis:
-    """PR-A: attach fabricated qualified references from the rationale.
+    """PR-A + PR-D-A.2: classify symbols the rationale references but
+    that aren't in either source.
+
+    Two channels:
+
+    - ``required_new_apis`` — symbols the LLM declared via the
+      ``REQUIRES NEW API:`` sentinel (PR-D-A.1). The LLM has explicitly
+      flagged these as missing, so they are informational, not warnings.
+    - ``grounding_warnings`` — symbols that appear nowhere in fork or
+      upstream AND were not declared via the sentinel. Genuine sneaky
+      fabrication; reviewer must not act on them blindly.
 
     Returns a new ``ConflictAnalysis`` (immutable update) so callers can
     treat the return value as the canonical, ground-checked result.
@@ -605,12 +616,23 @@ def _with_grounding_warnings(
     rationale = analysis.rationale or ""
     if not rationale:
         return analysis
-    warnings = scan_rationale_for_hallucinations(
+
+    declared = extract_required_new_apis(rationale)
+    declared_set = set(declared)
+
+    all_invented = scan_rationale_for_hallucinations(
         rationale, [fork_content, upstream_content], file_path
     )
-    if not warnings:
+    fabricated = [s for s in all_invented if s not in declared_set]
+
+    if not declared and not fabricated:
         return analysis
-    return analysis.model_copy(update={"grounding_warnings": warnings})
+    return analysis.model_copy(
+        update={
+            "grounding_warnings": fabricated,
+            "required_new_apis": declared,
+        }
+    )
 
 
 def _extract_diff_ranges(

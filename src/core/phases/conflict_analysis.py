@@ -399,6 +399,7 @@ def _build_human_decision_request(
         blast_radius=impact_hint.impact_radius if impact_hint else 0,
         is_god_node=impact_hint.is_god_node if impact_hint else False,
         grounding_warnings=list(analysis.grounding_warnings),
+        required_new_apis=list(analysis.required_new_apis),
     )
 
 
