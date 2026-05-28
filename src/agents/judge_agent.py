@@ -48,6 +48,7 @@ from src.tools.forks_profile_loader import (
 from src.tools.git_tool import GitTool
 from src.tools.three_way_diff import ThreeWayDiff, _safe_read_text
 from src.tools.syntax_checker import check_syntax as check_file_syntax
+from src.tools.duplicate_symbol_check import find_duplicate_symbols
 
 
 class JudgeAgent(BaseAgent):
@@ -68,6 +69,7 @@ class JudgeAgent(BaseAgent):
             file_diffs_map[fd.file_path] = fd
 
         deterministic_issues = self._run_deterministic_pipeline(state, file_diffs_map)
+        deterministic_issues.extend(self._check_duplicate_symbols(state))
         all_issues.extend(deterministic_issues)
 
         deterministic_veto_files = {
@@ -998,6 +1000,50 @@ class JudgeAgent(BaseAgent):
                         ),
                         must_fix_before_merge=True,
                         veto_condition="Top-level invocation/decorator lost after merge",
+                    )
+                )
+        return issues
+
+    def _check_duplicate_symbols(self, state: ReadOnlyStateView) -> list[JudgeIssue]:
+        """方案5: deterministic duplicate-top-level-symbol veto over merged files.
+
+        A chunked semantic merge can emit the same top-level declaration twice
+        (the zod failure: ``ZodNumberFormat`` / ``ZodIntersection`` each declared
+        2x → uncompilable). Detection is purely static, so this is the right
+        place to enforce two of the plan's rules at once:
+
+        - the file cannot take the O-J1 high-confidence skip — emitting a
+          ``veto_condition`` issue moves it into ``deterministic_veto_files``,
+          which ``run`` excludes from the skip candidates;
+        - the resulting CRITICAL forces FAIL deterministically (``verdict`` is
+          computed from issue counts, ignoring the LLM), and no fork-aware
+          downgrade is applied here — a duplicate declaration is uncompilable
+          regardless of fork intent, so it must never be softened to INFO.
+        """
+        if self.git_tool is None:
+            return []
+        issues: list[JudgeIssue] = []
+        for fp in state.file_decision_records:
+            abs_path = self.git_tool.repo_path / fp
+            if not abs_path.exists():
+                continue
+            content = _safe_read_text(abs_path)
+            if not content:
+                continue
+            for dup in find_duplicate_symbols(content, fp):
+                issues.append(
+                    JudgeIssue(
+                        file_path=fp,
+                        issue_level=IssueSeverity.CRITICAL,
+                        issue_type="duplicate_top_level_symbol",
+                        description=(
+                            f"{dup.kind} '{dup.name}' declared {dup.count}x at "
+                            f"top level (lines {dup.lines}) — cannot redeclare; "
+                            f"likely a chunk-merge duplication"
+                        ),
+                        affected_lines=dup.lines,
+                        must_fix_before_merge=True,
+                        veto_condition="Duplicate top-level symbol declaration",
                     )
                 )
         return issues
