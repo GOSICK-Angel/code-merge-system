@@ -8,7 +8,7 @@ from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.models.decision import DecisionSource, FileDecisionRecord, MergeDecision
 from src.models.diff import FileStatus, RiskLevel
 from src.models.plan import MergePhase
-from src.models.plan_review import PlanHumanDecision
+from src.models.plan_review import PlanHumanDecision, UserDecisionItem
 from src.models.state import MergeState, SystemStatus
 from src.tools.merge_plan_report import write_merge_plan_report
 from src.tools.report_writer import write_plan_review_report
@@ -16,6 +16,50 @@ from src.tools.commit_replayer import CommitReplayer
 from src.tools.git_committer import GitCommitter
 
 logger = logging.getLogger(__name__)
+
+
+def _surface_internal_escalations(state: MergeState) -> int:
+    """方案6 part1: register internal escalate(0.0) records in the human gate.
+
+    Escalations created outside the plan-stage gate — commit-replay / skipped
+    auto-merge layers, and the catch-up / deadlock-guard fallbacks in this phase
+    — only land in ``file_decision_records``; without this they never appear on
+    the AWAITING_HUMAN screen and the operator cannot resolve them in-run. Append
+    an undecided ``UserDecisionItem`` for every ``ESCALATE_HUMAN`` record
+    (``source != HUMAN``) not already represented in the gate, so the O-L4 guard
+    holds AWAITING_HUMAN until each is decided. The report-phase DROPPED
+    assertion is the backstop for any still undecided at completion.
+    """
+    from src.core.phases.auto_merge import _conflict_marker_decision_options
+
+    gated = {it.file_path for it in state.pending_user_decisions} | set(
+        state.human_decision_requests.keys()
+    )
+    new_items = [
+        UserDecisionItem(
+            item_id=f"internal_escalation_{fp}",
+            file_path=fp,
+            description=(
+                f"File '{fp}' was escalated internally "
+                f"({(rec.rationale or '').strip()[:120]}) and never reached the "
+                "human gate. Decide how to resolve it before the merge completes."
+            ),
+            risk_context="internal_escalation",
+            current_classification=RiskLevel.HUMAN_REQUIRED.value,
+            options=_conflict_marker_decision_options(),
+        )
+        for fp, rec in state.file_decision_records.items()
+        if rec.decision == MergeDecision.ESCALATE_HUMAN
+        and rec.decision_source != DecisionSource.HUMAN
+        and fp not in gated
+    ]
+    if new_items:
+        state.pending_user_decisions.extend(new_items)
+        logger.info(
+            "方案6: surfaced %d internal escalation(s) into the human gate",
+            len(new_items),
+        )
+    return len(new_items)
 
 
 class HumanReviewPhase(Phase):
@@ -30,6 +74,11 @@ class HumanReviewPhase(Phase):
 
     async def execute(self, state: MergeState, ctx: PhaseContext) -> PhaseOutcome:
         logger.info("Entering AWAITING_HUMAN status")
+
+        # 方案6 part1: pull any internal escalation that bypassed the plan-stage
+        # gate (commit-replay / skipped auto-merge layers) into the gate so it is
+        # decidable in-run; the O-L4 guard then holds AWAITING_HUMAN until decided.
+        _surface_internal_escalations(state)
 
         # O-6: if conflict decisions are still pending, go to Case 1 first.
         _has_pending_conflict_decisions = bool(

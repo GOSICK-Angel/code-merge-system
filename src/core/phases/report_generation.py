@@ -61,28 +61,28 @@ def _run_deterministic_verification(state: MergeState, ctx: PhaseContext) -> Non
 
 
 def _assert_no_dropped_escalations(state: MergeState, ctx: PhaseContext) -> None:
-    """方案6: surface escalated files that bypassed the human gate as DROPPED.
+    """方案6: surface every unresolved escalation reaching report as DROPPED.
 
     A ``FileDecisionRecord`` still at ``ESCALATE_HUMAN`` by report time was
-    never resolved (a human resolution rewrites it to a concrete decision with
-    ``DecisionSource.HUMAN``). Internal ``escalate(0.0)`` files from
-    commit-replay / skipped auto-merge layers can miss the human gate's pending
-    collection and otherwise vanish from the tree silently. Only files that
-    never appeared in any gate (``pending_user_decisions`` /
-    ``human_decision_requests``) are flagged — items the operator saw and chose
-    to skip are theirs to skip. Each flagged file lands in ``state.errors`` so
-    CI reports ``partial_failure`` and the report lists it, instead of a green
-    ``COMPLETED`` hiding a dropped file.
+    never resolved — a human resolution rewrites it to a concrete decision with
+    ``DecisionSource.HUMAN``. So ``decision == ESCALATE_HUMAN and
+    decision_source != HUMAN`` is a precise "unresolved" signal, flagged
+    regardless of whether the file reached the human gate: a run that completes
+    with an undecided escalation has dropped that file from the merge, whether
+    it bypassed the gate (internal ``escalate(0.0)`` from commit-replay /
+    skipped auto-merge layers) or was surfaced and left undecided. Each lands in
+    ``state.errors`` so CI reports ``partial_failure`` and the report lists it,
+    instead of a green ``COMPLETED`` hiding a dropped file.
+
+    Pairs with ``human_review._surface_internal_escalations`` (方案6 part1),
+    which registers these in the gate so the operator can decide them in-run;
+    this assertion is the backstop for any still undecided at completion.
     """
-    gated = {it.file_path for it in state.pending_user_decisions} | set(
-        state.human_decision_requests.keys()
-    )
     dropped = sorted(
         fp
         for fp, rec in state.file_decision_records.items()
         if rec.decision == MergeDecision.ESCALATE_HUMAN
         and rec.decision_source != DecisionSource.HUMAN
-        and fp not in gated
     )
     if not dropped:
         return
@@ -98,8 +98,7 @@ def _assert_no_dropped_escalations(state: MergeState, ctx: PhaseContext) -> None
                 "phase": "finalize",
                 "message": (
                     f"DROPPED (unresolved escalation): {fp} left at "
-                    f"ESCALATE_HUMAN — never reached the human gate and was "
-                    f"not landed"
+                    f"ESCALATE_HUMAN — not resolved by a human and not landed"
                 ),
             }
         )
