@@ -7,6 +7,7 @@ from src.cli.paths import get_report_dir
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.models.plan import MergePhase
 from src.models.state import MergeState, PhaseResult, SystemStatus
+from src.tools.merge_verification import gather_findings_from_git
 from src.tools.report_writer import (
     write_json_report,
     write_living_plan_report,
@@ -14,6 +15,48 @@ from src.tools.report_writer import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _run_deterministic_verification(state: MergeState, ctx: PhaseContext) -> None:
+    """Append LLM-free post-merge findings to ``state.errors``.
+
+    Aggregates duplicate top-level symbols and dropped additive fork exports
+    over the run's changed files, reading content from git. Findings land in
+    ``state.errors`` so the existing CI summary turns a green ``COMPLETED`` into
+    ``partial_failure`` (exit ``EXIT_PARTIAL_FAILURE``) and the merge report's
+    errors section surfaces them — no new SystemStatus, so resume / the state
+    machine are untouched. Best-effort: any git/read failure logs and returns.
+    Skipped in dry-run, where the merge was never committed and HEAD does not
+    reflect the merged artifact.
+    """
+    if state.dry_run:
+        return
+    try:
+        findings = gather_findings_from_git(
+            ctx.git_tool,
+            list(state.file_decision_records.keys()),
+            base_ref=state.merge_base_commit or None,
+            fork_ref=state.config.fork_ref or None,
+            merged_ref="HEAD",
+        )
+    except Exception as exc:
+        logger.warning("verification: gathering deterministic findings failed: %s", exc)
+        return
+    if not findings:
+        return
+    ctx.notify(
+        "orchestrator",
+        f"Deterministic verification: {len(findings)} finding(s)",
+    )
+    now = datetime.now().isoformat()
+    for f in findings:
+        state.errors.append(
+            {
+                "timestamp": now,
+                "phase": "verification",
+                "message": f"[{f.check}] {f.file_path}: {f.detail}",
+            }
+        )
 
 
 def _finalize_working_tree(state: MergeState, ctx: PhaseContext) -> None:
@@ -96,6 +139,7 @@ class ReportGenerationPhase(Phase):
         state.phase_results[MergePhase.REPORT.value] = phase_result
 
         _finalize_working_tree(state, ctx)
+        _run_deterministic_verification(state, ctx)
 
         output_dir = str(
             get_report_dir(

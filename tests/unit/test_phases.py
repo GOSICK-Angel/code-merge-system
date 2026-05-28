@@ -636,6 +636,68 @@ class TestReportGenerationPhase:
         assert len(state.errors) == 1
         assert "disk full" in state.errors[0]["message"]
 
+    @pytest.mark.asyncio
+    async def test_verification_findings_recorded_as_errors_partial_failure(self):
+        from src.tools.merge_verification import VerificationFinding
+        from src.tools.ci_reporter import build_ci_summary
+
+        state = _make_state(status=SystemStatus.GENERATING_REPORT)
+        ctx = _make_ctx()
+
+        finding = VerificationFinding(
+            file_path="schemas.ts",
+            check="duplicate_symbol",
+            severity="high",
+            detail="const 'X' declared 2x at top level",
+        )
+
+        phase = ReportGenerationPhase()
+        with (
+            patch(
+                "src.core.phases.report_generation.gather_findings_from_git",
+                return_value=[finding],
+            ),
+            patch("src.core.phases.report_generation.write_json_report"),
+            patch("src.core.phases.report_generation.write_markdown_report"),
+            patch("src.core.phases.report_generation.write_living_plan_report"),
+        ):
+            outcome = await phase.execute(state, ctx)
+
+        # Run stays COMPLETED — no new SystemStatus, resume/state machine untouched.
+        assert outcome.target_status == SystemStatus.COMPLETED
+        ctx.state_machine.transition.assert_called_once_with(
+            state, SystemStatus.COMPLETED, "reports generated"
+        )
+        # Finding is recorded as an error so CI downgrades the green status.
+        verification_errors = [
+            e for e in state.errors if e.get("phase") == "verification"
+        ]
+        assert len(verification_errors) == 1
+        assert "schemas.ts" in verification_errors[0]["message"]
+        # With status COMPLETED + errors present, CI reports partial_failure.
+        state.status = SystemStatus.COMPLETED
+        assert build_ci_summary(state)["status"] == "partial_failure"
+
+    @pytest.mark.asyncio
+    async def test_report_skips_verification_in_dry_run(self):
+        state = _make_state(status=SystemStatus.GENERATING_REPORT, dry_run=True)
+        ctx = _make_ctx()
+
+        phase = ReportGenerationPhase()
+        with (
+            patch(
+                "src.core.phases.report_generation.gather_findings_from_git"
+            ) as gather,
+            patch("src.core.phases.report_generation.write_json_report"),
+            patch("src.core.phases.report_generation.write_markdown_report"),
+            patch("src.core.phases.report_generation.write_living_plan_report"),
+        ):
+            outcome = await phase.execute(state, ctx)
+
+        gather.assert_not_called()
+        assert outcome.target_status == SystemStatus.COMPLETED
+        assert [e for e in state.errors if e.get("phase") == "verification"] == []
+
 
 # ---------------------------------------------------------------------------
 # _select_merge_strategy (conflict_analysis helper)
