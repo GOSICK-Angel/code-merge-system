@@ -698,6 +698,86 @@ class TestReportGenerationPhase:
         assert outcome.target_status == SystemStatus.COMPLETED
         assert [e for e in state.errors if e.get("phase") == "verification"] == []
 
+    def _escalated_record(self, file_path: str, source):
+        from src.models.decision import FileDecisionRecord
+        from src.models.diff import FileStatus
+
+        return FileDecisionRecord(
+            file_path=file_path,
+            file_status=FileStatus.MODIFIED,
+            decision=MergeDecision.ESCALATE_HUMAN,
+            decision_source=source,
+            confidence=0.0,
+            rationale="internal escalate",
+        )
+
+    @pytest.mark.asyncio
+    async def test_ungated_escalation_flagged_as_dropped(self):
+        from src.models.decision import DecisionSource
+        from src.tools.ci_reporter import build_ci_summary
+
+        state = _make_state(status=SystemStatus.GENERATING_REPORT)
+        state.file_decision_records["treeshake/x.ts"] = self._escalated_record(
+            "treeshake/x.ts", DecisionSource.AUTO_EXECUTOR
+        )
+        ctx = _make_ctx()
+
+        phase = ReportGenerationPhase()
+        with (
+            patch(
+                "src.core.phases.report_generation.gather_findings_from_git",
+                return_value=[],
+            ),
+            patch("src.core.phases.report_generation.write_json_report"),
+            patch("src.core.phases.report_generation.write_markdown_report"),
+            patch("src.core.phases.report_generation.write_living_plan_report"),
+        ):
+            await phase.execute(state, ctx)
+
+        dropped = [e for e in state.errors if e.get("phase") == "finalize"]
+        assert len(dropped) == 1
+        assert "treeshake/x.ts" in dropped[0]["message"]
+        state.status = SystemStatus.COMPLETED
+        assert build_ci_summary(state)["status"] == "partial_failure"
+
+    @pytest.mark.asyncio
+    async def test_gated_or_human_resolved_escalation_not_flagged(self):
+        from src.models.decision import DecisionSource
+        from src.models.plan_review import UserDecisionItem
+
+        state = _make_state(status=SystemStatus.GENERATING_REPORT)
+        # 1) Escalation the operator saw in the gate but chose to skip.
+        state.file_decision_records["seen.ts"] = self._escalated_record(
+            "seen.ts", DecisionSource.AUTO_EXECUTOR
+        )
+        state.pending_user_decisions.append(
+            UserDecisionItem(
+                item_id="i1",
+                file_path="seen.ts",
+                description="skip me",
+                current_classification="human_required",
+            )
+        )
+        # 2) Escalation already resolved by a human (source HUMAN).
+        state.file_decision_records["resolved.ts"] = self._escalated_record(
+            "resolved.ts", DecisionSource.HUMAN
+        )
+        ctx = _make_ctx()
+
+        phase = ReportGenerationPhase()
+        with (
+            patch(
+                "src.core.phases.report_generation.gather_findings_from_git",
+                return_value=[],
+            ),
+            patch("src.core.phases.report_generation.write_json_report"),
+            patch("src.core.phases.report_generation.write_markdown_report"),
+            patch("src.core.phases.report_generation.write_living_plan_report"),
+        ):
+            await phase.execute(state, ctx)
+
+        assert [e for e in state.errors if e.get("phase") == "finalize"] == []
+
 
 # ---------------------------------------------------------------------------
 # _select_merge_strategy (conflict_analysis helper)

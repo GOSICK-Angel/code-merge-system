@@ -5,6 +5,7 @@ from datetime import datetime
 
 from src.cli.paths import get_report_dir
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
+from src.models.decision import DecisionSource, MergeDecision
 from src.models.plan import MergePhase
 from src.models.state import MergeState, PhaseResult, SystemStatus
 from src.tools.merge_verification import gather_findings_from_git
@@ -55,6 +56,51 @@ def _run_deterministic_verification(state: MergeState, ctx: PhaseContext) -> Non
                 "timestamp": now,
                 "phase": "verification",
                 "message": f"[{f.check}] {f.file_path}: {f.detail}",
+            }
+        )
+
+
+def _assert_no_dropped_escalations(state: MergeState, ctx: PhaseContext) -> None:
+    """方案6: surface escalated files that bypassed the human gate as DROPPED.
+
+    A ``FileDecisionRecord`` still at ``ESCALATE_HUMAN`` by report time was
+    never resolved (a human resolution rewrites it to a concrete decision with
+    ``DecisionSource.HUMAN``). Internal ``escalate(0.0)`` files from
+    commit-replay / skipped auto-merge layers can miss the human gate's pending
+    collection and otherwise vanish from the tree silently. Only files that
+    never appeared in any gate (``pending_user_decisions`` /
+    ``human_decision_requests``) are flagged — items the operator saw and chose
+    to skip are theirs to skip. Each flagged file lands in ``state.errors`` so
+    CI reports ``partial_failure`` and the report lists it, instead of a green
+    ``COMPLETED`` hiding a dropped file.
+    """
+    gated = {it.file_path for it in state.pending_user_decisions} | set(
+        state.human_decision_requests.keys()
+    )
+    dropped = sorted(
+        fp
+        for fp, rec in state.file_decision_records.items()
+        if rec.decision == MergeDecision.ESCALATE_HUMAN
+        and rec.decision_source != DecisionSource.HUMAN
+        and fp not in gated
+    )
+    if not dropped:
+        return
+    ctx.notify(
+        "orchestrator",
+        f"Finalize: {len(dropped)} dropped (unresolved) escalation(s)",
+    )
+    now = datetime.now().isoformat()
+    for fp in dropped:
+        state.errors.append(
+            {
+                "timestamp": now,
+                "phase": "finalize",
+                "message": (
+                    f"DROPPED (unresolved escalation): {fp} left at "
+                    f"ESCALATE_HUMAN — never reached the human gate and was "
+                    f"not landed"
+                ),
             }
         )
 
@@ -140,6 +186,7 @@ class ReportGenerationPhase(Phase):
 
         _finalize_working_tree(state, ctx)
         _run_deterministic_verification(state, ctx)
+        _assert_no_dropped_escalations(state, ctx)
 
         output_dir = str(
             get_report_dir(
