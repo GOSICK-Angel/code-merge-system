@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections import defaultdict
 
 from src.memory.models import (
@@ -266,14 +267,42 @@ def score_path_overlap(query_paths: list[str], entry_paths: list[str]) -> float:
     return path_score
 
 
+def _entry_dir_key(entry: MemoryEntry) -> str:
+    """Directory bucket for consolidation grouping (OPP-8).
+
+    The top-2 path segments of the entry's first file path. PATTERN entries
+    store a directory there directly; DECISION entries store the file path
+    (whose directory we derive). Empty when the entry has no ``file_paths``
+    (e.g. judge-issue patterns) so those still group by tag alone.
+    """
+    if not entry.file_paths:
+        return ""
+    first = entry.file_paths[0]
+    parts = first.split(os.sep)
+    if len(parts) > 1:
+        return os.sep.join(parts[:2])
+    return first
+
+
 def _consolidate_entries(entries: list[MemoryEntry]) -> list[MemoryEntry]:
-    """Group entries by (phase, entry_type, primary_tag) and merge each group."""
-    groups: dict[tuple[str, str, str], list[MemoryEntry]] = defaultdict(list)
+    """Group by (phase, entry_type, primary_tag, dir_bucket) and merge groups.
+
+    The directory bucket (OPP-8) keeps location-distinct patterns from
+    collapsing into one lossy blob — the primary tag alone is often a generic
+    class (``c_class`` / ``conflict_decision``) shared across directories, so
+    same-tag entries in different subtrees must not merge.
+    """
+    groups: dict[tuple[str, str, str, str], list[MemoryEntry]] = defaultdict(list)
     ungroupable: list[MemoryEntry] = []
 
     for entry in entries:
         primary_tag = entry.tags[0] if entry.tags else ""
-        key = (entry.phase, entry.entry_type.value, primary_tag)
+        key = (
+            entry.phase,
+            entry.entry_type.value,
+            primary_tag,
+            _entry_dir_key(entry),
+        )
         groups[key].append(entry)
 
     result: list[MemoryEntry] = []
