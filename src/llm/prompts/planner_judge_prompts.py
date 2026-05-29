@@ -560,6 +560,48 @@ def _build_planner_responses_section(
     return "".join(lines)
 
 
+# Review-task rules + return schema shared by the whole-plan and per-segment
+# review prompts so the two cannot drift (rule 6's auth-keyword list in
+# particular). NOTE: this LLM-facing keyword list is intentionally distinct
+# from the deterministic ``_SAFELIST_RISK_KEYWORDS`` tuple above — they drive
+# different mechanisms (LLM C-class confirmation vs. trivial-safe short-circuit
+# exclusion) and are not meant to be identical.
+_REVIEW_TASKS_RULES = """## Your Review Tasks (raise issues ONLY with concrete evidence)
+1. Files where `is_security_sensitive=true` but classified below `auto_risky` → flag
+2. Files where `conflict_count > 0` but NOT classified `human_required` → flag
+3. Files that are obviously security-critical by name/path, classified `auto_safe`, AND show `[SEC]` or `conflicts>0` in the manifest → flag. Path name alone is NOT sufficient when `conflicts=0` and no `[SEC]` flag is present.
+4. Dangerous batch ordering that would break a dependency → flag (name both files)
+5. Files with `conflict_count=0` and `is_security_sensitive=false` → do NOT flag regardless of diff size, UNLESS rule 6 applies
+6. C-class files (marked `[C]` in the manifest) classified `auto_risky` whose path contains any of {auth, token, user, permission, session, oauth, credential, password, signin, signup, login, otp, secret, signature} as a path segment — flag to confirm the classification is intentional and not the result of a missing `security_sensitive` pattern. Use the manifest's `fork=+A/-D`, `upstream=+A/-D`, and `regions=...` flags as evidence: if fork and upstream both touched non-trivial line counts in overlapping regions, suggest `human_required`. Pure path-name match without supporting hunk evidence is NOT sufficient."""
+
+_MISMATCH_NOTE = """Note: MISMATCH / NOT-BATCHED divergence between the classifier and the
+batch is verified deterministically before this prompt is built; you
+do not need to re-detect it. Focus on semantic / path-based judgment."""
+
+_ZH_LANG_NOTE = "⚠️ 语言要求：'summary' 和每个 issue 的 'reason' 字段必须使用中文撰写，禁止使用英文句子（技术术语如文件路径、枚举值除外）。"
+
+
+def _return_schema_block(summary_text: str) -> str:
+    """Return-JSON schema shared by both review prompts. Only the ``summary``
+    placeholder text varies between the whole-plan and per-segment callers."""
+    return f"""Return JSON with:
+{{
+  "result": "approved" | "revision_needed" | "critical_replan",
+  "issues": [
+    {{
+      "file_path": "path/to/file",
+      "current_classification": "<MUST be exactly one of: auto_safe, auto_risky, human_required, deleted_only, binary, excluded>",
+      "suggested_classification": "<MUST be exactly one of: auto_safe, auto_risky, human_required, deleted_only, binary, excluded>",
+      "reason": "Specific reason why classification is wrong",
+      "issue_type": "risk_underestimated | wrong_batch | missing_dependency | security_missed"
+    }}
+  ],
+  "approved_files_count": 0,
+  "flagged_files_count": 0,
+  "summary": "{summary_text}"
+}}"""
+
+
 def build_plan_review_prompt(
     plan: MergePlan,
     file_diffs: list[FileDiff],
@@ -613,38 +655,15 @@ def build_plan_review_prompt(
 ## All Files (path: classification [flags])
 {manifest}
 {prior_section}{planner_response_section}
-## Your Review Tasks (raise issues ONLY with concrete evidence)
-1. Files where `is_security_sensitive=true` but classified below `auto_risky` → flag
-2. Files where `conflict_count > 0` but NOT classified `human_required` → flag
-3. Files that are obviously security-critical by name/path, classified `auto_safe`, AND show `[SEC]` or `conflicts>0` in the manifest → flag. Path name alone is NOT sufficient when `conflicts=0` and no `[SEC]` flag is present.
-4. Dangerous batch ordering that would break a dependency → flag (name both files)
-5. Files with `conflict_count=0` and `is_security_sensitive=false` → do NOT flag regardless of diff size, UNLESS rule 6 applies
-6. C-class files (marked `[C]` in the manifest) classified `auto_risky` whose path contains any of {{auth, token, user, permission, session, oauth, credential, password, signin, signup, login, otp, secret, signature}} as a path segment — flag to confirm the classification is intentional and not the result of a missing `security_sensitive` pattern. Use the manifest's `fork=+A/-D`, `upstream=+A/-D`, and `regions=...` flags as evidence: if fork and upstream both touched non-trivial line counts in overlapping regions, suggest `human_required`. Pure path-name match without supporting hunk evidence is NOT sufficient.
+{_REVIEW_TASKS_RULES}
 {"7. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
 
-Note: MISMATCH / NOT-BATCHED divergence between the classifier and the
-batch is verified deterministically before this prompt is built; you
-do not need to re-detect it. Focus on semantic / path-based judgment.
+{_MISMATCH_NOTE}
 
-Return JSON with:
-{{
-  "result": "approved" | "revision_needed" | "critical_replan",
-  "issues": [
-    {{
-      "file_path": "path/to/file",
-      "current_classification": "<MUST be exactly one of: auto_safe, auto_risky, human_required, deleted_only, binary, excluded>",
-      "suggested_classification": "<MUST be exactly one of: auto_safe, auto_risky, human_required, deleted_only, binary, excluded>",
-      "reason": "Specific reason why classification is wrong",
-      "issue_type": "risk_underestimated | wrong_batch | missing_dependency | security_missed"
-    }}
-  ],
-  "approved_files_count": 0,
-  "flagged_files_count": 0,
-  "summary": "Overall assessment"
-}}
+{_return_schema_block("Overall assessment")}
 
 CRITICAL: Each issue MUST reference a SINGLE file_path. The "current_classification" and "suggested_classification" fields MUST be exactly one of the enum values listed above — do NOT combine multiple values or add free text.
-{"⚠️ 语言要求：'summary' 和每个 issue 的 'reason' 字段必须使用中文撰写，禁止使用英文句子（技术术语如文件路径、枚举值除外）。" if lang == "zh" else ""}
+{_ZH_LANG_NOTE if lang == "zh" else ""}
 Respond with ONLY the JSON object. No other text."""
 
 
@@ -715,38 +734,15 @@ def build_segment_plan_review_prompt(
 ## Files in This Segment (path: classification [flags])
 {manifest}
 {prior_section}{planner_response_section}
-## Your Review Tasks (raise issues ONLY with concrete evidence)
-1. Files where `is_security_sensitive=true` but classified below `auto_risky` → flag
-2. Files where `conflict_count > 0` but NOT classified `human_required` → flag
-3. Files that are obviously security-critical by name/path, classified `auto_safe`, AND show `[SEC]` or `conflicts>0` in the manifest → flag. Path name alone is NOT sufficient when `conflicts=0` and no `[SEC]` flag is present.
-4. Dangerous batch ordering that would break a dependency → flag (name both files)
-5. Files with `conflict_count=0` and `is_security_sensitive=false` → do NOT flag regardless of diff size, UNLESS rule 6 applies
-6. C-class files (marked `[C]` in the manifest) classified `auto_risky` whose path contains any of {{auth, token, user, permission, session, oauth, credential, password, signin, signup, login, otp, secret, signature}} as a path segment — flag to confirm the classification is intentional and not the result of a missing `security_sensitive` pattern. Use the manifest's `fork=+A/-D`, `upstream=+A/-D`, and `regions=...` flags as evidence: if fork and upstream both touched non-trivial line counts in overlapping regions, suggest `human_required`. Pure path-name match without supporting hunk evidence is NOT sufficient.
+{_REVIEW_TASKS_RULES}
 {"7. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
 
-Note: MISMATCH / NOT-BATCHED divergence between the classifier and the
-batch is verified deterministically before this prompt is built; you
-do not need to re-detect it. Focus on semantic / path-based judgment.
+{_MISMATCH_NOTE}
 
 Only report issues for files listed in this segment. The other segments will cover the remaining files.
 
-Return JSON with:
-{{
-  "result": "approved" | "revision_needed" | "critical_replan",
-  "issues": [
-    {{
-      "file_path": "path/to/file",
-      "current_classification": "<MUST be exactly one of: auto_safe, auto_risky, human_required, deleted_only, binary, excluded>",
-      "suggested_classification": "<MUST be exactly one of: auto_safe, auto_risky, human_required, deleted_only, binary, excluded>",
-      "reason": "Specific reason why classification is wrong",
-      "issue_type": "risk_underestimated | wrong_batch | missing_dependency | security_missed"
-    }}
-  ],
-  "approved_files_count": 0,
-  "flagged_files_count": 0,
-  "summary": "Assessment of this segment"
-}}
+{_return_schema_block("Assessment of this segment")}
 
 CRITICAL: Each issue MUST reference a SINGLE file_path from this segment. The "current_classification" and "suggested_classification" fields MUST be exactly one of the enum values listed above.
-{"⚠️ 语言要求：'summary' 和每个 issue 的 'reason' 字段必须使用中文撰写，禁止使用英文句子（技术术语如文件路径、枚举值除外）。" if lang == "zh" else ""}
+{_ZH_LANG_NOTE if lang == "zh" else ""}
 Respond with ONLY the JSON object. No other text."""

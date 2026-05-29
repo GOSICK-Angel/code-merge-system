@@ -75,11 +75,11 @@
 - **影响** 改 rule 6 极易只改一处 → 漂移。
 - **修法** 抽 `_REVIEW_TASKS_BLOCK` / `_RETURN_SCHEMA_BLOCK` 常量共用。
 
-### 🟠 P1-3 auth 关键词列表三处副本且已不一致
+### 🟠 P1-3 auth 关键词列表副本（⚠️ 前提已修正）
 
-- **位置** `_SAFELIST_RISK_KEYWORDS` 元组（`planner_judge_prompts.py:66`，13 项）vs rule 6 内联 `{auth, token, user, ...}`（622、724，各 14 项）。
-- **影响** 已经不同步；维护时三处漂移。
-- **修法** 单一来源，rule 6 文本由该常量渲染。
+- **原始判断（部分错误）** 以为 `_SAFELIST_RISK_KEYWORDS`（13 项）与两处 rule-6 内联（各 14 项）是同一概念的三副本应合一。
+- **核实后** 这是**两个不同机制**：① `_SAFELIST_RISK_KEYWORDS`（含 `verify`）驱动**确定性**「显然安全」短路排除；② rule-6 内联（含 `session`/`user`，无 `verify`）是**面向 LLM** 的 C-class 复核提示。关键词本就该不同，强行合一会双向改变行为。
+- **正确修法（已落地 B1）** 只合并那两份**完全相同**的 rule-6 内联 → 抽 `_REVIEW_TASKS_RULES` 常量单一来源；`_SAFELIST_RISK_KEYWORDS` 保持独立并加注释说明差异。
 
 ### 🟠 P1-4 Opus 4.8 字面化：revision prompt 依赖外推
 
@@ -152,10 +152,12 @@
    - 单测 `test_gate_segment_review.py`（2 例）+ 既有契约测试自动覆盖
    - 验证：2965 单测全绿 / mypy strict 干净 / ruff 干净
 
-**批次 B（结构化重构，低风险高收益）**
-3. P0-4 长上下文排序（纯排序，先 analyst/judge/executor）
-4. P0-3 XML 标签包裹变量内容（同上三个优先）
-5. P1-2 / P1-3 去重（规则块 + auth 关键词单一来源）
+**批次 B（结构化重构）**
+- ✅ **B1 已落地（2026-05-28，feat/web，未提交）** — P1-2 + 修正后的 P1-3 去重：
+  - 抽 `_REVIEW_TASKS_RULES` / `_MISMATCH_NOTE` / `_ZH_LANG_NOTE` 常量 + `_return_schema_block()` helper，两个 review prompt 单一来源
+  - `_SAFELIST_RISK_KEYWORDS` 保留独立 + 注释（不同机制，见 P1-3 修正）
+  - **黄金快照证明逐字节不变**（en/zh × rr 0/2 × 两函数 共 8 组）；新增 `test_plan_review_shared_blocks.py`（3 例）；2968 单测全绿 / mypy / ruff 干净
+- ⏸ **B2 待决** — P0-3 XML / P0-4 长上下文排序，**仅 Claude 系 analyst/judge**（executor/planner_judge 是 OpenAI，按 §五 不碰）。XML 重构触及 analyst grounding，按 §五 护栏#3 **须真实 eval 验证不退化**（API 成本）→ 动手前需用户确认是否跑 eval
 
 **批次 C（输出质量）**
 6. P1-1 few-shot 示例
@@ -175,6 +177,7 @@
 - [x] 批次 A：executor 单测覆盖 grounding 引导；`grep "PJ-PLAN-REVIEW-SEGMENT" src/llm/prompts/gate_registry.py` 命中；契约测试绿（2026-05-28）
 - [x] 批次 A 接线 live 验证（2026-05-28，真实 zod 仓库，零 API 成本）：跑 executor 同一对生产函数 `_safe_harvest_symbols`+`build_semantic_merge_prompt` 喂真实 git 三方内容；`classic/iso.ts`→`./schemas.js`(257 exports)、`classic/schemas.ts`→含 `./iso.js`(15 exports，正是当年断编译区域) 均渲染入 prompt，grounding 就位。forgejo(Go) 无法验（harvester 仅 TS/JS）
 - [ ] 批次 A 全链路（可选，需 API $）：真实 LLM `merge --ci` 跑一遍看 executor 产物/rationale 不退化（注：zod 产物有已知无关编译缺陷，merge 质量信号偏噪，见 `project_zod_eval_and_batch1_fixes`）
+- [x] 批次 B1（2026-05-28）：review prompt 去重，黄金快照逐字节不变（8 组）+ `test_plan_review_shared_blocks.py` 绿；2968 单测 / mypy / ruff 干净
 - [ ] follow-up：harvester barrel/re-export（`export * from` / `export {x} from`）抓不到 → 0 exports 误导 grounding（analyst 侧同存，非批次 A 引入）
 - [ ] 批次 B：规则/关键词单一来源（`grep` 副本数=1）；prompt snapshot 测（若有）更新
 - [ ] 全程 mypy / ruff / pytest 全绿
