@@ -96,12 +96,19 @@ def build_file_review_prompt(
         fork_content, merged_content, language, max_content_chars
     )
 
-    return f"""Review the following merged file for correctness and completeness.
+    return f"""<task>
+Review the merged file below for correctness and completeness. The merged
+content (and the fork's pre-merge original, when shown) come first; the merge
+decision, review tasks, grounding rule and required JSON output follow.
+</task>
 
-# Project Context
-{project_context or "No project context provided."}
-
-# File: {file_path}
+<merged_content language="{language}">
+```{language}
+{_truncate_content(merged_content, max_content_chars)}
+```
+</merged_content>
+{fork_section}{_memory_section(memory_context)}<file_info>
+File: {file_path}
 Language: {language}
 
 # Merge Decision Applied
@@ -114,12 +121,13 @@ Language: {language}
 - Lines deleted: {original_diff.lines_deleted}
 - Conflicts: {original_diff.conflict_count}
 - Security sensitive: {original_diff.is_security_sensitive}
+</file_info>
 
-# Merged Content
-```{language}
-{_truncate_content(merged_content, max_content_chars)}
-```
-{fork_section}{_memory_section(memory_context)}
+<project_context>
+{project_context or "No project context provided."}
+</project_context>
+
+<instructions>
 # Review Tasks
 {_review_tasks_section(check_strategy)}
 
@@ -133,7 +141,9 @@ non-empty "affected_lines" array OR a non-empty "evidence_excerpt" string
 quoting a verbatim line from the merged content. Ungrounded CRITICAL/HIGH
 issues will be auto-downgraded to MEDIUM by the parser, so failing to cite
 evidence weakens your verdict.
+</instructions>
 
+<output_format>
 Return JSON:
 {{
   "issues": [
@@ -151,7 +161,8 @@ Return JSON:
   ],
   "overall_assessment": "Brief overall quality assessment",
   "confidence": 0.8
-}}"""
+}}
+</output_format>"""
 
 
 def build_verdict_prompt(

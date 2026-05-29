@@ -157,7 +157,12 @@
   - 抽 `_REVIEW_TASKS_RULES` / `_MISMATCH_NOTE` / `_ZH_LANG_NOTE` 常量 + `_return_schema_block()` helper，两个 review prompt 单一来源
   - `_SAFELIST_RISK_KEYWORDS` 保留独立 + 注释（不同机制，见 P1-3 修正）
   - **黄金快照证明逐字节不变**（en/zh × rr 0/2 × 两函数 共 8 组）；新增 `test_plan_review_shared_blocks.py`（3 例）；2968 单测全绿 / mypy / ruff 干净
-- ⏸ **B2 待决** — P0-3 XML / P0-4 长上下文排序，**仅 Claude 系 analyst/judge**（executor/planner_judge 是 OpenAI，按 §五 不碰）。XML 重构触及 analyst grounding，按 §五 护栏#3 **须真实 eval 验证不退化**（API 成本）→ 动手前需用户确认是否跑 eval
+- ✅ **B2 已落地（2026-05-29，feat/web，未提交时已 eval）** — P0-3 XML + P0-4 长上下文排序，**仅 Claude 系**：
+  - `build_conflict_analysis_prompt`（analyst）：三方内容上移到 `<three_way_content>` 顶部、`<instructions>`/`<output_format>` 置底，全程逐字保留 grounding/schema/semantic_compatibility/symbol surface
+  - `build_file_review_prompt`（judge）：`<merged_content>` + Fork Original 上移、schema 置底
+  - executor/planner_judge（OpenAI）按 §五 未碰；grounding 块（facts/surface/native）沿用 `#` 头（helper 被 round prompt 共用，不动）
+  - **eval（§五 护栏#3）**：因 Anthropic 端点 503，改用 `OPENAI_BASE_URL`+`OPENAI_MODELS`（mimo-v2.5-pro）在真实 zod `iso.ts` 上 A/B：baseline 虚构 `core._isoWeek`（grounding_warnings 命中），NEW 两次有效分析**零真实虚构**且正确用 `required_new_apis` 声明缺口 → **未退化（实为改善）**。注：mimo≠生产 claude，XML 系 Claude 亲和，样本小
+  - 2968 单测全绿 / mypy strict / ruff 干净
 
 **批次 C（输出质量）**
 6. P1-1 few-shot 示例
@@ -178,6 +183,7 @@
 - [x] 批次 A 接线 live 验证（2026-05-28，真实 zod 仓库，零 API 成本）：跑 executor 同一对生产函数 `_safe_harvest_symbols`+`build_semantic_merge_prompt` 喂真实 git 三方内容；`classic/iso.ts`→`./schemas.js`(257 exports)、`classic/schemas.ts`→含 `./iso.js`(15 exports，正是当年断编译区域) 均渲染入 prompt，grounding 就位。forgejo(Go) 无法验（harvester 仅 TS/JS）
 - [ ] 批次 A 全链路（可选，需 API $）：真实 LLM `merge --ci` 跑一遍看 executor 产物/rationale 不退化（注：zod 产物有已知无关编译缺陷，merge 质量信号偏噪，见 `project_zod_eval_and_batch1_fixes`）
 - [x] 批次 B1（2026-05-28）：review prompt 去重，黄金快照逐字节不变（8 组）+ `test_plan_review_shared_blocks.py` 绿；2968 单测 / mypy / ruff 干净
+- [x] 批次 B2（2026-05-29）：analyst/judge XML+排序重构；单测/mypy/ruff 全绿；zod iso.ts A/B eval（mimo）证 grounding 未退化（baseline 虚构 core._isoWeek，NEW 零真实虚构）
 - [ ] follow-up：harvester barrel/re-export（`export * from` / `export {x} from`）抓不到 → 0 exports 误导 grounding（analyst 侧同存，非批次 A 引入）
 - [ ] 批次 B：规则/关键词单一来源（`grep` 副本数=1）；prompt snapshot 测（若有）更新
 - [ ] 全程 mypy / ruff / pytest 全绿

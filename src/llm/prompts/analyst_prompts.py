@@ -379,33 +379,46 @@ def build_conflict_analysis_prompt(
     facts_block = _format_diff_facts_block(diff_facts)
     native_block = _format_native_3way_block(native_3way_outcome)
 
-    return f"""Analyze this Git merge conflict and provide a structured analysis.
+    return f"""<task>
+Analyze this Git merge conflict and provide a structured analysis. The full
+three-way content comes first; the file metadata, grounding signals, analysis
+instructions and required JSON output format follow it below.
+</task>
 
-# Project Context
-{project_context or "No project context provided."}
+<three_way_content>
+The fork and upstream versions are clean branches — reason about how each
+side's changes relate to their common ancestor (merge-base).
 
-# File Information
+<merge_base>
+{base_section}
+</merge_base>
+
+<fork_version>
+{current_section}
+</fork_version>
+
+<upstream_version>
+{target_section}
+</upstream_version>
+</three_way_content>
+
+<file_info>
 Path: {file_diff.file_path}
 Language: {language}
 Fork-side change (base→fork): +{fork_added} / -{fork_deleted}
 Upstream-side change (base→upstream): +{upstream_added} / -{upstream_deleted}
 Pre-existing markers in refs: {file_diff.conflict_count} (counts `<<<<<<<` already in the displayed content — usually 0 for clean refs)
+</file_info>
 
-# Change-volume signal
+<change_volume_signal>
 {size_signal}
+</change_volume_signal>
 
-{native_block}{facts_block}{surface_block}# Three-way Diff
+{native_block}{facts_block}{surface_block}<project_context>
+{project_context or "No project context provided."}
+</project_context>
 
-## Common ancestor version (merge-base)
-{base_section}
-
-## Current version (fork's modifications)
-{current_section}
-
-## Target version (upstream's modifications)
-{target_section}
-
-# Analysis Task
+<instructions>
 Analyze this conflict and output:
 1. conflict_type: one of concurrent_modification, logic_contradiction, semantic_equivalent,
    dependency_update, interface_change, deletion_vs_modification, refactor_vs_feature, configuration, unknown
@@ -431,7 +444,9 @@ boilerplate like "comparable small changes", "both sides made similar
 edits", "minor refactor". If the change really is trivial, say WHAT it
 is (e.g. "fork renamed `parseDate` to `parseISODate`; upstream added a
 `strict` parameter to the same function").
+</instructions>
 
+<output_format>
 Return JSON:
 {{
   "conflict_type": "concurrent_modification",
@@ -451,7 +466,8 @@ Return JSON:
   "confidence": 0.75,
   "rationale": "Detailed explanation of the analysis and recommendation",
   "is_security_sensitive": false
-}}"""
+}}
+</output_format>"""
 
 
 def build_decision_proposal_prompt(
