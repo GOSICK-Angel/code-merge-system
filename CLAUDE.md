@@ -45,7 +45,7 @@ Each agent reads its API key from its own env var — no key is hardcoded:
 
 | Agent | Env var |
 |-------|---------|
-| planner, conflict_analyst, judge, human_interface | `ANTHROPIC_API_KEY` |
+| planner, conflict_analyst, judge, human_interface, memory_extractor | `ANTHROPIC_API_KEY` |
 | planner_judge, executor | `OPENAI_API_KEY` |
 
 Run `merge validate --config <path>` to check all vars before running.
@@ -128,7 +128,7 @@ fields. Loader behavior:
 
 Every agent that inherits from `BaseAgent` and opts in via `contract_name = "<name>"` has a yaml at `src/agents/contracts/<name>.yaml` that declares its input whitelist, output schema, allowed prompt gate IDs, forbidden behaviors, and collaboration pattern. See `src/agents/contracts/_schema.md` for the full spec.
 
-Prompts are registered in `src/llm/prompts/gate_registry.py` under stable IDs (`P-*`, `PJ-*`, `CA-*`, `E-*`, `J-*`). Agents must reference gates by ID rather than importing prompt builders directly; `tests/unit/test_agent_contracts.py` verifies that every contract-declared gate is registered.
+Prompts are registered in `src/llm/prompts/gate_registry.py` under stable IDs (`P-*`, `PJ-*`, `CA-*`, `E-*`, `J-*`, `M-*`). Agents must reference gates by ID rather than importing prompt builders directly; `tests/unit/test_agent_contracts.py` verifies that every contract-declared gate is registered.
 
 ### Anti-Patterns (enforced by `tests/unit/test_agent_contracts.py`)
 
@@ -146,6 +146,10 @@ Key config thresholds: `risk_score_low=0.3`, `risk_score_high=0.6`, `auto_merge_
 
 `enable_working_branch` defaults to `True` (U7): each run creates a fresh `merge/auto-{timestamp}` branch from `fork_ref` and operates there, so a half-finished run never pollutes `fork_ref` HEAD. Set to `False` explicitly in `.merge/config.yaml` to restore the legacy in-place behavior.
 
+### Memory subsystem
+
+`src/memory/` persists context across runs (sqlite store at `memory.db`). The `memory_extractor` agent (contract `memory_extractor.yaml`, gates `M-*`) summarizes disputes/decisions/metrics into the store; later runs load relevant entries via `layered_loader.py`. Reviewer-agent read-only rules still apply.
+
 ### `.merge/` Directory (production mode)
 
 When run inside a target project (pip-installed), all artifacts are written under `<repo>/.merge/`:
@@ -155,7 +159,8 @@ When run inside a target project (pip-installed), all artifacts are written unde
   config.yaml          # auto-generated on first run by `merge <branch>`
   .env                 # API keys (gitignored automatically)
   .gitignore           # auto-generated: ignores .env and runs/
-  plans/               # MERGE_PLAN_*.md reports (replaces MERGE_RECORD/)
+  plans/               # MERGE_PLAN_*.md reports
+  memory.db            # cross-run memory store (sqlite)
   runs/<run_id>/
     checkpoint.json    # single rolling checkpoint
     merge_report.md
@@ -163,6 +168,8 @@ When run inside a target project (pip-installed), all artifacts are written unde
 ```
 
 API key resolution order: shell env vars → `.merge/.env` → `~/.config/code-merge-system/.env`
+
+**Dev mode** (running the agent against its own source tree, not pip-installed) writes elsewhere — see `src/cli/paths.py`: checkpoints/logs → `outputs/debug/`, plans → `MERGE_RECORD/`, memory → `outputs/debug/memory.db`.
 
 ## Project Skills
 
@@ -173,6 +180,7 @@ API key resolution order: shell env vars → `.merge/.env` → `~/.config/code-m
 - **run-integration** — set up + run `tests/integration/` (real API keys, not in CI).
 - **verify** — full validation suite (tests + mypy + ruff) before committing.
 - **control-cli** — local harness to drive/inspect/profile CLI/TUI (used for Web UI bridge debugging).
+- **setup-conflict-test-branches** — build common-ancestor test/upstream + test/fork branch pairs (C-class + HUMAN_REQUIRED coverage) against any target repo.
 
 ## Git Workflow
 
