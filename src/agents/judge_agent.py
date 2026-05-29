@@ -177,6 +177,7 @@ class JudgeAgent(BaseAgent):
                 prior_round_issues=prior_issues_by_file.get(file_path, []),
                 referenced_names=state.dependency_graph.referenced_symbols(file_path),
                 fork_content=fork_content,
+                lang=state.config.output.language,
             )
 
         # U5: per-file fan-out — dict.keys() is nominally disjoint, but
@@ -236,6 +237,7 @@ class JudgeAgent(BaseAgent):
         prior_round_issues: list[JudgeIssue] | None = None,
         referenced_names: frozenset[str] = frozenset(),
         fork_content: str | None = None,
+        lang: str = "en",
     ) -> list[JudgeIssue]:
         issues: list[JudgeIssue] = []
 
@@ -317,6 +319,7 @@ class JudgeAgent(BaseAgent):
             memory_context=memory_context,
             check_strategy=check_strategy,
             fork_content=fork_content,
+            lang=lang,
         )
         messages = [{"role": "user", "content": prompt}]
 

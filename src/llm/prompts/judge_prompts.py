@@ -8,6 +8,24 @@ if TYPE_CHECKING:
 
 _DEFAULT_MAX_CONTENT_CHARS = 5000
 
+# P2-2: single strong JSON-only instruction shared by every judge prompt.
+# Weak "Return JSON:" wording let some models emit a markdown preamble; this
+# matches the planner_judge contract (parseable by json.loads, first char `{`).
+_JSON_ONLY_INSTRUCTION = (
+    "Respond with ONLY a single JSON object matching the schema — it will be "
+    "parsed directly by json.loads(). The first character of your reply must "
+    "be `{`. No markdown fences, no preamble, no trailing prose."
+)
+
+# P2-4: human-facing fields (issue description, suggested_fix, overall
+# assessment) follow the run's output language. Injected only when lang ==
+# "zh"; English runs are unchanged.
+_ZH_LANG_NOTE = (
+    "\n\n语言要求：每个 issue 的 description、suggested_fix 以及 "
+    "overall_assessment 字段必须使用中文撰写（文件路径、函数名、枚举值等技术"
+    "标识保留原文）。"
+)
+
 
 def _truncate_content(content: str, max_chars: int | None) -> str:
     limit = max_chars if max_chars is not None else _DEFAULT_MAX_CONTENT_CHARS
@@ -79,8 +97,10 @@ def build_file_review_prompt(
     memory_context: str = "",
     check_strategy: "JudgeCheckStrategy | None" = None,
     fork_content: str | None = None,
+    lang: str = "en",
 ) -> str:
     language = original_diff.language or "unknown"
+    lang_note = _ZH_LANG_NOTE if lang == "zh" else ""
     decision_val = (
         decision_record.decision.value
         if hasattr(decision_record.decision, "value")
@@ -140,11 +160,11 @@ GROUNDING RULE (P1-3): every CRITICAL or HIGH issue MUST include either a
 non-empty "affected_lines" array OR a non-empty "evidence_excerpt" string
 quoting a verbatim line from the merged content. Ungrounded CRITICAL/HIGH
 issues will be auto-downgraded to MEDIUM by the parser, so failing to cite
-evidence weakens your verdict.
+evidence weakens your verdict.{lang_note}
 </instructions>
 
 <output_format>
-Return JSON:
+{_JSON_ONLY_INSTRUCTION}
 {{
   "issues": [
     {{
@@ -191,7 +211,7 @@ Provide a final verdict:
 - conditional: Has medium/low issues that should be addressed
 - fail: Has critical or high issues that must be fixed
 
-Return JSON:
+{_JSON_ONLY_INSTRUCTION}
 {{
   "verdict": "{verdict_hint}",
   "summary": "Overall merge quality assessment",
@@ -247,7 +267,9 @@ non-empty "affected_lines" array OR a non-empty "evidence_excerpt" string
 quoting a verbatim line from the merged content. Ungrounded CRITICAL/HIGH
 issues are auto-downgraded to MEDIUM by the parser.
 
-Return JSON:
+"""
+        + _JSON_ONLY_INSTRUCTION
+        + """
 {
   "files": [
     {
@@ -286,7 +308,7 @@ Re-evaluate each disputed issue. For each issue:
 - If the executor's counter-evidence is convincing, WITHDRAW the issue.
 - If the issue stands despite the rebuttal, MAINTAIN it.
 
-Return JSON:
+{_JSON_ONLY_INSTRUCTION}
 {{
   "remaining_issues": [
     {{

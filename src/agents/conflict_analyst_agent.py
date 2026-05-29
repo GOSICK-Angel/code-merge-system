@@ -116,6 +116,7 @@ class ConflictAnalystAgent(BaseAgent):
         thresholds = view.thresholds
         chunk_size = view.config.chunk_size_chars
         min_chunked_confidence = thresholds.chunked_aggregation_min_confidence
+        output_lang = view.config.output.language
 
         async def _analyze_one(file_path: str) -> ConflictAnalysis | None:
             fd = file_diffs_map.get(file_path)
@@ -140,6 +141,7 @@ class ConflictAnalystAgent(BaseAgent):
                 forks_profile=forks_profile,
                 chunk_size_chars=chunk_size,
                 min_chunked_confidence=min_chunked_confidence,
+                lang=output_lang,
             )
 
         # U5: each file gets its own shard; duplicates in ``high_risk_files``
@@ -183,6 +185,7 @@ class ConflictAnalystAgent(BaseAgent):
         referenced_names: frozenset[str] = frozenset(),
         impact_hint: DependencyImpactHint | None = None,
         fork_ref: str | None = None,
+        lang: str = "en",
     ) -> ConflictAnalysis:
         # U1.A: build_staged_content runs regardless of memory_store
         # availability. Only the memory-text injection remains gated.
@@ -270,6 +273,7 @@ class ConflictAnalystAgent(BaseAgent):
                     fork_ref,
                     self.git_tool,
                 ),
+                lang=lang,
             )
             return _with_grounding_warnings(
                 chunked,
@@ -326,6 +330,7 @@ class ConflictAnalystAgent(BaseAgent):
             imported_symbols=imported_symbols,
             diff_facts=diff_facts,
             native_3way_outcome=native_3way_outcome,
+            lang=lang,
         )
         messages = [{"role": "user", "content": prompt}]
 
@@ -366,6 +371,7 @@ class ConflictAnalystAgent(BaseAgent):
         chunk_size: int,
         min_chunked_confidence: float,
         imported_symbols: dict[str, list[str]] | None = None,
+        lang: str = "en",
     ) -> ConflictAnalysis:
         """Split large file into chunks, fan-out LLM calls, aggregate deterministically."""
         file_path = file_diff.file_path
@@ -413,6 +419,7 @@ class ConflictAnalystAgent(BaseAgent):
                 tgt_chunk,
                 enriched_context,
                 imported_symbols=imported_symbols,
+                lang=lang,
             )
             messages = [{"role": "user", "content": prompt}]
             raw = await self._call_llm_with_retry(messages, system=ANALYST_SYSTEM)

@@ -163,6 +163,7 @@ class TestConflictAnalystDrivesThresholdsFromState:
             forks_profile=None,
             chunk_size_chars=None,
             min_chunked_confidence=None,
+            lang="en",
         ):
             captured["chunk_size_chars"] = chunk_size_chars
             captured["min_chunked_confidence"] = min_chunked_confidence
@@ -252,6 +253,7 @@ class TestConflictAnalystDrivesThresholdsFromState:
             forks_profile=None,
             chunk_size_chars=None,
             min_chunked_confidence=None,
+            lang="en",
         ):
             captured["min_chunked_confidence"] = min_chunked_confidence
             return None

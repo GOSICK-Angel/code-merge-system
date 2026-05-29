@@ -152,9 +152,13 @@ def build_revision_prompt(
         for issue in capped_issues
     )
     if len(judge_issues) > MAX_REVISION_ISSUES:
+        remaining = len(judge_issues) - MAX_REVISION_ISSUES
         issues_text += (
-            f"\n\n(Showing {MAX_REVISION_ISSUES} of {len(judge_issues)} issues. "
-            f"Apply the same reclassification pattern to similar files.)"
+            f"\n\n(Showing the first {MAX_REVISION_ISSUES} of "
+            f"{len(judge_issues)} issues. Reclassify ONLY the files listed "
+            f"above. Do not infer or extrapolate changes to files that are not "
+            f"explicitly listed — the remaining {remaining} issues are "
+            f"truncated here and will be handled in a separate revision pass.)"
         )
 
     phases_text = "\n".join(

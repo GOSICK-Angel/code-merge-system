@@ -165,10 +165,13 @@
   - 2968 单测全绿 / mypy strict / ruff 干净
 
 **批次 C（输出质量）**
-6. P1-1 few-shot 示例
-7. P1-4 revision 显式范围
-8. P2-2 JSON-only 措辞统一
-9. P2-4 analyst/judge 语言注入
+- ✅ **C-A类 已落地（2026-05-29，feat/web，未提交）** — 三项 universal-safe（无需 eval）：
+  - **P1-4** `planner_prompts.py` revision 截断提示去掉「Apply the same reclassification pattern to similar files」外推依赖 → 显式「只重分类列出的文件，其余截断条目分批处理」
+  - **P2-2** analyst（conflict/commit_round）+ judge（file_review/verdict/batch/re_evaluate）的弱 `Return JSON:` 统一为强措辞常量 `_JSON_ONLY_INSTRUCTION`（json.loads 可解析、首字符 `{`、无 markdown/前言）；decision_proposal 本就有闭合强句，保留
+  - **P2-4** `build_conflict_analysis_prompt` / `build_file_review_prompt` 加 `lang` 参数 + `_ZH_LANG_NOTE`（zh 时注入 rationale/intent description、issue description/suggested_fix/overall_assessment 用中文）；agent 侧从 `config.output.language` 透传（analyst 两调用点经 `analyze_file`/`_chunked_analyze_file`，judge 经 `review_file`）。**英文 run 逐字节不变**（`default == en` 断言）
+  - 新增 `test_prompt_batch_c.py`（7 例）；2987 单测全绿 / mypy strict / ruff 干净；`test_state_thresholds.py` 两处 fake 签名补 `lang`
+  - §五分级：三项均 **A类**（措辞/语言注入/去外推），文档 §五 明列为 universal-safe 无需跨模型 eval
+- ⏳ **P1-1 few-shot 示例（B类，待 eval）** — 仅 planner 分类 / analyst / judge（Claude 系），executor/planner_judge 保持 zero-shot；须在配置模型上 eval，下一轮处理
 
 **批次 D（架构级，单独评估）**
 10. P2-1 Structured Outputs 迁移
@@ -184,6 +187,8 @@
 - [ ] 批次 A 全链路（可选，需 API $）：真实 LLM `merge --ci` 跑一遍看 executor 产物/rationale 不退化（注：zod 产物有已知无关编译缺陷，merge 质量信号偏噪，见 `project_zod_eval_and_batch1_fixes`）
 - [x] 批次 B1（2026-05-28）：review prompt 去重，黄金快照逐字节不变（8 组）+ `test_plan_review_shared_blocks.py` 绿；2968 单测 / mypy / ruff 干净
 - [x] 批次 B2（2026-05-29）：analyst/judge XML+排序重构；单测/mypy/ruff 全绿；zod iso.ts A/B eval（mimo）证 grounding 未退化（baseline 虚构 core._isoWeek，NEW 零真实虚构）
+- [x] 批次 C-A类（2026-05-29）：P1-4 去外推 + P2-2 强 JSON 措辞 + P2-4 zh 语言注入；`test_prompt_batch_c.py`（7 例）绿；英文 run 逐字节不变；2987 单测 / mypy / ruff 干净
+- [ ] 批次 C-B类（P1-1 few-shot）：需配置模型 eval（Claude 系 only）
 - [ ] follow-up：harvester barrel/re-export（`export * from` / `export {x} from`）抓不到 → 0 exports 误导 grounding（analyst 侧同存，非批次 A 引入）
 - [ ] 批次 B：规则/关键词单一来源（`grep` 副本数=1）；prompt snapshot 测（若有）更新
 - [ ] 全程 mypy / ruff / pytest 全绿

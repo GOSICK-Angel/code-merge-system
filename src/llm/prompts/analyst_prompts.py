@@ -7,6 +7,22 @@ from src.models.diff import FileDiff
 from src.tools.diff_facts import DiffFacts
 from src.tools.native_3way import NativeMergeOutcome
 
+# P2-2: single strong JSON-only instruction shared by every analyst prompt.
+# Weak "Return JSON:" wording let some models emit a markdown preamble; this
+# matches the planner_judge contract (parseable by json.loads, first char `{`).
+_JSON_ONLY_INSTRUCTION = (
+    "Respond with ONLY a single JSON object matching the schema — it will be "
+    "parsed directly by json.loads(). The first character of your reply must "
+    "be `{`. No markdown fences, no preamble, no trailing prose."
+)
+
+# P2-4: human-facing fields (rationale, intent descriptions) follow the run's
+# output language. Injected only when lang == "zh"; English runs are unchanged.
+_ZH_LANG_NOTE = (
+    "\n\n语言要求：rationale 与 upstream_intent / fork_intent 的 description "
+    "字段必须使用中文撰写（文件路径、函数名、枚举值等技术标识保留原文）。"
+)
+
 _ROUND_PER_VERSION_CHARS = 1000
 # Per-side diff budget for commit-round prompts. Two sides (fork, upstream)
 # keep total per-file content near _FILE_TOKEN_ESTIMATE (1000 tokens ≈ 4000
@@ -170,7 +186,9 @@ regions. Do NOT write boilerplate like "comparable small changes",
                      (forces escalate_human downstream)
   - "orthogonal"   — the edits do not interact; either take_* is safe
 
-Return JSON:
+"""
+        + _JSON_ONLY_INSTRUCTION
+        + """
 {
   "files": [
     {
@@ -321,6 +339,7 @@ def build_conflict_analysis_prompt(
     imported_symbols: dict[str, list[str]] | None = None,
     diff_facts: "DiffFacts | None" = None,
     native_3way_outcome: NativeMergeOutcome | None = None,
+    lang: str = "en",
 ) -> str:
     language = file_diff.language or "unknown"
     base_section = (
@@ -378,6 +397,7 @@ def build_conflict_analysis_prompt(
     surface_block = _format_imported_symbol_surface(imported_symbols)
     facts_block = _format_diff_facts_block(diff_facts)
     native_block = _format_native_3way_block(native_3way_outcome)
+    lang_note = _ZH_LANG_NOTE if lang == "zh" else ""
 
     return f"""<task>
 Analyze this Git merge conflict and provide a structured analysis. The full
@@ -443,11 +463,11 @@ changes — name the affected functions / fields / regions. Do NOT write
 boilerplate like "comparable small changes", "both sides made similar
 edits", "minor refactor". If the change really is trivial, say WHAT it
 is (e.g. "fork renamed `parseDate` to `parseISODate`; upstream added a
-`strict` parameter to the same function").
+`strict` parameter to the same function").{lang_note}
 </instructions>
 
 <output_format>
-Return JSON:
+{_JSON_ONLY_INSTRUCTION}
 {{
   "conflict_type": "concurrent_modification",
   "upstream_intent": {{
