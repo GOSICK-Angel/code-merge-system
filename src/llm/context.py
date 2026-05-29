@@ -84,7 +84,11 @@ def _truncate_text(text: str, max_chars: int, strategy: str) -> str:
     marker = "\n\n... [truncated] ...\n\n"
     marker_len = len(marker)
     available = max_chars - marker_len
-    if available <= 0:
+    # available == 1 would give half == 0 in the "middle" strategy, and
+    # text[-0:] returns the WHOLE string (Python treats -0 as 0) — blowing the
+    # budget by orders of magnitude. Below 2 chars no meaningful flanking
+    # truncation is possible, so fall back to a budget-respecting head slice.
+    if available < 2:
         return text[:max_chars]
 
     if strategy == "tail":

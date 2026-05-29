@@ -68,7 +68,11 @@ def test_store_ranking_parity_mixed_entries(tmp_path):
         mem = mem.add_entry(e)
         sql.add_entry(e)
 
-    assert _ranked_ids(mem, query) == _ranked_ids(sql, query)
+    mem_ranked = _ranked_ids(mem, query)
+    assert mem_ranked == _ranked_ids(sql, query)
+    # also pin content correctness: the exact-path match must top the ranking
+    # (so a broken exact-match branch can't pass via mere store parity).
+    assert mem_ranked[0] == entries[0].entry_id
 
 
 def test_score_path_overlap_signals():

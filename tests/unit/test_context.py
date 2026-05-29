@@ -103,6 +103,18 @@ class TestTruncateText:
         assert result.startswith("A")
         assert result.endswith("B")
 
+    def test_truncation_never_exceeds_budget_at_tiny_budgets(self):
+        # OPP-4 follow-up: when available (= max_chars - marker_len) is 0 or 1,
+        # the "middle" strategy used to emit text[-0:] == the whole string,
+        # blowing the budget ~40x. Every strategy must respect max_chars.
+        text = "x" * 1000
+        for max_chars in range(0, 30):
+            for strategy in ("tail", "head", "middle"):
+                result = _truncate_text(text, max_chars, strategy)
+                assert len(result) <= max_chars, (
+                    f"{strategy} @ max_chars={max_chars} -> len {len(result)}"
+                )
+
 
 class TestBuildStagedContent:
     """Tests for AgentPromptBuilder.build_staged_content integration."""

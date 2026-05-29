@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from src.core.orchestrator import Orchestrator
 from src.memory.hit_tracker import MemoryHitTracker
 from src.memory.models import MemoryEntry, MemoryEntryType
@@ -123,7 +125,10 @@ def test_writeback_off_by_default():
     assert orch._memory_store.to_memory().entries[0].confidence == 0.5
 
 
-def test_writeback_boosts_helpful_skips_human_and_bootstrap():
+@pytest.mark.parametrize(
+    "human_source", [DecisionSource.HUMAN, DecisionSource.BATCH_HUMAN]
+)
+def test_writeback_boosts_helpful_skips_human_and_bootstrap(human_source):
     orch = _orch(writeback=True, k=0.1)
     helpful = _entry("help", file_paths=["src/a.py"], confidence=0.5)
     human = _entry("human", file_paths=["src/secret.py"], confidence=0.5)
@@ -136,12 +141,30 @@ def test_writeback_boosts_helpful_skips_human_and_bootstrap():
 
     state = SimpleNamespace(
         file_decision_records={
-            "src/secret.py": SimpleNamespace(decision_source=DecisionSource.HUMAN)
+            "src/secret.py": SimpleNamespace(decision_source=human_source)
         }
     )
     orch._apply_outcome_confidence_writeback(state)
 
     by_id = {e.entry_id: e for e in orch._memory_store.to_memory().entries}
     assert by_id[helpful.entry_id].confidence == 0.6  # 0.5 + 0.1*1.0
-    assert by_id[human.entry_id].confidence == 0.5  # human-decided: untouched
+    assert by_id[human.entry_id].confidence == 0.5  # human/batch-human: untouched
     assert by_id[boot.entry_id].confidence == 0.5  # bootstrap: untouched
+
+
+def test_writeback_demotes_harmful_end_to_end():
+    # Pins the negative path through the orchestrator: a consistently-failing
+    # entry must have its confidence lowered (guards against a future
+    # `if score > 0` slip or a sign inversion in outcome_scores).
+    orch = _orch(writeback=True, k=0.1)
+    harmful = _entry("harm", file_paths=["src/b.py"], confidence=0.5)
+    orch._memory_store = orch._memory_store.add_entry(harmful)
+    for i in range(3):
+        f = f"harm-obs{i}"
+        orch._memory_hit_tracker.record_injection([f], [harmful.entry_id])
+        orch._memory_hit_tracker.record_outcome(f, success=False)
+
+    orch._apply_outcome_confidence_writeback(SimpleNamespace(file_decision_records={}))
+
+    updated = orch._memory_store.to_memory().entries[0]
+    assert abs(updated.confidence - 0.4) < 1e-9  # 0.5 + 0.1*(-1.0)

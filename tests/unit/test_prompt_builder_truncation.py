@@ -40,3 +40,24 @@ def test_unanchored_large_file_keeps_head_and_tail():
     assert "LAST_UNIQUE_LINE" in result
     assert "[truncated]" in result
     assert len(result) < len(content)
+
+
+def test_small_file_tight_budget_uses_tail_truncation():
+    # OPP-4 path 1: a small file (<200 lines, <8000 chars) under a tight budget
+    # must route through _truncate_text('tail'), not a bare head slice — pins
+    # the marker so a regression back to content[:max_chars] is caught.
+    builder = AgentPromptBuilder(_make_config(), None)
+    body = "\n".join(f"line {i}" for i in range(50))
+    content = f"FIRST_LINE\n{body}\nLAST_LINE\n"
+    assert len(content) < 8000 and content.count("\n") < 200
+
+    # budget_tokens=20 -> max_chars=70, comfortably above the truncation
+    # marker length so the 'tail' strategy emits the marker (and not a bare
+    # head slice), yet far below the ~400-char content so it truncates.
+    result = builder.build_staged_content(
+        content, "config.txt", diff_ranges=[], budget_tokens=20
+    )
+
+    assert "FIRST_LINE" in result
+    assert "[truncated]" in result
+    assert len(result) < len(content)
