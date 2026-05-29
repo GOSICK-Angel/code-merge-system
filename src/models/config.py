@@ -64,6 +64,15 @@ class AgentLLMConfig(BaseModel):
         "'responses' (the Responses API). Some proxies only expose one; pick "
         "the style your endpoint supports.",
     )
+    use_structured_outputs: bool = Field(
+        default=False,
+        description="P2-1 opt-in: when True, supported agents request native "
+        "Structured Outputs (OpenAI response_format=json_schema / Anthropic "
+        "forced tool-use) so the model returns a well-formed JSON object that "
+        "still flows through the existing response parsers. Falls back "
+        "automatically to prompt-injection JSON when the gateway rejects it. "
+        "Defaults to False (legacy prompt+parse behaviour, zero change).",
+    )
     fallback: Optional[AgentLLMConfig] = Field(
         default=None,
         description="O-1/O-5: Optional fallback provider config activated when the "

@@ -70,6 +70,55 @@ class ModelOutputError(Exception):
         self.schema_name = schema_name
 
 
+def _append_schema_instruction(
+    messages: list[dict[str, Any]], json_schema: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Append a JSON-Schema instruction to the last user turn (fallback path)."""
+    import json
+
+    instruction = (
+        "\n\nRespond with ONLY a JSON object conforming to this schema "
+        "(no markdown fences, no preamble — the first character must be `{`):\n"
+        + json.dumps(json_schema, indent=2)
+    )
+    augmented = list(messages)
+    if augmented and augmented[-1].get("role") == "user":
+        last = augmented[-1]
+        augmented[-1] = {"role": "user", "content": str(last["content"]) + instruction}
+    else:
+        augmented.append({"role": "user", "content": instruction})
+    return augmented
+
+
+def _to_openai_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Make a Pydantic ``model_json_schema()`` satisfy OpenAI strict mode.
+
+    Strict ``json_schema`` requires every object to set
+    ``additionalProperties: false`` and list ALL of its properties in
+    ``required``. Pydantic with ``extra="forbid"`` already emits the former
+    and (with no field defaults) the latter, but ``$defs`` sub-schemas and
+    any future loosening are normalised here defensively. Recurses through
+    ``$defs`` / ``properties`` / array ``items``.
+    """
+
+    def _walk(node: Any) -> Any:
+        if isinstance(node, dict):
+            out = {k: _walk(v) for k, v in node.items()}
+            if out.get("type") == "object" and "properties" in out:
+                out["additionalProperties"] = False
+                out["required"] = list(out["properties"].keys())
+            return out
+        if isinstance(node, list):
+            return [_walk(v) for v in node]
+        return node
+
+    return _walk(schema)  # type: ignore[no-any-return]
+
+
+class _StructuredUnsupported(Exception):
+    """Provider accepted the request but did not return a structured payload."""
+
+
 class LLMClient(ABC):
     model: str
 
@@ -103,6 +152,32 @@ class LLMClient(ABC):
         system: str | None = None,
     ) -> BaseModel:
         pass
+
+    async def structured_json(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        json_schema: dict[str, Any],
+        schema_name: str,
+        system: str | None = None,
+    ) -> str:
+        """Return a well-formed JSON *string* conforming to ``json_schema``.
+
+        P2-1 reliability layer: concrete providers override this with
+        native Structured Outputs (OpenAI ``response_format=json_schema`` /
+        Anthropic forced tool-use) so the model cannot wrap its answer in
+        markdown or a prose preamble. The returned string flows into the
+        existing ``response_parser`` functions unchanged — those keep all
+        grounding / sanitisation / deterministic-verdict logic.
+
+        This default implementation is the graceful-degradation path:
+        append the schema as a plain instruction and call ``complete``.
+        Providers override and fall back to ``super().structured_json``
+        when the gateway rejects native Structured Outputs (a self-hosted
+        or proxied OpenAI-compatible endpoint may not support it).
+        """
+        augmented = _append_schema_instruction(messages, json_schema)
+        return await self.complete(augmented, system=system)
 
     def update_api_key(self, new_key: str) -> None:
         """Replace the API key used by this client (C2 credential rotation)."""
@@ -322,6 +397,78 @@ class AnthropicClient(LLMClient):
         except Exception as ve:
             raise ModelOutputError(raw, schema.__name__, str(ve)) from ve
 
+    async def structured_json(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        json_schema: dict[str, Any],
+        schema_name: str,
+        system: str | None = None,
+    ) -> str:
+        # Forced tool-use is incompatible with extended thinking; if a
+        # thinking budget is configured, take the prompt-injection fallback
+        # rather than dropping the thinking the operator opted into.
+        if self.thinking_budget_tokens is not None:
+            return await super().structured_json(
+                messages,
+                json_schema=json_schema,
+                schema_name=schema_name,
+                system=system,
+            )
+        try:
+            return await self._structured_tool_use(
+                messages, json_schema, schema_name, system
+            )
+        except (anthropic.BadRequestError, _StructuredUnsupported):
+            return await super().structured_json(
+                messages,
+                json_schema=json_schema,
+                schema_name=schema_name,
+                system=system,
+            )
+
+    async def _structured_tool_use(
+        self,
+        messages: list[dict[str, Any]],
+        json_schema: dict[str, Any],
+        schema_name: str,
+        system: str | None,
+    ) -> str:
+        import json
+
+        cached_messages, cached_system = apply_cache_markers(
+            messages, system=system, strategy=self.cache_strategy
+        )
+        cached_messages = _sanitize_surrogates(cached_messages)
+        cached_system = _sanitize_surrogates(cached_system)
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            "messages": cached_messages,
+            "tools": [
+                {
+                    "name": schema_name,
+                    "description": (
+                        f"Emit the {schema_name} result as structured data "
+                        "matching the input schema."
+                    ),
+                    "input_schema": json_schema,
+                }
+            ],
+            "tool_choice": {"type": "tool", "name": schema_name},
+        }
+        if cached_system:
+            kwargs["system"] = cached_system
+
+        response = await self._client.messages.create(**kwargs)
+        for block in response.content:
+            if getattr(block, "type", None) == "tool_use":
+                return json.dumps(getattr(block, "input", {}))
+        raise _StructuredUnsupported(
+            f"Anthropic returned no tool_use block (model={self.model!r})"
+        )
+
 
 class OpenAIClient(LLMClient):
     def __init__(
@@ -437,11 +584,20 @@ class OpenAIClient(LLMClient):
             extra["reasoning"] = {"effort": self.reasoning_effort}
 
         response_format = kwargs.pop("response_format", None)
-        if (
-            isinstance(response_format, dict)
-            and response_format.get("type") == "json_object"
-        ):
-            extra["text"] = {"format": {"type": "json_object"}}
+        if isinstance(response_format, dict):
+            rf_type = response_format.get("type")
+            if rf_type == "json_object":
+                extra["text"] = {"format": {"type": "json_object"}}
+            elif rf_type == "json_schema":
+                js = response_format.get("json_schema", {})
+                extra["text"] = {
+                    "format": {
+                        "type": "json_schema",
+                        "name": js.get("name", "response"),
+                        "schema": js.get("schema", {}),
+                        "strict": bool(js.get("strict", True)),
+                    }
+                }
 
         if sanitized_system:
             extra["instructions"] = sanitized_system
@@ -514,6 +670,54 @@ class OpenAIClient(LLMClient):
             return schema.model_validate(data)
         except Exception as ve:
             raise ModelOutputError(raw, schema.__name__, str(ve)) from ve
+
+    async def structured_json(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        json_schema: dict[str, Any],
+        schema_name: str,
+        system: str | None = None,
+    ) -> str:
+        # Reasoning models on the chat wire reject ``response_format`` for
+        # some gateways; the tiered fallback below absorbs that.
+        strict_schema = _to_openai_strict_schema(json_schema)
+        rf = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_name,
+                "schema": strict_schema,
+                "strict": True,
+            },
+        }
+        try:
+            return await self.complete(messages, system=system, response_format=rf)
+        except (
+            openai.BadRequestError,
+            openai.UnprocessableEntityError,
+            openai.NotFoundError,
+            TypeError,
+        ):
+            # json_schema unsupported on this gateway — try plain JSON mode,
+            # which most OpenAI-compatible endpoints still honor.
+            try:
+                return await self.complete(
+                    _append_schema_instruction(messages, json_schema),
+                    system=system,
+                    response_format={"type": "json_object"},
+                )
+            except (
+                openai.BadRequestError,
+                openai.UnprocessableEntityError,
+                openai.NotFoundError,
+                TypeError,
+            ):
+                return await super().structured_json(
+                    messages,
+                    json_schema=json_schema,
+                    schema_name=schema_name,
+                    system=system,
+                )
 
 
 @dataclass(frozen=True)

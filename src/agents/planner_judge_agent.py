@@ -27,6 +27,7 @@ from src.models.dependency import FileDependencyGraph
 from src.models.plan_review import PlannerIssueResponse
 from src.llm.context import estimate_tokens
 from src.llm.response_parser import parse_plan_judge_verdict
+from src.llm.structured_schemas import PLAN_JUDGE_VERDICT
 
 
 @dataclass
@@ -563,7 +564,10 @@ class PlannerJudgeAgent(BaseAgent):
         t0 = time.monotonic()
         try:
             raw = await self._call_llm_with_retry(
-                messages, system=system, json_mode=True
+                messages,
+                system=system,
+                json_mode=True,
+                **self._structured_kwargs(PLAN_JUDGE_VERDICT),
             )
             elapsed = time.monotonic() - t0
             telemetry: dict[str, float | int | None] = {

@@ -183,7 +183,15 @@
     - **caveats**：生产默认 opus-4-6 在该 proxy 不可达（opus/sonnet 返回非标准响应，SDK 解析失败），仅 haiku-4.5 可用（最小 Claude tier）；temp=0 单次、样本 3 个 C-class。结论方向：few-shot 在真实 Claude 家族不退化、judge 略改善
 
 **批次 D（架构级，单独评估）**
-10. P2-1 Structured Outputs 迁移
+- ✅ **10. P2-1 Structured Outputs 已落地（2026-05-29，feat/web，未提交）** — 采用「可靠层 + 试点接线」，**opt-in，默认全关**（零行为变更）：
+  - **client 层原生 Structured Outputs**：`LLMClient.structured_json(messages, *, json_schema, schema_name, system) -> str` 返回良构 JSON 字符串。OpenAI 走 `response_format=json_schema strict`（chat + responses 两 wire 均接），Anthropic 走**强制 tool-use**（`tool_choice={type:tool}` + `input_schema`，从 tool_use block 取 `input`）。ABC 默认实现 = prompt 注入（test mock / 无 override 的 client 仍可用）
+  - **自动回退**：OpenAI 三级（json_schema → json_object → prompt 注入），捕获 `BadRequest/Unprocessable/NotFound/TypeError`；Anthropic 强制 tool-use 不兼容 extended-thinking，配了 `thinking_budget_tokens` 或无 tool_use block / `BadRequest` 时回退 prompt
+  - **关键设计**：structured_json 返回**字符串**而非域对象，仍喂现有 `response_parser`——grounding 降级 / hedging 净化 / 确定性裁决 / 截断闸口全部保留（Structured Outputs 只保形状，不碰语义）
+  - **wire-shape schema**（`src/llm/structured_schemas.py`）：`ConflictAnalysisWire/JudgeFileReviewWire/PlanJudgeVerdictWire`，`extra="forbid"` + 全必填 + `_to_openai_strict_schema()` 递归补 `additionalProperties:false`/`required` 满足 OpenAI strict
+  - **opt-in 开关** `AgentLLMConfig.use_structured_outputs: bool = False`（仿 `thinking_budget_tokens`）；`_call_llm_with_retry` 加 `json_schema/schema_name` 分支（走 retry/熔断/遥测同一路径）；`BaseAgent._structured_kwargs()` 共享 helper
+  - **试点接线**：analyst（`conflict_analysis`，主+chunk 两调用点）、judge（`file_review`）、planner_judge（`plan_judge_verdict`，与既有 json_mode 并存，json_schema 优先）；executor/commit_round 本轮不接
+  - **eval**：Anthropic 强制 tool-use 在真实 Claude haiku-4.5 @ forgejo C-class **端到端验证通过**（first_char=`{`、parse_conflict_analysis 正常 → semantic_merge/compatible/0.85），证明接线非死代码；OpenAI 层因 mimo 端点本 env 404（对任何 chat/responses 调用皆死，非回退逻辑问题）无法 live 验证，由单测覆盖三级回退
+  - 新增 `test_structured_outputs.py`（14 例）；3032 单测 / mypy strict / ruff 干净
 11. P2-3 Judge find/filter 分离（需 eval 验证 recall）
 - ✅ **12. P3-2 Anthropic extended-thinking 旋钮 已落地（2026-05-29，feat/web，未提交）** — 纯配置层，opt-in，**默认全部关闭**（零行为变更，无需 eval）：
   - `AgentLLMConfig.thinking_budget_tokens: int | None`（默认 None）+ model_validator（budget ≥1024 且 < max_tokens）
@@ -204,6 +212,7 @@
 - [x] 批次 B2（2026-05-29）：analyst/judge XML+排序重构；单测/mypy/ruff 全绿；zod iso.ts A/B eval（mimo）证 grounding 未退化（baseline 虚构 core._isoWeek，NEW 零真实虚构）
 - [x] 批次 C-A类（2026-05-29）：P1-4 去外推 + P2-2 强 JSON 措辞 + P2-4 zh 语言注入；`test_prompt_batch_c.py`（7 例）绿；英文 run 逐字节不变；2987 单测 / mypy / ruff 干净
 - [x] 批次 C-B类（2026-05-29）：P1-1 few-shot（planner 分类 / analyst / judge，Claude 系 only）；`test_prompt_few_shot.py`（17 例）绿；英文不变式保持；3018 单测 / mypy / ruff 干净。**eval 已做**（真实 Claude haiku-4.5 @ forgejo 3 C-class，A/B 对照）：analyst strategy 两臂一致 + grounding_warn=0 + 无偏置；planner 逐项一致守硬规则；judge 抑噪改善（caveat：opus-4-6 proxy 不可达，仅 haiku tier、样本小）
+- [x] 批次 D·P2-1（2026-05-29）：Structured Outputs 可靠层（opt-in 默认全关）+ 试点接线 analyst/judge/planner_judge；`test_structured_outputs.py`（14 例）绿；Anthropic 强制 tool-use 真实 haiku 端到端通过；3032 单测 / mypy / ruff 干净。**OpenAI 层 live 未验**（mimo 端点本 env 404），由单测覆盖
 - [x] 批次 D·P3-2（2026-05-29）：Anthropic extended-thinking 可配置旋钮（默认全关，opt-in）+ 完整 client 接线；`test_anthropic_thinking.py`（8 例）绿；2995 单测 / mypy / ruff 干净；OpenAI effort 本就可配，不动默认
 - [ ] follow-up：harvester barrel/re-export（`export * from` / `export {x} from`）抓不到 → 0 exports 误导 grounding（analyst 侧同存，非批次 A 引入）
 - [ ] 批次 B：规则/关键词单一来源（`grep` 副本数=1）；prompt snapshot 测（若有）更新

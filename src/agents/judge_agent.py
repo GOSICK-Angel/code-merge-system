@@ -28,6 +28,7 @@ from src.models.diff import FileChangeCategory, ForkDivergence
 from src.models.dependency import ConfidenceLabel
 from src.models.state import MergeState
 from src.llm.prompt_builders import AgentPromptBuilder
+from src.llm.relevance import weights_from_fanin
 from src.core.read_only_state_view import ReadOnlyStateView
 from src.llm.prompts.judge_prompts import (
     JUDGE_SYSTEM,
@@ -39,6 +40,7 @@ from src.llm.response_parser import (
     parse_file_review_issues,
     parse_judge_verdict,
 )
+from src.llm.structured_schemas import FILE_REVIEW
 from src.tools.file_classifier import matches_any_pattern
 from src.tools.conflict_markers import find_conflict_marker
 from src.tools.forks_profile_loader import (
@@ -176,6 +178,9 @@ class JudgeAgent(BaseAgent):
                 check_strategy=check_strategy,
                 prior_round_issues=prior_issues_by_file.get(file_path, []),
                 referenced_names=state.dependency_graph.referenced_symbols(file_path),
+                symbol_weights=weights_from_fanin(
+                    state.dependency_graph.symbol_fanin(file_path)
+                ),
                 fork_content=fork_content,
                 lang=state.config.output.language,
             )
@@ -236,6 +241,7 @@ class JudgeAgent(BaseAgent):
         check_strategy: JudgeCheckStrategy = JudgeCheckStrategy.UPSTREAM_MATCH,
         prior_round_issues: list[JudgeIssue] | None = None,
         referenced_names: frozenset[str] = frozenset(),
+        symbol_weights: dict[str, float] | None = None,
         fork_content: str | None = None,
         lang: str = "en",
     ) -> list[JudgeIssue]:
@@ -290,6 +296,7 @@ class JudgeAgent(BaseAgent):
                 budget_tokens,
                 is_security_sensitive=original_diff.is_security_sensitive,
                 referenced_names=referenced_names,
+                symbol_weights=symbol_weights,
             )
 
         # O-M1: dispute-round prior review block. Append before LLM call so
@@ -324,7 +331,11 @@ class JudgeAgent(BaseAgent):
         messages = [{"role": "user", "content": prompt}]
 
         try:
-            raw = await self._call_llm_with_retry(messages, system=JUDGE_SYSTEM)
+            raw = await self._call_llm_with_retry(
+                messages,
+                system=JUDGE_SYSTEM,
+                **self._structured_kwargs(FILE_REVIEW),
+            )
             llm_issues = parse_file_review_issues(
                 str(raw),
                 file_path,

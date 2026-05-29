@@ -544,6 +544,20 @@ class BaseAgent(ABC):
         # wrap it as a stop_reason-less response rather than crashing.
         return LLMResponse(text=str(result), stop_reason=None)
 
+    def _structured_kwargs(self, schema_name: str) -> dict[str, Any]:
+        """P2-1: structured-output kwargs for ``_call_llm_with_retry``.
+
+        Returns ``{json_schema, schema_name}`` when this agent has opted into
+        ``use_structured_outputs``; an empty dict otherwise (legacy path).
+        The returned JSON string is parsed by the agent's existing parser, so
+        enabling the flag is shape-only — semantics stay in response_parser.
+        """
+        if not self.llm_config.use_structured_outputs:
+            return {}
+        from src.llm.structured_schemas import wire_schema
+
+        return {"json_schema": wire_schema(schema_name), "schema_name": schema_name}
+
     async def _call_llm_with_retry(
         self,
         messages: list[dict[str, Any]],
@@ -551,6 +565,8 @@ class BaseAgent(ABC):
         schema: type[BaseModel] | None = None,
         max_retries: int | None = None,
         json_mode: bool = False,
+        json_schema: dict[str, Any] | None = None,
+        schema_name: str = "response",
         _return_meta: bool = False,
     ) -> str | BaseModel | LLMResponse:
         # U2: pre-call budget gate. Skipped when limit is None or no
@@ -578,6 +594,8 @@ class BaseAgent(ABC):
                         schema,
                         max_retries,
                         json_mode,
+                        json_schema=json_schema,
+                        schema_name=schema_name,
                         _return_meta=_return_meta,
                     )
                 finally:
@@ -662,6 +680,17 @@ class BaseAgent(ABC):
                 if schema is not None:
                     llm_result = await self.llm.complete_structured(
                         messages, schema, system=system
+                    )
+                elif json_schema is not None:
+                    # P2-1 reliability layer: native Structured Outputs return
+                    # a well-formed JSON string that the agent's existing
+                    # response_parser still consumes (grounding / sanitisation
+                    # / deterministic-verdict logic stays in the parser).
+                    llm_result = await self.llm.structured_json(
+                        messages,
+                        json_schema=json_schema,
+                        schema_name=schema_name,
+                        system=system,
                     )
                 else:
                     extra: dict[str, Any] = {}

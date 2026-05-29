@@ -22,6 +22,7 @@ from src.llm.prompts.analyst_prompts import (
     parse_decision_proposals,
 )
 from src.llm.response_parser import parse_commit_round_analyses, parse_conflict_analysis
+from src.llm.structured_schemas import CONFLICT_ANALYSIS
 from src.models.forks_profile import ForksProfile
 from src.tools.chunk_processor import split_by_semantic_boundary
 from src.tools.forks_profile_loader import format_analyst_context
@@ -183,6 +184,7 @@ class ConflictAnalystAgent(BaseAgent):
         chunk_size_chars: int | None = None,
         min_chunked_confidence: float | None = None,
         referenced_names: frozenset[str] = frozenset(),
+        symbol_weights: dict[str, float] | None = None,
         impact_hint: DependencyImpactHint | None = None,
         fork_ref: str | None = None,
         lang: str = "en",
@@ -297,6 +299,7 @@ class ConflictAnalystAgent(BaseAgent):
                 content_budget_tokens // 2,
                 is_security_sensitive=file_diff.is_security_sensitive,
                 referenced_names=referenced_names,
+                symbol_weights=symbol_weights,
             )
         if target_content:
             target_content = builder.build_staged_content(
@@ -306,6 +309,7 @@ class ConflictAnalystAgent(BaseAgent):
                 content_budget_tokens // 2,
                 is_security_sensitive=file_diff.is_security_sensitive,
                 referenced_names=referenced_names,
+                symbol_weights=symbol_weights,
             )
         if base_content:
             base_content = builder.build_staged_content(
@@ -315,6 +319,7 @@ class ConflictAnalystAgent(BaseAgent):
                 content_budget_tokens // 4,
                 is_security_sensitive=file_diff.is_security_sensitive,
                 referenced_names=referenced_names,
+                symbol_weights=symbol_weights,
             )
 
         imported_symbols = _safe_harvest(
@@ -335,7 +340,11 @@ class ConflictAnalystAgent(BaseAgent):
         messages = [{"role": "user", "content": prompt}]
 
         try:
-            raw = await self._call_llm_with_retry(messages, system=ANALYST_SYSTEM)
+            raw = await self._call_llm_with_retry(
+                messages,
+                system=ANALYST_SYSTEM,
+                **self._structured_kwargs(CONFLICT_ANALYSIS),
+            )
             parsed = parse_conflict_analysis(
                 str(raw), file_diff.file_path, self.llm_config.model
             )
@@ -422,7 +431,11 @@ class ConflictAnalystAgent(BaseAgent):
                 lang=lang,
             )
             messages = [{"role": "user", "content": prompt}]
-            raw = await self._call_llm_with_retry(messages, system=ANALYST_SYSTEM)
+            raw = await self._call_llm_with_retry(
+                messages,
+                system=ANALYST_SYSTEM,
+                **self._structured_kwargs(CONFLICT_ANALYSIS),
+            )
             return parse_conflict_analysis(str(raw), file_path, self.llm_config.model)
 
         # U5: chunks of a single file are tagged ``"<file>#<idx>"`` so the
