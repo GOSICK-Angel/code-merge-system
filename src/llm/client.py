@@ -419,13 +419,29 @@ class AnthropicClient(LLMClient):
             return await self._structured_tool_use(
                 messages, json_schema, schema_name, system
             )
-        except (anthropic.BadRequestError, _StructuredUnsupported):
-            return await super().structured_json(
-                messages,
-                json_schema=json_schema,
-                schema_name=schema_name,
-                system=system,
+        except _StructuredUnsupported:
+            pass
+        except anthropic.APIStatusError as e:
+            # Some Anthropic-compatible proxies force interleaved thinking on,
+            # which rejects forced tool_choice (observed as a 400 BadRequest or
+            # a 503 "Thinking mode does not support this tool_choice"). Degrade
+            # to prompt-injection in that case. Genuine transient/auth errors
+            # (rate limit, 401, 5xx without this signal) re-raise so the outer
+            # _call_llm_with_retry loop owns the retry policy.
+            msg = str(getattr(e, "message", "") or e).lower()
+            recoverable = (
+                isinstance(e, anthropic.BadRequestError)
+                or "tool_choice" in msg
+                or "thinking" in msg
             )
+            if not recoverable:
+                raise
+        return await super().structured_json(
+            messages,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            system=system,
+        )
 
     async def _structured_tool_use(
         self,

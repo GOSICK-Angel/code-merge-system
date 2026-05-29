@@ -121,15 +121,82 @@ class PlanJudgeVerdictWire(_Strict):
     summary: str
 
 
+class CommitRoundFileWire(ConflictAnalysisWire):
+    """One file's analysis inside a commit-round batch (adds ``file_path``)."""
+
+    file_path: str
+
+
+class CommitRoundWire(_Strict):
+    """Mirror of ``build_commit_round_prompt`` JSON (multi-file analysis)."""
+
+    files: list[CommitRoundFileWire]
+
+
+class DecisionProposalWire(_Strict):
+    key: str
+    label: str
+    description: str
+    preview: str
+
+
+class DecisionProposalsWire(_Strict):
+    """Mirror of ``build_decision_proposal_prompt`` JSON."""
+
+    proposals: list[DecisionProposalWire]
+
+
+class BatchReviewFileWire(_Strict):
+    file_path: str
+    issues: list[JudgeIssueWire]
+
+
+class BatchFileReviewWire(_Strict):
+    """Mirror of ``build_batch_file_review_prompt`` JSON."""
+
+    files: list[BatchReviewFileWire]
+
+
+class JudgeVerdictWire(_Strict):
+    """Mirror of ``build_verdict_prompt`` JSON."""
+
+    verdict: Literal["pass", "conditional", "fail"]
+    summary: str
+    blocking_issues: list[str]
+
+
+class ReEvaluateIssueWire(_Strict):
+    issue_id: str
+    status: Literal["maintained", "withdrawn"]
+    reasoning: str
+
+
+class JudgeReEvaluateWire(_Strict):
+    """Mirror of ``build_re_evaluate_prompt`` JSON."""
+
+    remaining_issues: list[ReEvaluateIssueWire]
+    overall_approved: bool
+
+
 # Stable schema identifiers used as the Structured-Output tool / schema name.
 CONFLICT_ANALYSIS = "conflict_analysis"
 FILE_REVIEW = "file_review"
 PLAN_JUDGE_VERDICT = "plan_judge_verdict"
+COMMIT_ROUND = "commit_round_analysis"
+DECISION_PROPOSALS = "decision_proposals"
+BATCH_FILE_REVIEW = "batch_file_review"
+JUDGE_VERDICT = "judge_verdict"
+JUDGE_RE_EVALUATE = "judge_re_evaluate"
 
 _WIRE_MODELS: dict[str, type[BaseModel]] = {
     CONFLICT_ANALYSIS: ConflictAnalysisWire,
     FILE_REVIEW: JudgeFileReviewWire,
     PLAN_JUDGE_VERDICT: PlanJudgeVerdictWire,
+    COMMIT_ROUND: CommitRoundWire,
+    DECISION_PROPOSALS: DecisionProposalsWire,
+    BATCH_FILE_REVIEW: BatchFileReviewWire,
+    JUDGE_VERDICT: JudgeVerdictWire,
+    JUDGE_RE_EVALUATE: JudgeReEvaluateWire,
 }
 
 

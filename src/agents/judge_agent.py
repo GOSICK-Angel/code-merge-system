@@ -40,7 +40,12 @@ from src.llm.response_parser import (
     parse_file_review_issues,
     parse_judge_verdict,
 )
-from src.llm.structured_schemas import FILE_REVIEW
+from src.llm.structured_schemas import (
+    BATCH_FILE_REVIEW,
+    FILE_REVIEW,
+    JUDGE_RE_EVALUATE,
+    JUDGE_VERDICT,
+)
 from src.tools.file_classifier import matches_any_pattern
 from src.tools.conflict_markers import find_conflict_marker
 from src.tools.forks_profile_loader import (
@@ -1230,7 +1235,11 @@ class JudgeAgent(BaseAgent):
         messages = [{"role": "user", "content": prompt}]
 
         try:
-            raw = await self._call_llm_with_retry(messages, system=JUDGE_SYSTEM)
+            raw = await self._call_llm_with_retry(
+                messages,
+                system=JUDGE_SYSTEM,
+                **self._structured_kwargs(JUDGE_VERDICT),
+            )
             verdict = parse_judge_verdict(
                 str(raw),
                 reviewed_files,
@@ -1681,7 +1690,9 @@ class JudgeAgent(BaseAgent):
             prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
         try:
             raw = await self._call_llm_with_retry(
-                [{"role": "user", "content": prompt}], system=JUDGE_SYSTEM
+                [{"role": "user", "content": prompt}],
+                system=JUDGE_SYSTEM,
+                **self._structured_kwargs(BATCH_FILE_REVIEW),
             )
             merged_contents = {fp: content for fp, content, _, _ in chunk}
             per_file = parse_batch_file_review_issues(
@@ -1834,7 +1845,9 @@ class JudgeAgent(BaseAgent):
 
         try:
             raw = await self._call_llm_with_retry(
-                [{"role": "user", "content": prompt}], system=JUDGE_SYSTEM
+                [{"role": "user", "content": prompt}],
+                system=JUDGE_SYSTEM,
+                **self._structured_kwargs(JUDGE_RE_EVALUATE),
             )
             raw_str = str(raw).strip()
             if raw_str.startswith("```"):

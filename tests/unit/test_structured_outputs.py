@@ -13,6 +13,8 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from pydantic import BaseModel
 
 from src.agents.conflict_analyst_agent import ConflictAnalystAgent
@@ -24,9 +26,15 @@ from src.llm.client import (
     _to_openai_strict_schema,
 )
 from src.llm.structured_schemas import (
+    BATCH_FILE_REVIEW,
+    COMMIT_ROUND,
     CONFLICT_ANALYSIS,
+    DECISION_PROPOSALS,
     FILE_REVIEW,
+    JUDGE_RE_EVALUATE,
+    JUDGE_VERDICT,
     PLAN_JUDGE_VERDICT,
+    _WIRE_MODELS,
     wire_schema,
 )
 from src.models.config import AgentLLMConfig
@@ -75,7 +83,10 @@ def _openai_resp(content: str) -> MagicMock:
 
 class TestStrictSchema:
     def test_objects_get_additional_properties_false_and_required(self) -> None:
-        for name in (CONFLICT_ANALYSIS, FILE_REVIEW, PLAN_JUDGE_VERDICT):
+        # Every registered wire schema (8 across the two expansion rounds)
+        # must satisfy OpenAI strict-mode constraints, including nested $defs.
+        assert len(_WIRE_MODELS) == 8
+        for name in _WIRE_MODELS:
             strict = _to_openai_strict_schema(wire_schema(name))
 
             def _check(node: Any) -> None:
@@ -171,6 +182,49 @@ class TestAnthropicStructured:
         assert json.loads(out) == {"x": "fallback"}
         assert client._client.messages.create.await_count == 2
 
+    async def test_thinking_proxy_503_falls_back_to_prompt(self) -> None:
+        # Some proxies force interleaved thinking on, which rejects forced
+        # tool_choice with a 503 "Thinking mode does not support this
+        # tool_choice". That must degrade to prompt injection, not propagate.
+        import anthropic
+        import httpx
+
+        client = _anthropic()
+        req = httpx.Request("POST", "http://x")
+        resp = httpx.Response(503, request=req)
+        err = anthropic.InternalServerError(
+            "Thinking mode does not support this tool_choice",
+            response=resp,
+            body=None,
+        )
+        client._client.messages.create = AsyncMock(
+            side_effect=[err, _anthropic_text_block('{"x": "degraded"}')]
+        )
+        out = await client.structured_json(
+            [{"role": "user", "content": "go"}],
+            json_schema=_SCHEMA,
+            schema_name="thing",
+        )
+        assert json.loads(out) == {"x": "degraded"}
+
+    async def test_unrelated_5xx_propagates(self) -> None:
+        import anthropic
+        import httpx
+
+        client = _anthropic()
+        req = httpx.Request("POST", "http://x")
+        resp = httpx.Response(503, request=req)
+        err = anthropic.InternalServerError(
+            "upstream connect error", response=resp, body=None
+        )
+        client._client.messages.create = AsyncMock(side_effect=err)
+        with pytest.raises(anthropic.InternalServerError):
+            await client.structured_json(
+                [{"role": "user", "content": "go"}],
+                json_schema=_SCHEMA,
+                schema_name="thing",
+            )
+
     async def test_thinking_budget_skips_native_tool_use(self) -> None:
         client = _anthropic(thinking_budget_tokens=2048)
         client._client.messages.create = AsyncMock(
@@ -254,6 +308,22 @@ class TestAgentWiring:
         kw = self._agent(True)._structured_kwargs(CONFLICT_ANALYSIS)
         assert kw["schema_name"] == CONFLICT_ANALYSIS
         assert kw["json_schema"] == wire_schema(CONFLICT_ANALYSIS)
+
+    def test_structured_kwargs_resolve_for_every_piloted_schema(self) -> None:
+        agent = self._agent(True)
+        for name in (
+            CONFLICT_ANALYSIS,
+            FILE_REVIEW,
+            PLAN_JUDGE_VERDICT,
+            COMMIT_ROUND,
+            DECISION_PROPOSALS,
+            BATCH_FILE_REVIEW,
+            JUDGE_VERDICT,
+            JUDGE_RE_EVALUATE,
+        ):
+            kw = agent._structured_kwargs(name)
+            assert kw["schema_name"] == name
+            assert kw["json_schema"] == wire_schema(name)
 
     async def test_analyze_file_passes_schema_when_enabled(self) -> None:
         agent = self._agent(True)

@@ -22,7 +22,11 @@ from src.llm.prompts.analyst_prompts import (
     parse_decision_proposals,
 )
 from src.llm.response_parser import parse_commit_round_analyses, parse_conflict_analysis
-from src.llm.structured_schemas import CONFLICT_ANALYSIS
+from src.llm.structured_schemas import (
+    COMMIT_ROUND,
+    CONFLICT_ANALYSIS,
+    DECISION_PROPOSALS,
+)
 from src.models.forks_profile import ForksProfile
 from src.tools.chunk_processor import split_by_semantic_boundary
 from src.tools.forks_profile_loader import format_analyst_context
@@ -588,7 +592,9 @@ class ConflictAnalystAgent(BaseAgent):
             prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
         try:
             raw = await self._call_llm_with_retry(
-                [{"role": "user", "content": prompt}], system=ANALYST_SYSTEM
+                [{"role": "user", "content": prompt}],
+                system=ANALYST_SYSTEM,
+                **self._structured_kwargs(COMMIT_ROUND),
             )
         except Exception as e:
             self.logger.error(
@@ -667,7 +673,9 @@ class ConflictAnalystAgent(BaseAgent):
         )
         try:
             raw = await self._call_llm_with_retry(
-                [{"role": "user", "content": prompt}], system=ANALYST_SYSTEM
+                [{"role": "user", "content": prompt}],
+                system=ANALYST_SYSTEM,
+                **self._structured_kwargs(DECISION_PROPOSALS),
             )
         except Exception as exc:
             self.logger.warning(
