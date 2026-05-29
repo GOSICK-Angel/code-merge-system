@@ -50,6 +50,7 @@ from src.llm.prompts.memory_extractor_prompts import (
 )
 from src.llm.prompts.planner_judge_prompts import (
     build_plan_review_prompt,
+    build_segment_plan_review_prompt,
     get_planner_judge_system,
 )
 from src.llm.prompts.planner_prompts import (
@@ -177,6 +178,12 @@ register_gate(
     "PJ-PLAN-REVIEW",
     build_plan_review_prompt,
     "PlannerJudge plan review user prompt (handles prior rounds + planner responses).",
+)
+register_gate(
+    "PJ-PLAN-REVIEW-SEGMENT",
+    build_segment_plan_review_prompt,
+    "PlannerJudge per-segment plan review user prompt — the split-send path "
+    "actually used in production (_review_segment) for large file lists.",
 )
 
 # ConflictAnalyst (CA-)

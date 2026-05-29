@@ -37,6 +37,17 @@ EXECUTOR_SYSTEM = """You are a code merge executor. Your task is to apply merge 
 performing semantic merges when needed. You must be precise and preserve all important logic from both branches.
 Never lose code that may be functionally important.
 
+GROUNDING — do not fabricate symbols:
+Only call functions, methods, fields, or constants that already appear in the
+fork content, the upstream content, or the "Imported Symbol Surface" block when
+one is provided. Do NOT invent module exports, and do NOT infer a symmetric name
+you have not actually seen (e.g. assuming `core._isoWeek` exists just because
+`core._isoDate` does — that exact guess broke a real merge). If combining both
+sides would require a symbol that exists on neither, prefer the side that already
+compiles over calling a non-existent API. You emit raw file content only, so you
+cannot leave a "to be added later" note — a reference to a symbol that does not
+exist will break the build.
+
 OUTPUT CONTRACT — strictly enforced by a parser, violating any rule causes the merge to be escalated to a human:
 
 1. Output ONLY the merged file content. No prefatory explanation, no chain-of-thought,
@@ -57,6 +68,35 @@ OUTPUT CONTRACT — strictly enforced by a parser, violating any rule causes the
    strictly worse than emitting this token — a truncated file silently corrupts the repo."""
 
 
+def _format_symbol_surface_block(
+    imported_symbols: dict[str, list[str]] | None,
+) -> str:
+    """Render the symbols each namespace import exposes so the executor can
+    ground qualified references instead of inventing them. Empty / None input
+    renders the empty string so existing callers see no behaviour change.
+
+    Phrased for an agent that emits raw file content — unlike the analyst's
+    surface, it must NOT mention ``REQUIRES NEW API`` (the executor cannot
+    leave annotations in the output)."""
+    if not imported_symbols:
+        return ""
+    lines = [
+        "# Imported Symbol Surface",
+        (
+            "Symbols each imported module actually exposes (read at fork_ref). "
+            "A name not in this list does not exist on that module — do not "
+            "reference it. Prefer combining symbols already present on either "
+            "side over introducing new ones."
+        ),
+    ]
+    for path, names in imported_symbols.items():
+        if names:
+            lines.append(f"- `{path}` exports: {', '.join(names)}")
+        else:
+            lines.append(f"- `{path}` exports: (no exports detected)")
+    return "\n".join(lines) + "\n"
+
+
 def build_semantic_merge_prompt(
     file_diff: FileDiff,
     conflict_analysis: ConflictAnalysis,
@@ -65,6 +105,7 @@ def build_semantic_merge_prompt(
     project_context: str,
     dependents: Sequence[str] = (),
     referenced_symbols: frozenset[str] = frozenset(),
+    imported_symbols: dict[str, list[str]] | None = None,
 ) -> str:
     language = file_diff.language or "unknown"
     rec_val = (
@@ -76,6 +117,9 @@ def build_semantic_merge_prompt(
     dependents_block = _format_dependents_block(dependents, referenced_symbols)
     dependents_section = f"\n{dependents_block}\n" if dependents_block else ""
 
+    surface_block = _format_symbol_surface_block(imported_symbols)
+    surface_section = f"\n{surface_block}" if surface_block else ""
+
     return f"""Perform a semantic merge of the following two versions of a file.
 
 # Project Context
@@ -83,7 +127,7 @@ def build_semantic_merge_prompt(
 
 # File: {file_diff.file_path}
 Language: {language}
-{dependents_section}
+{dependents_section}{surface_section}
 # Conflict Analysis
 - Type: {conflict_analysis.conflict_type.value if hasattr(conflict_analysis.conflict_type, "value") else conflict_analysis.conflict_type}
 - Recommended strategy: {rec_val}

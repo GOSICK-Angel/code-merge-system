@@ -33,6 +33,7 @@ from src.llm.response_parser import parse_merge_result
 from src.tools.patch_applier import apply_with_snapshot, create_escalate_record
 from src.tools.file_classifier import _fork_deleted_skip_record, is_fork_deleted
 from src.tools.git_tool import GitTool
+from src.tools.import_symbol_harvester import harvest_imports_for_file
 from src.tools.diff_stasher import stash_upstream_diff
 from src.cli.paths import get_diff_stash_dir
 from src.core.parallel_file_runner import (
@@ -50,6 +51,24 @@ logger = logging.getLogger(__name__)
 # also bumps the 8K max_tokens ceiling. 25 keeps both well under the
 # danger zone with comfortable headroom for verbose judge descriptions.
 _REBUTTAL_CHUNK_SIZE = 25
+
+
+def _safe_harvest_symbols(
+    file_path: str,
+    source_content: str | None,
+    ref: str | None,
+    git_tool: GitTool | None,
+) -> dict[str, list[str]]:
+    """Best-effort view of which symbols each namespace import exposes, fed to
+    the semantic-merge prompt so the executor can ground references instead of
+    inventing them. Any failure degrades to ``{}`` — grounding context must
+    never make a merge fail."""
+    if not source_content or not ref or git_tool is None:
+        return {}
+    try:
+        return harvest_imports_for_file(file_path, source_content, ref, git_tool)
+    except Exception:
+        return {}
 
 
 class ExecutorAgent(BaseAgent):
@@ -457,6 +476,15 @@ class ExecutorAgent(BaseAgent):
         # file other files import. Empty graph -> empty list -> no prompt
         # change (safe degrade).
         dependents = state.dependency_graph.dependents_of(file_diff.file_path)
+        # P0-1: hand the executor the symbols each namespace import actually
+        # exposes (harvested from the FULL fork content, not the staged view)
+        # so it grounds references instead of fabricating them.
+        imported_symbols = _safe_harvest_symbols(
+            file_diff.file_path,
+            orig_current_content,
+            state.config.fork_ref,
+            self.git_tool,
+        )
         prompt = build_semantic_merge_prompt(
             file_diff,
             conflict_analysis,
@@ -465,6 +493,7 @@ class ExecutorAgent(BaseAgent):
             enriched_context,
             dependents=dependents,
             referenced_symbols=referenced,
+            imported_symbols=imported_symbols,
         )
         messages = [{"role": "user", "content": prompt}]
 
