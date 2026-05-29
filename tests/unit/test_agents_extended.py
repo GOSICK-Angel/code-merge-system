@@ -205,7 +205,7 @@ class TestConflictAnalystAgent:
 
     def test_run_uses_git_tool_for_three_way_diff(self):
         state = _make_state()
-        state._merge_base = "abc123"
+        state.merge_base_commit = "abc123"
         fd = _make_file_diff("src/auth.py", RiskLevel.AUTO_RISKY)
         state.file_diffs = [fd]
 

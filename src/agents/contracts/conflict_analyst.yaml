@@ -1,7 +1,7 @@
 name: conflict_analyst
 version: 1
 inputs:
-  - _merge_base
+  - merge_base_commit
   - config
   - conflict_analyses
   - file_diffs

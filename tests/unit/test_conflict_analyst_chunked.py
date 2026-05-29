@@ -474,9 +474,10 @@ def test_conflict_analyst_yaml_inputs_include_thresholds() -> None:
     )
     data = yaml_lib.safe_load(yaml_path.read_text(encoding="utf-8"))
     assert "thresholds" in data["inputs"]
-    # Pre-existing 7 inputs remain (facts.md C4):
+    # Pre-existing 7 inputs remain (facts.md C4); _merge_base migrated to
+    # merge_base_commit (doc/bugfix/0528-legacy-merge-base-attr.md):
     for required in (
-        "_merge_base",
+        "merge_base_commit",
         "config",
         "conflict_analyses",
         "file_diffs",

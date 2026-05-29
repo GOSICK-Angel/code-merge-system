@@ -1,7 +1,6 @@
 name: planner
 version: 1
 inputs:
-  - _merge_base
   - config
   - config_drifts
   - dependency_graph

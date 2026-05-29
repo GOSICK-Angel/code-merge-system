@@ -122,10 +122,10 @@ class ConflictAnalystAgent(BaseAgent):
             if fd is None:
                 return None
             base_content = target_content = current_content = None
-            if self.git_tool and hasattr(view, "_merge_base"):
+            if self.git_tool and view.merge_base_commit:
                 base_content, current_content, target_content = (
                     self.git_tool.get_three_way_diff(
-                        view._merge_base or "",
+                        view.merge_base_commit,
                         view.config.fork_ref,
                         view.config.upstream_ref,
                         file_path,

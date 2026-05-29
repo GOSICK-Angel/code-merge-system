@@ -322,8 +322,6 @@ class PlannerAgent(BaseAgent):
         self._assert_plan_integrity(phases, actionable_files, decided_paths)
 
         merge_base = state.merge_base_commit
-        if not merge_base and hasattr(state, "_merge_base"):
-            merge_base = state._merge_base or ""
 
         self.logger.info(
             "Layered plan: %d layers, %d phases, %d actionable files (B=%d C=%d D=%d)",
