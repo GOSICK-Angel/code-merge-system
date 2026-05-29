@@ -50,6 +50,14 @@ class AgentLLMConfig(BaseModel):
         description="OpenAI reasoning-model effort hint ('low', 'medium', 'high'). "
         "Only sent when explicitly set — leave None for proxies that do not support it.",
     )
+    thinking_budget_tokens: int | None = Field(
+        default=None,
+        description="Anthropic extended-thinking budget in tokens (P3-2). When set, "
+        "the Anthropic request enables interleaved thinking with this budget and "
+        "forces temperature=1.0 (an API constraint). Must be >= 1024 and strictly "
+        "less than max_tokens. Leave None to disable (the default for every agent — "
+        "opt in per-agent via config). Ignored for OpenAI providers.",
+    )
     api_style: Literal["chat", "responses"] = Field(
         default="chat",
         description="OpenAI API surface: 'chat' (chat.completions, default) or "
@@ -68,6 +76,24 @@ class AgentLLMConfig(BaseModel):
         if isinstance(self.api_key_env, list):
             return self.api_key_env
         return [self.api_key_env]
+
+    @model_validator(mode="after")
+    def _validate_thinking_budget(self) -> AgentLLMConfig:
+        budget = self.thinking_budget_tokens
+        if budget is None:
+            return self
+        if budget < 1024:
+            raise ValueError(
+                "thinking_budget_tokens must be >= 1024 when set "
+                f"(Anthropic minimum); got {budget}."
+            )
+        if budget >= self.max_tokens:
+            raise ValueError(
+                "thinking_budget_tokens must be strictly less than max_tokens "
+                f"(thinking and visible output share the budget); got "
+                f"budget={budget}, max_tokens={self.max_tokens}."
+            )
+        return self
 
 
 AgentLLMConfig.model_rebuild()

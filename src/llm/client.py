@@ -219,12 +219,14 @@ class AnthropicClient(LLMClient):
         base_url: str | None = None,
         cache_strategy: CacheStrategy = CacheStrategy.SYSTEM_AND_RECENT,
         timeout: float = 60.0,
+        thinking_budget_tokens: int | None = None,
     ):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_retries = max_retries
         self.cache_strategy = cache_strategy
+        self.thinking_budget_tokens = thinking_budget_tokens
         self._timeout = _build_httpx_timeout(timeout)
         kwargs: dict[str, Any] = {
             "api_key": api_key,
@@ -259,6 +261,15 @@ class AnthropicClient(LLMClient):
         }
         if cached_system:
             kwargs_merged["system"] = cached_system
+        if self.thinking_budget_tokens is not None:
+            # Extended thinking requires temperature=1.0 (Anthropic API
+            # constraint); the configured temperature is overridden here rather
+            # than at config time so a single agent can be toggled freely.
+            kwargs_merged["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": self.thinking_budget_tokens,
+            }
+            kwargs_merged["temperature"] = 1.0
         kwargs_merged.update(kwargs)
 
         response = await self._client.messages.create(**kwargs_merged)
@@ -633,6 +644,7 @@ class LLMClientFactory:
                 base_url=base_url,
                 cache_strategy=CacheStrategy(config.cache_strategy),
                 timeout=float(config.request_timeout_seconds),
+                thinking_budget_tokens=config.thinking_budget_tokens,
             )
         return LLMClientFactory._build_openai(config, api_key, base_url)
 

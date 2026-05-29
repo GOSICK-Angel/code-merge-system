@@ -176,7 +176,13 @@
 **批次 D（架构级，单独评估）**
 10. P2-1 Structured Outputs 迁移
 11. P2-3 Judge find/filter 分离（需 eval 验证 recall）
-12. P3-2 Anthropic agent effort/thinking 配置
+- ✅ **12. P3-2 Anthropic extended-thinking 旋钮 已落地（2026-05-29，feat/web，未提交）** — 纯配置层，opt-in，**默认全部关闭**（零行为变更，无需 eval）：
+  - `AgentLLMConfig.thinking_budget_tokens: int | None`（默认 None）+ model_validator（budget ≥1024 且 < max_tokens）
+  - `AnthropicClient` 接 `thinking_budget_tokens`:set 时 `messages.create` 注入 `thinking={"type":"enabled","budget_tokens":N}` 并**强制 temperature=1.0**（Anthropic 约束）;None 时请求逐字段不变（`temperature` 不动、无 `thinking` 键）
+  - `LLMClientFactory` anthropic 分支透传 `config.thinking_budget_tokens`
+  - **OpenAI 侧已无缺口**:`reasoning_effort` 本就是自由 `str` 字段（可配 `high`/`xhigh`），executor/planner_judge 默认 medium 不动（改默认=成本/行为变更，须 eval）
+  - 新增 `test_anthropic_thinking.py`（8 例:校验/请求形状/工厂透传/默认全关）;2995 单测 / mypy strict / ruff 干净
+  - `_extract_anthropic_text` 早已跳过 thinking block，输出抽取无需改
 
 > 每批次后跑 `pytest tests/unit/`（契约测试 + 80% 覆盖）+ 在 forgejo / zod 上做一次真实 run 对照 rationale 质量不退化（见 `feedback_verify_real_forgejo` / `feedback_verify_real_run`）。Structured Outputs 与阈值调整须先核对 `doc/evaluation/`。
 
@@ -189,6 +195,7 @@
 - [x] 批次 B2（2026-05-29）：analyst/judge XML+排序重构；单测/mypy/ruff 全绿；zod iso.ts A/B eval（mimo）证 grounding 未退化（baseline 虚构 core._isoWeek，NEW 零真实虚构）
 - [x] 批次 C-A类（2026-05-29）：P1-4 去外推 + P2-2 强 JSON 措辞 + P2-4 zh 语言注入；`test_prompt_batch_c.py`（7 例）绿；英文 run 逐字节不变；2987 单测 / mypy / ruff 干净
 - [ ] 批次 C-B类（P1-1 few-shot）：需配置模型 eval（Claude 系 only）
+- [x] 批次 D·P3-2（2026-05-29）：Anthropic extended-thinking 可配置旋钮（默认全关，opt-in）+ 完整 client 接线；`test_anthropic_thinking.py`（8 例）绿；2995 单测 / mypy / ruff 干净；OpenAI effort 本就可配，不动默认
 - [ ] follow-up：harvester barrel/re-export（`export * from` / `export {x} from`）抓不到 → 0 exports 误导 grounding（analyst 侧同存，非批次 A 引入）
 - [ ] 批次 B：规则/关键词单一来源（`grep` 副本数=1）；prompt snapshot 测（若有）更新
 - [ ] 全程 mypy / ruff / pytest 全绿
@@ -221,7 +228,7 @@ P0-1 executor grounding、P0-2 segment gate、P0-4 长上下文排序、P1-2/P1-
 
 **C 类·版本特化（4.8 特有，当前默认不命中，且 blanket 套用有害）**
 - **P2-3 find/filter recall**：仅当 Judge 被显式配成 Opus 4.8 才考虑，且须 eval；对 reasoning/易误报模型有害。
-- **P3-2 effort/adaptive thinking**：Anthropic 4.6+ 与 OpenAI `reasoning_effort` API 不同，纯配置层按模型分别处理。
+- **P3-2 effort/adaptive thinking**：Anthropic 4.6+ 与 OpenAI `reasoning_effort` API 不同，纯配置层按模型分别处理。✅ 已落地为 opt-in 旋钮（`thinking_budget_tokens`，默认全关）;OpenAI `reasoning_effort` 本就可配。默认值不变，故无需 eval;若团队 opt-in 开 thinking 或调 effort=high/xhigh，须自行 eval 成本/质量。
 
 ### 实施护栏
 
