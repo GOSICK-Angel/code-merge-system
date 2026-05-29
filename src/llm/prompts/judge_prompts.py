@@ -87,6 +87,59 @@ You do not know the Executor's decision process; you only look at the final merg
 and independently assess quality. Be thorough and critical."""
 
 
+# P1-1: two worked examples anchor the verdict on its two failure modes — a
+# clean merge (empty issues array, not an invented nitpick) and a real defect
+# carrying the grounding the rule above demands (evidence_excerpt quoting a
+# verbatim merged line). Claude-only — executor / planner_judge stay zero-shot
+# per the §五 B-class guardrail.
+_REVIEW_EXAMPLES = """<examples>
+<example>
+The merged file integrates upstream's new `parseConfig` call while keeping the
+fork's `cacheTtl` field intact. No conflict markers, nothing dropped.
+{
+  "issues": [],
+  "overall_assessment": "Clean merge: upstream's parseConfig integration is present and the fork's cacheTtl customisation is preserved. No conflict markers, no missing logic.",
+  "confidence": 0.9
+}
+</example>
+
+<example>
+The merged file still contains an unresolved conflict marker and dropped the
+fork's `retryCount` guard.
+{
+  "issues": [
+    {
+      "file_path": "src/client/http.py",
+      "issue_level": "critical",
+      "issue_type": "unresolved_conflict",
+      "description": "Leftover conflict marker in the merged output — the merge was not completed.",
+      "affected_lines": [42],
+      "evidence_excerpt": "<<<<<<< HEAD",
+      "suggested_fix": "Resolve the conflict region and remove the <<<<<<< / ======= / >>>>>>> markers.",
+      "must_fix_before_merge": true,
+      "resolvability": "fixable"
+    },
+    {
+      "file_path": "src/client/http.py",
+      "issue_level": "high",
+      "issue_type": "missing_logic",
+      "description": "The fork's retryCount guard before send() was dropped during the merge.",
+      "affected_lines": [],
+      "evidence_excerpt": "    def send(self, req):",
+      "suggested_fix": "Re-introduce the `if self.retryCount > 0` guard ahead of the send() call.",
+      "must_fix_before_merge": true,
+      "resolvability": "fixable"
+    }
+  ],
+  "overall_assessment": "Merge failed: an unresolved conflict marker remains and a fork-side retry guard was lost.",
+  "confidence": 0.85
+}
+</example>
+</examples>
+
+"""
+
+
 def build_file_review_prompt(
     file_path: str,
     merged_content: str,
@@ -163,7 +216,7 @@ issues will be auto-downgraded to MEDIUM by the parser, so failing to cite
 evidence weakens your verdict.{lang_note}
 </instructions>
 
-<output_format>
+{_REVIEW_EXAMPLES}<output_format>
 {_JSON_ONLY_INSTRUCTION}
 {{
   "issues": [

@@ -21,6 +21,45 @@ def get_planner_system(language: str = "en") -> str:
 PLANNER_SYSTEM = get_planner_system("en")
 
 
+# P1-1: few-shot worked examples anchor the classification rules on the three
+# boundaries that drift most (B-class bias, the C-class hard rule, and the
+# security-sensitive escalation). Each maps one manifest line to its expected
+# risk_level + a one-line justification, mirroring the manifest format emitted
+# above. Claude-only agent — executor / planner_judge stay zero-shot per the
+# §五 B-class guardrail in doc/bugfix/0528-agent-prompt-engineering-review.md.
+_CLASSIFICATION_EXAMPLES = """## Worked Examples
+
+<examples>
+<example>
+Input manifest line:
+- src/utils/format.py | status=modified | category=upstream_only | fork_lines_added=0 | fork_lines_deleted=0 | upstream_lines_added=18 | upstream_lines_deleted=4 | conflicts=0 | security_sensitive=false
+Expected risk_level: auto_safe
+Why: category=upstream_only (B-class), no conflicts, not security-sensitive,
+both deltas < 200. Upstream-only change the fork never touched — bias toward
+auto_safe.
+</example>
+
+<example>
+Input manifest line:
+- src/core/router.py | status=modified | category=both_changed | fork_lines_added=40 | fork_lines_deleted=12 | upstream_lines_added=33 | upstream_lines_deleted=9 | conflicts=0 | security_sensitive=false
+Expected risk_level: auto_risky
+Why: category=both_changed (C-class) — the hard rule forbids auto_safe even
+with conflicts=0. Upstream delta < 200 so it does not force human_required;
+auto_risky routes it through ConflictAnalyst.
+</example>
+
+<example>
+Input manifest line:
+- src/auth/session.py | status=modified | category=both_changed | fork_lines_added=15 | fork_lines_deleted=3 | upstream_lines_added=22 | upstream_lines_deleted=7 | conflicts=0 | security_sensitive=true
+Expected risk_level: human_required
+Why: security_sensitive=true forces human_required regardless of conflict
+count — auth/session logic needs human sign-off.
+</example>
+</examples>
+
+"""
+
+
 def build_classification_prompt(
     file_diffs: list[FileDiff],
     project_context: str,
@@ -96,7 +135,7 @@ Changed files ({len(file_diffs)} total):
 ⚠️  BIAS TOWARD AUTO_SAFE for category=upstream_only files (B-class). When in doubt between auto_safe and auto_risky for B-class, choose auto_safe.
 ⚠️  NEVER use human_required for a file with conflicts=0 and security_sensitive=false unless category=both_changed with large upstream delta.
 
-Create a phased merge plan with the following structure:
+{_CLASSIFICATION_EXAMPLES}Create a phased merge plan with the following structure:
 1. Classify each file by risk level using the rules above
 2. Group files into batches by phase
 3. Summarize risk distribution

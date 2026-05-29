@@ -171,7 +171,16 @@
   - **P2-4** `build_conflict_analysis_prompt` / `build_file_review_prompt` 加 `lang` 参数 + `_ZH_LANG_NOTE`（zh 时注入 rationale/intent description、issue description/suggested_fix/overall_assessment 用中文）；agent 侧从 `config.output.language` 透传（analyst 两调用点经 `analyze_file`/`_chunked_analyze_file`，judge 经 `review_file`）。**英文 run 逐字节不变**（`default == en` 断言）
   - 新增 `test_prompt_batch_c.py`（7 例）；2987 单测全绿 / mypy strict / ruff 干净；`test_state_thresholds.py` 两处 fake 签名补 `lang`
   - §五分级：三项均 **A类**（措辞/语言注入/去外推），文档 §五 明列为 universal-safe 无需跨模型 eval
-- ⏳ **P1-1 few-shot 示例（B类，待 eval）** — 仅 planner 分类 / analyst / judge（Claude 系），executor/planner_judge 保持 zero-shot；须在配置模型上 eval，下一轮处理
+- ✅ **C-B类 P1-1 few-shot 示例 已落地（2026-05-29，feat/web，未提交；eval 待真实 Claude run）** — 仅 Claude 系三 prompt，executor/planner_judge 保持 zero-shot：
+  - **planner** `build_classification_prompt`：`_CLASSIFICATION_EXAMPLES`（3 例 `<example>`，manifest 行→risk_level+理由），覆盖 B-class upstream_only→auto_safe（偏置）/ C-class both_changed→auto_risky（硬规则）/ security_sensitive→human_required（边界）；插在 Classification Rules 与「Create a phased merge plan」之间
+  - **analyst** `build_conflict_analysis_prompt`：`_ANALYSIS_EXAMPLES`（2 例，三方场景→期望分析 JSON），覆盖 compatible→semantic_merge / incompatible→escalate_human；示例符合 GROUNDING RULES（每个 symbol 在自身片段出现）；插在 `</instructions>` 与 `<output_format>` 之间
+  - **judge** `build_file_review_prompt`：`_REVIEW_EXAMPLES`（2 例），覆盖干净 pass（issues:[]）/ 缺陷（带 evidence_excerpt grounding 的 unresolved_conflict+missing_logic）；插在 `</instructions>` 与 `<output_format>` 之间
+  - few-shot **不按 lang 门控**（en/zh 都加），`default == en` 不变式仍成立；新增 `test_prompt_few_shot.py`（17 例：示例存在/JSON 可解析/键齐/风险级别+策略覆盖/英文不变式）；3018 单测全绿 / mypy strict / ruff 干净
+  - **eval 已做（2026-05-29，真实 Claude haiku-4.5 @ cvte 端点，forgejo 3 个 C-class）**：A/B = baseline（剥 `<examples>`）vs NEW，三 agent 全覆盖：
+    - analyst：两臂 strategy 全一致（semantic_merge×3），`grounding_warnings=0`，零 fabrication，无 example-copying 偏置；NEW rationale 等同/更具体（点名 `EmailAuthCodeExpiry`）
+    - planner（category=C，auth_token.go 标 security）：BASE/NEW **逐项一致** — user/oauth=auto_risky（守 C-class 硬规则，无 auto_safe 泄漏）、auth_token=human_required（security 升级）
+    - judge（fork 内容作 merged，应 clean）：BASE 1 噪音 issue → NEW 0 issue（clean-pass 示例抑噪，**改善**）
+    - **caveats**：生产默认 opus-4-6 在该 proxy 不可达（opus/sonnet 返回非标准响应，SDK 解析失败），仅 haiku-4.5 可用（最小 Claude tier）；temp=0 单次、样本 3 个 C-class。结论方向：few-shot 在真实 Claude 家族不退化、judge 略改善
 
 **批次 D（架构级，单独评估）**
 10. P2-1 Structured Outputs 迁移
@@ -194,7 +203,7 @@
 - [x] 批次 B1（2026-05-28）：review prompt 去重，黄金快照逐字节不变（8 组）+ `test_plan_review_shared_blocks.py` 绿；2968 单测 / mypy / ruff 干净
 - [x] 批次 B2（2026-05-29）：analyst/judge XML+排序重构；单测/mypy/ruff 全绿；zod iso.ts A/B eval（mimo）证 grounding 未退化（baseline 虚构 core._isoWeek，NEW 零真实虚构）
 - [x] 批次 C-A类（2026-05-29）：P1-4 去外推 + P2-2 强 JSON 措辞 + P2-4 zh 语言注入；`test_prompt_batch_c.py`（7 例）绿；英文 run 逐字节不变；2987 单测 / mypy / ruff 干净
-- [ ] 批次 C-B类（P1-1 few-shot）：需配置模型 eval（Claude 系 only）
+- [x] 批次 C-B类（2026-05-29）：P1-1 few-shot（planner 分类 / analyst / judge，Claude 系 only）；`test_prompt_few_shot.py`（17 例）绿；英文不变式保持；3018 单测 / mypy / ruff 干净。**eval 已做**（真实 Claude haiku-4.5 @ forgejo 3 C-class，A/B 对照）：analyst strategy 两臂一致 + grounding_warn=0 + 无偏置；planner 逐项一致守硬规则；judge 抑噪改善（caveat：opus-4-6 proxy 不可达，仅 haiku tier、样本小）
 - [x] 批次 D·P3-2（2026-05-29）：Anthropic extended-thinking 可配置旋钮（默认全关，opt-in）+ 完整 client 接线；`test_anthropic_thinking.py`（8 例）绿；2995 单测 / mypy / ruff 干净；OpenAI effort 本就可配，不动默认
 - [ ] follow-up：harvester barrel/re-export（`export * from` / `export {x} from`）抓不到 → 0 exports 误导 grounding（analyst 侧同存，非批次 A 引入）
 - [ ] 批次 B：规则/关键词单一来源（`grep` 副本数=1）；prompt snapshot 测（若有）更新

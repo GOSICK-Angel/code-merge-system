@@ -330,6 +330,50 @@ def _format_imported_symbol_surface(
     return "\n".join(lines) + "\n"
 
 
+# P1-1: two worked examples pin the two ends of the strategy space the model
+# confuses most — a combinable edit (semantic_merge / compatible) versus a
+# contradiction on the same contract (escalate_human / incompatible). Both stay
+# faithful to the GROUNDING RULES: every symbol named appears in its own snippet.
+# Claude-only — executor / planner_judge stay zero-shot per §五 B-class guardrail.
+_ANALYSIS_EXAMPLES = """<examples>
+<example>
+fork added a `timeout` parameter to `fetchUser(id)`; upstream added retry
+logic inside the same `fetchUser` body. The two edits touch the same function
+but different concerns and can be combined.
+{
+  "conflict_type": "concurrent_modification",
+  "upstream_intent": {"description": "Added retry-on-failure loop around the fetch call in fetchUser", "intent_type": "feature", "confidence": 0.85},
+  "fork_intent": {"description": "Added a timeout parameter to fetchUser to bound slow requests", "intent_type": "feature", "confidence": 0.85},
+  "can_coexist": true,
+  "semantic_compatibility": "compatible",
+  "recommended_strategy": "semantic_merge",
+  "confidence": 0.8,
+  "rationale": "Both edits extend `fetchUser`: upstream wraps the call in a retry loop, fork threads a `timeout` argument. They address related resilience concerns on the same function and can be merged by keeping the `timeout` parameter and nesting it inside upstream's retry loop.",
+  "is_security_sensitive": false
+}
+</example>
+
+<example>
+fork changed `MAX_RETRIES` to 1 (deliberately disabling retries for its
+deployment); upstream changed the same `MAX_RETRIES` constant to 5. The two
+values contradict on the same invariant.
+{
+  "conflict_type": "logic_contradiction",
+  "upstream_intent": {"description": "Raised MAX_RETRIES from 3 to 5 for flaky-network resilience", "intent_type": "bugfix", "confidence": 0.9},
+  "fork_intent": {"description": "Lowered MAX_RETRIES to 1 to fail fast in the fork's latency-sensitive deployment", "intent_type": "config", "confidence": 0.9},
+  "can_coexist": false,
+  "semantic_compatibility": "incompatible",
+  "recommended_strategy": "escalate_human",
+  "confidence": 0.85,
+  "rationale": "Both sides set `MAX_RETRIES` to conflicting values (fork=1, upstream=5) on the same constant. Neither value subsumes the other — the right number is a deployment policy decision, so a human must choose.",
+  "is_security_sensitive": false
+}
+</example>
+</examples>
+
+"""
+
+
 def build_conflict_analysis_prompt(
     file_diff: FileDiff,
     base_content: str | None,
@@ -466,7 +510,7 @@ is (e.g. "fork renamed `parseDate` to `parseISODate`; upstream added a
 `strict` parameter to the same function").{lang_note}
 </instructions>
 
-<output_format>
+{_ANALYSIS_EXAMPLES}<output_format>
 {_JSON_ONLY_INSTRUCTION}
 {{
   "conflict_type": "concurrent_modification",
