@@ -7,6 +7,7 @@ from src.llm.context import (
     ContextSection,
     TokenBudget,
     _CHARS_PER_TOKEN,
+    _truncate_text,
     estimate_tokens,
     get_context_window,
 )
@@ -118,7 +119,7 @@ class AgentPromptBuilder:
             and len(content) < STAGED_THRESHOLD_CHARS
         ):
             max_chars = int(budget_tokens * _CHARS_PER_TOKEN)
-            return content[:max_chars]
+            return _truncate_text(content, max_chars, "tail")
 
         # When the whole file fits the budget, stage nothing — return it
         # verbatim. Relevance scoring drops every chunk below SIGNATURE_THRESHOLD
@@ -135,7 +136,7 @@ class AgentPromptBuilder:
 
         if not chunks:
             max_chars = int(budget_tokens * _CHARS_PER_TOKEN)
-            return content[:max_chars]
+            return _truncate_text(content, max_chars, "middle")
 
         conflict_ranges = [(ln, ln) for ln in conflict_marker_line_numbers(content)]
         context = ScoringContext(
@@ -178,6 +179,6 @@ class AgentPromptBuilder:
         # the token budget) instead of the placeholder.
         if used_tokens == 0:
             max_chars = int(budget_tokens * _CHARS_PER_TOKEN)
-            return content[:max_chars]
+            return _truncate_text(content, max_chars, "middle")
 
         return render_file_staged(chunks, levels)

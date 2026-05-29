@@ -189,9 +189,10 @@ class TestBuildStagedContent:
     def test_build_staged_content_security_sensitive_preserves_whole_file(self):
         """A security-sensitive file with no diff anchor and a budget too small
         for the full body keeps every chunk at SIGNATURE (file-level boost), so
-        the tail of the file survives. A non-sensitive file under the same
-        budget drops every chunk and falls back to a head-truncated view that
-        loses the tail — proving the security signal is actually wired in."""
+        the whole file survives. A non-sensitive file under the same budget
+        drops every chunk and falls back to a middle-truncated view (OPP-4)
+        that loses the middle — proving the security signal is actually wired
+        in."""
         builder = self._make_builder()
         bodies = [f"def func_{i}():\n" + "    x = 1\n" * 20 for i in range(100)]
         large_content = "\n".join(bodies)
@@ -212,18 +213,21 @@ class TestBuildStagedContent:
             is_security_sensitive=False,
         )
 
-        assert "func_99" in sensitive  # tail signature kept by file-level boost
-        assert "func_99" not in plain  # head-truncated fallback loses the tail
+        assert "func_50" in sensitive  # mid-file signature kept by file-level boost
+        assert "func_50" not in plain  # middle-truncated fallback drops the middle
 
     def test_build_staged_content_referenced_symbol_survives(self):
         """A symbol other files import (referenced_names) is boosted above the
         DROP threshold, so it survives staged compression even with no diff
-        anchor. Without the reference signal the same tail symbol is lost to the
-        head-truncated fallback — proving the dependency-graph signal is wired
-        through to relevance scoring."""
+        anchor. Without the reference signal the same mid-file symbol is lost to
+        the middle-truncated fallback (OPP-4) — proving the dependency-graph
+        signal is wired through to relevance scoring."""
         builder = self._make_builder()
-        bodies = [f"def func_{i}():\n" + "    x = 1\n" * 20 for i in range(50)]
+        # keep_me sits in the MIDDLE so the middle-truncation fallback drops it
+        # unless the reference boost lifts it above the DROP threshold.
+        bodies = [f"def func_{i}():\n" + "    x = 1\n" * 20 for i in range(25)]
         bodies.append("def keep_me():\n" + "    y = 2\n" * 20)
+        bodies += [f"def func_{i}():\n" + "    x = 1\n" * 20 for i in range(25, 50)]
         content = "\n".join(bodies)
         assert content.count("\n") >= 200
 
@@ -241,8 +245,8 @@ class TestBuildStagedContent:
             budget_tokens=2000,
         )
 
-        assert "keep_me" in with_ref  # referenced tail symbol kept (signature)
-        assert "keep_me" not in without_ref  # head-truncated fallback drops tail
+        assert "keep_me" in with_ref  # referenced mid-file symbol kept (signature)
+        assert "keep_me" not in without_ref  # middle-truncated fallback drops it
 
     def test_build_staged_content_conflict_region_survives(self):
         """An unresolved conflict block in the tail of a large file is boosted
