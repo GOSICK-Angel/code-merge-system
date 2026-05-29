@@ -1076,9 +1076,7 @@ class PlannerAgent(BaseAgent):
             top_risk_files=rs_data.get("top_risk_files", []),
         )
 
-        merge_base = ""
-        if hasattr(state, "_merge_base"):
-            merge_base = state._merge_base or ""
+        merge_base = state.merge_base_commit
 
         return MergePlan(
             created_at=datetime.now(),
