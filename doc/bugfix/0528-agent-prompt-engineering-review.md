@@ -133,9 +133,10 @@
 
 ### 🟢 P3-3 其余小项
 
-- Judge 内容截断 5000 / batch 2000 字符（`judge_prompts.py:9,191`）：大文件尾部缺陷看不到，与 evidence_excerpt 要求冲突——大文件审查盲区。
-- risk_scoring system 过薄（`risk_scoring_prompts.py:4`）：未锚定 0.3/0.6 阈值语义。
-- planner 阈值 200/50 硬编码在 prompt 文本，未从 config 取，可能与 `MergeConfig` 漂移。
+- ⏸ **Judge 内容截断 5000 / batch 2000 字符**（`judge_prompts.py`）：大文件尾部缺陷看不到。**已评估暂缓**——实际 `review_file` 已走 `build_staged_content` 按 diff range 分块/降级,头截断仅兜底,真正盲区有限;改限额涉 token 成本/行为变更,非纯 polish。留作后续(若要做仅把限额提为 config 可调、默认不变)。
+- ✅ **risk_scoring system 过薄 已落地（2026-05-29，feat/web，未提交）** — `RISK_SCORING_SYSTEM` 由「provide a risk score」一句扩为锚定分值语义([0.0,1.0]、越高越可能炸构建/丢 fork 逻辑、低于 low 边可自动合、≥ high 边需人工/分析复核、中间带需 conflict analysis);`build_risk_scoring_prompt` 加 `risk_score_low/high` 参数(默认 0.30/0.60,与 `ThresholdConfig` 一致)并注入「Scoring bands」块;`compute_llm_risk_score` 透传二者。通用安全(任何 provider 受益)。
+- ✅ **planner 阈值 200/50 已落地（2026-05-29，feat/web，未提交）** — 新增 `ThresholdConfig.classification_large_diff_lines: int = 200`(ge=1),`build_classification_prompt` 加 `large_diff_lines` 参数替换 4 处硬编码 `200`(auto_safe 双边判据 + auto_risky 大 diff 判据 + HARD RULE);`_classify_batch`/`_run_single_classify` 透传,两调用点从 `state.config.thresholds`/`config.thresholds` 取值。few-shot 示例内的「< 200」为具体场景插画(default 下成立)、保留;`MAX_REVISION_ISSUES=50` 是 prompt-size 守卫(非合并策略阈值),加注释保持模块常量。消除未来漂移,符合 Project Generality。
+- ⏸ **P3-1 正向表述**（executor OUTPUT CONTRACT 负向)：**已评估暂缓**——executor 跑 gpt-5.4(OpenAI/reasoning),§五 B 类护栏明令 executor 保持 zero-shot,加正向「合格输出」示例违反护栏;负向本身是 parser 强约束须保留。无 universal-safe 改法,不动。
 
 ---
 
@@ -195,7 +196,12 @@
   - **试点扩展（2026-05-29，同 commit 后续）**：补齐 analyst/judge 全部批量/辅助 JSON 出口——analyst `commit_round`（`CommitRoundWire`）+ `decision_proposals`；judge `batch_file_review` + `verdict` + `re_evaluate`，共 8 个 wire schema。**live eval 暴露并修复一个真实 robustness bug**：cvte 代理对 haiku **强开 thinking**，强制 tool_choice 返回 503「Thinking mode does not support this tool_choice」（非 BadRequest）穿透回退 → 扩 Anthropic 回退识别 tool_choice/thinking 不兼容（400/503）降级 prompt，真正瞬时错误仍 re-raise 交外层 retry。修后 commit_round 批量在真实 haiku 端到端通过（2/2 文件解析、semantic_merge）。3035 单测 / mypy / ruff 干净
   - **planner classification 接线（2026-05-29）**：第 4 个试点 agent。`PlanClassificationWire`（含完整 9 字段 `RiskSummaryWire` + `PlanPhaseWire`，phase/risk_level 用 Literal）。**关键**：单批次路径 `_build_merge_plan` 原样信任 LLM 的 risk_summary（每字段 0 默认），故 risk_summary 必须 required，否则 counts 全 0；多批次由 `_merge_batch_plans` 从 phases 重算。接 `_run_single_classify`（revision 走确定性 `_apply_judge_issues_to_plan` 无 LLM，不接）。live eval 真实 haiku 端到端通过：first_char=`{`、risk_summary 准确（total=3/auto_safe=1/auto_risky=1/human=1/rate=0.667）、分类合规（B→auto_safe / C→auto_risky 守硬规则 / security→human_required）。共 **9 wire schema**；3037 单测 / mypy / ruff 干净
   - **meta-review 接线（2026-05-29）**：第 5 个试点入口。`MetaReviewWire {assessment, recommendation}`，接 judge（META-JUDGE-REVIEW）+ planner（META-PLAN-REVIEW）两个失败收敛诊断调用点（共用形状/parser）。共 **10 wire schema**。live eval 真实 haiku 端到端通过（first_char=`{`、keys 恰为 assessment/recommendation）。至此 **executor 之外的全部 JSON 出口均已结构化**（executor 输出代码非 JSON，天然不适用）；3037 单测 / mypy / ruff 干净
-11. P2-3 Judge find/filter 分离（需 eval 验证 recall）
+- ✅ **11. P2-3 Judge find/filter 分离 已落地（2026-05-29，feat/web，未提交）** — 纯配置层 opt-in，**默认全关**（关时逐字节不变），仅动 Judge（PlannerJudge 刻意校准不碰）：
+  - `AgentLLMConfig.high_recall_review: bool = False`，注释写明面向 Opus 4.8 Judge、对 reasoning/易误报模型有害、须 eval 后才可依赖
+  - `judge_prompts.py` 加 `_FIND_FILTER_NOTE`（find 阶段只管覆盖，severity 走 `issue_level`/`confidence`/`must_fix_before_merge` 交下游 gate 过滤，grounding rule 仍适用）+ 给 `build_file_review_prompt`/`build_batch_file_review_prompt` 加 `high_recall: bool = False` 参数，仅 True 时在 GROUNDING RULE 后注入；与 `lang` 正交
+  - `judge_agent.py` 两调用点（`review_file` / `_review_files_batch_llm`）透传 `self.llm_config.high_recall_review`
+  - 新增 `test_prompt_p2_3.py`（7 例：config 默认 False、关时 file/batch 两 prompt 逐字节不变、开时注入 + grounding 在前、与 lang 正交）；3044 单测 / mypy strict / ruff 干净
+  - **eval 未做**：§五 C 类·4.8 特有，默认配置无任何 opus-4-8（且本 env opus/sonnet proxy 不可达）——开启 `high_recall_review=True` 前须在真实 Opus 4.8 Judge 上 eval recall/误报，否则保持默认关
 - ✅ **12. P3-2 Anthropic extended-thinking 旋钮 已落地（2026-05-29，feat/web，未提交）** — 纯配置层，opt-in，**默认全部关闭**（零行为变更，无需 eval）：
   - `AgentLLMConfig.thinking_budget_tokens: int | None`（默认 None）+ model_validator（budget ≥1024 且 < max_tokens）
   - `AnthropicClient` 接 `thinking_budget_tokens`:set 时 `messages.create` 注入 `thinking={"type":"enabled","budget_tokens":N}` 并**强制 temperature=1.0**（Anthropic 约束）;None 时请求逐字段不变（`temperature` 不动、无 `thinking` 键）
@@ -219,8 +225,10 @@
 - [x] 批次 D·P2-1 试点扩展（2026-05-29）：补齐 analyst（commit_round/decision_proposals）+ judge（batch/verdict/re_evaluate）全部 JSON 出口（8 wire schema）；live eval 修复 cvte-proxy 强开 thinking 致 tool_choice 503 穿透的回退 bug；commit_round 批量真实 haiku 端到端通过；3035 单测 / mypy / ruff 干净
 - [x] 批次 D·P2-1 planner classification（2026-05-29）：第 4 个试点 agent，`PlanClassificationWire`（required risk_summary 9 字段，单批次信任 LLM counts）；接 `_run_single_classify`；live eval 真实 haiku 端到端通过（risk_summary 准确、分类合规守硬规则）；共 9 wire schema；3037 单测 / mypy / ruff 干净
 - [x] 批次 D·P2-1 meta-review（2026-05-29）：`MetaReviewWire`，接 judge META-JUDGE-REVIEW + planner META-PLAN-REVIEW；live eval 真实 haiku 端到端通过。**至此 executor 外全部 JSON 出口结构化完成**，共 10 wire schema；3037 单测 / mypy / ruff 干净
+- [x] 批次 D·P2-3（2026-05-29）：Judge find/filter 分离 `high_recall_review` opt-in（默认全关，关时 file/batch 两 prompt 逐字节不变）；仅 Judge，PlannerJudge 不动；`test_prompt_p2_3.py`（7 例）绿；3044 单测 / mypy strict / ruff 干净。**eval 未做**——4.8 特有且默认无 opus-4-8 端点，开启前须真实 Opus 4.8 Judge 上验 recall/误报
 - [x] 批次 D·P3-2（2026-05-29）：Anthropic extended-thinking 可配置旋钮（默认全关，opt-in）+ 完整 client 接线；`test_anthropic_thinking.py`（8 例）绿；2995 单测 / mypy / ruff 干净；OpenAI effort 本就可配，不动默认
 - [ ] follow-up：harvester barrel/re-export（`export * from` / `export {x} from`）抓不到 → 0 exports 误导 grounding（analyst 侧同存，非批次 A 引入）
+- [x] P3-3b/P3-3c（2026-05-29）：risk_scoring 阈值锚定（system 扩写 + bands 从 `ThresholdConfig` 透传）+ planner 大-diff 阈值入 `classification_large_diff_lines`（默认 200,替换 4 处硬编码）；`MAX_REVISION_ISSUES` 加注释保持常量;`test_prompt_p3_thresholds.py`（6 例）绿；3050 单测 / mypy strict / ruff 干净。P3-3a（judge 截断,已被 staging 缓解）+ P3-1（executor 正向示例,与 §五 zero-shot 护栏抵触）评估暂缓
 - [ ] 批次 B：规则/关键词单一来源（`grep` 副本数=1）；prompt snapshot 测（若有）更新
 - [ ] 全程 mypy / ruff / pytest 全绿
 - [ ] forgejo + zod 各一次 `merge --ci` 对照，rationale/分类质量不退化

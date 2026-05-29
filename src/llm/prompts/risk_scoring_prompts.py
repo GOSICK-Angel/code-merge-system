@@ -1,13 +1,28 @@
 from src.models.diff import FileDiff
 
 
+# P3-3: the system prompt now anchors what the score means and how the bands
+# map to merge decisions, instead of a bare "provide a risk score". The numeric
+# band edges are supplied per-call from ThresholdConfig (risk_score_low /
+# risk_score_high) so the prompt cannot drift from the config that actually
+# gates the merge.
 RISK_SCORING_SYSTEM = (
-    "You are a code risk assessment specialist. "
-    "Analyze the given file diff and provide a risk score."
+    "You are a code risk assessment specialist. Analyze the given file diff and "
+    "return a calibrated merge-risk score in [0.0, 1.0]: higher means a greater "
+    "chance the change breaks the build or silently drops fork-side logic when "
+    "auto-merged. Calibrate to the scoring bands stated in the prompt — scores "
+    "below the low edge are safe auto-merge candidates, scores at or above the "
+    "high edge need human or analyst review, and the range in between is medium "
+    "risk that warrants conflict analysis."
 )
 
 
-def build_risk_scoring_prompt(file_diff: FileDiff, rule_score: float) -> str:
+def build_risk_scoring_prompt(
+    file_diff: FileDiff,
+    rule_score: float,
+    risk_score_low: float = 0.30,
+    risk_score_high: float = 0.60,
+) -> str:
     ext = (
         file_diff.file_path.rsplit(".", 1)[-1]
         if "." in file_diff.file_path
@@ -34,6 +49,11 @@ Rule-based risk score: {rule_score:.3f}
 
 Hunks:
 {hunks_text}
+
+Scoring bands (calibrate llm_risk_score to these):
+- < {risk_score_low:.2f} → low risk: routine change, safe to auto-merge
+- {risk_score_low:.2f}–{risk_score_high:.2f} → medium risk: auto-merge with conflict analysis
+- >= {risk_score_high:.2f} → high risk: needs human / analyst review
 
 Respond with ONLY a JSON object:
 {{

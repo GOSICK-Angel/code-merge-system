@@ -333,6 +333,7 @@ class JudgeAgent(BaseAgent):
             check_strategy=check_strategy,
             fork_content=fork_content,
             lang=lang,
+            high_recall=self.llm_config.high_recall_review,
         )
         messages = [{"role": "user", "content": prompt}]
 
@@ -1684,6 +1685,7 @@ class JudgeAgent(BaseAgent):
         prompt = build_batch_file_review_prompt(
             file_reviews,
             project_context=state.config.project_context,
+            high_recall=self.llm_config.high_recall_review,
         )
         file_paths = [fp for fp, _, _, _ in chunk]
         memory_text = self.get_memory_context(self._current_phase, file_paths)

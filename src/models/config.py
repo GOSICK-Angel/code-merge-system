@@ -73,6 +73,19 @@ class AgentLLMConfig(BaseModel):
         "automatically to prompt-injection JSON when the gateway rejects it. "
         "Defaults to False (legacy prompt+parse behaviour, zero change).",
     )
+    high_recall_review: bool = Field(
+        default=False,
+        description="P2-3 opt-in (Judge only): when True, the file-review prompt "
+        "separates the find pass from the filter pass — the Judge reports every "
+        "plausible defect and expresses severity through issue_level/confidence "
+        "rather than staying silent, letting the downstream gate filter. This "
+        "counteracts the more literal 'be conservative' adherence of Opus 4.8, "
+        "which lowers defect recall. Intended ONLY when the Judge is configured "
+        "as Opus 4.8 and MUST be validated with an eval before relying on it; it "
+        "is harmful on reasoning / easily-over-reporting models. Defaults to "
+        "False (zero change to the prompt). Does NOT affect PlannerJudge, whose "
+        "conservatism is a deliberate calibration against B-class drift.",
+    )
     fallback: Optional[AgentLLMConfig] = Field(
         default=None,
         description="O-1/O-5: Optional fallback provider config activated when the "
@@ -185,6 +198,15 @@ class ThresholdConfig(BaseModel):
     human_escalation: float = Field(default=0.60, ge=0.0, le=1.0)
     risk_score_low: float = Field(default=0.30, ge=0.0, le=1.0)
     risk_score_high: float = Field(default=0.60, ge=0.0, le=1.0)
+    classification_large_diff_lines: int = Field(
+        default=200,
+        ge=1,
+        description="P3-3: line-count threshold (added + deleted on one side) "
+        "above which the planner classification prompt treats a diff as 'large'. "
+        "Sourced here so the prompt cannot drift from config; the default 200 "
+        "preserves prior in-prompt behaviour. A large upstream delta on a "
+        "both_changed file forces human_required.",
+    )
     chunked_aggregation_min_confidence: float = Field(
         default=0.85,
         ge=0.0,

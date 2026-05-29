@@ -157,6 +157,7 @@ class PlannerAgent(BaseAgent):
                 idx,
                 total_batches,
                 rename_pairs=state.rename_pairs or None,
+                large_diff_lines=state.config.thresholds.classification_large_diff_lines,
             )
             all_plan_data.append(plan_data)
 
@@ -744,6 +745,7 @@ class PlannerAgent(BaseAgent):
         batch_index: int,
         total_batches: int,
         rename_pairs: list[tuple[str, str]] | None = None,
+        large_diff_lines: int = 200,
     ) -> dict[str, Any]:
         if len(file_diffs) <= _CLASSIFY_FILE_CHUNK_SIZE:
             return await self._run_single_classify(
@@ -753,6 +755,7 @@ class PlannerAgent(BaseAgent):
                 batch_index,
                 total_batches,
                 rename_pairs,
+                large_diff_lines,
             )
 
         # Sub-chunked path: outer batch is too big for one LLM call. Slice
@@ -791,6 +794,7 @@ class PlannerAgent(BaseAgent):
                 batch_index,
                 total_batches,
                 scoped_renames,
+                large_diff_lines,
             )
 
         # U5: sub-chunks of ``_classify_batch`` partition the file list into
@@ -830,9 +834,15 @@ class PlannerAgent(BaseAgent):
         batch_index: int,
         total_batches: int,
         rename_pairs: list[tuple[str, str]] | None = None,
+        large_diff_lines: int = 200,
     ) -> dict[str, Any]:
         prompt = build_classification_prompt(
-            file_diffs, project_context, batch_index, total_batches, rename_pairs
+            file_diffs,
+            project_context,
+            batch_index,
+            total_batches,
+            rename_pairs,
+            large_diff_lines,
         )
         file_paths = [fd.file_path for fd in file_diffs]
         memory_text = self.get_memory_context(self._current_phase, file_paths)
@@ -1601,6 +1611,7 @@ class PlannerAgent(BaseAgent):
             0,
             1,
             scoped_renames,
+            large_diff_lines=config.thresholds.classification_large_diff_lines,
         )
 
         risk_by_path: dict[str, RiskLevel] = {}

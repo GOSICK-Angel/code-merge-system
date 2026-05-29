@@ -301,13 +301,17 @@ async def compute_llm_risk_score(
     llm_client: Any,
     rule_score: float,
     rule_weight: float = 0.6,
+    risk_score_low: float = 0.30,
+    risk_score_high: float = 0.60,
 ) -> float:
     from src.llm.prompts.risk_scoring_prompts import (
         build_risk_scoring_prompt,
         RISK_SCORING_SYSTEM,
     )
 
-    prompt = build_risk_scoring_prompt(file_diff, rule_score)
+    prompt = build_risk_scoring_prompt(
+        file_diff, rule_score, risk_score_low, risk_score_high
+    )
     messages = [{"role": "user", "content": prompt}]
 
     try:

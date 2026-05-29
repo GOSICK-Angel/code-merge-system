@@ -17,6 +17,24 @@ _JSON_ONLY_INSTRUCTION = (
     "be `{`. No markdown fences, no preamble, no trailing prose."
 )
 
+# P2-3: find/filter separation, injected only when high_recall=True (opt-in,
+# Judge-on-Opus-4.8 only — see AgentLLMConfig.high_recall_review). Opus 4.8
+# follows "be conservative" more literally, which suppresses lower-severity
+# findings and lowers defect recall. This block reframes the review as a find
+# pass and pushes severity/confidence judgement to the downstream gate instead
+# of having the model omit the issue. Empty string when disabled keeps every
+# other run byte-for-byte identical.
+_FIND_FILTER_NOTE = (
+    "\n\nRECALL MODE (P2-3): treat this as a find pass, not a filter pass. "
+    "Report every plausible defect you observe — dropped fork logic, missing "
+    "upstream changes, suspect merges — rather than staying silent because an "
+    "issue looks minor or you are unsure it matters. Do not trim the list to "
+    "keep it short. Express severity through issue_level "
+    "(critical/high vs medium/low/info), confidence, and must_fix_before_merge "
+    "instead of omitting a finding; a downstream gate filters on those fields. "
+    "The grounding rule above still applies to every issue you raise."
+)
+
 # P2-4: human-facing fields (issue description, suggested_fix, overall
 # assessment) follow the run's output language. Injected only when lang ==
 # "zh"; English runs are unchanged.
@@ -151,9 +169,11 @@ def build_file_review_prompt(
     check_strategy: "JudgeCheckStrategy | None" = None,
     fork_content: str | None = None,
     lang: str = "en",
+    high_recall: bool = False,
 ) -> str:
     language = original_diff.language or "unknown"
     lang_note = _ZH_LANG_NOTE if lang == "zh" else ""
+    recall_note = _FIND_FILTER_NOTE if high_recall else ""
     decision_val = (
         decision_record.decision.value
         if hasattr(decision_record.decision, "value")
@@ -213,7 +233,7 @@ GROUNDING RULE (P1-3): every CRITICAL or HIGH issue MUST include either a
 non-empty "affected_lines" array OR a non-empty "evidence_excerpt" string
 quoting a verbatim line from the merged content. Ungrounded CRITICAL/HIGH
 issues will be auto-downgraded to MEDIUM by the parser, so failing to cite
-evidence weakens your verdict.{lang_note}
+evidence weakens your verdict.{recall_note}{lang_note}
 </instructions>
 
 {_REVIEW_EXAMPLES}<output_format>
@@ -278,6 +298,7 @@ _BATCH_PER_FILE_CONTENT_CHARS = 2000
 def build_batch_file_review_prompt(
     file_reviews: list[dict[str, Any]],
     project_context: str = "",
+    high_recall: bool = False,
 ) -> str:
     sections: list[str] = []
     for i, fr in enumerate(file_reviews, 1):
@@ -318,7 +339,9 @@ For each issue set "resolvability":
 GROUNDING RULE (P1-3): every CRITICAL or HIGH issue MUST include either a
 non-empty "affected_lines" array OR a non-empty "evidence_excerpt" string
 quoting a verbatim line from the merged content. Ungrounded CRITICAL/HIGH
-issues are auto-downgraded to MEDIUM by the parser.
+issues are auto-downgraded to MEDIUM by the parser."""
+        + (_FIND_FILTER_NOTE if high_recall else "")
+        + """
 
 """
         + _JSON_ONLY_INSTRUCTION
