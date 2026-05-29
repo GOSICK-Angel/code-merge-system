@@ -24,6 +24,7 @@ from src.llm.prompts.planner_prompts import (
     build_classification_prompt,
     build_evaluation_prompt,
 )
+from src.llm.structured_schemas import PLAN_CLASSIFICATION
 from src.models.plan_review import (
     PlannerIssueResponse,
     IssueResponseAction,
@@ -841,7 +842,9 @@ class PlannerAgent(BaseAgent):
 
         try:
             raw_response = await self._call_llm_with_retry(
-                messages, system=system_prompt
+                messages,
+                system=system_prompt,
+                **self._structured_kwargs(PLAN_CLASSIFICATION),
             )
             raw_str = str(raw_response).strip()
             if raw_str.startswith("```"):

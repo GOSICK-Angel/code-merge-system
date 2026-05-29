@@ -178,6 +178,54 @@ class JudgeReEvaluateWire(_Strict):
     overall_approved: bool
 
 
+_RiskLevel = Literal[
+    "auto_safe", "auto_risky", "human_required", "deleted_only", "binary", "excluded"
+]
+
+
+class PlanPhaseWire(_Strict):
+    batch_id: str
+    phase: Literal[
+        "analysis",
+        "plan_review",
+        "plan_revising",
+        "auto_merge",
+        "conflict_analysis",
+        "human_review",
+        "judge_review",
+        "report",
+    ]
+    file_paths: list[str]
+    risk_level: _RiskLevel
+    can_parallelize: bool
+
+
+class RiskSummaryWire(_Strict):
+    total_files: int
+    auto_safe_count: int
+    auto_risky_count: int
+    human_required_count: int
+    deleted_only_count: int
+    binary_count: int
+    excluded_count: int
+    estimated_auto_merge_rate: float
+    top_risk_files: list[str]
+
+
+class PlanClassificationWire(_Strict):
+    """Mirror of ``build_classification_prompt`` JSON.
+
+    Single-batch runs trust ``risk_summary`` verbatim (``_build_merge_plan``
+    reads each field with a zero default), so the full summary block is
+    required here — omitting it would zero every count.
+    """
+
+    phases: list[PlanPhaseWire]
+    risk_summary: RiskSummaryWire
+    project_context_summary: str
+    special_instructions: list[str]
+
+
 # Stable schema identifiers used as the Structured-Output tool / schema name.
 CONFLICT_ANALYSIS = "conflict_analysis"
 FILE_REVIEW = "file_review"
@@ -187,6 +235,7 @@ DECISION_PROPOSALS = "decision_proposals"
 BATCH_FILE_REVIEW = "batch_file_review"
 JUDGE_VERDICT = "judge_verdict"
 JUDGE_RE_EVALUATE = "judge_re_evaluate"
+PLAN_CLASSIFICATION = "plan_classification"
 
 _WIRE_MODELS: dict[str, type[BaseModel]] = {
     CONFLICT_ANALYSIS: ConflictAnalysisWire,
@@ -197,6 +246,7 @@ _WIRE_MODELS: dict[str, type[BaseModel]] = {
     BATCH_FILE_REVIEW: BatchFileReviewWire,
     JUDGE_VERDICT: JudgeVerdictWire,
     JUDGE_RE_EVALUATE: JudgeReEvaluateWire,
+    PLAN_CLASSIFICATION: PlanClassificationWire,
 }
 
 

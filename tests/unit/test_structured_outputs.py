@@ -33,6 +33,7 @@ from src.llm.structured_schemas import (
     FILE_REVIEW,
     JUDGE_RE_EVALUATE,
     JUDGE_VERDICT,
+    PLAN_CLASSIFICATION,
     PLAN_JUDGE_VERDICT,
     _WIRE_MODELS,
     wire_schema,
@@ -83,9 +84,9 @@ def _openai_resp(content: str) -> MagicMock:
 
 class TestStrictSchema:
     def test_objects_get_additional_properties_false_and_required(self) -> None:
-        # Every registered wire schema (8 across the two expansion rounds)
-        # must satisfy OpenAI strict-mode constraints, including nested $defs.
-        assert len(_WIRE_MODELS) == 8
+        # Every registered wire schema must satisfy OpenAI strict-mode
+        # constraints, including nested $defs / arrays of objects.
+        assert len(_WIRE_MODELS) == 9
         for name in _WIRE_MODELS:
             strict = _to_openai_strict_schema(wire_schema(name))
 
@@ -320,6 +321,7 @@ class TestAgentWiring:
             BATCH_FILE_REVIEW,
             JUDGE_VERDICT,
             JUDGE_RE_EVALUATE,
+            PLAN_CLASSIFICATION,
         ):
             kw = agent._structured_kwargs(name)
             assert kw["schema_name"] == name
@@ -356,4 +358,50 @@ class TestAgentWiring:
         spy = AsyncMock(return_value="{}")
         with patch.object(agent, "_call_llm_with_retry", new=spy):
             await agent.analyze_file(fd, None, "fork", "upstream")
+        assert "json_schema" not in spy.call_args.kwargs
+
+
+class TestPlannerWiring:
+    def _planner(self, structured: bool) -> Any:
+        from src.agents.planner_agent import PlannerAgent
+
+        cfg = AgentLLMConfig(
+            provider="anthropic",
+            model="m",
+            api_key_env="ANTHROPIC_API_KEY",
+            max_retries=1,
+            use_structured_outputs=structured,
+        )
+        return PlannerAgent(cfg)
+
+    async def test_classify_passes_plan_schema_when_enabled(self) -> None:
+        agent = self._planner(True)
+        fd = FileDiff(
+            file_path="a.py",
+            file_status=FileStatus.MODIFIED,
+            risk_level=RiskLevel.AUTO_SAFE,
+            risk_score=0.2,
+            lines_added=2,
+            lines_deleted=0,
+        )
+        spy = AsyncMock(return_value="{}")
+        with patch.object(agent, "_call_llm_with_retry", new=spy):
+            await agent._run_single_classify([fd], "ctx", "sys", 0, 1)
+        kwargs = spy.call_args.kwargs
+        assert kwargs.get("schema_name") == PLAN_CLASSIFICATION
+        assert kwargs.get("json_schema") == wire_schema(PLAN_CLASSIFICATION)
+
+    async def test_classify_no_schema_when_disabled(self) -> None:
+        agent = self._planner(False)
+        fd = FileDiff(
+            file_path="a.py",
+            file_status=FileStatus.MODIFIED,
+            risk_level=RiskLevel.AUTO_SAFE,
+            risk_score=0.2,
+            lines_added=2,
+            lines_deleted=0,
+        )
+        spy = AsyncMock(return_value="{}")
+        with patch.object(agent, "_call_llm_with_retry", new=spy):
+            await agent._run_single_classify([fd], "ctx", "sys", 0, 1)
         assert "json_schema" not in spy.call_args.kwargs
