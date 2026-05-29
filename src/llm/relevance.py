@@ -49,12 +49,39 @@ _ENTRY_POINT_NAMES = {
 }
 
 
+_REFERENCE_BASE_SCORE = 0.3
+
+
+def weights_from_fanin(
+    fanin: dict[str, int],
+    *,
+    base: float = 0.25,
+    per_dependent: float = 0.05,
+    cap: float = 1.0,
+) -> dict[str, float]:
+    """Map per-symbol importer counts to relevance weights (OPP-10).
+
+    A symbol imported by N distinct files scores ``base + per_dependent*N``,
+    capped at ``cap``. Defaults are calibrated so a single importer yields
+    0.30 — identical to the prior flat reference boost — while a high-fan-in
+    public interface climbs toward / past the FULL threshold and so stays
+    fully rendered under staged compression. An empty map leaves scoring
+    unchanged.
+    """
+    return {
+        symbol: min(cap, base + per_dependent * count)
+        for symbol, count in fanin.items()
+    }
+
+
 @dataclass(frozen=True)
 class ScoringContext:
     diff_ranges: list[tuple[int, int]]
     conflict_ranges: list[tuple[int, int]] = field(default_factory=list)
     is_security_sensitive: bool = False
     referenced_names: frozenset[str] = field(default_factory=frozenset)
+    # OPP-10: optional per-symbol degree weights; empty -> flat reference boost.
+    symbol_weights: dict[str, float] = field(default_factory=dict)
 
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -154,8 +181,11 @@ class RelevanceScorer:
         return 0.3 if self._context.is_security_sensitive else 0.0
 
     def _reference_score(self, chunk: CodeChunk) -> float:
+        weight = self._context.symbol_weights.get(chunk.name)
+        if weight is not None:
+            return weight
         if chunk.name in self._context.referenced_names:
-            return 0.3
+            return _REFERENCE_BASE_SCORE
         return 0.0
 
     def _entry_point_score(self, chunk: CodeChunk) -> float:

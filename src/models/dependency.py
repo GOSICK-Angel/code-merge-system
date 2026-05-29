@@ -71,6 +71,21 @@ class FileDependencyGraph(BaseModel, frozen=True):
             if e.target_file == file_path and e.target_symbol
         )
 
+    def symbol_fanin(self, file_path: str) -> dict[str, int]:
+        """Per-symbol importer count for symbols defined in ``file_path``.
+
+        For each symbol ``file_path`` defines that other files import (inbound
+        edges with ``target_file == file_path`` and a non-empty
+        ``target_symbol``), counts the distinct importing source files. Feeds
+        degree-weighted relevance scoring (OPP-10) so a high-fan-in public
+        symbol stays FULL under staged compression while a leaf helper does
+        not. Empty graph -> empty dict (safe degrade)."""
+        importers: dict[str, set[str]] = {}
+        for e in self.edges:
+            if e.target_file == file_path and e.target_symbol:
+                importers.setdefault(e.target_symbol, set()).add(e.source_file)
+        return {symbol: len(srcs) for symbol, srcs in importers.items()}
+
     def topological_order(self, files: list[str]) -> list[str]:
         file_set = set(files)
         in_degree: dict[str, int] = {f: 0 for f in files}

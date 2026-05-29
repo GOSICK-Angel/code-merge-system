@@ -104,6 +104,7 @@ class AgentPromptBuilder:
         budget_tokens: int,
         is_security_sensitive: bool = False,
         referenced_names: frozenset[str] = frozenset(),
+        symbol_weights: dict[str, float] | None = None,
     ) -> str:
         from src.llm.chunker import (
             ASTChunker,
@@ -144,6 +145,7 @@ class AgentPromptBuilder:
             conflict_ranges=conflict_ranges,
             is_security_sensitive=is_security_sensitive,
             referenced_names=referenced_names,
+            symbol_weights=symbol_weights or {},
         )
         scorer = RelevanceScorer(context)
         levels = scorer.score_and_assign(chunks, budget_tokens)

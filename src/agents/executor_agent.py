@@ -432,6 +432,7 @@ class ExecutorAgent(BaseAgent):
         # U1.A: build_staged_content runs regardless of memory_store
         # availability. Only the memory-text injection remains gated.
         from src.llm.prompt_builders import AgentPromptBuilder
+        from src.llm.relevance import weights_from_fanin
 
         builder = AgentPromptBuilder(
             self.llm_config, self._memory_store, self._memory_hit_tracker
@@ -451,6 +452,12 @@ class ExecutorAgent(BaseAgent):
         diff_ranges = _extract_diff_ranges(file_diff)
         target_ranges = _extract_diff_ranges(file_diff, side="target")
         referenced = state.dependency_graph.referenced_symbols(file_diff.file_path)
+        # OPP-10: degree-weight the referenced symbols by fan-in so a high
+        # fan-in public interface stays FULL under staged compression. Empty
+        # graph -> empty dict -> flat reference boost (safe degrade).
+        symbol_weights = weights_from_fanin(
+            state.dependency_graph.symbol_fanin(file_diff.file_path)
+        )
         content_budget = builder.compute_content_budget(
             EXECUTOR_SYSTEM + enriched_context
         )
@@ -462,6 +469,7 @@ class ExecutorAgent(BaseAgent):
             budget_tokens // 2,
             is_security_sensitive=file_diff.is_security_sensitive,
             referenced_names=referenced,
+            symbol_weights=symbol_weights,
         )
         target_content = builder.build_staged_content(
             target_content,
@@ -470,6 +478,7 @@ class ExecutorAgent(BaseAgent):
             budget_tokens // 2,
             is_security_sensitive=file_diff.is_security_sensitive,
             referenced_names=referenced,
+            symbol_weights=symbol_weights,
         )
 
         # Phase B step 8: warn the merge to preserve the public interface of a
