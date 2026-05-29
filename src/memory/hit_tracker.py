@@ -202,6 +202,25 @@ class MemoryHitTracker:
             "top_harmful": harmful,
         }
 
+    def outcome_scores(self, min_observations: int = 3) -> dict[str, float]:
+        """Per-entry outcome score for entries with enough observations.
+
+        Score is ``(pass - fail) / (pass + fail)`` in ``[-1, 1]``; only entries
+        with at least ``min_observations`` total observations are returned.
+        Drives the OPP-5 confidence write-back (helpful entries score > 0,
+        harmful < 0). Unlike ``harmful_entry_ids`` this returns BOTH signs so
+        the orchestrator can boost helpful entries too."""
+        with self._lock:
+            scores: dict[str, float] = {}
+            for eid, counters in self._entry_outcomes.items():
+                p = counters.get("pass", 0)
+                f = counters.get("fail", 0)
+                total = p + f
+                if total < min_observations:
+                    continue
+                scores[eid] = (p - f) / total
+            return scores
+
     def harmful_entry_ids(
         self,
         threshold: float = -0.5,

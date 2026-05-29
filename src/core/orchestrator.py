@@ -53,12 +53,13 @@ from src.core.phases import (
 from src.core.phases.base import ActivityEvent, OnActivityCallback
 from src.core.coordinator import Coordinator
 from src.core.state_machine import StateMachine
-from src.memory.bootstrap import bootstrap_from_claude_md
+from src.memory.bootstrap import _BOOTSTRAP_TAG, bootstrap_from_claude_md
 from src.memory.hit_tracker import MemoryHitTracker
 from src.memory.sqlite_store import SQLiteMemoryStore
 from src.memory.store import MemoryStore
 from src.memory.summarizer import PhaseSummarizer
 from src.models.config import MergeConfig
+from src.models.decision import DecisionSource
 from src.models.state import MergeState, RunBudgetExceeded, SystemStatus
 from src.tools.gate_runner import GateRunner
 from src.tools.git_tool import GitTool
@@ -518,6 +519,52 @@ class Orchestrator:
                 self._phases_since_last_extract = 0
             except Exception as exc:
                 logger.warning("LLM memory extraction failed for %s: %s", phase, exc)
+
+        if phase == "judge_review":
+            try:
+                self._apply_outcome_confidence_writeback(state)
+            except Exception as exc:
+                logger.warning("Outcome confidence write-back failed: %s", exc)
+
+    def _apply_outcome_confidence_writeback(self, state: MergeState) -> None:
+        """OPP-5: nudge persisted memory confidence toward judge outcomes.
+
+        Default OFF. When enabled, each tracked entry with at least
+        ``min_observations`` pass/fail observations has its stored confidence
+        moved by ``k * outcome_score``. Human-decided files (mirroring the
+        repair-skips-human rule) and bootstrap (human-authored) entries are
+        never touched, so outcome noise cannot demote a human-resolved entry.
+        """
+        cfg = getattr(self.config, "memory", None)
+        if cfg is None or not getattr(cfg, "outcome_confidence_writeback", False):
+            return
+        scores = self._memory_hit_tracker.outcome_scores(
+            cfg.outcome_writeback_min_observations
+        )
+        if not scores:
+            return
+        human_files = {
+            fp
+            for fp, record in state.file_decision_records.items()
+            if record.decision_source
+            in (DecisionSource.HUMAN, DecisionSource.BATCH_HUMAN)
+        }
+        deltas: dict[str, float] = {}
+        for entry in self._memory_store.to_memory().entries:
+            score = scores.get(entry.entry_id)
+            if score is None:
+                continue
+            if _BOOTSTRAP_TAG in entry.tags:
+                continue
+            if human_files and any(fp in human_files for fp in entry.file_paths):
+                continue
+            deltas[entry.entry_id] = cfg.outcome_writeback_k * score
+        if deltas:
+            self._memory_store = self._memory_store.adjust_confidence(deltas)
+            logger.info(
+                "OPP-5: nudged confidence of %d memory entries by judge outcomes",
+                len(deltas),
+            )
 
     def _should_llm_extract(self, phase: str, state: MergeState) -> bool:
         cfg = getattr(self.config, "memory", None)

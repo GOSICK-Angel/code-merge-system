@@ -873,6 +873,27 @@ class MemoryExtractionConfig(BaseModel):
         "completed phases regardless of error/dispute triggers, so L2 "
         "aggregation grows on long happy-path runs. 0 disables.",
     )
+    outcome_confidence_writeback: bool = Field(
+        default=False,
+        description="OPP-5: after judge_review, nudge each tracked memory "
+        "entry's persisted confidence toward its pass/fail outcome score so "
+        "helpful entries rise and harmful ones fall. Default OFF — write-back "
+        "is irreversible across runs and should prove out before enabling. "
+        "Never touches human-decided or bootstrap (human-authored) entries.",
+    )
+    outcome_writeback_k: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=0.5,
+        description="OPP-5: step size for the outcome confidence nudge — "
+        "new = clamp(confidence + k * outcome_score, 0.05, 0.98).",
+    )
+    outcome_writeback_min_observations: int = Field(
+        default=3,
+        ge=1,
+        description="OPP-5: minimum pass+fail observations before an entry's "
+        "confidence is nudged, so a single run cannot move it.",
+    )
 
 
 class RenameDetectionConfig(BaseModel):

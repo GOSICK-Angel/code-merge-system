@@ -41,6 +41,34 @@ class MemoryStore:
         new_memory = self._memory.model_copy(update={"phase_summaries": summaries})
         return MemoryStore(new_memory)
 
+    def adjust_confidence(self, deltas: dict[str, float]) -> MemoryStore:
+        """Return a new store with per-entry confidence nudged by ``deltas``.
+
+        Keyed by ``entry_id``; each new confidence is clamped to
+        ``[0.05, 0.98]``. Entries absent from ``deltas`` (or with a zero/no-op
+        delta) are returned unchanged, preserving their ``content_hash`` so
+        dedup identity is untouched. Used by the OPP-5 outcome feedback loop;
+        immutable per the store contract."""
+        if not deltas:
+            return self
+        entries: list[MemoryEntry] = []
+        changed = False
+        for entry in self._memory.entries:
+            delta = deltas.get(entry.entry_id)
+            if not delta:
+                entries.append(entry)
+                continue
+            new_conf = min(0.98, max(0.05, entry.confidence + delta))
+            if new_conf == entry.confidence:
+                entries.append(entry)
+                continue
+            entries.append(entry.model_copy(update={"confidence": new_conf}))
+            changed = True
+        if not changed:
+            return self
+        new_memory = self._memory.model_copy(update={"entries": entries})
+        return MemoryStore(new_memory)
+
     def set_codebase_profile(self, key: str, value: str) -> MemoryStore:
         profile = {**self._memory.codebase_profile, key: value}
         new_memory = self._memory.model_copy(update={"codebase_profile": profile})

@@ -197,6 +197,30 @@ class SQLiteMemoryStore:
             )
         return self
 
+    def adjust_confidence(self, deltas: dict[str, float]) -> "SQLiteMemoryStore":
+        """Nudge per-entry confidence by ``deltas`` (keyed by entry_id),
+        clamped to ``[0.05, 0.98]``. A plain UPDATE — the UNIQUE index is on
+        ``content_hash`` (unchanged), so it never conflicts. Used by the OPP-5
+        outcome feedback loop."""
+        if not deltas:
+            return self
+        with self._conn() as conn:
+            for entry_id, delta in deltas.items():
+                if not delta:
+                    continue
+                row = conn.execute(
+                    "SELECT confidence FROM memory_entries WHERE entry_id = ?",
+                    (entry_id,),
+                ).fetchone()
+                if row is None:
+                    continue
+                new_conf = min(0.98, max(0.05, float(row["confidence"]) + delta))
+                conn.execute(
+                    "UPDATE memory_entries SET confidence = ? WHERE entry_id = ?",
+                    (str(new_conf), entry_id),
+                )
+        return self
+
     def set_codebase_profile(self, key: str, value: str) -> "SQLiteMemoryStore":
         with self._conn() as conn:
             conn.execute(
