@@ -212,6 +212,13 @@ class RiskSummaryWire(_Strict):
     top_risk_files: list[str]
 
 
+class MetaReviewWire(_Strict):
+    """Mirror of META-PLAN / META-JUDGE review JSON ({assessment, recommendation})."""
+
+    assessment: str
+    recommendation: str
+
+
 class PlanClassificationWire(_Strict):
     """Mirror of ``build_classification_prompt`` JSON.
 
@@ -236,6 +243,7 @@ BATCH_FILE_REVIEW = "batch_file_review"
 JUDGE_VERDICT = "judge_verdict"
 JUDGE_RE_EVALUATE = "judge_re_evaluate"
 PLAN_CLASSIFICATION = "plan_classification"
+META_REVIEW = "meta_review"
 
 _WIRE_MODELS: dict[str, type[BaseModel]] = {
     CONFLICT_ANALYSIS: ConflictAnalysisWire,
@@ -247,6 +255,7 @@ _WIRE_MODELS: dict[str, type[BaseModel]] = {
     JUDGE_VERDICT: JudgeVerdictWire,
     JUDGE_RE_EVALUATE: JudgeReEvaluateWire,
     PLAN_CLASSIFICATION: PlanClassificationWire,
+    META_REVIEW: MetaReviewWire,
 }
 
 

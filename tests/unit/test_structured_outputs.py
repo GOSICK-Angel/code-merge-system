@@ -33,6 +33,7 @@ from src.llm.structured_schemas import (
     FILE_REVIEW,
     JUDGE_RE_EVALUATE,
     JUDGE_VERDICT,
+    META_REVIEW,
     PLAN_CLASSIFICATION,
     PLAN_JUDGE_VERDICT,
     _WIRE_MODELS,
@@ -86,7 +87,7 @@ class TestStrictSchema:
     def test_objects_get_additional_properties_false_and_required(self) -> None:
         # Every registered wire schema must satisfy OpenAI strict-mode
         # constraints, including nested $defs / arrays of objects.
-        assert len(_WIRE_MODELS) == 9
+        assert len(_WIRE_MODELS) == 10
         for name in _WIRE_MODELS:
             strict = _to_openai_strict_schema(wire_schema(name))
 
@@ -322,6 +323,7 @@ class TestAgentWiring:
             JUDGE_VERDICT,
             JUDGE_RE_EVALUATE,
             PLAN_CLASSIFICATION,
+            META_REVIEW,
         ):
             kw = agent._structured_kwargs(name)
             assert kw["schema_name"] == name

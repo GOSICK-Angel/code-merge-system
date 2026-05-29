@@ -45,6 +45,7 @@ from src.llm.structured_schemas import (
     FILE_REVIEW,
     JUDGE_RE_EVALUATE,
     JUDGE_VERDICT,
+    META_REVIEW,
 )
 from src.tools.file_classifier import matches_any_pattern
 from src.tools.conflict_markers import find_conflict_marker
@@ -1923,6 +1924,7 @@ class JudgeAgent(BaseAgent):
         raw = await self._call_llm_with_retry(
             [{"role": "user", "content": prompt}],
             system=system,
+            **self._structured_kwargs(META_REVIEW),
         )
         return _parse_meta_review_json(str(raw))
 

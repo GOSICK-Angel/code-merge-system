@@ -24,7 +24,7 @@ from src.llm.prompts.planner_prompts import (
     build_classification_prompt,
     build_evaluation_prompt,
 )
-from src.llm.structured_schemas import PLAN_CLASSIFICATION
+from src.llm.structured_schemas import META_REVIEW, PLAN_CLASSIFICATION
 from src.models.plan_review import (
     PlannerIssueResponse,
     IssueResponseAction,
@@ -1687,6 +1687,7 @@ class PlannerAgent(BaseAgent):
         raw = await self._call_llm_with_retry(
             [{"role": "user", "content": prompt}],
             system=system,
+            **self._structured_kwargs(META_REVIEW),
         )
         return _parse_meta_review_json(str(raw))
 
