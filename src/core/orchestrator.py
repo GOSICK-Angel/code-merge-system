@@ -511,8 +511,10 @@ class Orchestrator:
         if self.memory_extractor is not None and self._should_llm_extract(phase, state):
             try:
                 llm_entries = await self.memory_extractor.extract(phase, state)  # type: ignore[attr-defined]
+                store = self._memory_store
                 for entry in llm_entries:
-                    self._memory_store.add_entry(entry)
+                    store = store.add_entry(entry)
+                self._memory_store = store
                 self._phases_since_last_extract = 0
             except Exception as exc:
                 logger.warning("LLM memory extraction failed for %s: %s", phase, exc)

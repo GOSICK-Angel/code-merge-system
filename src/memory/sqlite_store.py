@@ -15,7 +15,12 @@ from src.memory.models import (
     MergeMemory,
     PhaseSummary,
 )
-from src.memory.store import CONSOLIDATION_THRESHOLD, MAX_ENTRIES, _consolidate_entries
+from src.memory.store import (
+    CONSOLIDATION_THRESHOLD,
+    MAX_ENTRIES,
+    _consolidate_entries,
+    score_path_overlap,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -246,17 +251,7 @@ class SQLiteMemoryStore:
         for row in rows:
             entry = _row_to_entry(row)
             entry_fps: list[str] = json.loads(row["file_paths"])
-            path_score = 0.0
-            for fp in file_paths:
-                for efp in entry_fps:
-                    if fp == efp:
-                        path_score = max(path_score, 1.0)
-                    elif fp.startswith(efp) or efp.startswith(fp):
-                        common = len(_common_prefix(fp, efp))
-                        path_score = max(path_score, common / max(len(fp), len(efp)))
-
-            if path_score == 0.0 and not entry_fps:
-                path_score = 0.1
+            path_score = score_path_overlap(file_paths, entry_fps)
 
             confidence = entry.confidence
             if ref_short:
@@ -364,12 +359,3 @@ class SQLiteMemoryStore:
         with self._conn() as conn:
             rows = conn.execute("SELECT key, value FROM kv_store").fetchall()
         return {r["key"]: r["value"] for r in rows}
-
-
-def _common_prefix(a: str, b: str) -> str:
-    prefix_len = 0
-    for ca, cb in zip(a, b):
-        if ca != cb:
-            break
-        prefix_len += 1
-    return a[:prefix_len]

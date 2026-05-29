@@ -89,21 +89,7 @@ class MemoryStore:
         ref_short = current_upstream_ref[:8] if current_upstream_ref else ""
         scored: dict[str, tuple[float, MemoryEntry]] = {}
         for entry in self._memory.entries:
-            path_score = 0.0
-            for fp in file_paths:
-                for efp in entry.file_paths:
-                    if fp == efp:
-                        path_score = max(path_score, 1.0)
-                        continue
-                    if fp.startswith(efp) or efp.startswith(fp):
-                        common = len(_common_prefix(fp, efp))
-                        path_score = max(path_score, common / max(len(fp), len(efp)))
-                    jaccard = _path_jaccard(fp, efp)
-                    if jaccard > 0.0:
-                        path_score = max(path_score, jaccard * 0.85)
-
-            if path_score == 0.0 and not entry.file_paths:
-                path_score = 0.1
+            path_score = score_path_overlap(file_paths, entry.file_paths)
 
             confidence = entry.confidence
             if ref_short:
@@ -248,6 +234,36 @@ def _path_jaccard(a: str, b: str) -> float:
         return 0.0
     union = len(ta | tb)
     return intersection / union
+
+
+def score_path_overlap(query_paths: list[str], entry_paths: list[str]) -> float:
+    """Blend path-overlap signals between query files and an entry's paths.
+
+    Combines three signals (max wins): exact match (1.0), common-prefix ratio
+    (strong for files in the same subtree), and token Jaccard similarity
+    discounted by 0.85 (captures sibling paths sharing most segments but no
+    common prefix, e.g. ``pkg/plugin_manager/manager.go`` vs
+    ``pkg/plugin_runtime/runtime.go``). An entry with no ``file_paths`` gets a
+    0.1 floor so global insights still surface.
+
+    Shared by both ``MemoryStore`` and ``SQLiteMemoryStore`` so their L2
+    retrieval ranking can never drift (OPP-1).
+    """
+    if not entry_paths:
+        return 0.1
+    path_score = 0.0
+    for fp in query_paths:
+        for efp in entry_paths:
+            if fp == efp:
+                path_score = max(path_score, 1.0)
+                continue
+            if fp.startswith(efp) or efp.startswith(fp):
+                common = len(_common_prefix(fp, efp))
+                path_score = max(path_score, common / max(len(fp), len(efp)))
+            jaccard = _path_jaccard(fp, efp)
+            if jaccard > 0.0:
+                path_score = max(path_score, jaccard * 0.85)
+    return path_score
 
 
 def _consolidate_entries(entries: list[MemoryEntry]) -> list[MemoryEntry]:
