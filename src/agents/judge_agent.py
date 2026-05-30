@@ -56,7 +56,9 @@ from src.tools.forks_profile_loader import (
 from src.tools.git_tool import GitTool
 from src.tools.three_way_diff import ThreeWayDiff, _safe_read_text
 from src.tools.syntax_checker import check_syntax as check_file_syntax
+from src.tools.syntax_checker import has_real_checker
 from src.tools.duplicate_symbol_check import find_duplicate_symbols
+from src.tools.hallucinated_symbol_guard import find_invented_member_accesses
 
 
 class JudgeAgent(BaseAgent):
@@ -78,6 +80,7 @@ class JudgeAgent(BaseAgent):
 
         deterministic_issues = self._run_deterministic_pipeline(state, file_diffs_map)
         deterministic_issues.extend(self._check_duplicate_symbols(state))
+        deterministic_issues.extend(self._check_invented_symbols(state))
         all_issues.extend(deterministic_issues)
 
         deterministic_veto_files = {
@@ -294,6 +297,14 @@ class JudgeAgent(BaseAgent):
             decision_record.original_snapshot, merged_content
         ) or _extract_diff_ranges(original_diff)
         budget_tokens = max_content_chars // 4 if max_content_chars else 2000
+        # #12: preserve the FULL on-disk merged blob. Evidence grounding and the
+        # conflict-marker scan must run against the raw content, not the
+        # budget-trimmed staged view below — otherwise a real CRITICAL whose
+        # evidence_excerpt was elided out of the staged window is wrongly
+        # downgraded as "hallucinated evidence", and a conflict marker outside
+        # the staged window is silently missed. The LLM prompt still sees the
+        # staged view (that is what must fit the token budget).
+        raw_merged_content = merged_content
         if merged_content:
             merged_content = builder.build_staged_content(
                 merged_content,
@@ -346,14 +357,14 @@ class JudgeAgent(BaseAgent):
             llm_issues = parse_file_review_issues(
                 str(raw),
                 file_path,
-                merged_content=merged_content,
+                merged_content=raw_merged_content or merged_content,
                 fork_content=fork_content,
             )
             issues.extend(llm_issues)
         except Exception as e:
             self.logger.error(f"File review failed for {file_path}: {e}")
 
-        marker = find_conflict_marker(merged_content)
+        marker = find_conflict_marker(raw_merged_content or merged_content)
         if marker is not None:
             issues.append(
                 JudgeIssue(
@@ -481,6 +492,11 @@ class JudgeAgent(BaseAgent):
         files fall through to the full LLM review.
         """
         if self.git_tool is None:
+            return False
+        # #5A: only let a file take the high-confidence skip when its language
+        # is GENUINELY checkable. An unsupported extension returns valid=True
+        # vacuously — skipping it on that basis waves an unreviewed file through.
+        if not has_real_checker(file_path):
             return False
         abs_path = self.git_tool.repo_path / file_path
         if not abs_path.exists():
@@ -1076,6 +1092,65 @@ class JudgeAgent(BaseAgent):
                         affected_lines=dup.lines,
                         must_fix_before_merge=True,
                         veto_condition="Duplicate top-level symbol declaration",
+                    )
+                )
+        return issues
+
+    def _check_invented_symbols(self, state: ReadOnlyStateView) -> list[JudgeIssue]:
+        """#5: deterministic hallucinated-cross-module-symbol veto over merged files.
+
+        Mirrors ``_check_duplicate_symbols`` (iterates ``file_decision_records``,
+        reads the merged worktree blob) so the invented-symbol guard becomes a
+        Judge-side blocking veto that is **path-independent** — it fires for
+        single-shot, chunked, AND native-3way merges, and crucially it runs in
+        the deterministic pipeline BEFORE the O-J1 high-confidence skip, so a
+        native-3way C-class file committed at 0.95 confidence cannot wave a
+        fabricated symbol through as "reviewed clean".
+
+        Scope: only files actually MERGED (semantic_merge / manual_patch). A
+        take_target / take_current blob is a verbatim copy of a ref and cannot
+        introduce a symbol absent from that ref, so checking it is pointless and
+        risks the substring-heuristic firing on legitimately-recombined code.
+        The merged blob is read in full (no staging), so the lexical guard's
+        false-negative risk is lowest here.
+        """
+        if self.git_tool is None:
+            return []
+        merged_decisions = {
+            MergeDecision.SEMANTIC_MERGE,
+            MergeDecision.MANUAL_PATCH,
+        }
+        issues: list[JudgeIssue] = []
+        for fp, record in state.file_decision_records.items():
+            if record.decision not in merged_decisions:
+                continue
+            abs_path = self.git_tool.repo_path / fp
+            if not abs_path.exists():
+                continue
+            merged = _safe_read_text(abs_path)
+            if not merged:
+                continue
+            fork_content = self.git_tool.get_file_content(state.config.fork_ref, fp)
+            upstream_content = self.git_tool.get_file_content(
+                state.config.upstream_ref, fp
+            )
+            invented = find_invented_member_accesses(
+                merged, [fork_content or "", upstream_content or ""], fp
+            )
+            if invented:
+                issues.append(
+                    JudgeIssue(
+                        file_path=fp,
+                        issue_level=IssueSeverity.CRITICAL,
+                        issue_type="hallucinated_symbol",
+                        description=(
+                            f"Merged file references cross-module symbol(s) "
+                            f"{invented} present in neither fork nor upstream — "
+                            f"likely a hallucinated member access that will not "
+                            f"compile."
+                        ),
+                        must_fix_before_merge=True,
+                        veto_condition="Hallucinated cross-module symbol",
                     )
                 )
         return issues
@@ -1703,13 +1778,38 @@ class JudgeAgent(BaseAgent):
                 file_paths,
                 merged_contents=merged_contents,
                 fork_contents=fork_contents,
+                strict_json=True,
             )
             for issues_list in per_file.values():
                 all_issues.extend(issues_list)
         except Exception as e:
+            # #3A: fail CLOSED. A batch review that could not be obtained or
+            # parsed (truncated/malformed JSON, transport failure after retries)
+            # must NOT silently pass the chunk as defect-free — that is the worst
+            # fail-open: a broken merge reaching COMPLETED unreviewed. Synthesize
+            # a per-file CRITICAL so the verdict deterministically FAILs and the
+            # files route to escalation/repair instead.
             self.logger.error(
-                "Batch LLM review failed for chunk of %d: %s", len(chunk), e
+                "Batch LLM review failed for chunk of %d: %s — failing closed "
+                "(synthesizing per-file review-unavailable issues)",
+                len(chunk),
+                e,
             )
+            for fp, _content, _record, _fd in chunk:
+                all_issues.append(
+                    JudgeIssue(
+                        file_path=fp,
+                        issue_level=IssueSeverity.CRITICAL,
+                        issue_type="batch_review_unavailable",
+                        description=(
+                            "Judge batch review could not be obtained or parsed "
+                            f"(likely truncated/malformed output): {e!r}. Failing "
+                            "closed — this file was not actually reviewed."
+                        ),
+                        must_fix_before_merge=True,
+                        veto_condition="Judge review unavailable",
+                    )
+                )
 
         return all_issues
 

@@ -95,6 +95,10 @@ class TestAnalystGroundingWiring:
             )
 
         assert result.grounding_warnings == ["core._isoWeek"]
+        # #12: the fabricated subset is also exposed on its own field so the
+        # conflict-analysis strategy gate can escalate on it (verb-mismatch
+        # warnings must NOT land here).
+        assert result.fabricated_symbols == ["core._isoWeek"]
 
     def test_no_warning_when_rationale_is_grounded(self) -> None:
         fd = _make_file_diff()

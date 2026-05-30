@@ -23,18 +23,35 @@ from src.tools.diff_facts import DiffFacts
 # `<side> <verb>` and variants. Capturing groups: 1=side phrase, 2=verb stem.
 # Side phrases: "fork", "upstream", "both sides", "both" (the latter implies
 # both sides simultaneously).
-_VERB_CLAIM = re.compile(
-    r"\b(both\s+sides?|both|fork|upstream)\s+(added|removed|modified|changed)\b",
-    re.IGNORECASE,
-)
-
+#
+# #12: the verb vocabulary is broadened beyond the three core stems to common
+# side-attributed synonyms. This channel is advisory only — its warnings land in
+# ``grounding_warnings`` but NOT in ``fabricated_symbols`` (the #12 hard-escalation
+# gate), so a broader, occasionally-noisier net here cannot over-escalate a merge;
+# it only surfaces more "the rationale's verb disagrees with the diff" hints.
 _VERB_TO_KEY: dict[str, str] = {
     "added": "added",
+    "introduced": "added",
+    "inserted": "added",
     "removed": "removed",
+    "deleted": "removed",
+    "dropped": "removed",
+    "stripped": "removed",
     "modified": "modified",
-    # "changed" is ambiguous — count it as modified (the most common reading)
+    # the following are ambiguous edits-in-place — count as modified
     "changed": "modified",
+    "updated": "modified",
+    "edited": "modified",
+    "rewrote": "modified",
+    "rewritten": "modified",
 }
+
+_VERB_CLAIM = re.compile(
+    r"\b(both\s+sides?|both|fork|upstream)\s+("
+    + "|".join(sorted(_VERB_TO_KEY, key=len, reverse=True))
+    + r")\b",
+    re.IGNORECASE,
+)
 
 
 def _side_has_verb(facts: DiffFacts, side: str, verb_key: str) -> bool:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
 import git as _git
 
 from src.core.orchestrator import Orchestrator
@@ -263,3 +264,56 @@ class TestDryRun:
                 result = await orch.run(state)
 
         assert result.status == SystemStatus.AWAITING_HUMAN
+
+
+class TestTokenCeiling:
+    """#8C: pricing-independent token ceiling fires even at $0 cost
+    (unpriced / proxy models like deepseek-v4-pro)."""
+
+    def _agent(self):
+        from src.agents.planner_agent import PlannerAgent
+        from src.models.config import AgentLLMConfig
+
+        return PlannerAgent(
+            AgentLLMConfig(
+                provider="openai", model="deepseek-v4-pro", api_key_env="OPENAI_API_KEY"
+            )
+        )
+
+    def test_token_ceiling_trips_at_zero_dollar_cost(self):
+        from src.tools.cost_tracker import CostTracker, TokenUsage
+        from src.models.state import RunBudgetExceeded
+
+        tracker = CostTracker()
+        # Unpriced model -> cost_usd stays 0.0, but tokens accumulate.
+        tracker.record(
+            "planner",
+            "planning",
+            "deepseek-v4-pro",
+            "openai",
+            TokenUsage(input_tokens=60_000, output_tokens=2_000),
+        )
+        assert tracker.total_cost_usd == 0.0
+        assert tracker.total_tokens == 62_000
+
+        agent = self._agent()
+        agent.set_cost_tracker(tracker, phase="planning")
+        agent.set_budget(limit_usd=None, token_limit=50_000)
+        with pytest.raises(RunBudgetExceeded):
+            agent._check_budget()
+
+    def test_token_ceiling_none_disables(self):
+        from src.tools.cost_tracker import CostTracker, TokenUsage
+
+        tracker = CostTracker()
+        tracker.record(
+            "planner",
+            "planning",
+            "deepseek-v4-pro",
+            "openai",
+            TokenUsage(input_tokens=999_999, output_tokens=1),
+        )
+        agent = self._agent()
+        agent.set_cost_tracker(tracker, phase="planning")
+        agent.set_budget(limit_usd=None, token_limit=None)
+        agent._check_budget()  # no raise

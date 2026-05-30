@@ -280,3 +280,26 @@ class TestBatchHallucinationGuard:
                 ["a.py"],
                 merged_contents=["not", "a", "dict"],  # type: ignore[arg-type]
             )
+
+
+class TestBatchReviewFailClosed:
+    """#3A: unparseable batch verdict must fail closed when strict_json=True."""
+
+    def test_unparseable_returns_empty_by_default(self) -> None:
+        # Legacy contract preserved: non-strict swallows bad JSON to empty.
+        out = parse_batch_file_review_issues("not json at all", ["a.ts"])
+        assert out == {"a.ts": []}
+
+    def test_unparseable_raises_when_strict(self) -> None:
+        from src.llm.client import ParseError
+
+        with pytest.raises(ParseError):
+            parse_batch_file_review_issues(
+                "not json at all", ["a.ts"], strict_json=True
+            )
+
+    def test_valid_empty_issues_does_not_raise_when_strict(self) -> None:
+        out = parse_batch_file_review_issues(
+            '{"files": []}', ["a.ts"], strict_json=True
+        )
+        assert out == {"a.ts": []}

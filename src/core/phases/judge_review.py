@@ -378,8 +378,14 @@ class JudgeReviewPhase(Phase):
                 returncode = -1
                 output = f"build check timed out after {cfg.timeout_seconds}s"
         except Exception as exc:
+            # #7A: fail CLOSED. A build gate the operator deliberately enabled
+            # that cannot even launch (bad command, missing toolchain, OS error)
+            # must NOT silently leave the verdict at PASS — that is the exact
+            # "the one compile gate fails open" hole. Treat a launch crash as a
+            # build failure and fall through to the downgrade below.
             logger.error("Build check raised unexpectedly: %s", exc)
-            return
+            returncode = -2
+            output = f"build check failed to launch: {exc!r}"
 
         if returncode == 0:
             return
@@ -424,19 +430,42 @@ class JudgeReviewPhase(Phase):
 
         ctx.notify("orchestrator", "Running smoke tests (Phase 5.5)")
 
-        from src.agents.smoke_test_agent import SmokeTestAgent
-
-        agent = ctx.agents.get("smoke_test")
-        if agent is None:
-            agent = SmokeTestAgent(
-                state.config.agents.judge,
-                repo_path=state.config.repo_path,
-            )
-
+        # #7A: fail CLOSED on a launch crash. Constructing the agent and running
+        # it are both inside the try so a misconfigured suite / missing harness
+        # downgrades to FAIL (when block_on_failure) instead of silently leaving
+        # the verdict at PASS.
         try:
+            from src.agents.smoke_test_agent import SmokeTestAgent
+
+            agent = ctx.agents.get("smoke_test")
+            if agent is None:
+                agent = SmokeTestAgent(
+                    state.config.agents.judge,
+                    repo_path=state.config.repo_path,
+                )
             await agent.run(state)
         except Exception as exc:
             logger.error("Smoke tests raised unexpectedly: %s", exc)
+            if cfg.block_on_failure and state.judge_verdict is not None:
+                crash_issue = JudgeIssue(
+                    file_path="(smoke)",
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="smoke_test_failed",
+                    description=f"Smoke test harness failed to run: {exc!r}",
+                    must_fix_before_merge=True,
+                    veto_condition="Smoke test launch failed",
+                )
+                state.judge_verdict = state.judge_verdict.model_copy(
+                    update={
+                        "verdict": VerdictType.FAIL,
+                        "veto_triggered": True,
+                        "veto_reason": f"Smoke test harness failed: {exc!r}",
+                        "issues": list(state.judge_verdict.issues) + [crash_issue],
+                        "critical_issues_count": (
+                            state.judge_verdict.critical_issues_count + 1
+                        ),
+                    }
+                )
             return
 
         report = state.smoke_test_report

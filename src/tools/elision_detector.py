@@ -154,6 +154,11 @@ def has_prose_preamble(content: str) -> tuple[bool, str | None]:
 # An EOF inside a string literal would also be suspicious, but we
 # can't catch that without a parser — the length sanity check below
 # is the second line of defence.
+# Below this smaller-input size (chars) we don't run the length-shortfall
+# truncation check — a legitimately short merge of two short files would
+# otherwise misfire (e.g. a 50-char file merging to 28 chars).
+_MIN_SIZE_FOR_TRUNCATION_CHECK = 200
+
 _HEALTHY_ENDINGS = (
     "}",
     "]",
@@ -214,20 +219,28 @@ def looks_truncated(
     # A line that ends with whitespace was already stripped above.
     ends_healthy = any(tail_stripped.endswith(suffix) for suffix in _HEALTHY_ENDINGS)
 
+    # Length guard (independent of the tail) — fire when the merged output is
+    # dramatically shorter than both inputs, EVEN IF the tail ends on a healthy
+    # token. This is the key fix for clean mid-file elision: an LLM that drops a
+    # function but closes the file with ``}`` was previously waved through by the
+    # ``ends_healthy`` short-circuit regardless of how much it deleted (a 4000→
+    # 750 char drop passed clean). A real merge recombines existing lines, so a
+    # &lt;60%-of-the-smaller-input result is a strong drop/truncation signal. We
+    # still REFUSE to run without size hints (no principled baseline) and guard
+    # tiny files (a legitimately short merge of two short files must not misfire).
+    if current_size is not None and target_size is not None:
+        smaller = min(current_size, target_size)
+        if smaller > _MIN_SIZE_FOR_TRUNCATION_CHECK:
+            floor = int(smaller * 0.6)
+            if floor > 0 and len(content) < floor:
+                return True, tail_stripped[-160:]
+
+    # No dramatic shortfall (or no size hints): a healthy tail is clean.
     if ends_healthy:
         return False, None
 
-    # Length guard — only fire when the merged output is dramatically
-    # shorter than both inputs. This is the single strongest signal of
-    # max_tokens truncation in practice, and we deliberately REFUSE to
-    # run any truncation heuristic without size hints: there is no
-    # principled way to call "tail looks unfinished" without comparing
-    # against an expected length, and every fallback-only heuristic
-    # we tried produced unacceptable false-positive rates on legitimate
-    # one-line files / templates ending on a non-bracket token.
-    if current_size is None or target_size is None:
-        return False, None
-    floor = int(min(current_size, target_size) * 0.6)
-    if floor > 0 and len(content) < floor:
-        return True, tail_stripped[-160:]
+    # Unhealthy tail without a dramatic shortfall is left alone — the
+    # fallback-only "tail looks unfinished" heuristic produced unacceptable
+    # false positives on legitimate one-line files / templates ending on a
+    # non-bracket token, so we require the length signal above to flag.
     return False, None

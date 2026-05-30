@@ -102,13 +102,22 @@ class TestLooksTruncated:
         assert sample is not None
         assert "authorized_integ" in sample
 
-    def test_dramatic_shortness_with_healthy_tail_is_clean(self):
-        # Detector early-returns when the tail ends in a healthy
-        # terminator (closing brace) — the length guard never runs,
-        # so this short-but-complete file passes even with much larger
-        # inputs.
+    def test_dramatic_shortness_with_healthy_tail_now_fires(self):
+        # Behavior change (#9B): a merge dramatically shorter than both inputs
+        # is flagged EVEN WHEN the tail ends in a healthy terminator. The old
+        # ends_healthy short-circuit let a clean mid-file elision (drop a
+        # function, close the file with `}`) pass regardless of how much was
+        # deleted — the dominant silent code-loss mode. 28 chars from 2000-char
+        # inputs is well under the 60% floor, so it now fires.
         content = "package main\n\nfunc main() {}\n"
         hit, _ = looks_truncated(content, current_size=2000, target_size=2000)
+        assert hit
+
+    def test_tiny_inputs_below_min_size_are_not_length_checked(self):
+        # The length-shortfall branch is guarded by a minimum smaller-input
+        # size so a legitimately short merge of two short files never misfires.
+        content = "x"  # 1 char; below the min-size guard, so not flagged
+        hit, _ = looks_truncated(content, current_size=120, target_size=120)
         assert not hit
 
     def test_size_within_range_is_clean_even_with_unusual_tail(self):
@@ -221,3 +230,46 @@ class TestElisionDetectorRegression:
 
     def test_clean_content_passes(self):
         assert not has_elision("package main\n\nfunc main() {}")[0]
+
+
+class TestEffectiveChunkSize:
+    """#9D: chunk size is coupled to the executor's max_tokens output budget so a
+    chunk pair's merged output cannot exceed the model's output ceiling and
+    self-truncate."""
+
+    def _agent(self, max_tokens: int):
+        from src.agents.executor_agent import ExecutorAgent
+        from src.models.config import AgentLLMConfig
+
+        return ExecutorAgent(
+            AgentLLMConfig(
+                provider="openai",
+                model="deepseek-v4-pro",
+                api_key_env="OPENAI_API_KEY",
+                max_tokens=max_tokens,
+            )
+        )
+
+    def _state(self, chunk_size_chars: int):
+        from unittest.mock import MagicMock
+
+        st = MagicMock()
+        st.config.chunk_size_chars = chunk_size_chars
+        return st
+
+    def test_small_max_tokens_caps_below_configured(self):
+        # max_tokens=8192 -> output-safe ~11468 < configured 20000.
+        agent = self._agent(8192)
+        eff = agent._effective_chunk_size(self._state(20000))
+        assert eff < 20000
+        # A chunk pair's merged output (~2*eff chars) must fit under max_tokens.
+        assert (2 * eff) / 3.5 < 8192
+
+    def test_large_max_tokens_keeps_configured(self):
+        # max_tokens=32768 -> output-safe ~45875 > configured 20000, so config wins.
+        agent = self._agent(32768)
+        assert agent._effective_chunk_size(self._state(20000)) == 20000
+
+    def test_never_below_floor(self):
+        agent = self._agent(512)
+        assert agent._effective_chunk_size(self._state(20000)) >= 2000

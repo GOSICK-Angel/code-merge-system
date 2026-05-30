@@ -414,7 +414,7 @@ class ExecutorAgent(BaseAgent):
         orig_current_content = current_content
         orig_target_content = target_content
 
-        chunk_size = state.config.chunk_size_chars
+        chunk_size = self._effective_chunk_size(state)
         if max(len(current_content), len(target_content)) > chunk_size:
             logger.info(
                 "Large file (%d chars): routing %s to chunked semantic merge",
@@ -512,8 +512,13 @@ class ExecutorAgent(BaseAgent):
             self._last_merge_had_prose_preamble = False
             merged_content = parse_merge_result(
                 raw,
-                current_size=len(current_content),
-                target_size=len(target_content),
+                # B2 fix: the truncation/length-floor guard must measure the
+                # merge against the FULL file sizes, not the budget-trimmed
+                # staged views (current_content/target_content were rebound to
+                # build_staged_content output above). Using the trimmed sizes
+                # let a heavily-elided merge pass gate-4 silently.
+                current_size=len(orig_current_content),
+                target_size=len(orig_target_content),
             )
         except Exception as e:
             if isinstance(e, ParseError) and "preamble" in str(e).lower():
@@ -530,22 +535,36 @@ class ExecutorAgent(BaseAgent):
                 reason,
             )
 
-        foreign = _foreign_chars(
-            merged_content, orig_current_content, orig_target_content
+        # Mirror the chunked path's deduplication so a seam/regeneration that
+        # duplicates a top-level declaration is cleaned before guards run.
+        from src.tools.duplicate_symbol_check import (
+            remove_duplicate_top_level_symbols,
         )
-        if foreign is not None:
+
+        deduped = remove_duplicate_top_level_symbols(
+            merged_content, file_diff.file_path
+        )
+        if deduped != merged_content:
+            logger.info(
+                "Semantic merge for %s: removed duplicate top-level declaration(s)",
+                file_diff.file_path,
+            )
+            merged_content = deduped
+
+        fidelity_reason = self._single_shot_fidelity_issue(
+            file_diff.file_path,
+            merged_content,
+            orig_current_content,
+            orig_target_content,
+            state,
+        )
+        if fidelity_reason is not None:
             logger.warning(
-                "Semantic merge for %s invented characters absent from both "
-                "sources (%r) — escalating instead of committing corruption",
+                "Semantic merge for %s failed fidelity guard: %s",
                 file_diff.file_path,
-                foreign,
+                fidelity_reason,
             )
-            return create_escalate_record(
-                file_diff.file_path,
-                f"SEMANTIC_MERGE_INFIDELITY: merge output introduced "
-                f"character(s) {foreign!r} present in neither fork nor "
-                f"upstream — likely LLM corruption of an opaque blob.",
-            )
+            return create_escalate_record(file_diff.file_path, fidelity_reason)
 
         current_phase_str = (
             state.current_phase.value
@@ -564,6 +583,101 @@ class ExecutorAgent(BaseAgent):
             confidence=conflict_analysis.confidence,
         )
 
+    def _effective_chunk_size(self, state: MergeState) -> int:
+        """#9D: chunk size coupled to the executor's output budget.
+
+        A chunked merge emits, per chunk pair, up to ``cur_chunk + tgt_chunk``
+        chars (~``2 * chunk_size``). If that exceeds the model's ``max_tokens``
+        output ceiling the response truncates — caught by parse_merge_result
+        gate-1 (good: no corruption) but the file then escalates instead of
+        merging. Observed on zod ``core/schemas.ts`` (148 KB) with the default
+        ``max_tokens=8192``: every chunk hit the cap.
+
+        Cap the split size so a chunk pair's merged output fits under
+        ``max_tokens`` with headroom: output_tokens ≈ 2*chunk/3.5; keep it under
+        0.8*max_tokens → chunk < 1.4*max_tokens chars. Never EXCEED the
+        configured ``chunk_size_chars`` (operators may want smaller). A larger
+        ``max_tokens`` (e.g. 32k) lets the configured value stand.
+        """
+        configured = state.config.chunk_size_chars
+        max_tokens = getattr(self.llm_config, "max_tokens", 8192) or 8192
+        output_safe = int(max_tokens * 1.4)
+        return max(2000, min(configured, output_safe))
+
+    def _single_shot_fidelity_issue(
+        self,
+        file_path: str,
+        merged_content: str,
+        orig_current_content: str,
+        orig_target_content: str,
+        state: MergeState,
+    ) -> str | None:
+        """Post-merge fidelity guards for the single-shot (whole-file) path.
+
+        Historically this path ran only ``_foreign_chars`` (non-ASCII only),
+        so a fabricated cross-module symbol (the ``core._isoWeek`` class) or a
+        silently dropped fork export committed clean as a high-confidence
+        SEMANTIC_MERGE. Mirror the chunked path's invented-symbol guard and add
+        a deterministic additive-fork-export preservation check. All inputs are
+        the UNTRIMMED originals so staged compression cannot cause a false
+        escalation. Returns an escalation reason, or ``None`` when clean.
+        """
+        # 1) Non-ASCII opaque-blob corruption (existing guard).
+        foreign = _foreign_chars(
+            merged_content, orig_current_content, orig_target_content
+        )
+        if foreign is not None:
+            return (
+                f"SEMANTIC_MERGE_INFIDELITY: merge output introduced "
+                f"character(s) {foreign!r} present in neither fork nor "
+                f"upstream — likely LLM corruption of an opaque blob."
+            )
+
+        # 2) Hallucinated cross-module member access (was chunked-path only).
+        from src.tools.hallucinated_symbol_guard import (
+            find_invented_member_accesses,
+        )
+
+        invented = find_invented_member_accesses(
+            merged_content, [orig_current_content, orig_target_content], file_path
+        )
+        if invented:
+            return (
+                f"SEMANTIC_MERGE_INFIDELITY: merge introduced cross-module "
+                f"reference(s) {invented} present in neither fork nor upstream "
+                f"— likely a hallucinated symbol. Escalating for human review."
+            )
+
+        # 3) Additive fork-export preservation: a public top-level symbol the
+        # fork ADDED over the merge base must survive the merge. Needs the
+        # merge-base blob, which this path does not otherwise fetch. Best-effort
+        # — any git failure degrades to "no check" rather than blocking.
+        if self.git_tool is not None and state.merge_base_commit:
+            try:
+                base_content = self.git_tool.get_file_content(
+                    state.merge_base_commit, file_path
+                )
+            except Exception:
+                base_content = None
+            if base_content is not None:
+                from src.tools.feature_preservation import (
+                    added_exported_symbols,
+                    missing_symbols,
+                )
+
+                expected = added_exported_symbols(
+                    base_content, orig_current_content, file_path
+                )
+                dropped = missing_symbols(merged_content, expected, file_path)
+                if dropped:
+                    return (
+                        f"SEMANTIC_MERGE_INFIDELITY: merge dropped fork-added "
+                        f"public symbol(s) {sorted(dropped)} that the fork "
+                        f"introduced over the merge base — silent fork-feature "
+                        f"loss. Escalating for human review."
+                    )
+        return None
+
     async def _execute_chunked_semantic_merge(
         self,
         file_diff: FileDiff,
@@ -575,9 +689,11 @@ class ExecutorAgent(BaseAgent):
         from src.tools.chunk_processor import (
             align_chunks,
             merge_chunks,
-            split_by_semantic_boundary,
+            seam_balanced,
+            split_with_forced_flag,
         )
         from src.tools.duplicate_symbol_check import (
+            find_duplicate_function_impls,
             remove_duplicate_top_level_symbols,
         )
         from src.tools.hallucinated_symbol_guard import (
@@ -585,14 +701,33 @@ class ExecutorAgent(BaseAgent):
         )
 
         file_path = file_diff.file_path
-        chunk_size = state.config.chunk_size_chars
+        chunk_size = self._effective_chunk_size(state)
 
-        current_chunks = split_by_semantic_boundary(
+        current_chunks, cur_forced = split_with_forced_flag(
             current_content, file_path, chunk_size
         )
-        target_chunks = split_by_semantic_boundary(
+        target_chunks, tgt_forced = split_with_forced_flag(
             target_content, file_path, chunk_size
         )
+        # #10: a forced mid-body split cuts one semantic unit into brace-
+        # incomplete halves that cannot be merged slice-by-slice. Escalate
+        # rather than feed the LLM an unmergeable fragment.
+        if cur_forced or tgt_forced:
+            logger.warning(
+                "Chunked merge for %s: an oversized unit (> 2x chunk_size=%d) "
+                "forced a mid-body split — escalating instead of merging "
+                "brace-incomplete halves.",
+                file_path,
+                chunk_size,
+            )
+            return create_escalate_record(
+                file_path,
+                f"CHUNKED_MERGE_FORCED_SPLIT: a single semantic unit exceeds "
+                f"2x chunk_size ({chunk_size} chars) with no safe split point, "
+                f"so chunking would cut it mid-body into unmergeable halves. "
+                f"Raise the executor max_tokens / chunk_size_chars, or resolve "
+                f"this file manually.",
+            )
         pairs = align_chunks(current_chunks, target_chunks)
 
         logger.info(
@@ -606,6 +741,13 @@ class ExecutorAgent(BaseAgent):
         memory_text = self.get_memory_context(self._current_phase, [file_path])
         merged_chunks: list[str] = []
         for idx, (curr_chunk, tgt_chunk) in enumerate(pairs):
+            # #10: a fork-only region with no upstream counterpart (empty target
+            # chunk). Pass the fork content through verbatim — sending it to the
+            # LLM with an empty "upstream" side invites a needless rewrite /
+            # hallucination of fork code that has nothing to merge against.
+            if not tgt_chunk.strip():
+                merged_chunks.append(curr_chunk)
+                continue
             prompt = _build_chunk_merge_prompt(
                 file_path,
                 curr_chunk,
@@ -655,6 +797,39 @@ class ExecutorAgent(BaseAgent):
                 file_path,
             )
             merged_content = deduped
+        # #10: a chunk seam can re-emit a JS/TS function implementation, a
+        # TS2451 redeclaration the const/class dedup above cannot remove safely
+        # (deleting a span risks dropping a real overload). Escalate instead.
+        dup_fns = find_duplicate_function_impls(merged_content, file_path)
+        if dup_fns:
+            logger.warning(
+                "Chunked merge for %s redeclares function implementation(s) %s "
+                "at a chunk seam — escalating instead of committing.",
+                file_path,
+                dup_fns,
+            )
+            return create_escalate_record(
+                file_path,
+                f"CHUNKED_MERGE_DUP_FUNCTION: function implementation(s) "
+                f"{dup_fns} declared more than once after reassembly (TS2451 "
+                f"redeclaration) — likely a chunk mispairing. Escalating.",
+            )
+        # #10: structural seam gate. A mispaired or partially-merged chunk can
+        # produce a brace/paren/bracket-imbalanced (or unterminated-string)
+        # reassembly even when each chunk parsed in isolation. Escalate rather
+        # than commit uncompilable output — defense-in-depth behind alignment.
+        if not seam_balanced(merged_content, file_path):
+            logger.warning(
+                "Chunked merge for %s is brace-imbalanced after reassembly "
+                "(chunk seam corruption) — escalating instead of committing.",
+                file_path,
+            )
+            return create_escalate_record(
+                file_path,
+                "CHUNKED_MERGE_SEAM_IMBALANCE: reassembled chunked merge is "
+                "structurally unbalanced (brackets / strings) — a likely chunk "
+                "mispairing or partial merge. Escalating for human resolution.",
+            )
         foreign = _foreign_chars(merged_content, current_content, target_content)
         if foreign is not None:
             logger.warning(
@@ -1271,7 +1446,17 @@ def _build_chunk_merge_prompt(
         f"# Target (Upstream) — chunk {chunk_num}/{total_chunks}\n"
         f"{fence}{lang}\n{target_chunk}\n{fence}\n\n"
         "Merge these two sections: preserve fork customisations, incorporate upstream "
-        "changes. Return ONLY the merged content, no explanations, no code fences."
+        "changes. Return ONLY the merged content, no explanations, no code fences.\n\n"
+        "# GROUNDING — CHUNK ISOLATION\n"
+        "You are merging ONE self-contained slice of a larger file, not the whole "
+        "file. Symbols defined in other slices are NOT visible here.\n"
+        "- Do NOT introduce a symbol, import, type, or member access that does not "
+        "appear in the two sections above. A symbol not visible here does not exist "
+        "at this location — do not fabricate it.\n"
+        "- If combining both sides would require a symbol not present in these "
+        "sections, keep the side that is self-consistent without it.\n"
+        "- Do not add a closing or opening brace to 'balance' a slice that looks "
+        "incomplete — the slice boundary is intentional; emit only the merged lines."
     )
 
 

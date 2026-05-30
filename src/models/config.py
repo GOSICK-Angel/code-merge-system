@@ -219,6 +219,33 @@ class ThresholdConfig(BaseModel):
             "1822-file run; tune via .merge/config.yaml."
         ),
     )
+    preservation_min_fork_lines: int = Field(
+        default=50,
+        ge=0,
+        description=(
+            "#11: minimum fork-side (lines_added + lines_deleted vs merge_base) "
+            "for a C-class file to enter the fork-preservation audit. Below this, "
+            "a small fork override that ends up byte-equal to upstream is treated "
+            "as plausibly intentional. Security-sensitive files (FileDiff."
+            "is_security_sensitive) override this to 0 so even a single-line fork "
+            "customization is audited."
+        ),
+    )
+    preservation_fork_survival_floor: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "#11: line-level fork-survival gate. For a C-class file whose worktree "
+            "is NOT byte-equal to upstream (so the wholesale-drop check does not "
+            "fire), flag a preservation loss when at least this fraction of the "
+            "fork's DISTINCTIVE lines (present in fork but in neither merge_base "
+            "nor upstream) are absent from the merged worktree. Heuristic and "
+            "surfacing-only — flagged files route to conflict analysis, never a "
+            "hard veto, so a false positive costs one extra LLM analysis. Raise "
+            "toward 1.0 to flag only near-total drops; lower to catch partial loss."
+        ),
+    )
 
 
 class SecuritySensitiveConfig(BaseModel):
@@ -1256,6 +1283,18 @@ class MergeConfig(BaseModel):
         "cumulative cost crosses this fraction of max_cost_usd. Default 0.8 "
         "(80%) gives reviewers ~20% headroom before the hard cap trips. "
         "Has no effect when max_cost_usd is None.",
+    )
+    max_total_tokens: int | None = Field(
+        default=8_000_000,
+        gt=0,
+        description="#8C pricing-independent budget guardrail: hard ceiling on "
+        "cumulative input+output tokens for the run. Unlike max_cost_usd this "
+        "still trips for unpriced / proxy models (deepseek, self-hosted "
+        "gateways) recorded at $0 cost — without it a runaway resend (the "
+        "observed ~370k-token base-resend storm) has no stop. Enforced "
+        "alongside max_cost_usd in BaseAgent._check_budget and the Orchestrator "
+        "inter-phase ceiling, both transitioning to AWAITING_HUMAN. None = "
+        "no token ceiling. Default 8M ~ a very large multi-hundred-file run.",
     )
     enable_working_branch: bool = Field(
         default=True,

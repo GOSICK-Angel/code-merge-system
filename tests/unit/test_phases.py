@@ -844,6 +844,31 @@ class TestSelectMergeStrategy:
         result = _select_merge_strategy(analysis, thresholds)
         assert result == MergeDecision.SEMANTIC_MERGE
 
+    def test_fabricated_symbols_escalate_even_at_high_confidence(self):
+        # #12: a fabricated member access in the analyst rationale is a strong
+        # hallucination signal — escalate regardless of confidence / can_coexist.
+        analysis = self._make_analysis(
+            confidence=0.99,
+            can_coexist=True,
+            fabricated_symbols=["core._isoWeek"],
+        )
+        thresholds = ThresholdConfig()
+        result = _select_merge_strategy(analysis, thresholds)
+        assert result == MergeDecision.ESCALATE_HUMAN
+
+    def test_no_fabricated_symbols_does_not_escalate(self):
+        # Verb-mismatch grounding warnings (advisory) must NOT escalate — only
+        # the fabricated_symbols subset gates.
+        analysis = self._make_analysis(
+            confidence=0.95,
+            can_coexist=True,
+            grounding_warnings=["Rationale claims fork added, but diff facts ..."],
+            fabricated_symbols=[],
+        )
+        thresholds = ThresholdConfig()
+        result = _select_merge_strategy(analysis, thresholds)
+        assert result == MergeDecision.SEMANTIC_MERGE
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle: before → execute → after via run()

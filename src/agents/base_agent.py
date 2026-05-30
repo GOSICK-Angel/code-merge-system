@@ -155,6 +155,7 @@ class BaseAgent(ABC):
         # U2 budget cap state.
         self._budget_limit_usd: float | None = None
         self._budget_warn_pct: float = 0.8
+        self._budget_token_limit: int | None = None
         self._budget_warning_emitted: bool = False
         self._on_activity: Any | None = None
         self._fallback_llm: LLMClient | None = (
@@ -247,16 +248,24 @@ class BaseAgent(ABC):
     def set_hooks(self, hooks: HookManager) -> None:
         self._hooks = hooks
 
-    def set_budget(self, limit_usd: float | None, warn_pct: float = 0.8) -> None:
-        """Configure U2 per-run budget. ``None`` disables the cap.
+    def set_budget(
+        self,
+        limit_usd: float | None,
+        warn_pct: float = 0.8,
+        token_limit: int | None = None,
+    ) -> None:
+        """Configure U2 per-run budget. ``None`` disables a given cap.
 
-        When set, ``_call_llm_with_retry`` checks ``cost_tracker.total_cost_usd``
-        before and after each LLM call and raises ``RunBudgetExceeded`` once
-        the cumulative spend reaches ``limit_usd``. The first crossing of
-        ``limit_usd * warn_pct`` emits a ``budget_warning`` activity event.
+        When set, ``_call_llm_with_retry`` checks ``cost_tracker`` before and
+        after each LLM call and raises ``RunBudgetExceeded`` once cumulative
+        spend reaches ``limit_usd`` OR cumulative tokens reach ``token_limit``
+        (#8C — the token cap is pricing-independent so it still fires for
+        unpriced/proxy models). The first crossing of ``limit_usd * warn_pct``
+        emits a ``budget_warning`` activity event.
         """
         self._budget_limit_usd = limit_usd
         self._budget_warn_pct = warn_pct
+        self._budget_token_limit = token_limit
         self._budget_warning_emitted = False
 
     def set_activity_callback(self, cb: Any) -> None:
@@ -301,7 +310,23 @@ class BaseAgent(ABC):
         is gated on ``_budget_warning_emitted`` to avoid flooding the event
         stream when the agent stays in the warn band.
         """
-        if self._budget_limit_usd is None or self._cost_tracker is None:
+        if self._cost_tracker is None:
+            return
+        # #8C: pricing-independent token ceiling — fires even when total_cost_usd
+        # stays $0 (unpriced/proxy models). Reuses RunBudgetExceeded so the
+        # Orchestrator's existing partial-report + AWAITING_HUMAN handling
+        # applies; spent/limit carry token counts here.
+        if self._budget_token_limit is not None:
+            tokens = self._cost_tracker.total_tokens
+            if tokens >= self._budget_token_limit:
+                from src.models.state import RunBudgetExceeded
+
+                raise RunBudgetExceeded(
+                    spent=float(tokens),
+                    limit=float(self._budget_token_limit),
+                    phase=self._current_phase,
+                )
+        if self._budget_limit_usd is None:
             return
         spent = self._cost_tracker.total_cost_usd
         limit = self._budget_limit_usd

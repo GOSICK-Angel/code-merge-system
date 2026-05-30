@@ -61,8 +61,27 @@ def split_by_semantic_boundary(
 
     Returns a list of non-empty strings that concatenate back to *content*.
     """
+    chunks, _forced = split_with_forced_flag(content, file_path, chunk_size)
+    return chunks
+
+
+def split_with_forced_flag(
+    content: str,
+    file_path: str,
+    chunk_size: int,
+) -> tuple[list[str], bool]:
+    """Like :func:`split_by_semantic_boundary` but also reports whether any
+    chunk boundary was a **forced mid-body split** (#10).
+
+    A forced mid-body split happens when ``chunk_size * 2`` chars accumulate
+    with no semantic boundary or blank line to break on — the splitter then cuts
+    at an arbitrary line, producing two brace-incomplete halves of one unit (a
+    header without its body, a body without its header). Neither half can be
+    merged independently, so the executor escalates rather than feed the LLM an
+    unmergeable slice.
+    """
     if len(content) <= chunk_size:
-        return [content]
+        return [content], False
 
     ext = Path(file_path).suffix.lower()
     pattern = _boundary_pattern(ext)
@@ -126,7 +145,14 @@ def align_chunks(
     if not chunks_a or not chunks_b:
         return []
 
-    if len(chunks_a) == len(chunks_b):
+    # #10: the equal-count index-zip is only sound when the i-th chunks are the
+    # same unit on both sides. An upstream insertion that shifts a boundary can
+    # keep the counts equal yet pair fork-chunk-i with a DIFFERENT upstream
+    # region. Trust the zip only when both sides expose an identical leading-
+    # symbol sequence; otherwise fall through to the b-covering positional
+    # assignment, which tolerates the shift (and any residual mispair is caught
+    # by the post-merge seam-balance gate, which escalates rather than commits).
+    if len(chunks_a) == len(chunks_b) and _symbols_aligned(chunks_a, chunks_b):
         return list(zip(chunks_a, chunks_b))
 
     line_counts_a = [c.count("\n") + 1 for c in chunks_a]
@@ -167,10 +193,16 @@ def _group_into_chunks(
     lines: list[str],
     boundaries: set[int],
     chunk_size: int,
-) -> list[str]:
-    """Build split indices then slice — avoids double-processing lines."""
+) -> tuple[list[str], bool]:
+    """Build split indices then slice — avoids double-processing lines.
+
+    Returns ``(chunks, forced_midbody)`` where ``forced_midbody`` is True iff a
+    split was made at an arbitrary line (the ``chunk_size * 2`` last resort)
+    rather than at a semantic boundary or blank line.
+    """
     split_indices: list[int] = [0]
     current_size = 0
+    forced_midbody = False
 
     for i, line in enumerate(lines):
         current_size += len(line)
@@ -186,6 +218,7 @@ def _group_into_chunks(
         elif current_size >= chunk_size * 2:
             split_indices.append(i)
             current_size = len(line)
+            forced_midbody = True
 
     split_indices.append(len(lines))
 
@@ -194,4 +227,51 @@ def _group_into_chunks(
         chunk = "".join(lines[start:end])
         if chunk:
             chunks.append(chunk)
-    return chunks
+    return chunks, forced_midbody
+
+
+# Capture the declared symbol NAME after a boundary keyword, for alignment.
+_LEADING_SYMBOL = re.compile(
+    r"^(?:export\s+|default\s+|public\s+|private\s+|protected\s+|abstract\s+|"
+    r"async\s+|pub\s+)*"
+    r"(?:def|class|func|fn|function|struct|enum|impl|trait|interface|"
+    r"const|let|var)\s+([A-Za-z_$][\w$]*)"
+)
+
+
+def _leading_symbol(chunk: str) -> str | None:
+    """The first top-level declared symbol name in *chunk*, if any."""
+    for line in chunk.splitlines():
+        m = _LEADING_SYMBOL.match(line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _symbols_aligned(chunks_a: list[str], chunks_b: list[str]) -> bool:
+    """True when both sides expose a confident, identical leading-symbol
+    sequence — i.e. the equal-count index-zip provably pairs the same units.
+
+    Returns False when symbols are sparse/ambiguous (non-code, blank-line
+    boundaries) so the caller can fall back to positional assignment rather than
+    trust a blind index-zip across diverged boundaries.
+    """
+    syms_a = [_leading_symbol(c) for c in chunks_a]
+    syms_b = [_leading_symbol(c) for c in chunks_b]
+    # Require most chunks to carry a symbol before trusting the sequence.
+    named_a = sum(s is not None for s in syms_a)
+    if named_a < max(2, (len(chunks_a) + 1) // 2):
+        return False
+    return syms_a == syms_b
+
+
+def seam_balanced(merged: str, file_path: str) -> bool:
+    """#10: post-``merge_chunks`` structural gate. Returns False when the
+    reassembled file is brace/paren/bracket-imbalanced or has an unterminated
+    string for a brace-language — the corruption a mispaired or force-split
+    chunk seam produces. Reuses the always-on syntax checker; unsupported
+    languages (no real checker) return True (nothing to assert).
+    """
+    from src.tools.syntax_checker import check_syntax
+
+    return bool(check_syntax(file_path, merged).valid)

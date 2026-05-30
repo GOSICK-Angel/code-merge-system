@@ -107,3 +107,72 @@ class Foo:
         result = check_syntax("bad.yaml", ":\n  - [unclosed")
         assert result.valid is False
         assert len(result.errors) >= 1
+
+
+class TestBalanceChecker:
+    """#1: conservative comment/string/regex-aware bracket-balance for the
+    brace-family languages (previously a no-op returning valid=True)."""
+
+    def test_valid_typescript_passes(self) -> None:
+        code = "export function f(x: number): number {\n  return x + 1;\n}\n"
+        assert check_syntax("a.ts", code).valid is True
+
+    def test_truncated_typescript_unbalanced_fails(self) -> None:
+        # LLM truncation: missing closing brace.
+        r = check_syntax("a.ts", "export function f() {\n  return bar(\n")
+        assert r.valid is False
+        assert r.language == "typescript"
+
+    def test_clean_mid_file_elision_unbalanced_fails(self) -> None:
+        r = check_syntax("a.ts", "class A {\n  m() {\n    return 1\n")
+        assert r.valid is False
+
+    def test_stray_closer_fails(self) -> None:
+        assert check_syntax("a.ts", "function a(){}\n}\n").valid is False
+
+    def test_mismatched_bracket_fails(self) -> None:
+        assert check_syntax("a.ts", "function a( ] {}\n").valid is False
+
+    def test_regex_brace_quantifier_is_clean(self) -> None:
+        # zod is dense with /{n,m}/ quantifiers — these must NOT count as braces.
+        code = "const re = /\\d{1,3}/g;\nfunction f() { return re; }\n"
+        assert check_syntax("a.ts", code).valid is True
+
+    def test_regex_char_class_brace_is_clean(self) -> None:
+        assert check_syntax("a.ts", "const re = /[{}]/;\nconst y = {a:1};\n").valid
+
+    def test_template_interpolation_braces_clean(self) -> None:
+        code = "const s = `${a} and ${ {x:1}.x }`;\nconst y = {b:2};\n"
+        assert check_syntax("a.ts", code).valid is True
+
+    def test_division_not_treated_as_regex(self) -> None:
+        assert check_syntax("a.ts", "const z = a / b / c;\nlet q = z;\n").valid
+
+    def test_braces_in_comment_ignored(self) -> None:
+        assert check_syntax("a.ts", "// a } here {\nfunction h(){return 1;}\n").valid
+
+    def test_braces_in_string_ignored(self) -> None:
+        assert check_syntax("a.ts", 'const x = "a { b } c"; const y = [1];\n').valid
+
+    def test_unterminated_template_fails(self) -> None:
+        assert check_syntax("a.ts", "const x = `hello ${y}").valid is False
+
+    def test_go_raw_string_with_braces_clean(self) -> None:
+        code = "package main\nfunc main(){ s := `a{b}c`; _ = s }\n"
+        assert check_syntax("a.go", code).valid is True
+
+    def test_go_truncated_fails(self) -> None:
+        assert check_syntax("a.go", "package main\nfunc main(){\n").valid is False
+
+    def test_rust_lifetime_not_string(self) -> None:
+        code = "fn f<'a>(x: &'a str) -> &'a str { x }\n"
+        assert check_syntax("a.rs", code).valid is True
+
+    def test_rust_nested_block_comment_clean(self) -> None:
+        assert check_syntax("a.rs", "/* a /* b */ c */\nfn f(){}\n").valid is True
+
+    def test_java_char_literal_brace_clean(self) -> None:
+        assert check_syntax("a.java", "class A { char c = '{'; void m(){} }\n").valid
+
+    def test_empty_content_is_valid(self) -> None:
+        assert check_syntax("a.ts", "   \n  ").valid is True

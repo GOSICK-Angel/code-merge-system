@@ -657,6 +657,7 @@ def parse_batch_file_review_issues(
     file_paths: list[str],
     merged_contents: dict[str, str] | None = None,
     fork_contents: dict[str, str] | None = None,
+    strict_json: bool = False,
 ) -> dict[str, list[JudgeIssue]]:
     if merged_contents is not None and not isinstance(merged_contents, dict):
         raise TypeError(
@@ -673,6 +674,14 @@ def parse_batch_file_review_issues(
     try:
         data = _extract_json(raw)
     except ParseError:
+        # #3A: fail CLOSED when the caller asks for it. An unparseable batch
+        # verdict (truncated / malformed JSON) silently became "no issues found"
+        # for EVERY file in the chunk → the broken merge passed Judge review and
+        # reached COMPLETED. With strict_json the caller turns the unparseable
+        # response into a blocking CRITICAL instead of a free pass. Default stays
+        # False to preserve the legacy best-effort contract for other callers.
+        if strict_json:
+            raise
         return result
 
     for file_entry in data.get("files", []):

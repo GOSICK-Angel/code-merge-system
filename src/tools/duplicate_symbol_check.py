@@ -82,6 +82,44 @@ class DuplicateSymbol(BaseModel):
     lines: list[int]
 
 
+# #10: a top-level JS/TS function IMPLEMENTATION whose signature AND opening
+# body brace are on one line (``function foo(...) {``). Overload signatures end
+# in ``;`` (no ``{``) so they never match — this is the conservative subset that
+# is unambiguously a redeclaration error (TS2451) when it repeats, with no risk
+# of confusing a legal overload set. Multi-line-signature impls are not matched
+# (missed, but never a false positive). Used for ESCALATION only, never auto-
+# deletion: a false positive here would be a safe over-escalation, but auto-
+# deleting a function span risks dropping a real overload — corruption.
+_JS_FUNCTION_IMPL = re.compile(
+    rf"^(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*{_NAME}\s*\([^;]*\)"
+    r"(?:\s*:\s*[^;{]+)?\s*\{"
+)
+_JS_FUNCTION_EXTS = frozenset({".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"})
+
+
+def find_duplicate_function_impls(content: str, file_path: str) -> list[str]:
+    """Return JS/TS function names declared as a single-line IMPLEMENTATION
+    (``function foo(...) {``) more than once at top level — an unambiguous
+    redeclaration error a chunk seam can introduce. Empty for non-JS/TS files.
+    """
+    if Path(file_path).suffix.lower() not in _JS_FUNCTION_EXTS or not content:
+        return []
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for line in content.splitlines():
+        if not line or line[0].isspace():
+            continue
+        m = _JS_FUNCTION_IMPL.match(line)
+        if not m:
+            continue
+        name = m.group("name")
+        if name not in counts:
+            counts[name] = 0
+            order.append(name)
+        counts[name] += 1
+    return [n for n in order if counts[n] > 1]
+
+
 def _match_line(
     line: str, patterns: list[tuple[str, re.Pattern[str]]]
 ) -> tuple[str, str] | None:

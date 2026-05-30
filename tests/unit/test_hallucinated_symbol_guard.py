@@ -60,3 +60,50 @@ class TestFindInventedMemberAccesses:
         merged = "core.z1; core.z2; core.z3; core.z4; core.z5; core.z6;\n"
         out = find_invented_member_accesses(merged, [fork], "x.ts", limit=3)
         assert out == ["core.z1", "core.z2", "core.z3"]
+
+
+class TestHardenedGuard:
+    """#6: chained-leaf coverage + set-based recombination (no substring)."""
+
+    def test_chained_leaf_fabrication_flagged(self) -> None:
+        from src.tools.hallucinated_symbol_guard import find_invented_member_accesses
+
+        # source has core.schemas (real) but NOT core.schemas._isoWeek — the
+        # exact zod fabricated-leaf shape the old non-overlapping scan missed.
+        src = "import { core } from './core'\nconst x = core.schemas.ZodString\n"
+        merged = "const y = core.schemas._isoWeek()\n"
+        assert find_invented_member_accesses(merged, [src], "a.ts") == [
+            "schemas._isoWeek"
+        ]
+
+    def test_substring_whitelist_bypass_closed(self) -> None:
+        from src.tools.hallucinated_symbol_guard import find_invented_member_accesses
+
+        # core._isoWeek must NOT be whitelisted by a longer core._isoWeekFoo.
+        src = "const a = core._isoWeekFoo\n"
+        merged = "const b = core._isoWeek\n"
+        assert find_invented_member_accesses(merged, [src], "a.ts") == [
+            "core._isoWeek"
+        ]
+
+    def test_legit_recombination_allowed(self) -> None:
+        from src.tools.hallucinated_symbol_guard import find_invented_member_accesses
+
+        src = "const a = core.schemas.ZodString\n"
+        merged = "const b = core.schemas.ZodString\n"
+        assert find_invented_member_accesses(merged, [src], "a.ts") == []
+
+    def test_brand_new_import_base_allowed(self) -> None:
+        from src.tools.hallucinated_symbol_guard import find_invented_member_accesses
+
+        merged = "import { z } from 'zod'\nconst b = z.string()\n"
+        assert find_invented_member_accesses(merged, ["const a = 1\n"], "a.ts") == []
+
+    def test_wildcard_prose_not_flagged(self) -> None:
+        from src.tools.hallucinated_symbol_guard import scan_rationale_for_hallucinations
+
+        # "core._iso*" wildcard-family prose must not produce core._iso noise.
+        src = "inst.x = core._isoDate(p)\n"
+        rationale = "use core._iso* directly, plus core._isoWeek if available"
+        out = scan_rationale_for_hallucinations(rationale, [src], "a.ts")
+        assert out == ["core._isoWeek"]

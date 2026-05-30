@@ -427,7 +427,15 @@ class ConflictAnalystAgent(BaseAgent):
             cur_chunk, tgt_chunk = pairs[idx]
             prompt = build_conflict_analysis_prompt(
                 file_diff,
-                base_content,
+                # Cost fix (#8A): do NOT resend the FULL un-chunked merge-base
+                # blob in every chunk prompt. On zod core/schemas.ts (base
+                # ~148KB) this caused a ~62k-token prompt to be re-sent 6-8×
+                # for ONE file (~370k+ input tokens, 16+ min wall-clock). The
+                # base is not split in alignment with cur/tgt chunks anyway, so
+                # per-chunk it is noise; the prompt degrades base_section to
+                # "Not available" and still shows fork vs upstream per chunk,
+                # which is what the per-chunk divergence analysis needs.
+                None,
                 cur_chunk,
                 tgt_chunk,
                 enriched_context,
@@ -754,6 +762,7 @@ def _with_grounding_warnings(
     return analysis.model_copy(
         update={
             "grounding_warnings": list(analysis.grounding_warnings) + merged_warnings,
+            "fabricated_symbols": list(analysis.fabricated_symbols) + fabricated,
             "required_new_apis": declared,
         }
     )

@@ -1091,9 +1091,17 @@ class AutoMergePhase(Phase):
                     continue
                 seen.add(fp)
                 fd = file_diffs_map.get(fp)
-                auto_take = fd is not None and (
-                    _is_lock_file(fp) or (is_bump and _is_dep_manifest(fp))
+                # #4: a lock file is a generated artifact — TAKE_TARGET is
+                # correct (the toolchain regenerates it). But a hand-edited
+                # dependency MANIFEST that is C-class (both fork and upstream
+                # changed it) must NOT be blindly overwritten — that silently
+                # drops fork dependency pins / overrides with zero review. Route
+                # C-class manifests to conflict analysis instead.
+                cat = fd.change_category if fd is not None else None
+                manifest_safe = (
+                    is_bump and _is_dep_manifest(fp) and cat != FileChangeCategory.C
                 )
+                auto_take = fd is not None and (_is_lock_file(fp) or manifest_safe)
                 if auto_take and fd is not None:
                     record = await executor.execute_auto_merge(
                         fd, MergeDecision.TAKE_TARGET, state

@@ -610,7 +610,9 @@ class Orchestrator:
             # activity callback so it can emit a one-shot budget_warning
             # the first time cumulative spend crosses warn_pct.
             agent.set_budget(
-                self.config.max_cost_usd, self.config.per_run_cost_warn_pct
+                self.config.max_cost_usd,
+                self.config.per_run_cost_warn_pct,
+                token_limit=self.config.max_total_tokens,
             )
             if self._on_activity is not None:
                 agent.set_activity_callback(self._on_activity)

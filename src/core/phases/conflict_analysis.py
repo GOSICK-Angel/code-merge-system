@@ -6,6 +6,7 @@ from typing import Any
 
 from src.agents.base_agent import CIRCUIT_BREAKER_THRESHOLD
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
+from src.llm.relevance import weights_from_fanin
 from src.models.conflict import ConflictAnalysis, ConflictType
 from src.models.config import ThresholdConfig
 from src.models.decision import MergeDecision
@@ -208,6 +209,14 @@ def _select_merge_strategy(
     analysis: ConflictAnalysis, thresholds: ThresholdConfig
 ) -> MergeDecision:
     if analysis.is_security_sensitive:
+        return MergeDecision.ESCALATE_HUMAN
+
+    # #12: the analyst rationale referenced a member access fabricated on a real
+    # module (present in neither fork nor upstream, not declared via REQUIRES NEW
+    # API). This is a strong hallucination signal scoped to the fabricated subset
+    # of grounding warnings (verb-mismatch warnings stay advisory) — escalate
+    # rather than auto-merge on a rationale we know is partly invented.
+    if analysis.fabricated_symbols:
         return MergeDecision.ESCALATE_HUMAN
 
     if analysis.semantic_compatibility == "incompatible":
@@ -812,6 +821,9 @@ class ConflictAnalysisPhase(Phase):
                 project_context=state.config.project_context,
                 referenced_names=state.dependency_graph.referenced_symbols(
                     fd.file_path
+                ),
+                symbol_weights=weights_from_fanin(
+                    state.dependency_graph.symbol_fanin(fd.file_path)
                 ),
                 impact_hint=state.dependency_graph.impact_hint(
                     fd.file_path,

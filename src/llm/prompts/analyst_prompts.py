@@ -411,9 +411,15 @@ def build_conflict_analysis_prompt(
             "Strongly prefer take_current."
         )
     elif fork_total == 0:
+        # #11: demoted from an imperative "Strongly prefer take_target" to a
+        # neutral observation. When the fork-side line stats are wrong (rename,
+        # wrong base, undercount), a strong take_target push silently discards
+        # real fork content — let the analyst judge from the content, and the
+        # preservation auditor still catches a wholesale drop downstream.
         size_signal = (
-            "UPSTREAM changed lines only — fork did not modify this file. "
-            "Strongly prefer take_target."
+            "UPSTREAM changed lines only — fork-side diff shows no line changes "
+            "vs merge_base. take_target is usually appropriate, but confirm the "
+            "fork genuinely has no customization here before discarding it."
         )
     else:
         ratio = fork_total / upstream_total

@@ -175,6 +175,15 @@ class CostTracker:
         with self._lock:
             return len(self._entries)
 
+    @property
+    def total_tokens(self) -> int:
+        """Cumulative input+output tokens across all calls. Unlike
+        ``total_cost_usd`` this is pricing-independent, so it provides a real
+        budget guardrail even for unpriced / proxy models (deepseek-v4-pro,
+        self-hosted gateways) whose dollar cost is recorded as $0 (#8C)."""
+        with self._lock:
+            return sum(e.usage.total_tokens for e in self._entries)
+
     def summary(self) -> dict[str, Any]:
         """Aggregate summary for reporting (C5)."""
         with self._lock:
