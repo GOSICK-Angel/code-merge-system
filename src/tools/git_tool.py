@@ -1,9 +1,40 @@
 import logging
+from enum import Enum
 from pathlib import Path
 import git
 from git import Repo, InvalidGitRepositoryError
 
 logger = logging.getLogger(__name__)
+
+
+class GitReadStatus(Enum):
+    """Outcome of a best-effort git blob read (W5 W1).
+
+    Distinguishes a path that is *legitimately absent* at a ref (``ABSENT`` —
+    the fork added/deleted it; nothing to read, no alarm) from a *genuine git
+    failure* (``GIT_ERROR`` — a broken ref / misconfigured ``git_tool``). The
+    two were previously conflated into a bare ``None``, forcing the P1 gate-skip
+    alarm to stay silent on every ``None`` to avoid over-firing on absent files.
+    With the status split, a degrade-to-skip gate can alarm ONLY on
+    ``GIT_ERROR`` and stay silent on ``ABSENT``.
+    """
+
+    OK = "ok"
+    ABSENT = "absent"
+    GIT_ERROR = "git_error"
+
+
+# git's exit code is 128 for BOTH an absent path and a broken ref; the only
+# reliable signal is stderr text. ``<ref>:<path>`` (the colon form this module
+# uses) yields "path '…' does not exist in '<ref>'" for an absent path.
+_GIT_ABSENT_MARKERS = ("does not exist in", "exists on disk, but not in")
+
+
+def _classify_git_read_error(exc: git.GitCommandError) -> GitReadStatus:
+    text = f"{getattr(exc, 'stderr', '') or ''} {exc}".lower()
+    if any(marker in text for marker in _GIT_ABSENT_MARKERS):
+        return GitReadStatus.ABSENT
+    return GitReadStatus.GIT_ERROR
 
 
 class GitTool:
@@ -65,6 +96,36 @@ class GitTool:
         if isinstance(result, str):
             return result.encode("utf-8", errors="surrogateescape")
         return None
+
+    def get_file_content_checked(
+        self, ref: str, file_path: str
+    ) -> tuple[str | None, GitReadStatus]:
+        """W1: like :meth:`get_file_content` but also returns whether a ``None``
+        means the file is legitimately absent at ``ref`` or git genuinely failed.
+        """
+        raw, status = self.get_file_bytes_checked(ref, file_path)
+        if raw is None:
+            return None, status
+        return raw.decode("utf-8", errors="surrogateescape"), status
+
+    def get_file_bytes_checked(
+        self, ref: str, file_path: str
+    ) -> tuple[bytes | None, GitReadStatus]:
+        """W1 status-returning twin of :meth:`get_file_bytes` (same git call /
+        ``strip_newline_in_stdout=False`` contract)."""
+        try:
+            result = self.repo.git.show(
+                f"{ref}:{file_path}",
+                stdout_as_string=False,
+                strip_newline_in_stdout=False,
+            )
+        except git.GitCommandError as exc:
+            return None, _classify_git_read_error(exc)
+        if isinstance(result, bytes):
+            return result, GitReadStatus.OK
+        if isinstance(result, str):
+            return result.encode("utf-8", errors="surrogateescape"), GitReadStatus.OK
+        return None, GitReadStatus.GIT_ERROR
 
     def get_three_way_diff(
         self, base: str, current: str, target: str, file_path: str
@@ -323,6 +384,16 @@ class GitTool:
         except git.GitCommandError:
             return None
 
+    def get_file_hash_checked(
+        self, ref: str, file_path: str
+    ) -> tuple[str | None, GitReadStatus]:
+        """W1 status-returning twin of :meth:`get_file_hash`."""
+        try:
+            sha = str(self.repo.git.rev_parse(f"{ref}:{file_path}")).strip()
+            return sha, GitReadStatus.OK
+        except git.GitCommandError as exc:
+            return None, _classify_git_read_error(exc)
+
     def get_head_sha(self) -> str:
         return str(self.repo.git.rev_parse("HEAD")).strip()
 
@@ -334,6 +405,21 @@ class GitTool:
             return str(self.repo.git.hash_object(str(abs_path))).strip()
         except git.GitCommandError:
             return None
+
+    def get_worktree_blob_sha_checked(
+        self, file_path: str
+    ) -> tuple[str | None, GitReadStatus]:
+        """W1 status-returning twin of :meth:`get_worktree_blob_sha`. A file not
+        on disk is ``ABSENT`` (not a git failure); a ``hash_object`` failure is a
+        genuine ``GIT_ERROR``."""
+        abs_path = self.repo_path / file_path
+        if not abs_path.exists():
+            return None, GitReadStatus.ABSENT
+        try:
+            sha = str(self.repo.git.hash_object(str(abs_path))).strip()
+            return sha, GitReadStatus.OK
+        except git.GitCommandError as exc:
+            return None, _classify_git_read_error(exc)
 
     def diff_files_between(self, before_sha: str, after_sha: str) -> list[str]:
         if before_sha == after_sha:

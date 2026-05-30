@@ -16,6 +16,7 @@ import pytest
 from src.core.phases.auto_merge import AutoMergePhase
 from src.models.diff import FileChangeCategory
 from src.tools.commit_replayer import CommitReplayer
+from src.tools.git_tool import GitReadStatus
 
 
 class TestOB5ReplayClean_UsesActualDiff:
@@ -86,8 +87,11 @@ class TestOB5SanityCheck:
     async def test_no_drift_when_hashes_match(self):
         state = self._make_phase_with_b_batch(["a.py", "b.py"])
         ctx = MagicMock()
-        ctx.git_tool.get_file_hash.return_value = "deadbeef"
-        ctx.git_tool.get_worktree_blob_sha.return_value = "deadbeef"
+        ctx.git_tool.get_file_hash_checked.return_value = ("deadbeef", GitReadStatus.OK)
+        ctx.git_tool.get_worktree_blob_sha_checked.return_value = (
+            "deadbeef",
+            GitReadStatus.OK,
+        )
 
         drift = await AutoMergePhase()._b_class_sanity_check(state, ctx)
         assert drift == []
@@ -96,8 +100,14 @@ class TestOB5SanityCheck:
     async def test_drift_when_worktree_differs_from_upstream(self):
         state = self._make_phase_with_b_batch(["a.py", "b.py"])
         ctx = MagicMock()
-        ctx.git_tool.get_file_hash.side_effect = ["up1", "up2"]
-        ctx.git_tool.get_worktree_blob_sha.side_effect = ["up1", "fork2"]
+        ctx.git_tool.get_file_hash_checked.side_effect = [
+            ("up1", GitReadStatus.OK),
+            ("up2", GitReadStatus.OK),
+        ]
+        ctx.git_tool.get_worktree_blob_sha_checked.side_effect = [
+            ("up1", GitReadStatus.OK),
+            ("fork2", GitReadStatus.OK),
+        ]
 
         drift = await AutoMergePhase()._b_class_sanity_check(state, ctx)
         assert drift == ["b.py"]
@@ -106,8 +116,12 @@ class TestOB5SanityCheck:
     async def test_missing_blob_skipped(self):
         state = self._make_phase_with_b_batch(["missing.py"])
         ctx = MagicMock()
-        ctx.git_tool.get_file_hash.return_value = None
-        ctx.git_tool.get_worktree_blob_sha.return_value = "abc"
+        # absent (not git-broken) → silent skip, no drift, no alarm.
+        ctx.git_tool.get_file_hash_checked.return_value = (None, GitReadStatus.ABSENT)
+        ctx.git_tool.get_worktree_blob_sha_checked.return_value = (
+            "abc",
+            GitReadStatus.OK,
+        )
 
         drift = await AutoMergePhase()._b_class_sanity_check(state, ctx)
         assert drift == []
@@ -127,12 +141,15 @@ class TestOB5SanityCheck:
         state.config.upstream_ref = "upstream/main"
 
         ctx = MagicMock()
-        ctx.git_tool.get_file_hash.return_value = "u"
-        ctx.git_tool.get_worktree_blob_sha.return_value = "f"
+        ctx.git_tool.get_file_hash_checked.return_value = ("u", GitReadStatus.OK)
+        ctx.git_tool.get_worktree_blob_sha_checked.return_value = (
+            "f",
+            GitReadStatus.OK,
+        )
 
         drift = await AutoMergePhase()._b_class_sanity_check(state, ctx)
         assert drift == ["b.py"]
-        assert ctx.git_tool.get_file_hash.call_count == 1
+        assert ctx.git_tool.get_file_hash_checked.call_count == 1
 
     @pytest.mark.asyncio
     async def test_no_plan_returns_empty(self):
@@ -169,13 +186,19 @@ class TestOB5SanityCheck:
         }
 
         ctx = MagicMock()
-        ctx.git_tool.get_file_hash.return_value = "upstream_sha"
-        ctx.git_tool.get_worktree_blob_sha.return_value = "fork_sha"
+        ctx.git_tool.get_file_hash_checked.return_value = (
+            "upstream_sha",
+            GitReadStatus.OK,
+        )
+        ctx.git_tool.get_worktree_blob_sha_checked.return_value = (
+            "fork_sha",
+            GitReadStatus.OK,
+        )
 
         drift = await AutoMergePhase()._b_class_sanity_check(state, ctx)
 
         assert drift == ["real_drift.py"]
-        assert ctx.git_tool.get_file_hash.call_count == 1
+        assert ctx.git_tool.get_file_hash_checked.call_count == 1
 
 
 class TestOB5SanityCheckDMissing:
@@ -200,8 +223,14 @@ class TestOB5SanityCheckDMissing:
     async def test_d_missing_drift_detected(self):
         state = self._state_with_batch(["new_feature.go"], FileChangeCategory.D_MISSING)
         ctx = MagicMock()
-        ctx.git_tool.get_file_hash.return_value = "upstream_sha"
-        ctx.git_tool.get_worktree_blob_sha.return_value = "intermediate_sha"
+        ctx.git_tool.get_file_hash_checked.return_value = (
+            "upstream_sha",
+            GitReadStatus.OK,
+        )
+        ctx.git_tool.get_worktree_blob_sha_checked.return_value = (
+            "intermediate_sha",
+            GitReadStatus.OK,
+        )
 
         drift = await AutoMergePhase()._b_class_sanity_check(state, ctx)
         assert drift == ["new_feature.go"]
@@ -335,10 +364,17 @@ class TestOJ3VerifyTakeDecisions:
         from src.models.config import AgentLLMConfig
 
         git_tool = MagicMock()
-        git_tool.get_file_hash.side_effect = lambda ref, fp: hashes_by_ref.get(
-            (ref, fp)
-        )
-        git_tool.get_worktree_blob_sha.side_effect = lambda fp: worktree_hashes.get(fp)
+
+        def _hash_checked(ref: str, fp: str):
+            val = hashes_by_ref.get((ref, fp))
+            return val, GitReadStatus.OK if val is not None else GitReadStatus.ABSENT
+
+        def _worktree_checked(fp: str):
+            val = worktree_hashes.get(fp)
+            return val, GitReadStatus.OK if val is not None else GitReadStatus.ABSENT
+
+        git_tool.get_file_hash_checked.side_effect = _hash_checked
+        git_tool.get_worktree_blob_sha_checked.side_effect = _worktree_checked
         cfg = AgentLLMConfig(
             provider="anthropic", model="claude-opus-4-6", api_key_env="TEST_KEY"
         )

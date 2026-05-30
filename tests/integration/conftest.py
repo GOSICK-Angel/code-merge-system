@@ -4,41 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.models.config import MergeConfig, OutputConfig
-
-
-# Tests whose *expectations* predate current orchestrator routing (a rule-based
-# conflict resolver now short-circuits the scripted analyst; extra drift /
-# preservation / commit phases run; per-agent call counts shifted). The fixture
-# is restored (loadable + fast), but faithfully re-scripting each of these
-# against the current routing is a separate maintenance task tracked in
-# doc/review/05-wave4-implementation-log.md. xfail (not skip) so they still run
-# and flip to xpass — visibly — if the pipeline/test alignment is restored.
-_DRIFTED_NODEIDS = {
-    "test_low_confidence_conflict_transitions_to_awaiting_human",
-    "test_low_confidence_conflict_populates_human_decision_requests",
-    "test_awaiting_human_state_has_no_errors",
-    "test_awaiting_human_conflict_analysis_stored",
-    "test_all_auto_safe_plan_judge_called_once",
-    "test_one_revision_round_reaches_completed",
-    "test_one_revision_round_planner_called_twice",
-    "test_max_revisions_exceeded_transitions_to_awaiting_human",
-    "test_max_revisions_exceeded_planner_judge_called_three_times",
-    "test_semantic_merge_decision_recorded",
-    "test_semantic_merge_content_written_to_disk",
-    "test_semantic_merge_conflict_analysis_stored",
-}
-
-
-def pytest_collection_modifyitems(config, items) -> None:
-    mark = pytest.mark.xfail(
-        reason="integration fixture drift vs current pipeline routing "
-        "(rule-based resolver / added phases / call-count); tracked in "
-        "doc/review/05-wave4-implementation-log.md",
-        strict=False,
-    )
-    for item in items:
-        if item.name in _DRIFTED_NODEIDS:
-            item.add_marker(mark)
+from src.tools.git_tool import GitReadStatus
 
 
 # ── Shared LLM response payloads ─────────────────────────────────────────────
@@ -126,7 +92,12 @@ PLANNER_JUDGE_REVISION_NEEDED = json.dumps(
                 "current_classification": "auto_safe",
                 "suggested_classification": "auto_risky",
                 "reason": "File contains complex branching logic",
-                "issue_type": "risk_underestimated",
+                # deliberately OUTSIDE SHORTCIRCUIT_SAFE_ISSUE_TYPES so the R1
+                # plan review runs the (scripted) LLM re-check each round instead
+                # of auto-applying + short-circuiting — the behaviour these
+                # revision-loop tests assert (planner/pj call counts, round
+                # exhaustion → AWAITING_HUMAN).
+                "issue_type": "classification_dispute",
             }
         ],
         "approved_files_count": 1,
@@ -232,18 +203,28 @@ class FakeGitTool:
             return (
                 base + "    # upstream change\n" if ref == self._upstream_ref else base
             )
-        # "C": base, fork, upstream all differ
+        # "C": fork and upstream make CONFLICTING edits to the SAME (first) base
+        # line, so every RuleBasedResolver pattern (line-addition union /
+        # adjacent-edit / whitespace-only / import-union) declines and the
+        # scripted LLM analyst actually runs — these tests exercise the
+        # analyst-driven semantic-merge / escalation flow, not the rule resolver.
+        lines = base.split("\n")
         if ref == self._fork_ref:
-            return base + "    # fork change\n"
+            lines[0] = lines[0] + "  # fork-edit"
+            return "\n".join(lines)
         if ref == self._upstream_ref:
-            return base + "    # upstream change\n"
+            lines[0] = lines[0] + "  # upstream-edit"
+            return "\n".join(lines)
         return base
 
     def _worktree_blob(self, file_path: str) -> str:
         base = self._file_contents.get(file_path, f"# content of {file_path}\n")
         if self._category == "B":
             return base + "    # upstream change\n"  # take_target → upstream content
-        return base + "    # merged\n"  # distinct merged result (no fork loss)
+        # "C" merged result keeps the fork's edit (no fork loss) and upstream's.
+        lines = base.split("\n")
+        lines[0] = lines[0] + "  # fork-edit  # upstream-edit"
+        return "\n".join(lines)
 
     def get_merge_base(self, upstream_ref: str, fork_ref: str) -> str:
         return self._MERGE_BASE
@@ -293,8 +274,17 @@ class FakeGitTool:
     def get_status(self) -> list[tuple[str, str]]:
         return []
 
+    def _sha(self, content: str) -> str:
+        # Real git blob sha so the patch applier's post-write self-check
+        # (``_git_blob_sha(written) == get_worktree_blob_sha``) matches what was
+        # actually written to disk — required once a file reaches the real
+        # semantic-merge write path (previously short-circuited by the resolver).
+        from src.tools.patch_applier import _git_blob_sha
+
+        return _git_blob_sha(content.encode("utf-8"))
+
     def list_files_with_hashes(self, ref: str) -> dict[str, str]:
-        return {fp: self._blob(ref, fp) for fp in self._file_contents}
+        return {fp: self._sha(self._blob(ref, fp)) for fp in self._file_contents}
 
     def list_files(self, ref: str) -> list[str]:
         return list(self._file_contents)
@@ -304,13 +294,39 @@ class FakeGitTool:
 
     def get_file_hash(self, ref: str, file_path: str) -> str | None:
         if file_path in self._file_contents:
-            return self._blob(ref, file_path)
+            return self._sha(self._blob(ref, file_path))
         return None
 
     def get_worktree_blob_sha(self, file_path: str) -> str | None:
+        # Post-write: hash the ACTUAL on-disk file so the patch applier's
+        # self-check passes. Pre-write: fall back to the synthetic merged blob.
+        dest = self.repo_path / file_path
+        if dest.exists():
+            return self._sha(dest.read_text(encoding="utf-8"))
         if file_path in self._file_contents:
-            return self._worktree_blob(file_path)
+            return self._sha(self._worktree_blob(file_path))
         return None
+
+    # W1 status-returning twins (consumed by the B-class sanity, executor
+    # fork-export, and judge take-verification gates). The fake never errors, so
+    # a present value is OK and a missing one is ABSENT (never GIT_ERROR).
+    def get_file_hash_checked(
+        self, ref: str, file_path: str
+    ) -> tuple[str | None, GitReadStatus]:
+        val = self.get_file_hash(ref, file_path)
+        return val, GitReadStatus.OK if val is not None else GitReadStatus.ABSENT
+
+    def get_worktree_blob_sha_checked(
+        self, file_path: str
+    ) -> tuple[str | None, GitReadStatus]:
+        val = self.get_worktree_blob_sha(file_path)
+        return val, GitReadStatus.OK if val is not None else GitReadStatus.ABSENT
+
+    def get_file_content_checked(
+        self, ref: str, file_path: str
+    ) -> tuple[str | None, GitReadStatus]:
+        val = self.get_file_content(ref, file_path)
+        return val, GitReadStatus.OK if val is not None else GitReadStatus.ABSENT
 
     def get_file_bytes(self, ref: str, file_path: str) -> bytes | None:
         content = self.get_file_content(ref, file_path)

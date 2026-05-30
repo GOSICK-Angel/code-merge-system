@@ -348,10 +348,11 @@ class ConflictAnalystAgent(BaseAgent):
             raw = await self._call_llm_with_retry(
                 messages,
                 system=ANALYST_SYSTEM,
+                _return_meta=True,
                 **self._structured_kwargs(CONFLICT_ANALYSIS),
             )
             parsed = parse_conflict_analysis(
-                str(raw), file_diff.file_path, self.llm_config.model
+                raw, file_diff.file_path, self.llm_config.model, strict_json=True
             )
             return _with_grounding_warnings(
                 parsed,
@@ -447,9 +448,12 @@ class ConflictAnalystAgent(BaseAgent):
             raw = await self._call_llm_with_retry(
                 messages,
                 system=ANALYST_SYSTEM,
+                _return_meta=True,
                 **self._structured_kwargs(CONFLICT_ANALYSIS),
             )
-            return parse_conflict_analysis(str(raw), file_path, self.llm_config.model)
+            return parse_conflict_analysis(
+                raw, file_path, self.llm_config.model, strict_json=True
+            )
 
         # U5: chunks of a single file are tagged ``"<file>#<idx>"`` so the
         # disjointness contract still applies (each chunk is its own shard);
@@ -603,6 +607,7 @@ class ConflictAnalystAgent(BaseAgent):
             raw = await self._call_llm_with_retry(
                 [{"role": "user", "content": prompt}],
                 system=ANALYST_SYSTEM,
+                _return_meta=True,
                 **self._structured_kwargs(COMMIT_ROUND),
             )
         except Exception as e:
@@ -620,9 +625,7 @@ class ConflictAnalystAgent(BaseAgent):
         # DROPPED path, but the truncation case is now logged unambiguously
         # rather than masquerading as "analyzed, found nothing".
         try:
-            analyses = parse_commit_round_analyses(
-                str(raw), file_paths, strict_json=True
-            )
+            analyses = parse_commit_round_analyses(raw, file_paths, strict_json=True)
         except ParseError:
             self._consecutive_failures += 1
             self._sliding_window.append(False)
@@ -631,7 +634,7 @@ class ConflictAnalystAgent(BaseAgent):
                 "(response_chars=%d, consecutive_failures=%d) — files will "
                 "escalate rather than silently drop.",
                 len(file_paths),
-                len(str(raw)),
+                len(str(getattr(raw, "text", raw))),
                 self._consecutive_failures,
             )
             return {}

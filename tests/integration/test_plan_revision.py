@@ -70,10 +70,12 @@ async def test_one_revision_round_increments_counter(
 
 
 @pytest.mark.asyncio
-async def test_one_revision_round_planner_called_twice(
+async def test_one_revision_round_planner_called_once(
     mocker, tmp_path, patch_llm_factory, make_config, fake_git_auto_safe
 ):
-    """Planner is called once for initial plan and once for the revision."""
+    """Planner is called once for the initial plan; the revision applies the
+    judge's suggested reclassification deterministically (current routing does
+    NOT re-invoke the planner LLM for a classification revision)."""
     mocker.patch("src.core.orchestrator.GitTool", return_value=fake_git_auto_safe)
     config = make_config(max_plan_revision_rounds=2)
     orchestrator = Orchestrator(config)
@@ -90,7 +92,7 @@ async def test_one_revision_round_planner_called_twice(
     state = MergeState(config=config)
     await orchestrator.run(state)
 
-    assert planner_mock.call_count == 2
+    assert planner_mock.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -138,10 +140,12 @@ async def test_max_revisions_exceeded_does_not_set_failed(
 
 
 @pytest.mark.asyncio
-async def test_max_revisions_exceeded_planner_judge_called_three_times(
+async def test_max_revisions_exceeded_planner_judge_called_twice(
     mocker, tmp_path, patch_llm_factory, make_config, fake_git_auto_safe
 ):
-    """With max=2, the judge reviews 3 times (rounds 0, 1, 2) before giving up."""
+    """With max=2, the judge reviews twice (rounds 0 and 1); the round-limit
+    check (plan_revision_rounds >= max) fires before a 3rd review and routes to
+    AWAITING_HUMAN."""
     mocker.patch("src.core.orchestrator.GitTool", return_value=fake_git_auto_safe)
     config = make_config(max_plan_revision_rounds=2)
     orchestrator = Orchestrator(config)
@@ -155,4 +159,4 @@ async def test_max_revisions_exceeded_planner_judge_called_three_times(
     state = MergeState(config=config)
     await orchestrator.run(state)
 
-    assert pj_mock.call_count == 3
+    assert pj_mock.call_count == 2

@@ -53,7 +53,7 @@ from src.tools.forks_profile_loader import (
     find_removed_domain_match,
     find_rewritten_module_match,
 )
-from src.tools.git_tool import GitTool
+from src.tools.git_tool import GitReadStatus, GitTool
 from src.tools.three_way_diff import ThreeWayDiff, _safe_read_text
 from src.tools.syntax_checker import check_syntax as check_file_syntax
 from src.tools.syntax_checker import has_real_checker
@@ -361,10 +361,11 @@ class JudgeAgent(BaseAgent):
             raw = await self._call_llm_with_retry(
                 messages,
                 system=JUDGE_SYSTEM,
+                _return_meta=True,
                 **self._structured_kwargs(FILE_REVIEW),
             )
             llm_issues = parse_file_review_issues(
-                str(raw),
+                raw,
                 file_path,
                 merged_content=raw_merged_content or merged_content,
                 fork_content=fork_content,
@@ -496,8 +497,26 @@ class JudgeAgent(BaseAgent):
                 expected_ref = fork_ref
             else:
                 continue
-            expected_sha = self.git_tool.get_file_hash(expected_ref, fp)
-            worktree_sha = self.git_tool.get_worktree_blob_sha(fp)
+            expected_sha, exp_status = self.git_tool.get_file_hash_checked(
+                expected_ref, fp
+            )
+            worktree_sha, wt_status = self.git_tool.get_worktree_blob_sha_checked(fp)
+            if GitReadStatus.GIT_ERROR in (exp_status, wt_status):
+                # W1: read-only Judge — a genuine git error disabled the take_*
+                # byte-verification for this file. Accumulate on self._gate_skips
+                # (shipped via the PHASE_COMPLETED payload, persisted to
+                # state.errors by judge_review); a legitimately-absent blob
+                # (ABSENT) stays silent.
+                from src.tools.gate_skip import gate_skip_entry
+
+                self._gate_skips.append(
+                    gate_skip_entry(
+                        "judge_take_verification",
+                        fp,
+                        f"{expected_ref} / worktree sha read failed",
+                    )
+                )
+                continue
             if expected_sha is None or worktree_sha is None:
                 continue
             if expected_sha == worktree_sha:
@@ -1827,11 +1846,12 @@ class JudgeAgent(BaseAgent):
             raw = await self._call_llm_with_retry(
                 [{"role": "user", "content": prompt}],
                 system=JUDGE_SYSTEM,
+                _return_meta=True,
                 **self._structured_kwargs(BATCH_FILE_REVIEW),
             )
             merged_contents = {fp: content for fp, content, _, _ in chunk}
             per_file = parse_batch_file_review_issues(
-                str(raw),
+                raw,
                 file_paths,
                 merged_contents=merged_contents,
                 fork_contents=fork_contents,

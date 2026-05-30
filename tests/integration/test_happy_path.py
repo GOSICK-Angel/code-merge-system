@@ -62,7 +62,9 @@ async def test_all_auto_safe_plan_judge_called_once(
     state = MergeState(config=config)
     await orchestrator.run(state)
 
-    planner_mock.assert_called_once()
+    # The planner builds an all-auto-safe (pure B-class) plan deterministically
+    # — no planner LLM round — but the planner-judge still reviews it once.
+    assert planner_mock.call_count == 0
     judge_mock.assert_called_once()
 
 

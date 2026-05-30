@@ -23,8 +23,10 @@ from src.models.diff import FileStatus
 from src.models.state import MergeState
 from src.tools.compile_gate import (
     auto_merged_compiled_paths_without_gate,
+    gate_covered_suffixes,
     has_compile_gate,
 )
+from src.tools.syntax_checker import balance_only_language_suffixes
 
 
 def _state(**config_overrides) -> MergeState:
@@ -134,3 +136,113 @@ class TestReportAdvisory:
         _decided(state, "src/a.ts")
         _check_compile_gate_advisory(state, self._ctx())
         assert state.errors == []
+
+
+# --------------------------------------------------------------------------- #
+# W5 W4: per-language compile-gate coverage
+# --------------------------------------------------------------------------- #
+class TestGateCoveredSuffixes:
+    def test_no_gate_covers_nothing(self) -> None:
+        assert gate_covered_suffixes(_state().config) == frozenset()
+
+    def test_tsc_build_check_covers_ts_js_not_go(self) -> None:
+        cfg = _state(
+            build_check=BuildCheckConfig(enabled=True, command="tsc --noEmit")
+        ).config
+        cov = gate_covered_suffixes(cfg)
+        assert {".ts", ".tsx"} <= cov
+        assert ".go" not in cov
+
+    def test_go_build_covers_go_only(self) -> None:
+        cfg = _state(
+            build_check=BuildCheckConfig(enabled=True, command="go build ./...")
+        ).config
+        assert gate_covered_suffixes(cfg) == frozenset({".go"})
+
+    def test_ruff_parser_gate_covers_nothing_compiled(self) -> None:
+        cfg = _state(
+            gate=GateConfig(
+                enabled=True,
+                commands=[
+                    GateCommandConfig(
+                        name="lint", command="ruff check .", baseline_parser="ruff_json"
+                    )
+                ],
+            )
+        ).config
+        assert gate_covered_suffixes(cfg) == frozenset()
+
+    def test_eslint_is_lint_only_covers_nothing(self) -> None:
+        cfg = _state(
+            gate=GateConfig(
+                enabled=True,
+                commands=[
+                    GateCommandConfig(
+                        name="lint", command="eslint .", baseline_parser="eslint_json"
+                    )
+                ],
+            )
+        ).config
+        assert gate_covered_suffixes(cfg) == frozenset()
+
+    def test_opaque_bundler_conservatively_covers_everything(self) -> None:
+        cfg = _state(
+            build_check=BuildCheckConfig(enabled=True, command="pnpm run build")
+        ).config
+        assert gate_covered_suffixes(cfg) == balance_only_language_suffixes()
+
+    def test_parser_id_authoritative_over_opaque_command(self) -> None:
+        cfg = _state(
+            gate=GateConfig(
+                enabled=True,
+                commands=[
+                    GateCommandConfig(
+                        name="tc",
+                        command="npm run typecheck",
+                        baseline_parser="tsc_errors",
+                    )
+                ],
+            )
+        ).config
+        cov = gate_covered_suffixes(cfg)
+        assert ".ts" in cov
+        assert ".go" not in cov
+
+
+class TestPerLanguageAtRisk:
+    def test_ruff_only_gate_still_flags_ts(self) -> None:
+        state = _state(
+            gate=GateConfig(
+                enabled=True,
+                commands=[
+                    GateCommandConfig(
+                        name="lint", command="ruff check .", baseline_parser="ruff_json"
+                    )
+                ],
+            )
+        )
+        _decided(state, "src/a.ts")
+        assert auto_merged_compiled_paths_without_gate(state) == ["src/a.ts"]
+
+    def test_tsc_gate_flags_co_merged_go(self) -> None:
+        state = _state(
+            build_check=BuildCheckConfig(enabled=True, command="tsc --noEmit")
+        )
+        _decided(state, "src/a.ts")
+        _decided(state, "src/b.go")
+        assert auto_merged_compiled_paths_without_gate(state) == ["src/b.go"]
+
+    def test_go_build_suppresses_go(self) -> None:
+        state = _state(
+            build_check=BuildCheckConfig(enabled=True, command="go build ./...")
+        )
+        _decided(state, "src/b.go")
+        assert auto_merged_compiled_paths_without_gate(state) == []
+
+    def test_opaque_bundler_suppresses_all(self) -> None:
+        state = _state(
+            build_check=BuildCheckConfig(enabled=True, command="pnpm run build")
+        )
+        _decided(state, "src/a.ts")
+        _decided(state, "src/b.go")
+        assert auto_merged_compiled_paths_without_gate(state) == []

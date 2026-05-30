@@ -1,8 +1,45 @@
 import json
 from typing import Any
 
+from src.models.decision import DecisionSource, FileDecisionRecord, MergeDecision
 from src.models.state import MergeState, SystemStatus
 from src.models.judge import VerdictType
+
+_AUTO_SOURCES = frozenset({DecisionSource.AUTO_PLANNER, DecisionSource.AUTO_EXECUTOR})
+_HUMAN_SOURCES = frozenset({DecisionSource.HUMAN, DecisionSource.BATCH_HUMAN})
+
+
+def _outcome(rec: FileDecisionRecord) -> str:
+    """Coarse outcome bucket for the escalation-by-category matrix."""
+    if rec.decision == MergeDecision.ESCALATE_HUMAN:
+        return "escalated"
+    if rec.decision_source in _HUMAN_SOURCES:
+        return "human"
+    if rec.decision_source in _AUTO_SOURCES:
+        return "auto"
+    return "other"
+
+
+def _escalation_by_category(state: MergeState) -> dict[str, dict[str, int]]:
+    """W5: a ``{category: {auto, escalated, human, other}}`` matrix, joining
+    ``state.file_categories`` with ``state.file_decision_records`` on file path.
+
+    Pure local computation over existing state — no new tracking, no network. An
+    operator reads it to see the escalation *shape*: escalations concentrated in
+    ``both_changed`` (C-class) are expected; any in ``upstream_only`` (B-class)
+    are a red flag. Files categorized but never decided (e.g. unchanged) and
+    files decided without a category both degrade gracefully (the latter bucket
+    under ``"unknown"``).
+    """
+    matrix: dict[str, dict[str, int]] = {}
+    for fp, rec in state.file_decision_records.items():
+        cat = state.file_categories.get(fp)
+        cat_key = cat.value if cat is not None else "unknown"
+        bucket = matrix.setdefault(
+            cat_key, {"auto": 0, "escalated": 0, "human": 0, "other": 0}
+        )
+        bucket[_outcome(rec)] += 1
+    return matrix
 
 
 def build_ci_summary(state: MergeState) -> dict[str, Any]:
@@ -76,6 +113,7 @@ def build_ci_summary(state: MergeState) -> dict[str, Any]:
         "failed_count": failed,
         "judge_verdict": judge_verdict,
         "errors": [err.get("message", "") for err in state.errors[-5:]],
+        "by_category": _escalation_by_category(state),
     }
 
 

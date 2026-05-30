@@ -13,6 +13,7 @@ from src.models.judge import JudgeIssue, IssueSeverity, VerdictType, JudgeVerdic
 from src.models.plan import MergePlan, MergePhase, PhaseFileBatch, RiskSummary
 from src.models.plan_judge import PlanIssue
 from src.core.read_only_state_view import ReadOnlyStateView
+from src.tools.git_tool import GitReadStatus
 
 
 def _make_config() -> MergeConfig:
@@ -1978,10 +1979,15 @@ class TestJudgeAgent:
         mock_git = MagicMock()
         mock_git.repo_path.__truediv__ = MagicMock(return_value=mock_path)
         # O-J3: keep this test focused on the LLM review path by making the
-        # take-decision short-circuit fall through (returning None forces the
-        # check to skip rather than verify+skip the file).
-        mock_git.get_file_hash = MagicMock(return_value=None)
-        mock_git.get_worktree_blob_sha = MagicMock(return_value=None)
+        # take-decision short-circuit fall through (an ABSENT read forces the
+        # check to skip rather than verify+skip the file). W1: the checked
+        # readers return (value, status) tuples.
+        mock_git.get_file_hash_checked = MagicMock(
+            return_value=(None, GitReadStatus.ABSENT)
+        )
+        mock_git.get_worktree_blob_sha_checked = MagicMock(
+            return_value=(None, GitReadStatus.ABSENT)
+        )
         self.agent.git_tool = mock_git
 
         readonly = ReadOnlyStateView(state)

@@ -98,7 +98,7 @@ class TestReviewFilePassesForkContent:
 
         captured_messages: dict[str, object] = {}
 
-        async def _capture(messages, system=None):
+        async def _capture(messages, system=None, **kwargs):
             captured_messages["messages"] = messages
             return '{"issues": []}'
 

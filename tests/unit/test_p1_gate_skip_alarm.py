@@ -29,6 +29,7 @@ from src.models.diff import FileChangeCategory, FileDiff, FileStatus, RiskLevel
 from src.models.plan import MergePhase, MergePlan, PhaseFileBatch, RiskSummary
 from src.models.state import MergeState
 from src.tools.gate_skip import GATE_SKIP_PHASE, gate_skip_entry
+from src.tools.git_tool import GitReadStatus
 from src.tools.preservation_auditor import audit_fork_preservation
 
 
@@ -63,6 +64,27 @@ class _FakeGit:
         if self._raise_on_content:
             raise RuntimeError("simulated git failure")
         return self._ref_contents.get((ref, file_path))
+
+    # W1 status-returning twins (consumed by the executor fork-export site).
+    def get_file_hash_checked(
+        self, ref: str, file_path: str
+    ) -> tuple[str | None, GitReadStatus]:
+        val = self._ref_hashes.get((ref, file_path))
+        return val, GitReadStatus.OK if val is not None else GitReadStatus.ABSENT
+
+    def get_worktree_blob_sha_checked(
+        self, file_path: str
+    ) -> tuple[str | None, GitReadStatus]:
+        val = self._worktree_hashes.get(file_path)
+        return val, GitReadStatus.OK if val is not None else GitReadStatus.ABSENT
+
+    def get_file_content_checked(
+        self, ref: str, file_path: str
+    ) -> tuple[str | None, GitReadStatus]:
+        if self._raise_on_content:
+            return None, GitReadStatus.GIT_ERROR
+        val = self._ref_contents.get((ref, file_path))
+        return val, GitReadStatus.OK if val is not None else GitReadStatus.ABSENT
 
 
 def _fd(

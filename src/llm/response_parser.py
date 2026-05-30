@@ -42,6 +42,33 @@ def _extract_json(raw: str | dict[str, Any]) -> dict[str, Any]:
         raise ParseError(f"Cannot extract JSON from response: {e}\nRaw: {raw[:500]}")
 
 
+def _stop_reason_gate(
+    raw: "str | dict[str, Any] | LLMResponseLike", strict_json: bool
+) -> "str | dict[str, Any]":
+    """W2: provider-truncation fail-closed for the legacy-parser consumers.
+
+    When ``raw`` is an ``LLMResponse`` (duck-typed to dodge the import cycle) and
+    ``strict_json`` is set, ``stop_reason in {"max_tokens", "length"}`` raises
+    ``ParseError`` — mirroring ``parse_merge_result`` gate #1. This closes the
+    residual that ``strict_json`` alone cannot: a truncation that still left an
+    earlier balanced object yields partial-but-valid JSON which ``_extract_json``
+    salvages (find('{')/rfind('}')), so it never raises — the only signal the
+    text was cut is ``stop_reason``. Returns the ``.text`` (or the unchanged
+    str/dict) to feed ``_extract_json`` for non-truncated / legacy callers.
+    """
+    if hasattr(raw, "text") and hasattr(raw, "stop_reason"):
+        stop_reason = getattr(raw, "stop_reason", None)
+        if strict_json and stop_reason in {"max_tokens", "length"}:
+            raise ParseError(
+                f"Refusing truncated LLM response (stop_reason={stop_reason!r}): "
+                f"the output ran past the max_tokens ceiling and the trailing "
+                f"bytes are not in the response. Escalate to human review / bump "
+                f"max_tokens instead of parsing a partial-but-salvageable object."
+            )
+        return str(getattr(raw, "text"))
+    return raw
+
+
 def _validate_confidence(value: float) -> float:
     if not isinstance(value, (int, float)):
         raise ParseError(f"Confidence must be a number, got {type(value)}")
@@ -198,9 +225,16 @@ def parse_plan_judge_verdict(
 
 
 def parse_conflict_analysis(
-    raw: str | dict[str, Any], file_path: str, model: str = "unknown"
+    raw: "str | dict[str, Any] | LLMResponseLike",
+    file_path: str,
+    model: str = "unknown",
+    strict_json: bool = False,
 ) -> ConflictAnalysis:
-    data = _extract_json(raw)
+    # W2: under strict_json a provider-truncated LLMResponse raises ParseError;
+    # the analyst's caller catches it and escalates (rather than accepting a
+    # partial-but-salvageable answer as a genuine low-confidence one). Default
+    # False preserves every legacy caller.
+    data = _extract_json(_stop_reason_gate(raw, strict_json))
 
     conflict_type_raw = data.get("conflict_type", "unknown")
     try:
@@ -528,14 +562,14 @@ def _validate_evidence_grounded(
 
 
 def parse_file_review_issues(
-    raw: str | dict[str, Any],
+    raw: "str | dict[str, Any] | LLMResponseLike",
     default_file_path: str,
     merged_content: str | None = None,
     fork_content: str | None = None,
     strict_json: bool = False,
 ) -> list[JudgeIssue]:
     try:
-        data = _extract_json(raw)
+        data = _extract_json(_stop_reason_gate(raw, strict_json))
     except ParseError:
         # P2: fail CLOSED when asked. A truncated/malformed per-file Judge review
         # silently became "no issues" — the broken file passed review and rolled
@@ -581,7 +615,7 @@ def parse_file_review_issues(
 
 
 def parse_commit_round_analyses(
-    raw: str | dict[str, Any],
+    raw: "str | dict[str, Any] | LLMResponseLike",
     file_paths: list[str],
     strict_json: bool = False,
 ) -> dict[str, "ConflictAnalysis"]:
@@ -589,7 +623,7 @@ def parse_commit_round_analyses(
 
     result: dict[str, ConflictAnalysis] = {}
     try:
-        data = _extract_json(raw)
+        data = _extract_json(_stop_reason_gate(raw, strict_json))
     except ParseError:
         # P2: fail CLOSED when asked. A truncated commit-round analysis silently
         # became an empty dict → the affected files dropped out of the analysis
@@ -670,7 +704,7 @@ def parse_commit_round_analyses(
 
 
 def parse_batch_file_review_issues(
-    raw: str | dict[str, Any],
+    raw: "str | dict[str, Any] | LLMResponseLike",
     file_paths: list[str],
     merged_contents: dict[str, str] | None = None,
     fork_contents: dict[str, str] | None = None,
@@ -689,7 +723,7 @@ def parse_batch_file_review_issues(
 
     result: dict[str, list[JudgeIssue]] = {fp: [] for fp in file_paths}
     try:
-        data = _extract_json(raw)
+        data = _extract_json(_stop_reason_gate(raw, strict_json))
     except ParseError:
         # #3A: fail CLOSED when the caller asks for it. An unparseable batch
         # verdict (truncated / malformed JSON) silently became "no issues found"

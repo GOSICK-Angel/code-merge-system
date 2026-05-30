@@ -13,6 +13,7 @@ from src.agents.base_agent import CIRCUIT_BREAKER_THRESHOLD
 if TYPE_CHECKING:
     from src.tools.git_tool import GitTool
 from src.agents.executor_agent import ExecutorAgent
+from src.tools.git_tool import GitReadStatus
 from src.agents.judge_agent import JudgeAgent
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.core.phases._gate_helpers import (
@@ -1628,13 +1629,30 @@ class AutoMergePhase(Phase):
                     continue
                 if is_fork_deleted(state, fp):
                     continue
-                upstream_sha = ctx.git_tool.get_file_hash(upstream_ref, fp)
-                worktree_sha = ctx.git_tool.get_worktree_blob_sha(fp)
+                upstream_sha, up_status = ctx.git_tool.get_file_hash_checked(
+                    upstream_ref, fp
+                )
+                worktree_sha, wt_status = ctx.git_tool.get_worktree_blob_sha_checked(fp)
+                if GitReadStatus.GIT_ERROR in (up_status, wt_status):
+                    # W1: a genuine git error (distinct from a legitimately-absent
+                    # blob) disabled the B-class drift sanity for this file —
+                    # alarm so a systemically broken git_tool reports
+                    # partial_failure instead of a falsely-clean 0/N drift.
+                    from src.tools.gate_skip import gate_skip_entry
+
+                    state.errors.append(
+                        gate_skip_entry(
+                            "b_class_drift_sanity",
+                            fp,
+                            "upstream/worktree sha read failed",
+                        )
+                    )
+                    continue
                 if upstream_sha is None or worktree_sha is None:
-                    # File missing on one side; downstream conflict path
-                    # already covers this (D-missing / D-extra logic). P1: count
-                    # only genuinely-compared files below so a systemic git
-                    # failure logs "0/0 drift" (nothing checked) rather than a
+                    # File legitimately missing on one side (ABSENT); the
+                    # downstream conflict path already covers this (D-missing /
+                    # D-extra logic). Count only genuinely-compared files below so
+                    # a systemic git failure logs "0/0 drift" rather than a
                     # falsely-clean "0/N drift".
                     continue
                 checked += 1

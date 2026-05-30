@@ -32,7 +32,7 @@ from src.llm.client import ParseError
 from src.llm.response_parser import parse_merge_result
 from src.tools.patch_applier import apply_with_snapshot, create_escalate_record
 from src.tools.file_classifier import _fork_deleted_skip_record, is_fork_deleted
-from src.tools.git_tool import GitTool
+from src.tools.git_tool import GitReadStatus, GitTool
 from src.tools.import_symbol_harvester import harvest_imports_for_file
 from src.tools.diff_stasher import stash_upstream_diff
 from src.cli.paths import get_diff_stash_dir
@@ -653,23 +653,27 @@ class ExecutorAgent(BaseAgent):
         # merge-base blob, which this path does not otherwise fetch. Best-effort
         # — any git failure degrades to "no check" rather than blocking.
         if self.git_tool is not None and state.merge_base_commit:
+            base_content: str | None
+            read_status: GitReadStatus
             try:
-                base_content = self.git_tool.get_file_content(
+                base_content, read_status = self.git_tool.get_file_content_checked(
                     state.merge_base_commit, file_path
                 )
-            except Exception as exc:
-                # P1: a genuine git error (not a legitimately-absent base blob,
-                # which returns None without raising) silently disabled the
-                # fork-export preservation check — record it so the run reports
-                # partial_failure instead of a clean COMPLETED.
-                base_content = None
+            except Exception as exc:  # defensive: a non-git escape must not be silent
+                base_content, read_status = None, GitReadStatus.GIT_ERROR
+                logger.debug("fork-export merge-base read raised: %r", exc)
+            if read_status == GitReadStatus.GIT_ERROR:
+                # W1: a genuine git error — distinct from a legitimately-absent
+                # base blob (ABSENT = fork added the file = nothing to preserve) —
+                # silently disabled the fork-export preservation check. Record it
+                # so the run reports partial_failure instead of a clean COMPLETED.
                 from src.tools.gate_skip import gate_skip_entry
 
                 state.errors.append(
                     gate_skip_entry(
                         "fork_export_preservation",
                         file_path,
-                        f"merge-base read raised: {exc!r}",
+                        "merge-base read failed",
                     )
                 )
             if base_content is not None:
