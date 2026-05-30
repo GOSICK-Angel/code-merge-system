@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from src.models.decision import MergeDecision
 from src.models.diff import FileChangeCategory
 from src.models.state import MergeState
+from src.tools.gate_skip import gate_skip_entry
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,18 @@ def audit_fork_preservation(
             upstream_sha = git_tool.get_file_hash(upstream_ref, fp)
             worktree_sha = git_tool.get_worktree_blob_sha(fp)
             if upstream_sha is None or worktree_sha is None:
+                # P1: this C-class file (material fork delta) should resolve on
+                # both upstream and worktree; an unreadable blob silently skips
+                # the whole preservation check for it. Record so a systemic git
+                # failure surfaces as partial_failure rather than a clean pass.
+                state.errors.append(
+                    gate_skip_entry(
+                        "preservation_audit",
+                        fp,
+                        "upstream/worktree blob unreadable "
+                        "(git read failed or file absent at ref)",
+                    )
+                )
                 continue
 
             decision = (
@@ -225,6 +238,17 @@ def audit_fork_preservation(
                 or upstream_content is None
                 or merged_content is None
             ):
+                # P1: worktree != upstream confirmed (both blobs read OK), so a
+                # None content read here is a genuine read failure that silently
+                # disabled the line-level partial-drop check for this file.
+                state.errors.append(
+                    gate_skip_entry(
+                        "preservation_line_check",
+                        fp,
+                        "base/fork/upstream/merged content unreadable — "
+                        "line-level fork-survival check skipped",
+                    )
+                )
                 continue
             dropped, total = fork_survival_shortfall(
                 base_content, fork_content, upstream_content, merged_content

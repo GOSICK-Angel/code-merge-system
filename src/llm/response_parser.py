@@ -532,8 +532,18 @@ def parse_file_review_issues(
     default_file_path: str,
     merged_content: str | None = None,
     fork_content: str | None = None,
+    strict_json: bool = False,
 ) -> list[JudgeIssue]:
-    data = _extract_json(raw)
+    try:
+        data = _extract_json(raw)
+    except ParseError:
+        # P2: fail CLOSED when asked. A truncated/malformed per-file Judge review
+        # silently became "no issues" — the broken file passed review and rolled
+        # into a PASS verdict. With strict_json the caller turns it into a
+        # blocking veto instead. Default False preserves the legacy contract.
+        if strict_json:
+            raise
+        return []
     issues: list[JudgeIssue] = []
 
     for item in data.get("issues", []):
@@ -571,7 +581,9 @@ def parse_file_review_issues(
 
 
 def parse_commit_round_analyses(
-    raw: str | dict[str, Any], file_paths: list[str]
+    raw: str | dict[str, Any],
+    file_paths: list[str],
+    strict_json: bool = False,
 ) -> dict[str, "ConflictAnalysis"]:
     from uuid import uuid4 as _uuid4
 
@@ -579,6 +591,11 @@ def parse_commit_round_analyses(
     try:
         data = _extract_json(raw)
     except ParseError:
+        # P2: fail CLOSED when asked. A truncated commit-round analysis silently
+        # became an empty dict → the affected files dropped out of the analysis
+        # with no signal. strict_json lets the caller escalate instead.
+        if strict_json:
+            raise
         return result
 
     for entry in data.get("files", []):

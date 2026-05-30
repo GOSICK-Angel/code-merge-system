@@ -10,7 +10,9 @@
       "Read(//Users/angel/.claude/hooks/**)",
       "Bash(rm -rf /tmp/eval-runs-v4/runs/* /tmp/eval-runs-v4/logs/*)",
       "Bash(bash -c 'SIDS=\\(tests/eval/datasets/tier1/samples/*/\\); SIDS=\\(\"${SIDS[@]##*samples/}\"\\); SIDS=\\(\"${SIDS[@]%/}\"\\); bash /tmp/eval-runs/run_v4_full.sh \"${SIDS[@]}\"')",
-      "Skill(web-access)"
+      "Skill(web-access)",
+      "Bash(rm -rf /Users/angel/AI/merge-test/zod/.merge/runs/* /Users/angel/AI/merge-test/zod/.merge/memory.db /Users/angel/AI/merge-test/zod/.merge/memory_hit_stats.json)",
+      "Read(//Users/angel/AI/merge-test/zod/.merge/**)"
     ]
   },
   "hooks": {

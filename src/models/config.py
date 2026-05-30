@@ -860,6 +860,15 @@ class BuildCheckConfig(BaseModel):
     command: str = ""
     working_dir: str = "."
     timeout_seconds: int = Field(default=600, ge=1)
+    require_for_compiled_langs: bool = Field(
+        default=False,
+        description="P3 (Wave 4): when True and NO compile gate (build_check or a "
+        "gate command) is configured, a merge that auto-merged compiled-language "
+        "files (TS/JS/Go/Rust/Java) is routed to AWAITING_HUMAN instead of "
+        "COMPLETED — the always-on syntax gate is balance-only and cannot catch a "
+        "type error. Default False preserves silent completion; set True for a "
+        "strict 'never green without a compile gate' posture.",
+    )
 
 
 class MigrationConfig(BaseModel):

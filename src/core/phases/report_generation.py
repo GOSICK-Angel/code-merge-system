@@ -41,7 +41,19 @@ def _run_deterministic_verification(state: MergeState, ctx: PhaseContext) -> Non
             merged_ref="HEAD",
         )
     except Exception as exc:
+        # P1: the deterministic post-merge verification (dup-symbol /
+        # dropped-export) could not run at all — record it as a gate-skip so a
+        # broken git_tool does not yield a silent clean COMPLETED.
         logger.warning("verification: gathering deterministic findings failed: %s", exc)
+        from src.tools.gate_skip import gate_skip_entry
+
+        state.errors.append(
+            gate_skip_entry(
+                "deterministic_verification",
+                "(all)",
+                f"post-merge verification could not run: {exc!r}",
+            )
+        )
         return
     if not findings:
         return
@@ -58,6 +70,46 @@ def _run_deterministic_verification(state: MergeState, ctx: PhaseContext) -> Non
                 "message": f"[{f.check}] {f.file_path}: {f.detail}",
             }
         )
+
+
+def _check_compile_gate_advisory(state: MergeState, ctx: PhaseContext) -> None:
+    """P3(a): warn when compiled-language files were auto-merged with no compile
+    gate configured.
+
+    The always-on per-file syntax gate is balance-only for TS/JS/Go/Rust/Java —
+    it cannot catch a brace-balanced merge that does not typecheck. If neither
+    ``build_check`` nor a ``gate`` command is configured, such a merge can reach
+    ``COMPLETED`` uncompilable. Record a ``no_compile_gate`` advisory in
+    ``state.errors`` so the run reports ``partial_failure`` instead of a clean
+    green, surfacing the dependency the safety net rests on. Advisory only — it
+    does not block (the opt-in soft gate in judge_review does that). Skipped in
+    dry-run.
+    """
+    if state.dry_run:
+        return
+    from src.tools.compile_gate import auto_merged_compiled_paths_without_gate
+
+    at_risk = auto_merged_compiled_paths_without_gate(state)
+    if not at_risk:
+        return
+    sample = ", ".join(at_risk[:5])
+    ctx.notify(
+        "orchestrator",
+        f"No compile gate configured: {len(at_risk)} compiled-language "
+        f"file(s) auto-merged unchecked",
+    )
+    state.errors.append(
+        {
+            "timestamp": datetime.now().isoformat(),
+            "phase": "verification",
+            "message": (
+                f"[no_compile_gate] {len(at_risk)} compiled-language file(s) "
+                f"auto-merged with no build_check/gate configured (e.g. {sample}); "
+                f"the always-on syntax gate is balance-only and cannot catch a "
+                f"type error. Configure build_check.command (e.g. 'tsc --noEmit')."
+            ),
+        }
+    )
 
 
 def _assert_no_dropped_escalations(state: MergeState, ctx: PhaseContext) -> None:
@@ -185,6 +237,7 @@ class ReportGenerationPhase(Phase):
 
         _finalize_working_tree(state, ctx)
         _run_deterministic_verification(state, ctx)
+        _check_compile_gate_advisory(state, ctx)
         _assert_no_dropped_escalations(state, ctx)
 
         output_dir = str(

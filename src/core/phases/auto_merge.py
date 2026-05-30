@@ -1628,13 +1628,16 @@ class AutoMergePhase(Phase):
                     continue
                 if is_fork_deleted(state, fp):
                     continue
-                checked += 1
                 upstream_sha = ctx.git_tool.get_file_hash(upstream_ref, fp)
                 worktree_sha = ctx.git_tool.get_worktree_blob_sha(fp)
                 if upstream_sha is None or worktree_sha is None:
                     # File missing on one side; downstream conflict path
-                    # already covers this (D-missing / D-extra logic).
+                    # already covers this (D-missing / D-extra logic). P1: count
+                    # only genuinely-compared files below so a systemic git
+                    # failure logs "0/0 drift" (nothing checked) rather than a
+                    # falsely-clean "0/N drift".
                     continue
+                checked += 1
                 if upstream_sha != worktree_sha:
                     drift.append(fp)
         logger.info(

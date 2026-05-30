@@ -6,10 +6,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-  # nightly placeholder, not blocking — uncomment once Tier-1 evaluation
-  # stabilises and we are ready to spend budget on every nightly run.
-  # schedule:
-  #   - cron: "0 18 * * *"
+  # Wave-4 P5 (Tier B): nightly, non-blocking. Drives the eval-tier1 job (and any
+  # future secret-gated real-key run) once per day. eval-tier1 stays
+  # continue-on-error so a nightly failure never blocks; it gates on
+  # `github.event_name != 'pull_request'`, so PRs are unaffected.
+  schedule:
+    - cron: "0 18 * * *"
 
 jobs:
   web-build:
@@ -76,6 +78,13 @@ jobs:
 
       - name: Unit tests
         run: pytest tests/unit/ -v --cov=src --cov-report=term-missing --cov-fail-under=80
+
+      - name: Integration tests (hermetic, mocked LLM — no API keys)
+        # Wave-4 P5: drive the full orchestrator over the in-memory FakeGitTool
+        # with scripted LLM responses. Key-free, so it runs on every PR. Asserts
+        # the safety gates / routing end-to-end (drifted-expectation cases are
+        # xfailed in tests/integration/conftest.py with a tracked reason).
+        run: pytest tests/integration/ -v
 
       - name: Lint eval scripts (ruff)
         run: |

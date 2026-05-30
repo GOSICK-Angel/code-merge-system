@@ -444,3 +444,13 @@ def has_real_checker(file_path: str) -> bool:
     not be skipped on a vacuous "syntax OK", it must get full LLM review.
     """
     return Path(file_path).suffix.lower() in _REAL_CHECKER_EXTS
+
+
+def balance_only_language_suffixes() -> frozenset[str]:
+    """The compiled-language extensions whose only always-on gate is the
+    balance check (no real type/parse check) — they depend on an
+    operator-configured build/compile gate for semantic correctness. Single
+    source of truth (mirrors ``_BALANCE_SPECS``) for the P3/P4 "no compile gate"
+    advisory, so the two never drift from the actual checker coverage.
+    """
+    return frozenset(_BALANCE_SPECS)

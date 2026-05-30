@@ -29,6 +29,25 @@ def _is_human_decided(state: MergeState, file_path: str) -> bool:
     return record is not None and record.decision_source == DecisionSource.HUMAN
 
 
+def _persist_gate_skips(
+    state: MergeState, gates_skipped: list[dict[str, str]] | None
+) -> None:
+    """P1: persist the Judge's "deterministic gate could not run" records into
+    ``state.errors`` (the read-only Judge cannot write state itself).
+
+    Deduped by message so a persistent skip recurring across dispute rounds does
+    not stack N identical entries. Any entry already present in ``state.errors``
+    (same ``message``) is left untouched.
+    """
+    if not gates_skipped:
+        return
+    seen_msgs = {e.get("message") for e in state.errors}
+    for entry in gates_skipped:
+        if entry.get("message") not in seen_msgs:
+            state.errors.append(entry)
+            seen_msgs.add(entry.get("message"))
+
+
 def _summarize_exc(exc: BaseException, max_chars: int = 120) -> str:
     msg = str(exc).strip() or type(exc).__name__
     return msg[:max_chars]
@@ -62,6 +81,12 @@ class JudgeReviewPhase(Phase):
                 from src.models.judge import JudgeVerdict as JV
 
                 state.judge_verdict = JV.model_validate(verdict_data)
+
+            # P1: the read-only Judge cannot write state.errors; it returns any
+            # "deterministic gate could not run" records in the payload. Persist
+            # them here (Orchestrator side) so a silently-disabled veto pipeline
+            # surfaces as partial_failure instead of a clean PASS.
+            _persist_gate_skips(state, msg.payload.get("gates_skipped"))
 
             customization_violations = judge.verify_customizations(
                 ctx.config.customizations,
@@ -246,6 +271,34 @@ class JudgeReviewPhase(Phase):
                     checkpoint_tag="after_phase5_smoke",
                     memory_phase="judge_review",
                 )
+            # P3(b): opt-in strict posture — refuse a silent green COMPLETED when
+            # compiled-language files were auto-merged with NO compile gate
+            # configured (the always-on syntax gate is balance-only; a type error
+            # would otherwise reach COMPLETED). JUDGE_REVIEWING → AWAITING_HUMAN is
+            # a legal edge; GENERATING_REPORT → AWAITING_HUMAN is not, so this gate
+            # must live here, not in report_generation. Default-off flag preserves
+            # current behavior; the report-time advisory (P3a) covers the default.
+            if state.config.build_check.require_for_compiled_langs:
+                from src.tools.compile_gate import (
+                    auto_merged_compiled_paths_without_gate,
+                )
+
+                at_risk = auto_merged_compiled_paths_without_gate(state)
+                if at_risk:
+                    reason = (
+                        f"no compile gate configured but {len(at_risk)} "
+                        f"compiled-language file(s) auto-merged "
+                        f"(require_for_compiled_langs=True)"
+                    )
+                    ctx.state_machine.transition(
+                        state, SystemStatus.AWAITING_HUMAN, reason
+                    )
+                    return PhaseOutcome(
+                        target_status=SystemStatus.AWAITING_HUMAN,
+                        reason=reason,
+                        checkpoint_tag="after_phase5",
+                        memory_phase="judge_review",
+                    )
             ctx.state_machine.transition(
                 state, SystemStatus.GENERATING_REPORT, "judge verdict: PASS"
             )

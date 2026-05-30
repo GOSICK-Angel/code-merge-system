@@ -657,8 +657,21 @@ class ExecutorAgent(BaseAgent):
                 base_content = self.git_tool.get_file_content(
                     state.merge_base_commit, file_path
                 )
-            except Exception:
+            except Exception as exc:
+                # P1: a genuine git error (not a legitimately-absent base blob,
+                # which returns None without raising) silently disabled the
+                # fork-export preservation check — record it so the run reports
+                # partial_failure instead of a clean COMPLETED.
                 base_content = None
+                from src.tools.gate_skip import gate_skip_entry
+
+                state.errors.append(
+                    gate_skip_entry(
+                        "fork_export_preservation",
+                        file_path,
+                        f"merge-base read raised: {exc!r}",
+                    )
+                )
             if base_content is not None:
                 from src.tools.feature_preservation import (
                     added_exported_symbols,

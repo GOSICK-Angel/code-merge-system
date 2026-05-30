@@ -412,24 +412,13 @@ def validate_command(config: str) -> None:
 
 def validate_config_warnings(config: MergeConfig) -> list[str]:
     """Non-fatal advisories that should not fail validation but do warn the
-    operator about silently degraded behavior."""
-    warnings: list[str] = []
+    operator about silently degraded behavior. P4: delegates to the shared
+    ``config_preflight_warnings`` so ``merge validate`` and a real ``merge`` run
+    surface the same set (chunk/max_tokens self-truncation, reasoning-model
+    floor, missing compile gate, tree-sitter grammars)."""
+    from src.cli.preflight import config_preflight_warnings
 
-    if config.dependency_graph.enabled:
-        from src.tools.dep_extractors.treesitter_extractor import (
-            missing_grammar_languages,
-        )
-
-        missing = missing_grammar_languages(config.dependency_graph.languages)
-        if missing:
-            warnings.append(
-                f"dependency_graph.enabled=true but tree-sitter grammar(s) for "
-                f"{missing} are unavailable — the graph will silently yield no "
-                f"edges for these languages and every graph consumer becomes a "
-                f'no-op. Install with: pip install ".[ast]"'
-            )
-
-    return warnings
+    return config_preflight_warnings(config)
 
 
 def validate_config_and_env(config: MergeConfig) -> list[str]:

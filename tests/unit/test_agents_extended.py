@@ -1816,7 +1816,11 @@ class TestJudgeAgent:
         assert any(i.issue_type == "unresolved_conflict" for i in issues)
         assert any(i.issue_level == IssueSeverity.CRITICAL for i in issues)
 
-    def test_review_file_returns_empty_on_llm_error(self):
+    def test_review_file_fails_closed_on_llm_error(self):
+        # P2: a per-file review that cannot complete (LLM error after retries, or
+        # truncated/unparseable output) must NOT pass the file with zero issues —
+        # that silently rolled a never-reviewed file into a PASS verdict. It now
+        # synthesizes a CRITICAL review-unavailable veto (mirrors #3A batch path).
         fd = _make_file_diff("src/main.py")
         record = self._make_decision_record("src/main.py")
 
@@ -1831,7 +1835,10 @@ class TestJudgeAgent:
                 self.agent.review_file("src/main.py", "x = 1\n", record, fd)
             )
 
-        assert issues == []
+        vetoes = [i for i in issues if i.issue_type == "review_unavailable"]
+        assert len(vetoes) == 1
+        assert vetoes[0].issue_level == IssueSeverity.CRITICAL
+        assert vetoes[0].veto_condition
 
     def test_compute_verdict_pass_when_no_issues(self):
         result = self.agent.compute_verdict([])

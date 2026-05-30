@@ -68,9 +68,15 @@ class JudgeAgent(BaseAgent):
     def __init__(self, llm_config: AgentLLMConfig, git_tool: GitTool | None = None):
         super().__init__(llm_config)
         self.git_tool = git_tool
+        # P1: the Judge is read-only (ReadOnlyStateView) and may not write
+        # state.errors. It accumulates "deterministic gate could not run"
+        # records here and hands them to the phase via the completion payload,
+        # which writes them to state.errors on the Orchestrator side.
+        self._gate_skips: list[dict[str, str]] = []
 
     async def run(self, state: ReadOnlyStateView) -> AgentMessage:
         state = self.restricted_view(state)
+        self._gate_skips = []
         all_issues: list[JudgeIssue] = []
         reviewed_files: list[str] = []
 
@@ -237,7 +243,10 @@ class JudgeAgent(BaseAgent):
             phase=MergePhase.JUDGE_REVIEW,
             message_type=MessageType.PHASE_COMPLETED,
             subject=f"Judge review completed: {verdict.verdict.value}",
-            payload={"verdict": verdict.model_dump(mode="json")},
+            payload={
+                "verdict": verdict.model_dump(mode="json"),
+                "gates_skipped": list(self._gate_skips),
+            },
         )
 
     async def review_file(
@@ -359,10 +368,36 @@ class JudgeAgent(BaseAgent):
                 file_path,
                 merged_content=raw_merged_content or merged_content,
                 fork_content=fork_content,
+                strict_json=True,
             )
             issues.extend(llm_issues)
         except Exception as e:
-            self.logger.error(f"File review failed for {file_path}: {e}")
+            # P2: fail CLOSED. A per-file review that could not be obtained or
+            # parsed (truncated/malformed output, transport failure after
+            # retries) previously just logged → the file passed review with zero
+            # issues and rolled into a PASS verdict. Mirror the #3A batch path:
+            # synthesize a CRITICAL veto so the verdict deterministically FAILs
+            # and the file routes to escalation/repair instead of silent pass.
+            self.logger.error(
+                "File review failed for %s: %s — failing closed "
+                "(synthesizing review-unavailable veto)",
+                file_path,
+                e,
+            )
+            issues.append(
+                JudgeIssue(
+                    file_path=file_path,
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="review_unavailable",
+                    description=(
+                        "Judge review could not be obtained or parsed "
+                        f"(likely truncated/malformed output): {e!r}. Failing "
+                        "closed — this file was not actually reviewed."
+                    ),
+                    must_fix_before_merge=True,
+                    veto_condition="Judge review unavailable",
+                )
+            )
 
         marker = find_conflict_marker(raw_merged_content or merged_content)
         if marker is not None:
@@ -513,6 +548,18 @@ class JudgeAgent(BaseAgent):
         file_diffs_map: dict[str, FileDiff],
     ) -> list[JudgeIssue]:
         if self.git_tool is None:
+            # P1: the entire deterministic veto pipeline (B/C/D, invented- and
+            # duplicate-symbol checks, signature splits, dep-graph impacts) is
+            # disabled when git is unavailable — an unambiguous total skip.
+            from src.tools.gate_skip import gate_skip_entry
+
+            self._gate_skips.append(
+                gate_skip_entry(
+                    "judge_deterministic_pipeline",
+                    "(all)",
+                    "git_tool unavailable — all deterministic vetoes skipped",
+                )
+            )
             return []
 
         issues: list[JudgeIssue] = []
@@ -524,6 +571,16 @@ class JudgeAgent(BaseAgent):
         upstream_ref = state.config.upstream_ref
 
         if not merge_base or not upstream_ref:
+            from src.tools.gate_skip import gate_skip_entry
+
+            self._gate_skips.append(
+                gate_skip_entry(
+                    "judge_deterministic_pipeline",
+                    "(all)",
+                    "merge_base or upstream_ref missing — all deterministic "
+                    "vetoes skipped",
+                )
+            )
             return []
 
         # P0-1: read fork-pinned / upstream-pinned glob whitelists from

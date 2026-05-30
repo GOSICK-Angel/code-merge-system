@@ -21,6 +21,7 @@ from src.llm.prompts.analyst_prompts import (
     build_decision_proposal_prompt,
     parse_decision_proposals,
 )
+from src.llm.client import ParseError
 from src.llm.response_parser import parse_commit_round_analyses, parse_conflict_analysis
 from src.llm.structured_schemas import (
     COMMIT_ROUND,
@@ -613,7 +614,27 @@ class ConflictAnalystAgent(BaseAgent):
             )
             return {}
 
-        analyses = parse_commit_round_analyses(str(raw), file_paths)
+        # P2: strict_json distinguishes a genuinely-truncated/unparseable
+        # response (ParseError) from a well-formed-but-empty one. Either way the
+        # files end with no analysis and flow to the downstream escalation /
+        # DROPPED path, but the truncation case is now logged unambiguously
+        # rather than masquerading as "analyzed, found nothing".
+        try:
+            analyses = parse_commit_round_analyses(
+                str(raw), file_paths, strict_json=True
+            )
+        except ParseError:
+            self._consecutive_failures += 1
+            self._sliding_window.append(False)
+            self.logger.warning(
+                "Commit-round response was truncated/unparseable for %d file(s) "
+                "(response_chars=%d, consecutive_failures=%d) — files will "
+                "escalate rather than silently drop.",
+                len(file_paths),
+                len(str(raw)),
+                self._consecutive_failures,
+            )
+            return {}
         parsed_count = len(analyses)
         requested_count = len(file_paths)
 
@@ -621,8 +642,8 @@ class ConflictAnalystAgent(BaseAgent):
             self._consecutive_failures += 1
             self._sliding_window.append(False)
             self.logger.warning(
-                "Commit-round parsed 0/%d analyses (likely truncated JSON or "
-                "schema break); response_chars=%d, consecutive_failures=%d",
+                "Commit-round parsed 0/%d analyses (well-formed but empty); "
+                "response_chars=%d, consecutive_failures=%d",
                 requested_count,
                 len(str(raw)),
                 self._consecutive_failures,
