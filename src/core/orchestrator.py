@@ -183,7 +183,10 @@ class Orchestrator:
         # --- memory ---
         self._memory_store: MemoryStore | SQLiteMemoryStore = MemoryStore()
         self._memory_hit_tracker = MemoryHitTracker()
-        self._summarizer = PhaseSummarizer(upstream_ref=config.upstream_ref)
+        self._summarizer = PhaseSummarizer(
+            upstream_ref=config.upstream_ref,
+            repair_recipe_enabled=getattr(config.memory, "repair_recipe_enabled", True),
+        )
         self._phases_since_last_extract: int = 0
 
         # --- hooks (C1) ---

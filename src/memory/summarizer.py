@@ -56,9 +56,15 @@ def _is_epistemically_empty(rationale: str | None) -> bool:
     return any(pat.search(lowered) for pat in _EPISTEMIC_FAILURE_PATTERNS)
 
 
+_MAX_REPAIR_RECIPES = 20
+
+
 class PhaseSummarizer:
-    def __init__(self, upstream_ref: str = "") -> None:
+    def __init__(
+        self, upstream_ref: str = "", repair_recipe_enabled: bool = True
+    ) -> None:
         self._upstream_ref = upstream_ref[:8] if upstream_ref else ""
+        self._repair_recipe_enabled = repair_recipe_enabled
 
     def summarize_planning(
         self, state: MergeState
@@ -352,6 +358,8 @@ class PhaseSummarizer:
                     )
                 )
 
+        entries.extend(self._build_repair_recipes(state))
+
         summary = PhaseSummary(
             phase="judge_review",
             files_processed=0,
@@ -360,6 +368,59 @@ class PhaseSummarizer:
             statistics=stats,
         )
         return summary, entries
+
+    def _build_repair_recipes(self, state: MergeState) -> list[MemoryEntry]:
+        """P1-C: mint REPAIR_RECIPE entries for deterministic repairs the Judge
+        verified by passing the file.
+
+        Pure execution-grounding: an entry is written only when a repair
+        operator fired during the merge (``state.applied_repairs``) AND the file
+        is in ``judge_verdict.passed_files``. No LLM decides "did it work". Keyed
+        by an ``error_signature`` (error_class + operator + dir-layer) so the
+        next run that opens a sibling file retrieves "this class of error was
+        resolved here by operator X, verified by judge PASS"."""
+        if not self._repair_recipe_enabled:
+            return []
+        verdict = state.judge_verdict
+        if verdict is None or not state.applied_repairs:
+            return []
+        passed = set(verdict.passed_files)
+        ref_tag = f"upstream_ref:{self._upstream_ref}" if self._upstream_ref else ""
+        recipes: list[MemoryEntry] = []
+        seen: set[str] = set()
+        for repair in state.applied_repairs:
+            fp = repair.get("file_path", "")
+            if fp not in passed:
+                continue
+            operator = repair.get("operator", "unknown")
+            error_class = repair.get("error_class", "unknown")
+            parts = fp.split(os.sep)
+            dir_layer = os.sep.join(parts[:2]) if len(parts) > 1 else "."
+            signature = f"{error_class}:{operator}:{dir_layer}"
+            if signature in seen:
+                continue
+            seen.add(signature)
+            tags = ["repair_recipe", error_class, operator, dir_layer]
+            if ref_tag:
+                tags.append(ref_tag)
+            recipes.append(
+                MemoryEntry(
+                    entry_type=MemoryEntryType.REPAIR_RECIPE,
+                    phase="judge_review",
+                    content=(
+                        f"{error_class} in {dir_layer}: resolved deterministically "
+                        f"by `{operator}`, verified by judge PASS — apply the same "
+                        f"operator before escalating this error class."
+                    ),
+                    file_paths=[fp, dir_layer],
+                    tags=tags,
+                    confidence=0.9,
+                    confidence_level=ConfidenceLevel.EXTRACTED,
+                )
+            )
+            if len(recipes) >= _MAX_REPAIR_RECIPES:
+                break
+        return recipes
 
 
 def _count_by_directory(file_paths: list[str]) -> Counter[str]:

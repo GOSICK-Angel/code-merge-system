@@ -974,6 +974,16 @@ class MemoryExtractionConfig(BaseModel):
         "findings land in report_generation, after this hook (see "
         "doc/plan/self-learning-system.md P1-B).",
     )
+    repair_recipe_enabled: bool = Field(
+        default=True,
+        description="P1-C: at judge_review summarization, mint a verified "
+        "REPAIR_RECIPE memory entry for each deterministic repair operator "
+        "(e.g. duplicate-symbol dedup) that fired AND whose file the Judge "
+        "passed. Execution-grounded and additive — no LLM decides success — so "
+        "default ON, unlike the harm-capable P1-A/P1-B loops. Future runs that "
+        "open a sibling file retrieve the recipe via the existing memory "
+        "channel. Set False to ablate in the eval-memory harness.",
+    )
     inject_enabled: bool = Field(
         default=True,
         description="P0 ablation switch: when False, no memory context is "

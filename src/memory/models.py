@@ -15,6 +15,7 @@ class MemoryEntryType(str, Enum):
     RELATIONSHIP = "relationship"
     PHASE_SUMMARY = "phase_summary"
     CODEBASE_INSIGHT = "codebase_insight"
+    REPAIR_RECIPE = "repair_recipe"
 
 
 class ConfidenceLevel(str, Enum):

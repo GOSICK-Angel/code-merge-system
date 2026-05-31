@@ -176,6 +176,16 @@ class MergeState(BaseModel):
     judge_verdict: JudgeVerdict | None = None
     judge_repair_rounds: int = 0
     judge_verdicts_log: list[dict[str, Any]] = Field(default_factory=list)
+    applied_repairs: list[dict[str, str]] = Field(
+        default_factory=list,
+        description=(
+            "P1-C: deterministic repair operators that fired and let the merge "
+            "proceed (not escalate), e.g. dedup of a duplicate top-level symbol. "
+            "Each entry is {file_path, operator, error_class}. Read at "
+            "judge_review summarization to mint a verified REPAIR_RECIPE memory "
+            "entry only for files the Judge ultimately passed."
+        ),
+    )
     judge_resolution: Literal["accept", "abort", "rerun"] | None = Field(
         default=None,
         description=(

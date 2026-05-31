@@ -550,6 +550,12 @@ class ExecutorAgent(BaseAgent):
                 file_diff.file_path,
             )
             merged_content = deduped
+            _record_applied_repair(
+                state,
+                file_diff.file_path,
+                "dedup_top_level_symbols",
+                "duplicate_top_level_symbol",
+            )
 
         fidelity_reason = self._single_shot_fidelity_issue(
             file_diff.file_path,
@@ -814,6 +820,12 @@ class ExecutorAgent(BaseAgent):
                 file_path,
             )
             merged_content = deduped
+            _record_applied_repair(
+                state,
+                file_path,
+                "dedup_top_level_symbols",
+                "duplicate_top_level_symbol",
+            )
         # #10: a chunk seam can re-emit a JS/TS function implementation, a
         # TS2451 redeclaration the const/class dedup above cannot remove safely
         # (deleting a span risks dropping a real overload). Escalate instead.
@@ -1413,6 +1425,23 @@ def _extract_diff_ranges(
     elif file_diff.lines_added > 0 or file_diff.lines_deleted > 0:
         ranges.append((1, file_diff.lines_added + file_diff.lines_deleted + 100))
     return ranges
+
+
+def _record_applied_repair(
+    state: MergeState, file_path: str, operator: str, error_class: str
+) -> None:
+    """P1-C: log a deterministic repair operator that fixed a file and let the
+    merge proceed (vs escalate). Deduped per (file_path, operator) so repeated
+    chunk seams do not inflate the list. A verified REPAIR_RECIPE memory entry is
+    minted later only if the Judge passes the file."""
+    for existing in state.applied_repairs:
+        if existing.get("file_path") == file_path and existing.get("operator") == (
+            operator
+        ):
+            return
+    state.applied_repairs.append(
+        {"file_path": file_path, "operator": operator, "error_class": error_class}
+    )
 
 
 def _foreign_chars(merged: str, *sources: str) -> str | None:
