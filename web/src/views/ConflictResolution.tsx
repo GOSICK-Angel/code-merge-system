@@ -255,6 +255,14 @@ export function ConflictResolution({ clientRef }: Props): JSX.Element {
     if (!current || !currentDraft) return;
     if (validateDraft(currentDraft) !== null) return;
     sendSingle(current.file_path, currentDraft);
+    // Auto-advance to the next still-pending file so a multi-file review
+    // can't strand the operator on the file they just resolved and silently
+    // miss a remaining decision (e.g. an escalated file with empty
+    // conflict_points renders no detail and is easy to overlook). Optimistic:
+    // the just-submitted file is still in ``pending`` until the next snapshot
+    // confirms it, so exclude it explicitly here.
+    const next = pending.find((r) => r.file_path !== current.file_path);
+    if (next) selectFile(next.file_path);
   };
 
   const draftCount = Object.keys(drafts).length;
