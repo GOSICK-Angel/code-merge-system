@@ -970,6 +970,21 @@ class MemoryExtractionConfig(BaseModel):
         "(merge eval-memory). Extraction/write-back are unaffected — only "
         "read-time injection is suppressed. Default True (normal behaviour).",
     )
+    persist_suppress: bool = Field(
+        default=False,
+        description="P1-A: at run end, persistently soft-delete (suppress) "
+        "memory entries judged stably harmful (>= suppress_min_observations "
+        "pass/fail observations with a net-negative outcome). Default OFF — "
+        "like OPP-5 write-back, suppression is cross-run durable and should "
+        "prove out on the eval-memory ablation before enabling. Never touches "
+        "human-decided or bootstrap (human-authored) entries.",
+    )
+    suppress_min_observations: int = Field(
+        default=3,
+        ge=1,
+        description="P1-A: minimum pass+fail observations before a harmful "
+        "entry is persistently suppressed, so a single run cannot prune it.",
+    )
 
 
 class RenameDetectionConfig(BaseModel):

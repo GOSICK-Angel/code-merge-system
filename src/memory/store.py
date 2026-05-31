@@ -69,6 +69,31 @@ class MemoryStore:
         new_memory = self._memory.model_copy(update={"entries": entries})
         return MemoryStore(new_memory)
 
+    def suppress_entry(self, entry_id: str, reason: str) -> MemoryStore:
+        """P1-A: persistently soft-delete an entry (audit-preserving).
+
+        Marks ``suppressed=True`` + records ``reason`` rather than removing
+        the row, so the decision stays auditable and reversible. Suppressed
+        entries are skipped at injection (``get_relevant_context``) and at
+        consolidation. Idempotent and immutable; an unknown ``entry_id`` or an
+        already-suppressed entry returns ``self`` unchanged."""
+        changed = False
+        entries: list[MemoryEntry] = []
+        for entry in self._memory.entries:
+            if entry.entry_id == entry_id and not entry.suppressed:
+                entries.append(
+                    entry.model_copy(
+                        update={"suppressed": True, "suppressed_reason": reason}
+                    )
+                )
+                changed = True
+            else:
+                entries.append(entry)
+        if not changed:
+            return self
+        new_memory = self._memory.model_copy(update={"entries": entries})
+        return MemoryStore(new_memory)
+
     def set_codebase_profile(self, key: str, value: str) -> MemoryStore:
         profile = {**self._memory.codebase_profile, key: value}
         new_memory = self._memory.model_copy(update={"codebase_profile": profile})
@@ -118,6 +143,8 @@ class MemoryStore:
         ref_short = current_upstream_ref[:8] if current_upstream_ref else ""
         scored: dict[str, tuple[float, MemoryEntry]] = {}
         for entry in self._memory.entries:
+            if entry.suppressed:
+                continue
             path_score = score_path_overlap(file_paths, entry.file_paths)
 
             confidence = entry.confidence
@@ -324,6 +351,12 @@ def _consolidate_entries(entries: list[MemoryEntry]) -> list[MemoryEntry]:
     ungroupable: list[MemoryEntry] = []
 
     for entry in entries:
+        # P1-A: suppressed entries pass through untouched — they must not be
+        # merged into a live blob (that would resurrect harmful content) nor
+        # silently dropped (audit trail must survive consolidation).
+        if entry.suppressed:
+            ungroupable.append(entry)
+            continue
         primary_tag = entry.tags[0] if entry.tags else ""
         key = (
             entry.phase,

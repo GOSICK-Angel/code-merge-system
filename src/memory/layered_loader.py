@@ -123,7 +123,11 @@ class LayeredMemoryLoader:
         lines: list[str] = []
         injected_ids: list[str] = []
         for entry in relevant:
-            if entry.entry_id in harmful_ids:
+            # P1-A: persistent suppress (entry.suppressed) OR realtime harmful
+            # (tracker observations this process). get_relevant_context already
+            # drops suppressed at the source; this keeps the read path correct
+            # even if a caller passes pre-fetched entries.
+            if entry.suppressed or entry.entry_id in harmful_ids:
                 continue
             if not _has_path_overlap(entry.file_paths, file_paths):
                 continue

@@ -525,6 +525,10 @@ class Orchestrator:
                 self._apply_outcome_confidence_writeback(state)
             except Exception as exc:
                 logger.warning("Outcome confidence write-back failed: %s", exc)
+            try:
+                self._apply_suppress_harmful_entries(state)
+            except Exception as exc:
+                logger.warning("Harmful-entry suppression failed: %s", exc)
 
     def _apply_outcome_confidence_writeback(self, state: MergeState) -> None:
         """OPP-5: nudge persisted memory confidence toward judge outcomes.
@@ -564,6 +568,47 @@ class Orchestrator:
             logger.info(
                 "OPP-5: nudged confidence of %d memory entries by judge outcomes",
                 len(deltas),
+            )
+
+    def _apply_suppress_harmful_entries(self, state: MergeState) -> None:
+        """P1-A: persistently soft-delete stably-harmful memory entries.
+
+        Default OFF. When ``persist_suppress`` is on, entries whose accumulated
+        outcome score crosses the harmful threshold with at least
+        ``suppress_min_observations`` observations are marked ``suppressed`` so
+        the prune survives tracker loss across runs (the O-M6 read-time filter
+        recomputes from sidecar observations and resurrects on loss). Human and
+        bootstrap entries are exempt, mirroring OPP-5."""
+        cfg = getattr(self.config, "memory", None)
+        if cfg is None or not getattr(cfg, "persist_suppress", False):
+            return
+        harmful_ids = self._memory_hit_tracker.harmful_entry_ids(
+            min_observations=cfg.suppress_min_observations
+        )
+        if not harmful_ids:
+            return
+        human_files = {
+            fp
+            for fp, record in state.file_decision_records.items()
+            if record.decision_source
+            in (DecisionSource.HUMAN, DecisionSource.BATCH_HUMAN)
+        }
+        suppressed = 0
+        for entry in self._memory_store.to_memory().entries:
+            if entry.entry_id not in harmful_ids or entry.suppressed:
+                continue
+            if _BOOTSTRAP_TAG in entry.tags:
+                continue
+            if human_files and any(fp in human_files for fp in entry.file_paths):
+                continue
+            self._memory_store = self._memory_store.suppress_entry(
+                entry.entry_id, reason="P1-A: stably-harmful judge outcomes"
+            )
+            suppressed += 1
+        if suppressed:
+            logger.info(
+                "P1-A: persistently suppressed %d stably-harmful memory entries",
+                suppressed,
             )
 
     def _should_llm_extract(self, phase: str, state: MergeState) -> bool:
