@@ -597,8 +597,14 @@ class Orchestrator:
 
     def _inject_memory(self) -> None:
         memory_cfg = getattr(self.config, "memory", None)
+        # P0 ablation: when inject_enabled is False, leave each agent's store
+        # at None so get_memory_context() returns "" — the "memory=off" arm.
+        # Extraction/write-back still run at the orchestrator level; only
+        # read-time prompt injection is suppressed.
+        inject_enabled = getattr(memory_cfg, "inject_enabled", True)
         for agent in self._all_agents:
-            agent.set_memory_store(self._memory_store)  # type: ignore[arg-type]
+            if inject_enabled:
+                agent.set_memory_store(self._memory_store)  # type: ignore[arg-type]
             agent.set_memory_hit_tracker(self._memory_hit_tracker)
             agent.set_memory_config(memory_cfg)
             agent.set_upstream_ref(self.config.upstream_ref)

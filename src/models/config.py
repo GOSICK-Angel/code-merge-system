@@ -961,6 +961,15 @@ class MemoryExtractionConfig(BaseModel):
         description="OPP-5: minimum pass+fail observations before an entry's "
         "confidence is nudged, so a single run cannot move it.",
     )
+    inject_enabled: bool = Field(
+        default=True,
+        description="P0 ablation switch: when False, no memory context is "
+        "injected into any agent prompt (the orchestrator skips wiring the "
+        "store onto agents, so get_memory_context returns empty). Used to "
+        "produce the 'memory=off' arm of the memory-effectiveness ablation "
+        "(merge eval-memory). Extraction/write-back are unaffected — only "
+        "read-time injection is suppressed. Default True (normal behaviour).",
+    )
 
 
 class RenameDetectionConfig(BaseModel):

@@ -462,6 +462,64 @@ def validate_config_and_env(config: MergeConfig) -> list[str]:
     return errors
 
 
+@cli.command("eval-memory")
+@click.option(
+    "--on",
+    "on_path",
+    required=True,
+    type=click.Path(exists=True),
+    help="memory=on run: a memory_effectiveness.json file or its run directory",
+)
+@click.option(
+    "--off",
+    "off_path",
+    required=True,
+    type=click.Path(exists=True),
+    help="memory=off run: a memory_effectiveness.json file or its run directory "
+    "(produce one by setting memory.inject_enabled: false in config.yaml)",
+)
+@click.option(
+    "--out",
+    "out_path",
+    required=False,
+    default=None,
+    type=click.Path(),
+    help="optional path to write the ablation comparison as JSON",
+)
+def eval_memory_command(on_path: str, off_path: str, out_path: str | None) -> None:
+    """P0: compare a memory=on vs memory=off run and report the decision lift.
+
+    Offline and read-only — consumes the memory_effectiveness.json each run
+    persists at report time. The acceptance gate (lift > 0 AND harmful rate
+    not rising) is defined in doc/evaluation/acceptance.md.
+    """
+    from src.tools.memory_replay import (
+        build_ablation_comparison,
+        load_effectiveness_report,
+        render_ablation_table,
+    )
+
+    try:
+        report_on = load_effectiveness_report(on_path)
+        report_off = load_effectiveness_report(off_path)
+    except (FileNotFoundError, ValueError) as e:
+        console.print(f"[red]Failed to load effectiveness report: {e}[/red]")
+        sys.exit(1)
+
+    comparison = build_ablation_comparison(report_on, report_off)
+    console.print(render_ablation_table(comparison))
+
+    if out_path:
+        try:
+            Path(out_path).write_text(
+                comparison.model_dump_json(indent=2), encoding="utf-8"
+            )
+            console.print(f"[green]Wrote ablation comparison to {out_path}[/green]")
+        except OSError as e:
+            console.print(f"[red]Failed to write {out_path}: {e}[/red]")
+            sys.exit(1)
+
+
 cli.add_command(_forks_profile_group)
 
 

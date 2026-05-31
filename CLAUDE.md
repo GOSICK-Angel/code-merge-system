@@ -37,7 +37,12 @@ merge validate --config <path>   # validate config + env vars
 merge init [--repo-path .]       # generate per-target CLAUDE.md for merge decisions
 merge plan-suggest [--target ... --candidates ...]   # enumerate baseline commit-windows
 merge forks-profile init         # scaffold .merge/forks-profile.yaml (recommended ≥30 fork-deleted files)
+merge eval-memory --on <run|json> --off <run|json> [--out <path>]   # P0 memory ablation: compare memory=on vs memory=off effectiveness reports
 ```
+
+To produce a `memory=off` run for the ablation, set `memory.inject_enabled: false`
+in `.merge/config.yaml` and re-run on the same dataset; each run persists a
+`memory_effectiveness.json` under its run dir that `merge eval-memory` consumes.
 
 ## Required Environment Variables
 
