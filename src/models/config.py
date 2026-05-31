@@ -1008,6 +1008,23 @@ class MemoryExtractionConfig(BaseModel):
         description="P1-A: minimum pass+fail observations before a harmful "
         "entry is persistently suppressed, so a single run cannot prune it.",
     )
+    suppress_harmful_threshold: float = Field(
+        default=-0.8,
+        ge=-1.0,
+        le=0.0,
+        description="P1-A固化: outcome-score ceiling for *persistent* suppress "
+        "(score=(pass-fail)/total). Stricter than the transient read-time "
+        "filter's -0.5 because suppression is durable and cross-run — require "
+        "near-universal failure, not a slim majority.",
+    )
+    suppress_min_fail_count: int = Field(
+        default=5,
+        ge=1,
+        description="P1-A固化: minimum absolute fail count before persistent "
+        "suppress — a 0-pass/3-fail entry is too thin to durably prune. Guards "
+        "the PR-0d false-positive where a few deterministic-file failures look "
+        "harmful by ratio alone.",
+    )
 
 
 class RenameDetectionConfig(BaseModel):

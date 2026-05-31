@@ -56,6 +56,18 @@ def test_harmful_threshold_is_inclusive() -> None:
     assert "edge" in tracker.harmful_entry_ids(threshold=-0.5)
 
 
+def test_harmful_min_fail_count_floor() -> None:
+    """P1-A固化: min_fail_count gates by absolute fails, not just ratio."""
+    tracker = MemoryHitTracker()
+    for i in range(3):  # 0 pass / 3 fail → score -1.0
+        f = f"f{i}"
+        tracker.record_injection([f], ["thin"])
+        tracker.record_outcome(f, success=False)
+    assert "thin" in tracker.harmful_entry_ids()  # default floor 0
+    assert "thin" not in tracker.harmful_entry_ids(min_fail_count=5)
+    assert "thin" in tracker.harmful_entry_ids(min_fail_count=3)
+
+
 def test_harmful_custom_threshold() -> None:
     tracker = MemoryHitTracker()
     tracker.record_injection(["a.py"], ["mild-bad"])

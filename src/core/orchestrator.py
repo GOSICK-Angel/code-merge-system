@@ -610,17 +610,22 @@ class Orchestrator:
     def _apply_suppress_harmful_entries(self, state: MergeState) -> None:
         """P1-A: persistently soft-delete stably-harmful memory entries.
 
-        Default OFF. When ``persist_suppress`` is on, entries whose accumulated
-        outcome score crosses the harmful threshold with at least
-        ``suppress_min_observations`` observations are marked ``suppressed`` so
-        the prune survives tracker loss across runs (the O-M6 read-time filter
-        recomputes from sidecar observations and resurrects on loss). Human and
+        Default OFF. Persistent suppress is durable and cross-run, so its bar
+        is deliberately stricter than the transient read-time O-M6 filter:
+        ``suppress_harmful_threshold`` (≈ near-universal failure, not a slim
+        majority) AND ``suppress_min_fail_count`` absolute fails. A
+        deterministic-confound guard further skips entries whose only judged
+        file association is with files that failed via a *deterministic* veto
+        this run — a deterministic gate ignores memory, so blaming the injected
+        entry is the PR-0d single-arm false positive (metrics §9.7). Human and
         bootstrap entries are exempt, mirroring OPP-5."""
         cfg = getattr(self.config, "memory", None)
         if cfg is None or not getattr(cfg, "persist_suppress", False):
             return
         harmful_ids = self._memory_hit_tracker.harmful_entry_ids(
-            min_observations=cfg.suppress_min_observations
+            threshold=getattr(cfg, "suppress_harmful_threshold", -0.8),
+            min_observations=cfg.suppress_min_observations,
+            min_fail_count=getattr(cfg, "suppress_min_fail_count", 5),
         )
         if not harmful_ids:
             return
@@ -630,6 +635,20 @@ class Orchestrator:
             if record.decision_source
             in (DecisionSource.HUMAN, DecisionSource.BATCH_HUMAN)
         }
+        verdict = getattr(state, "judge_verdict", None)
+        passed_files = set(verdict.passed_files) if verdict else set()
+        # Files that failed via a deterministic veto this run — their failure is
+        # independent of injected memory, so an entry tied only to them is a
+        # correlational (not causal) "harm".
+        det_fail_files = (
+            {
+                issue.file_path
+                for issue in verdict.issues
+                if issue.veto_condition and issue.file_path in set(verdict.failed_files)
+            }
+            if verdict
+            else set()
+        )
         suppressed = 0
         for entry in self._memory_store.to_memory().entries:
             if entry.entry_id not in harmful_ids or entry.suppressed:
@@ -637,6 +656,13 @@ class Orchestrator:
             if _BOOTSTRAP_TAG in entry.tags:
                 continue
             if human_files and any(fp in human_files for fp in entry.file_paths):
+                continue
+            entry_files = set(entry.file_paths)
+            if (
+                det_fail_files
+                and entry_files & det_fail_files
+                and not (entry_files & passed_files)
+            ):
                 continue
             self._memory_store = self._memory_store.suppress_entry(
                 entry.entry_id, reason="P1-A: stably-harmful judge outcomes"

@@ -209,13 +209,14 @@ def test_persist_suppress_marks_stable_harmful_skips_human_and_bootstrap():
     store = orch._memory_store
     for e in (harmful, human, boot):
         store = store.add_entry(e)
-        _track_fails(orch._memory_hit_tracker, e.entry_id, 3)
+        _track_fails(orch._memory_hit_tracker, e.entry_id, 6)  # >= min_fail_count
     orch._memory_store = store
 
     state = SimpleNamespace(
+        judge_verdict=None,
         file_decision_records={
             "src/secret.py": SimpleNamespace(decision_source=DecisionSource.HUMAN)
-        }
+        },
     )
     orch._apply_suppress_harmful_entries(state)
 
@@ -231,6 +232,109 @@ def test_persist_suppress_respects_min_observations():
     orch = _orch(persist=True, min_obs=3)
     e = _entry("harm", ["src/a.py"])
     orch._memory_store = orch._memory_store.add_entry(e)
-    _track_fails(orch._memory_hit_tracker, e.entry_id, 2)  # below threshold
-    orch._apply_suppress_harmful_entries(SimpleNamespace(file_decision_records={}))
+    _track_fails(orch._memory_hit_tracker, e.entry_id, 2)  # below min_observations
+    orch._apply_suppress_harmful_entries(
+        SimpleNamespace(judge_verdict=None, file_decision_records={})
+    )
     assert orch._memory_store.to_memory().entries[0].suppressed is False
+
+
+# --- P1-A固化: stricter persistent-suppress criterion (PR-0d false-positive) -
+
+
+def _track_mixed(tracker, entry_id: str, *, passes: int, fails: int) -> None:
+    for i in range(passes):
+        f = f"{entry_id}-p{i}"
+        tracker.record_injection([f], [entry_id])
+        tracker.record_outcome(f, success=True)
+    for i in range(fails):
+        f = f"{entry_id}-f{i}"
+        tracker.record_injection([f], [entry_id])
+        tracker.record_outcome(f, success=False)
+
+
+def test_suppress_needs_min_fail_count():
+    # score -1.0 but only 4 fails (< default 5) → too thin for a durable prune.
+    from types import SimpleNamespace
+
+    orch = _orch(persist=True, min_obs=3)
+    e = _entry("harm", ["src/a.py"])
+    orch._memory_store = orch._memory_store.add_entry(e)
+    _track_fails(orch._memory_hit_tracker, e.entry_id, 4)
+    orch._apply_suppress_harmful_entries(
+        SimpleNamespace(judge_verdict=None, file_decision_records={})
+    )
+    assert orch._memory_store.to_memory().entries[0].suppressed is False
+
+
+def test_suppress_needs_strict_threshold():
+    # 3 pass / 7 fail → score -0.4, above the -0.8 persistent bar (would pass the
+    # loose read-time -0.5 but not the durable suppress threshold).
+    from types import SimpleNamespace
+
+    orch = _orch(persist=True, min_obs=3)
+    e = _entry("harm", ["src/a.py"])
+    orch._memory_store = orch._memory_store.add_entry(e)
+    _track_mixed(orch._memory_hit_tracker, e.entry_id, passes=3, fails=7)
+    orch._apply_suppress_harmful_entries(
+        SimpleNamespace(judge_verdict=None, file_decision_records={})
+    )
+    assert orch._memory_store.to_memory().entries[0].suppressed is False
+
+
+def test_deterministic_confound_guard_skips_veto_only_entry():
+    # The PR-0d case: entry tied ONLY to a file that failed via a deterministic
+    # veto → its "harm" is correlational; persistent suppress must skip it.
+    from types import SimpleNamespace
+
+    from src.models.judge import IssueSeverity, JudgeIssue
+
+    orch = _orch(persist=True, min_obs=3)
+    e = _entry("harm", ["auth/oauth.go", "auth"])
+    orch._memory_store = orch._memory_store.add_entry(e)
+    _track_fails(orch._memory_hit_tracker, e.entry_id, 6)  # strongly harmful by ratio
+
+    veto_issue = JudgeIssue(
+        file_path="auth/oauth.go",
+        issue_level=IssueSeverity.CRITICAL,
+        issue_type="reverse_impact_unhandled",
+        description="reverse impact",
+        veto_condition="reverse impact unhandled",
+    )
+    verdict = SimpleNamespace(
+        passed_files=[], failed_files=["auth/oauth.go"], issues=[veto_issue]
+    )
+    orch._apply_suppress_harmful_entries(
+        SimpleNamespace(judge_verdict=verdict, file_decision_records={})
+    )
+    assert orch._memory_store.to_memory().entries[0].suppressed is False
+
+
+def test_confound_guard_does_not_shield_entry_touching_passed_file():
+    # An entry that also touches a PASSED file is not purely confounded — a
+    # strongly-harmful ratio still suppresses it.
+    from types import SimpleNamespace
+
+    from src.models.judge import IssueSeverity, JudgeIssue
+
+    orch = _orch(persist=True, min_obs=3)
+    e = _entry("harm", ["auth/oauth.go", "auth/ok.go"])
+    orch._memory_store = orch._memory_store.add_entry(e)
+    _track_fails(orch._memory_hit_tracker, e.entry_id, 6)
+
+    veto_issue = JudgeIssue(
+        file_path="auth/oauth.go",
+        issue_level=IssueSeverity.CRITICAL,
+        issue_type="reverse_impact_unhandled",
+        description="reverse impact",
+        veto_condition="reverse impact unhandled",
+    )
+    verdict = SimpleNamespace(
+        passed_files=["auth/ok.go"],
+        failed_files=["auth/oauth.go"],
+        issues=[veto_issue],
+    )
+    orch._apply_suppress_harmful_entries(
+        SimpleNamespace(judge_verdict=verdict, file_decision_records={})
+    )
+    assert orch._memory_store.to_memory().entries[0].suppressed is True
