@@ -100,6 +100,9 @@ def test_influenced_counts_intersection_of_injected_and_judged():
     assert report.harmful_influence_count == 1
     assert report.correct_rate_after_influence == 0.5
     assert report.harmful_influence_rate == 0.5
+    # PR-0d: per-file lists persisted (sorted) for offline causal attribution
+    assert report.passed_files == ["a.py", "c.py"]
+    assert report.failed_files == ["b.py"]
 
 
 def test_injected_file_not_judged_is_excluded_from_influence():

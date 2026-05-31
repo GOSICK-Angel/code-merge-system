@@ -53,14 +53,14 @@
 | 门 | 阈值 | 数据源 | 作用 |
 |---|---|---|---|
 | `MDL` 记忆决策增益 | **> 0** | `merge eval-memory`（on/off 消融）| 任一反馈环默认开启的**硬前置**；≤ 0 则保持 opt-in |
-| `HIR` 有害影响率 | **不高于同数据集 off 基线** | `memory_effectiveness.json` | 上升即说明记忆在污染决策，禁止默认开启 |
+| `memory_harmed`（因果，PR-0d）| **= 0** | `merge eval-memory` 跨臂逐文件 diff | 跨臂判决翻坏的文件数；> 0 即记忆**导致**退化，禁止默认开启。取代单臂 `HIR`（相关性、会假阳性，metrics §9.7）|
 | `CRI` 影响后正确率 | **≥ off 基线 overall_correct_rate** | `memory_effectiveness.json` | 被记忆改变的决策不得比无记忆更差 |
 | `MCPD` 单决策记忆成本 | **≤ off 基线 × 1.15** | `CostTracker` | 防止记忆注入让 prompt 成本悄悄回退 |
 
 **判定流程**：
 1. 同数据集跑 `memory=on`（默认）与 `memory=off`（config `memory.inject_enabled: false`）两 run；
 2. `merge eval-memory --on <on_run> --off <off_run>` 产出 `MemoryAblationComparison`；
-3. `MDL > 0` 且 `HIR` 不升 → 允许把对应反馈环 default 翻为 `True`，并在本文件 §5 历史区记录基线数；
+3. `MDL > 0` 且 `memory_harmed = 0`（因果，PR-0d）→ 允许把对应反馈环 default 翻为 `True`，并在本文件 §5 历史区记录基线数；
 4. 任一门未过 → 反馈环维持 opt-in，记录原因。
 
 > 这是"默认开启"的闸口，不是合并质量的一票否决；故归为独立章节，与 §1/§2 的合并
@@ -108,14 +108,15 @@
 
 > 由 `merge eval-memory` 对同数据集 memory=on/off 两 run 产出（metrics.md §9）。
 
-| 评估时间 | 数据集 | on/off run_id | `MDL` | `HIR`(on) | 激活判定 |
-|---|---|---|---|---|---|
-| 2026-05-31 | forgejo `test/fork` ← `origin/forgejo`（124 文件，judge 复审 16）| `a0563230` / `81ce3475` | **0.0000** | 0.20 | **不默认开启**（MDL 未 > 0）|
+| 评估时间 | 数据集 | on/off run_id | `MDL` | `memory_harmed`(因果) | `HIR`(on,相关) | 激活判定 |
+|---|---|---|---|---|---|---|
+| 2026-05-31 | forgejo `test/fork` ← `origin/forgejo`（124 文件，judge 复审 16）| `a0563230` / `81ce3475` | **0.0000** | **0** | 0.20 | **不默认开启**（MDL 未 > 0）|
 
 口径与 caveat（务必随基线一并阅读，避免误用）：
 - 模型 `deepseek-v4-pro`（temperature：executor/judge=0.1，余默认）；两臂同一 `ablation_decisions.yaml`（plan_review 15×`take_target` + judge_review `accept`），唯一变量为 `memory.inject_enabled`。
-- off 臂 `memory_influenced_decisions=0`，证实 `inject_enabled=false` 完全抑制注入（开关有效）。on 臂注入影响 15/16 判决，但 `overall_correct_rate` 与 off 持平（均 81.25%，13/16 pass）→ 本 run 记忆对总体正确率净中性。
-- 单 run、单数据集、`judge_verdict=fail`/`partial_failure`（确定性 reverse_impact veto），样本量小（judged=16）；**不足以作收紧/默认开启依据**，仅为首组可搬动基线。需多 run / 多数据集复算（procedure 待补）方能据 §3 翻默认开启。
+- off 臂 `memory_influenced_decisions=0`，证实 `inject_enabled=false` 完全抑制注入（开关有效）。on 臂注入影响 15/16 判决，但**两臂 per-file 判决逐字节相同**（同 13 pass / 同 3 fail，失败均为 `auth_token.go`/`oauth.go`/`build-release.yml` 的确定性 reverse_impact veto）→ 记忆对本 run 任何判决**零作用**。
+- **因果归因（PR-0d）`memory_harmed=0`、`memory_helped=0`**；单臂 `HIR(on)=0.2` 是**假阳性**——它把"记忆恰好注入到本就确定性失败的文件"误算成有害，跨臂 diff 证伪（metrics §9.7）。激活门以因果 harmed 为准。
+- 本 run 由确定性机制（take_target + veto）主导，记忆无用武之地；不证明记忆无价值，需 **LLM 判断密集**数据集才能测出。单 run、judged=16、样本小，**仅首组可搬动基线**，需多 run / 多数据集复算（procedure 待补）方可据 §3 翻默认开启。
 
 ---
 

@@ -70,29 +70,56 @@ def _pct(value: float) -> str:
     return f"{value * 100:.2f}%"
 
 
+def _file_list(files: list[str], limit: int = 5) -> str:
+    if not files:
+        return "none"
+    shown = ", ".join(files[:limit])
+    return shown if len(files) <= limit else f"{shown}, … (+{len(files) - limit})"
+
+
 def render_ablation_table(cmp: MemoryAblationComparison) -> str:
     """Render the ablation comparison as a plain markdown table.
 
     The verdict line restates the convenience ``memory_beneficial`` flag
-    (lift > 0); the full acceptance gate also requires the harmful-influence
-    rate not to rise over time (see ``doc/evaluation/acceptance.md``).
+    (lift > 0); the full acceptance gate also requires the causal harmed count
+    not to rise over time (see ``doc/evaluation/acceptance.md``).
+
+    PR-0d: the causal block reports help/harm attributed by cross-arm per-file
+    verdict diff. ``harmful_influence_rate (on)`` is kept but labelled
+    correlational — a deterministic failure inflates it without memory being
+    the cause, which the causal ``memory_harmed`` count avoids.
     """
     lift = cmp.memory_decision_lift
     sign = "+" if lift > 0 else ""
     verdict = "BENEFICIAL (lift > 0)" if cmp.memory_beneficial else "NOT beneficial"
-    return "\n".join(
-        [
-            "| Metric | memory=on | memory=off |",
-            "|---|---|---|",
-            f"| run_id | `{cmp.on_run_id}` | `{cmp.off_run_id}` |",
-            f"| overall_correct_rate | {_pct(cmp.overall_correct_rate_on)} "
-            f"| {_pct(cmp.overall_correct_rate_off)} |",
-            "",
-            f"**memory_decision_lift**: {sign}{lift:.4f} "
-            f"({_pct(lift) if lift >= 0 else '-' + _pct(-lift)})",
-            "",
-            f"**harmful_influence_rate (on)**: {_pct(cmp.harmful_influence_rate_on)}",
-            "",
-            f"**Verdict**: {verdict}",
+    lines = [
+        "| Metric | memory=on | memory=off |",
+        "|---|---|---|",
+        f"| run_id | `{cmp.on_run_id}` | `{cmp.off_run_id}` |",
+        f"| overall_correct_rate | {_pct(cmp.overall_correct_rate_on)} "
+        f"| {_pct(cmp.overall_correct_rate_off)} |",
+        "",
+        f"**memory_decision_lift**: {sign}{lift:.4f} "
+        f"({_pct(lift) if lift >= 0 else '-' + _pct(-lift)})",
+        "",
+    ]
+    if cmp.causal_attribution_available:
+        lines += [
+            f"**Causal attribution (cross-arm per-file diff)**: "
+            f"helped={cmp.memory_helped_count}, harmed={cmp.memory_harmed_count}",
+            f"  - memory_helped (off-fail → on-pass): {_file_list(cmp.memory_helped_files)}",
+            f"  - memory_harmed (off-pass → on-fail): {_file_list(cmp.memory_harmed_files)}",
         ]
-    )
+    else:
+        lines.append(
+            "**Causal attribution**: N/A (reports carry no per-file lists; "
+            "regenerate with PR-0d+ to enable)"
+        )
+    lines += [
+        "",
+        f"**harmful_influence_rate (on, correlational)**: "
+        f"{_pct(cmp.harmful_influence_rate_on)}",
+        "",
+        f"**Verdict**: {verdict}",
+    ]
+    return "\n".join(lines)

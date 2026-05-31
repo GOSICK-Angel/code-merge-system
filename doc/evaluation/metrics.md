@@ -352,16 +352,19 @@ overall_correct_rate = |passed_files| / (|passed_files| + |failed_files|)
 数据源：`MemoryAblationComparison.memory_decision_lift`。**MDL > 0 是"学到了"的
 最小证据**，也是 Phase 1 任一反馈环默认开启的硬前置（见 acceptance.md §3）。
 
-### 9.2 有害影响率（Harmful Influence Rate, HIR）
+### 9.2 有害影响率（Harmful Influence Rate, HIR）—— **相关性，非因果**
 
-> 被记忆注入"影响"且最终 fail 的决策占比——F2（检索污染/有害记忆）的直接度量。
+> 被记忆注入"影响"且最终 fail 的决策占比。单臂量，**会过度归因**。
 
 ```
 HIR = |injected ∩ failed_files| / |influenced|        （influenced=0 时记 0）
 ```
 
-数据源：`MemoryEffectivenessReport.harmful_influence_rate`。P1-A（持久化 suppress）的
-优化目标是在"tracker 重置"场景下 HIR 不回升。
+数据源：`MemoryEffectivenessReport.harmful_influence_rate`。**警告（PR-0d）**：HIR 把
+"记忆恰好被注入到一个本来就会失败的文件"也算成有害，但确定性失败（如 reverse_impact
+veto）与记忆无关。forgejo 首组基线即暴露此假阳性：HIR(on)=0.2，而跨臂因果归因
+（§9.7）harmed=0——3 个失败在 memory=off 臂**逐文件相同**。故 HIR 只作单 run 粗筛，
+**默认开启/收紧判据一律以 §9.7 的因果 harmed 为准**。
 
 ### 9.3 影响后正确率（Correct Rate After Influence, CRI）
 
@@ -399,6 +402,24 @@ MCPD = cost_usd_per_run / F_eval
 
 数据源：`CostTracker` + `F_eval`。记忆注入增大 prompt，开启反馈环不得让 MCPD 显著上升
 （acceptance.md §3）。
+
+### 9.7 跨臂因果归因（Causal Help / Harm, PR-0d）
+
+> 唯一能判定"记忆是否**导致**好/坏结果"的口径——逐文件比对 on/off 两臂的 judge 判决，
+> 只有判决真正翻转才归因于记忆。
+
+```
+memory_helped = { f : f ∈ off.failed_files ∧ f ∈ on.passed_files }   （记忆把失败救成功）
+memory_harmed = { f : f ∈ off.passed_files ∧ f ∈ on.failed_files }   （记忆把成功弄失败）
+```
+
+数据源：`MemoryAblationComparison.memory_helped_count / memory_harmed_count`，由
+`merge eval-memory` 跨两份 `memory_effectiveness.json`（PR-0d 起持久化 `passed_files`/
+`failed_files`）计算；`causal_attribution_available=False` 表示报告无 per-file 列表
+（PR-0d 前的旧产物）——此时 helped/harmed 不可知，**不等于 0**。
+
+两臂判决**逐文件相同**（确定性主导的合并）→ helped=harmed=0，正确地不把确定性失败
+甩锅给记忆。这是 §9.2 HIR 的因果替代，也是 acceptance.md §3 激活门的真正判据。
 
 > **后续指标（Phase 1-C / 2-B 落地后补充）**：`repeat_error_repair_rounds`（同
 > error_signature 平均修复轮数，需 P1-C 的 `summarize_judge_repair_rounds` 按签名聚合）、

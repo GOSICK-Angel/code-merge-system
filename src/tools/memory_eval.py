@@ -93,6 +93,8 @@ def compute_memory_effectiveness(
         top_harmful=_items_from_outcomes(outcomes_dict.get("top_harmful")),
         total_tracked_entries=_as_int(outcomes_dict.get("tracked_entries", 0)),
         effective_observations=_as_int(summary.get("effective_observations", 0)),
+        passed_files=sorted(passed),
+        failed_files=sorted(failed),
     )
 
 
@@ -103,10 +105,25 @@ def compare_memory_effectiveness(
     """Diff two runs (memory on vs off) on the same dataset.
 
     ``memory_beneficial`` is the simple ``lift > 0`` convenience flag; the
-    full acceptance gate (lift positive AND harmful rate not rising) lives in
+    full acceptance gate (lift positive AND harmed count not rising) lives in
     ``doc/evaluation/acceptance.md``.
+
+    PR-0d: help/harm is attributed *causally* by diffing per-file verdicts
+    across the arms — a file is harmed only if it passed without memory but
+    failed with it (and vice-versa for helped). A deterministic failure that
+    occurs identically in both arms therefore counts as neither, unlike the
+    single-arm ``harmful_influence_rate`` which blames any injected-and-failed
+    file. Falls back to ``causal_attribution_available=False`` when the reports
+    predate PR-0d and carry no per-file lists.
     """
     lift = round(memory_on.overall_correct_rate - memory_off.overall_correct_rate, 4)
+
+    on_passed, on_failed = set(memory_on.passed_files), set(memory_on.failed_files)
+    off_passed, off_failed = set(memory_off.passed_files), set(memory_off.failed_files)
+    available = bool(on_passed or on_failed or off_passed or off_failed)
+    helped = sorted(off_failed & on_passed)
+    harmed = sorted(off_passed & on_failed)
+
     return MemoryAblationComparison(
         on_run_id=memory_on.run_id,
         off_run_id=memory_off.run_id,
@@ -115,4 +132,9 @@ def compare_memory_effectiveness(
         memory_decision_lift=lift,
         harmful_influence_rate_on=memory_on.harmful_influence_rate,
         memory_beneficial=lift > 0.0,
+        memory_helped_files=helped,
+        memory_harmed_files=harmed,
+        memory_helped_count=len(helped),
+        memory_harmed_count=len(harmed),
+        causal_attribution_available=available,
     )

@@ -14,7 +14,13 @@ from src.tools.memory_replay import (
 )
 
 
-def _report(run_id: str, correct_rate: float, harmful_rate: float = 0.0):
+def _report(
+    run_id: str,
+    correct_rate: float,
+    harmful_rate: float = 0.0,
+    passed_files: list[str] | None = None,
+    failed_files: list[str] | None = None,
+):
     return MemoryEffectivenessReport(
         run_id=run_id,
         total_judged_decisions=10,
@@ -26,6 +32,8 @@ def _report(run_id: str, correct_rate: float, harmful_rate: float = 0.0):
         harmful_influence_rate=harmful_rate,
         total_tracked_entries=2,
         effective_observations=4,
+        passed_files=passed_files or [],
+        failed_files=failed_files or [],
     )
 
 
@@ -79,6 +87,57 @@ def test_comparison_non_positive_lift_not_beneficial():
     cmp = build_ablation_comparison(_report("on", 0.7), _report("off", 0.7))
     assert cmp.memory_decision_lift == pytest.approx(0.0)
     assert cmp.memory_beneficial is False
+
+
+# --- PR-0d causal attribution ----------------------------------------------
+
+
+def test_causal_deterministic_failure_not_blamed_on_memory():
+    """Same per-file verdict in both arms → 0 helped, 0 harmed even though the
+    single-arm harmful_influence_rate is non-zero (the forgejo baseline case)."""
+    on = _report(
+        "on", 0.8125, harmful_rate=0.2, passed_files=["a", "b"], failed_files=["x"]
+    )
+    off = _report("off", 0.8125, passed_files=["a", "b"], failed_files=["x"])
+    cmp = build_ablation_comparison(on, off)
+    assert cmp.causal_attribution_available is True
+    assert cmp.memory_helped_count == 0
+    assert cmp.memory_harmed_count == 0
+    assert cmp.harmful_influence_rate_on == pytest.approx(
+        0.2
+    )  # correlational, unchanged
+
+
+def test_causal_memory_helped_and_harmed():
+    # off fails f1 (on passes it → helped); off passes f2 (on fails it → harmed)
+    on = _report("on", 0.5, passed_files=["f1", "keep"], failed_files=["f2"])
+    off = _report("off", 0.5, passed_files=["f2", "keep"], failed_files=["f1"])
+    cmp = build_ablation_comparison(on, off)
+    assert cmp.memory_helped_files == ["f1"]
+    assert cmp.memory_harmed_files == ["f2"]
+    assert cmp.memory_helped_count == 1
+    assert cmp.memory_harmed_count == 1
+
+
+def test_causal_unavailable_when_no_file_lists():
+    cmp = build_ablation_comparison(_report("on", 0.9), _report("off", 0.7))
+    assert cmp.causal_attribution_available is False
+    assert cmp.memory_helped_count == 0 and cmp.memory_harmed_count == 0
+
+
+def test_render_causal_block_present():
+    on = _report("on", 0.8, passed_files=["a"], failed_files=["x"])
+    off = _report("off", 0.8, passed_files=["a", "x"], failed_files=[])
+    table = render_ablation_table(build_ablation_comparison(on, off))
+    assert "Causal attribution" in table
+    assert "memory_harmed (off-pass → on-fail): x" in table
+
+
+def test_render_causal_na_when_unavailable():
+    table = render_ablation_table(
+        build_ablation_comparison(_report("on", 0.9), _report("off", 0.7))
+    )
+    assert "N/A" in table
 
 
 # --- rendering --------------------------------------------------------------
