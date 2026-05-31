@@ -1,4 +1,3 @@
-import asyncio
 import json
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -6,15 +5,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.core.checkpoint import Checkpoint
-from src.core.message_bus import MessageBus
-from src.core.phase_runner import PhaseRunner
 from src.core.state_machine import StateMachine, VALID_TRANSITIONS
 from src.models.config import MergeConfig, ThresholdConfig
 from src.models.conflict import ConflictAnalysis, ConflictType
 from src.models.decision import MergeDecision
 from src.models.diff import FileDiff, FileChangeCategory, FileStatus, RiskLevel
 from src.models.judge import ExecutorRebuttal, JudgeVerdict, VerdictType
-from src.models.message import AgentMessage, AgentType, MessageType
 from src.models.plan import MergePlan, MergePhase, PhaseFileBatch, RiskSummary
 from src.models.plan_judge import PlanJudgeResult, PlanJudgeVerdict
 from src.models.state import MergeState, SystemStatus
@@ -92,24 +88,6 @@ def _make_file_diff(
         lines_added=5,
         lines_deleted=3,
         is_security_sensitive=is_security_sensitive,
-    )
-
-
-def _make_agent_message(
-    sender: AgentType = AgentType.PLANNER,
-    receiver: AgentType = AgentType.ORCHESTRATOR,
-    phase: MergePhase = MergePhase.ANALYSIS,
-    message_type: MessageType = MessageType.INFO,
-    subject: str = "test",
-    payload: dict | None = None,
-) -> AgentMessage:
-    return AgentMessage(
-        sender=sender,
-        receiver=receiver,
-        phase=phase,
-        message_type=message_type,
-        subject=subject,
-        payload=payload or {},
     )
 
 
@@ -245,17 +223,6 @@ class TestStateMachine:
         for target in SystemStatus:
             assert sm.can_transition(SystemStatus.FAILED, target) is False
 
-    def test_get_valid_transitions_initialized(self):
-        sm = StateMachine()
-        valid = sm.get_valid_transitions(SystemStatus.INITIALIZED)
-        assert SystemStatus.PLANNING in valid
-        assert SystemStatus.FAILED in valid
-
-    def test_get_valid_transitions_completed_empty(self):
-        sm = StateMachine()
-        valid = sm.get_valid_transitions(SystemStatus.COMPLETED)
-        assert valid == []
-
     def test_transition_appends_message_to_state(self):
         sm = StateMachine()
         state = _make_state()
@@ -290,10 +257,9 @@ class TestStateMachine:
 
     def test_paused_can_transition_to_most_states(self):
         sm = StateMachine()
-        valid = sm.get_valid_transitions(SystemStatus.PAUSED)
-        assert SystemStatus.PLANNING in valid
-        assert SystemStatus.AUTO_MERGING in valid
-        assert SystemStatus.FAILED in valid
+        assert sm.can_transition(SystemStatus.PAUSED, SystemStatus.PLANNING)
+        assert sm.can_transition(SystemStatus.PAUSED, SystemStatus.AUTO_MERGING)
+        assert sm.can_transition(SystemStatus.PAUSED, SystemStatus.FAILED)
 
     def test_all_statuses_have_entry_in_valid_transitions(self):
         for status in SystemStatus:
@@ -409,266 +375,51 @@ class TestCheckpoint:
         state = _make_state(_make_config(str(tmp_path)))
         cp.register_signal_handler(state)
 
+    def test_signal_handler_restores_default_after_first_fire(self, tmp_path):
+        """Re-entrant Ctrl-C during cleanup must not cascade. After the
+        first SIGINT fires the handler, SIGINT/SIGTERM must be restored
+        to SIG_DFL so a second ^C is a clean kernel SIGINT rather than
+        another SystemExit raised inside whatever blocking call
+        (threading.Event.wait, socket close) is mid-flight.
+        """
+        import signal as _signal
 
-class TestMessageBus:
-    def test_publish_stores_message(self):
-        bus = MessageBus()
-        msg = _make_agent_message()
-        bus.publish(msg)
-        assert msg in bus._messages
+        cp = Checkpoint(tmp_path)
+        state = _make_state(_make_config(str(tmp_path)))
+        original_int = _signal.getsignal(_signal.SIGINT)
+        original_term = _signal.getsignal(_signal.SIGTERM)
+        try:
+            cp.register_signal_handler(state)
+            installed = _signal.getsignal(_signal.SIGINT)
+            assert callable(installed)
+            with pytest.raises(SystemExit):
+                installed(_signal.SIGINT, None)
+            assert _signal.getsignal(_signal.SIGINT) is _signal.SIG_DFL
+            assert _signal.getsignal(_signal.SIGTERM) is _signal.SIG_DFL
+        finally:
+            _signal.signal(_signal.SIGINT, original_int)
+            _signal.signal(_signal.SIGTERM, original_term)
 
-    def test_publish_puts_message_in_queue(self):
-        bus = MessageBus()
-        msg = _make_agent_message()
-        bus.publish(msg)
-        assert not bus._queue.empty()
+    def test_signal_handler_swallows_save_errors_then_exits(self, tmp_path):
+        """A broken `save()` (e.g. read-only fs during shutdown) must not
+        mask SystemExit — the process should still exit cleanly."""
+        import signal as _signal
+        from unittest.mock import patch
 
-    def test_subscribe_and_callback_called_on_publish(self):
-        bus = MessageBus()
-        received = []
-        bus.subscribe(AgentType.ORCHESTRATOR, lambda m: received.append(m))
-        msg = _make_agent_message(receiver=AgentType.ORCHESTRATOR)
-        bus.publish(msg)
-        assert len(received) == 1
-        assert received[0] is msg
-
-    def test_subscribe_callback_not_called_for_different_receiver(self):
-        bus = MessageBus()
-        received = []
-        bus.subscribe(AgentType.PLANNER, lambda m: received.append(m))
-        msg = _make_agent_message(receiver=AgentType.ORCHESTRATOR)
-        bus.publish(msg)
-        assert len(received) == 0
-
-    def test_publish_broadcast_calls_all_subscribers_except_sender(self):
-        bus = MessageBus()
-        planner_received = []
-        executor_received = []
-        bus.subscribe(AgentType.PLANNER, lambda m: planner_received.append(m))
-        bus.subscribe(AgentType.EXECUTOR, lambda m: executor_received.append(m))
-        msg = _make_agent_message(
-            sender=AgentType.ORCHESTRATOR,
-            receiver=AgentType.BROADCAST,
-        )
-        bus.publish(msg)
-        assert len(planner_received) == 1
-        assert len(executor_received) == 1
-
-    def test_publish_broadcast_does_not_call_sender_subscriber(self):
-        bus = MessageBus()
-        sender_received = []
-        bus.subscribe(AgentType.ORCHESTRATOR, lambda m: sender_received.append(m))
-        msg = _make_agent_message(
-            sender=AgentType.ORCHESTRATOR,
-            receiver=AgentType.BROADCAST,
-        )
-        bus.publish(msg)
-        assert len(sender_received) == 0
-
-    def test_get_messages_returns_all_without_filter(self):
-        bus = MessageBus()
-        m1 = _make_agent_message(receiver=AgentType.PLANNER)
-        m2 = _make_agent_message(receiver=AgentType.EXECUTOR)
-        bus.publish(m1)
-        bus.publish(m2)
-        results = bus.get_messages()
-        assert len(results) == 2
-
-    def test_get_messages_filters_by_receiver(self):
-        bus = MessageBus()
-        m1 = _make_agent_message(receiver=AgentType.PLANNER)
-        m2 = _make_agent_message(receiver=AgentType.EXECUTOR)
-        bus.publish(m1)
-        bus.publish(m2)
-        results = bus.get_messages(receiver=AgentType.PLANNER)
-        assert len(results) == 1
-        assert results[0] is m1
-
-    def test_get_messages_includes_broadcast_for_any_receiver(self):
-        bus = MessageBus()
-        broadcast_msg = _make_agent_message(receiver=AgentType.BROADCAST)
-        bus.publish(broadcast_msg)
-        results = bus.get_messages(receiver=AgentType.PLANNER)
-        assert broadcast_msg in results
-
-    def test_get_messages_unprocessed_only(self):
-        bus = MessageBus()
-        m1 = _make_agent_message()
-        m2 = _make_agent_message()
-        bus.publish(m1)
-        bus.publish(m2)
-        bus.mark_processed(m1.message_id)
-        results = bus.get_messages(unprocessed_only=True)
-        assert m1 not in results
-        assert m2 in results
-
-    def test_mark_processed_sets_flag(self):
-        bus = MessageBus()
-        msg = _make_agent_message()
-        bus.publish(msg)
-        bus.mark_processed(msg.message_id)
-        assert bus._messages[0].is_processed is True
-
-    def test_mark_processed_unknown_id_does_nothing(self):
-        bus = MessageBus()
-        msg = _make_agent_message()
-        bus.publish(msg)
-        bus.mark_processed("unknown-id")
-        assert bus._messages[0].is_processed is False
-
-    def test_clear_empties_messages_and_queue(self):
-        bus = MessageBus()
-        bus.publish(_make_agent_message())
-        bus.clear()
-        assert len(bus._messages) == 0
-        assert bus._queue.empty()
-
-    async def test_wait_for_message_returns_published_message(self):
-        bus = MessageBus()
-        msg = _make_agent_message()
-        bus.publish(msg)
-        result = await bus.wait_for_message(timeout=1.0)
-        assert result is msg
-
-    async def test_wait_for_message_times_out(self):
-        bus = MessageBus()
-        result = await bus.wait_for_message(timeout=0.05)
-        assert result is None
-
-    def test_subscriber_exception_does_not_propagate(self):
-        bus = MessageBus()
-
-        def bad_callback(m):
-            raise RuntimeError("oops")
-
-        bus.subscribe(AgentType.ORCHESTRATOR, bad_callback)
-        msg = _make_agent_message(receiver=AgentType.ORCHESTRATOR)
-        bus.publish(msg)
-
-    def test_multiple_subscribers_for_same_agent_type(self):
-        bus = MessageBus()
-        calls_a = []
-        calls_b = []
-        bus.subscribe(AgentType.JUDGE, lambda m: calls_a.append(m))
-        bus.subscribe(AgentType.JUDGE, lambda m: calls_b.append(m))
-        msg = _make_agent_message(receiver=AgentType.JUDGE)
-        bus.publish(msg)
-        assert len(calls_a) == 1
-        assert len(calls_b) == 1
-
-
-class TestPhaseRunner:
-    async def test_run_sequential_processes_all_items(self):
-        runner = PhaseRunner(batch_size=10, max_concurrency=5)
-
-        async def handler(x):
-            return x * 2
-
-        results = await runner.run_sequential([1, 2, 3], handler)
-        assert sorted(results) == [2, 4, 6]
-
-    async def test_run_sequential_returns_results_in_order(self):
-        runner = PhaseRunner(batch_size=10, max_concurrency=5)
-        order = []
-
-        async def handler(x):
-            order.append(x)
-            return x
-
-        results = await runner.run_sequential([10, 20, 30], handler)
-        assert results == [10, 20, 30]
-        assert order == [10, 20, 30]
-
-    async def test_run_sequential_empty_list(self):
-        runner = PhaseRunner()
-        results = await runner.run_sequential([], lambda x: None)
-        assert results == []
-
-    async def test_run_parallel_processes_all_items(self):
-        runner = PhaseRunner(batch_size=10, max_concurrency=5)
-
-        async def handler(x):
-            return x * 2
-
-        results = await runner.run_parallel([1, 2, 3, 4, 5], handler)
-        assert sorted(results) == [2, 4, 6, 8, 10]
-
-    async def test_run_parallel_empty_list(self):
-        runner = PhaseRunner()
-
-        async def handler(x):
-            return x
-
-        results = await runner.run_parallel([], handler)
-        assert results == []
-
-    async def test_run_parallel_respects_max_concurrency(self):
-        runner = PhaseRunner(max_concurrency=2)
-        active = []
-        peak = [0]
-
-        async def handler(x):
-            active.append(x)
-            peak[0] = max(peak[0], len(active))
-            await asyncio.sleep(0.01)
-            active.pop()
-            return x
-
-        await runner.run_parallel(list(range(10)), handler)
-        assert peak[0] <= 2
-
-    async def test_run_parallel_captures_exceptions(self):
-        runner = PhaseRunner()
-
-        async def handler(x):
-            if x == 2:
-                raise ValueError("bad item")
-            return x
-
-        results = await runner.run_parallel([1, 2, 3], handler)
-        errors = [r for r in results if isinstance(r, Exception)]
-        assert len(errors) == 1
-        assert isinstance(errors[0], ValueError)
-
-    async def test_run_batched_parallel_processes_all(self):
-        runner = PhaseRunner(batch_size=3, max_concurrency=2)
-
-        async def handler(x):
-            return x + 1
-
-        results = await runner.run_batched(list(range(9)), handler, parallel=True)
-        assert sorted(results) == list(range(1, 10))
-
-    async def test_run_batched_sequential_processes_all(self):
-        runner = PhaseRunner(batch_size=3, max_concurrency=5)
-
-        async def handler(x):
-            return x * 2
-
-        results = await runner.run_batched(list(range(6)), handler, parallel=False)
-        assert sorted(results) == [0, 2, 4, 6, 8, 10]
-
-    async def test_run_batched_calls_on_batch_complete(self):
-        runner = PhaseRunner(batch_size=2, max_concurrency=2)
-        batch_callbacks = []
-
-        async def on_batch(batch_results):
-            batch_callbacks.append(batch_results)
-
-        async def handler(x):
-            return x
-
-        await runner.run_batched([1, 2, 3, 4], handler, on_batch_complete=on_batch)
-        assert len(batch_callbacks) == 2
-
-    async def test_run_batched_empty_list(self):
-        runner = PhaseRunner()
-
-        async def handler(x):
-            return x
-
-        results = await runner.run_batched([], handler)
-        assert results == []
+        cp = Checkpoint(tmp_path)
+        state = _make_state(_make_config(str(tmp_path)))
+        original_int = _signal.getsignal(_signal.SIGINT)
+        original_term = _signal.getsignal(_signal.SIGTERM)
+        try:
+            cp.register_signal_handler(state)
+            installed = _signal.getsignal(_signal.SIGINT)
+            with patch.object(cp, "save", side_effect=OSError("disk full")):
+                with pytest.raises(SystemExit):
+                    installed(_signal.SIGINT, None)
+            assert _signal.getsignal(_signal.SIGINT) is _signal.SIG_DFL
+        finally:
+            _signal.signal(_signal.SIGINT, original_int)
+            _signal.signal(_signal.SIGTERM, original_term)
 
 
 class TestOrchestratorSelectMergeStrategy:
@@ -857,9 +608,7 @@ class TestPhaseClasses:
     def _make_ctx(config, **overrides):
         from src.core.phases.base import PhaseContext
         from src.core.state_machine import StateMachine
-        from src.core.message_bus import MessageBus
         from src.core.checkpoint import Checkpoint
-        from src.core.phase_runner import PhaseRunner
         from src.memory.store import MemoryStore
         from src.memory.summarizer import PhaseSummarizer
 
@@ -868,9 +617,7 @@ class TestPhaseClasses:
             git_tool=MagicMock(),
             gate_runner=MagicMock(),
             state_machine=StateMachine(),
-            message_bus=MessageBus(),
             checkpoint=MagicMock(),
-            phase_runner=PhaseRunner(),
             memory_store=MemoryStore(),
             summarizer=PhaseSummarizer(),
             trace_logger=None,

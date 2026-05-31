@@ -1,0 +1,49 @@
+diff --git a/models/auth/auth_token.go b/models/auth/auth_token.go
+index d01ddbca1e..69dc1f8d94 100644
+--- a/models/auth/auth_token.go
++++ b/models/auth/auth_token.go
+@@ -11,6 +11,7 @@ import (
+ 	"time"
+ 
+ 	"forgejo.org/models/db"
++	"forgejo.org/modules/optional"
+ 	"forgejo.org/modules/timeutil"
+ 	"forgejo.org/modules/util"
+ )
+@@ -21,6 +22,9 @@ var (
+ 	// Used to store long term authorization tokens.
+ 	LongTermAuthorization AuthorizationPurpose = "long_term_authorization"
+ 
++	// Long-term token for OAuth2/OIDC sign-ins; bounces through the IdP rather than auto-logging in.
++	LongTermAuthorizationSSO AuthorizationPurpose = "long_term_authorization_sso"
++
+ 	// Used to activate a user account.
+ 	UserActivation AuthorizationPurpose = "user_activation"
+ 
+@@ -39,7 +43,8 @@ type AuthorizationToken struct {
+ 	UID             int64  `xorm:"INDEX REFERENCES(user, id)"`
+ 	LookupKey       string `xorm:"INDEX UNIQUE"`
+ 	HashedValidator string
+-	Purpose         AuthorizationPurpose `xorm:"NOT NULL DEFAULT 'long_term_authorization'"`
++	Purpose         AuthorizationPurpose   `xorm:"NOT NULL DEFAULT 'long_term_authorization'"`
++	LoginSourceID   optional.Option[int64] `xorm:"INDEX REFERENCES(login_source, id)"`
+ 	Expiry          timeutil.TimeStamp
+ }
+ 
+@@ -60,7 +65,7 @@ func (authToken *AuthorizationToken) IsExpired() bool {
+ // GenerateAuthToken generates a new authentication token for the given user.
+ // It returns the lookup key and validator values that should be passed to the
+ // user via a long-term cookie.
+-func GenerateAuthToken(ctx context.Context, userID int64, expiry timeutil.TimeStamp, purpose AuthorizationPurpose) (lookupKey, validator string, err error) {
++func GenerateAuthToken(ctx context.Context, userID int64, loginSourceID optional.Option[int64], expiry timeutil.TimeStamp, purpose AuthorizationPurpose) (lookupKey, validator string, err error) {
+ 	// Request 64 random bytes. The first 32 bytes will be used for the lookupKey
+ 	// and the other 32 bytes will be used for the validator.
+ 	rBytes := util.CryptoRandomBytes(64)
+@@ -73,6 +78,7 @@ func GenerateAuthToken(ctx context.Context, userID int64, expiry timeutil.TimeSt
+ 		LookupKey:       lookupKey,
+ 		HashedValidator: HashValidator(rBytes[32:]),
+ 		Purpose:         purpose,
++		LoginSourceID:   loginSourceID,
+ 	})
+ 	return lookupKey, validator, err
+ }

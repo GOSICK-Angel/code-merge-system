@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import re
 from collections import Counter
 
 from src.memory.models import (
@@ -12,11 +14,46 @@ from src.memory.models import (
 from src.models.decision import FileDecisionRecord
 from src.models.state import MergeState
 
+logger = logging.getLogger(__name__)
+
 _MAX_KEY_DECISIONS = 10
 _MAX_PATTERNS = 10
 _DIR_DOMINANCE_THRESHOLD = 0.7
 _MAX_DECISION_ENTRIES = 50
 _NOTES_TRUNCATE = 200
+
+# Surface patterns Claude uses when it abandons specific analysis of a
+# diff and falls back to abstract pattern-matching. Letting these land
+# in memory creates a self-amplifying loop: the next run reads the
+# marker as "prior knowledge" and echoes it back instead of analyzing
+# the fresh content. Zod run cc477e1b — 37% of memory was poisoned this
+# way after four generations.
+#
+# Regex form because the LLM produces many surface variants
+# ("no diff content", "no actual diff content", "without diff content
+# available", etc.); a fixed substring list misses ~half of them.
+_EPISTEMIC_FAILURE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(no|without)\s+(actual\s+)?(diff|file)\s+content\b"),
+    re.compile(r"\bwithout\s+seeing\b"),
+    re.compile(r"\bno\s+actual\s+conflict\s+markers\b"),
+    re.compile(r"\b(based\s+on\s+)?prior\s+(pattern|phase)\s+decisions?\b"),
+    re.compile(r"\bpattern\s+decisions?\s+for\s+this\s+exact\s+file\b"),
+    re.compile(r"\bpattern\s+of\s+prior\s+decisions?\b"),
+    re.compile(r"\bcircuit\s+breaker\s+open\b"),
+    re.compile(r"\bllm\s+analysis\s+skipped\b"),
+)
+
+
+def _is_epistemically_empty(rationale: str | None) -> bool:
+    """Reject rationales that contain "model gave up" surface markers.
+
+    Used at memory-write time so a single failed analysis cannot infect
+    every subsequent run via the # Prior Knowledge channel.
+    """
+    if not rationale:
+        return False
+    lowered = rationale.lower()
+    return any(pat.search(lowered) for pat in _EPISTEMIC_FAILURE_PATTERNS)
 
 
 class PhaseSummarizer:
@@ -194,13 +231,16 @@ class PhaseSummarizer:
         # Opt-4: file_paths includes dir_prefix (top-2 path segments) for
         #        directory-level retrieval so sibling files share memory hits.
         ref_tag = f"upstream_ref:{self._upstream_ref}" if self._upstream_ref else ""
+        skipped_empty = 0
         for file_path, analysis in list(analyses.items())[:_MAX_DECISION_ENTRIES]:
+            raw_notes = analysis.analysis_notes or analysis.rationale or ""
+            if _is_epistemically_empty(raw_notes):
+                skipped_empty += 1
+                continue
             parts = file_path.split(os.sep)
             dir_prefix = os.sep.join(parts[:2]) if len(parts) > 1 else "."
             strategy = analysis.recommended_strategy.value
-            notes = (analysis.analysis_notes or analysis.rationale or "")[
-                :_NOTES_TRUNCATE
-            ]
+            notes = raw_notes[:_NOTES_TRUNCATE]
             content = (
                 f"{file_path}: {strategy} [{analysis.conflict_type.value}]"
                 f" confidence={analysis.overall_confidence:.2f}"
@@ -224,6 +264,13 @@ class PhaseSummarizer:
                     confidence=min(0.92, analysis.overall_confidence + 0.1),
                     confidence_level=ConfidenceLevel.EXTRACTED,
                 )
+            )
+
+        if skipped_empty:
+            logger.info(
+                "Skipped %d epistemically-empty conflict_analysis entries "
+                "(model gave up on diff — would poison future runs).",
+                skipped_empty,
             )
 
         summary = PhaseSummary(

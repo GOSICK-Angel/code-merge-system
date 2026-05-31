@@ -1,0 +1,8 @@
+sample_id: t1-0001
+tier: 1
+category: C
+expected_human: false
+description: |
+  Greeting helper. Upstream extends the signature with a loud flag;
+  fork only added a leading comment. Golden keeps both: upstream
+  signature change plus fork comment.

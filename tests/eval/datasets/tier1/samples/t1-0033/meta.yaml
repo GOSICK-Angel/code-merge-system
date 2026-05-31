@@ -1,0 +1,18 @@
+sample_id: t1-0033
+tier: 1
+category: C
+loss_class: null         # organic sample (not M-injected); concurrent independent feature additions
+expected_human: true     # golden preserves both sides → system should escalate (calibration: dataset.md §2.3)
+description: |
+  C-class coverage: routers/web/auth/oauth.go — fork and upstream both
+  insert code into SignInOAuth at the same point, with INDEPENDENT intents:
+    * fork records the initiating provider in the session
+      (Session.Set("oauth_provider", provider)) for the audit trail.
+    * upstream sets Session.Set("oauth_signin_silent", prompt=="none")
+      then calls Session.Release().
+  Golden keeps BOTH blocks (fork's audit Set first, then upstream's
+  silent-signin logic + Release; hand-resolved, `go build` verified) —
+  independent human output, NOT the system's merge (dataset.md §1.4). Both
+  additions are load-bearing; a directional take_current/take_target would
+  silently drop one feature. Under single-shot Tier-1 eval the expected
+  outcome is escalation (no human present).

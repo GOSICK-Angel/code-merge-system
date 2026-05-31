@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from src.llm.chunker import ChunkKind, CodeChunk
 from src.llm.relevance import (
     FULL_THRESHOLD,
@@ -94,26 +92,26 @@ class TestConflictBoost:
         assert score >= FULL_THRESHOLD
 
 
-class TestSecurityPatternBoost:
-    def test_security_pattern_boost(self) -> None:
-        ctx = ScoringContext(
-            diff_ranges=[],
-            security_patterns=["password"],
-        )
+class TestSecuritySensitiveBoost:
+    def test_security_sensitive_file_boosts_every_chunk(self) -> None:
+        # File-level signal: when the file is security-sensitive, every chunk
+        # gets the boost regardless of content, so off-diff security logic is
+        # not silently dropped during staged compression.
+        ctx = ScoringContext(diff_ranges=[], is_security_sensitive=True)
         scorer = RelevanceScorer(ctx)
-        chunk = _make_chunk(content="def check_password(pwd): pass")
-        score = scorer.score_chunk(chunk)
-        assert score > 0.3
+        sensitive = scorer.score_chunk(_make_chunk(content="def hello(): pass"))
 
-    def test_no_security_match(self) -> None:
-        ctx = ScoringContext(
-            diff_ranges=[],
-            security_patterns=["password"],
+        ctx_plain = ScoringContext(diff_ranges=[], is_security_sensitive=False)
+        plain = RelevanceScorer(ctx_plain).score_chunk(
+            _make_chunk(content="def hello(): pass")
         )
+        assert abs((sensitive - plain) - 0.3) < 1e-9
+
+    def test_non_sensitive_file_no_boost(self) -> None:
+        ctx = ScoringContext(diff_ranges=[], is_security_sensitive=False)
         scorer = RelevanceScorer(ctx)
-        chunk = _make_chunk(content="def hello(): pass")
-        base_score = scorer.score_chunk(chunk)
-        assert base_score < 0.3
+        score = scorer.score_chunk(_make_chunk(content="def hello(): pass"))
+        assert score < 0.3
 
 
 class TestReferenceBoost:
@@ -160,6 +158,35 @@ class TestScoreAndAssign:
         ]
         levels = scorer.score_and_assign(chunks, budget_tokens=100_000)
         assert all(v == RenderLevel.FULL for v in levels.values())
+
+    def test_same_named_chunks_do_not_collide(self) -> None:
+        # Two chunks share a name (overloaded def); only the second overlaps
+        # the diff. Keying by name would collapse them onto one level and
+        # mis-render the irrelevant one. Keying by (start_line, end_line)
+        # keeps an independent decision per chunk.
+        ctx = ScoringContext(diff_ranges=[(40, 45)])
+        scorer = RelevanceScorer(ctx)
+        chunks = [
+            _make_chunk(
+                name="handle",
+                start_line=1,
+                end_line=5,
+                content="def handle(): legacy()",
+            ),
+            _make_chunk(
+                name="handle",
+                start_line=40,
+                end_line=45,
+                content="def handle(): current()",
+            ),
+        ]
+        levels = scorer.score_and_assign(chunks, budget_tokens=100_000)
+        # One key per chunk — no collapse.
+        assert len(levels) == 2
+        assert (1, 5) in levels and (40, 45) in levels
+        # The diff-overlapping chunk is FULL; the unrelated one is not promoted.
+        assert levels[(40, 45)] == RenderLevel.FULL
+        assert levels[(1, 5)] != RenderLevel.FULL
 
     def test_budget_demotion_full_to_signature(self) -> None:
         ctx = ScoringContext(diff_ranges=[(1, 5)])
@@ -221,4 +248,49 @@ class TestScoreAndAssign:
             ),
         ]
         levels = scorer.score_and_assign(chunks, budget_tokens=100_000)
-        assert levels["helper"] in (RenderLevel.FULL, RenderLevel.SIGNATURE)
+        assert levels[(50, 55)] in (RenderLevel.FULL, RenderLevel.SIGNATURE)
+
+    def test_name_boost_requires_whole_identifier(self) -> None:
+        # The FULL chunk references get_user (whole identifier) and contains
+        # "width" (which embeds the substring "id"). A chunk named "id" must
+        # not be boosted off that substring; "get_user" must be.
+        ctx = ScoringContext(diff_ranges=[(1, 10)])
+        scorer = RelevanceScorer(ctx)
+        chunks = [
+            _make_chunk(
+                name="render",
+                kind=ChunkKind.FUNCTION,
+                start_line=1,
+                end_line=10,
+                content="def render(): return self.width + get_user()",
+            ),
+            _make_chunk(
+                name="get_user",
+                kind=ChunkKind.STATEMENT,
+                start_line=50,
+                end_line=52,
+                content="unrelated",
+                signature="get_user",
+            ),
+            _make_chunk(
+                name="id",
+                kind=ChunkKind.STATEMENT,
+                start_line=60,
+                end_line=62,
+                content="unrelated",
+                signature="id",
+            ),
+        ]
+        levels = scorer.score_and_assign(chunks, budget_tokens=100_000)
+        assert levels[(1, 10)] == RenderLevel.FULL
+        assert levels[(50, 52)] == RenderLevel.SIGNATURE  # boosted by get_user
+        assert levels[(60, 62)] == RenderLevel.DROP  # "id" only as substring
+
+
+def test_identifier_tokens_whole_word_only() -> None:
+    from src.llm.relevance import _identifier_tokens
+
+    tokens = _identifier_tokens(["self.width + get_user()"])
+    assert "width" in tokens
+    assert "get_user" in tokens
+    assert "id" not in tokens

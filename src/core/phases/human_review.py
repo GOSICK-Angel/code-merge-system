@@ -8,7 +8,7 @@ from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.models.decision import DecisionSource, FileDecisionRecord, MergeDecision
 from src.models.diff import FileStatus, RiskLevel
 from src.models.plan import MergePhase
-from src.models.plan_review import PlanHumanDecision
+from src.models.plan_review import PlanHumanDecision, UserDecisionItem
 from src.models.state import MergeState, SystemStatus
 from src.tools.merge_plan_report import write_merge_plan_report
 from src.tools.report_writer import write_plan_review_report
@@ -16,6 +16,50 @@ from src.tools.commit_replayer import CommitReplayer
 from src.tools.git_committer import GitCommitter
 
 logger = logging.getLogger(__name__)
+
+
+def _surface_internal_escalations(state: MergeState) -> int:
+    """方案6 part1: register internal escalate(0.0) records in the human gate.
+
+    Escalations created outside the plan-stage gate — commit-replay / skipped
+    auto-merge layers, and the catch-up / deadlock-guard fallbacks in this phase
+    — only land in ``file_decision_records``; without this they never appear on
+    the AWAITING_HUMAN screen and the operator cannot resolve them in-run. Append
+    an undecided ``UserDecisionItem`` for every ``ESCALATE_HUMAN`` record
+    (``source != HUMAN``) not already represented in the gate, so the O-L4 guard
+    holds AWAITING_HUMAN until each is decided. The report-phase DROPPED
+    assertion is the backstop for any still undecided at completion.
+    """
+    from src.core.phases.auto_merge import _conflict_marker_decision_options
+
+    gated = {it.file_path for it in state.pending_user_decisions} | set(
+        state.human_decision_requests.keys()
+    )
+    new_items = [
+        UserDecisionItem(
+            item_id=f"internal_escalation_{fp}",
+            file_path=fp,
+            description=(
+                f"File '{fp}' was escalated internally "
+                f"({(rec.rationale or '').strip()[:120]}) and never reached the "
+                "human gate. Decide how to resolve it before the merge completes."
+            ),
+            risk_context="internal_escalation",
+            current_classification=RiskLevel.HUMAN_REQUIRED.value,
+            options=_conflict_marker_decision_options(),
+        )
+        for fp, rec in state.file_decision_records.items()
+        if rec.decision == MergeDecision.ESCALATE_HUMAN
+        and rec.decision_source != DecisionSource.HUMAN
+        and fp not in gated
+    ]
+    if new_items:
+        state.pending_user_decisions.extend(new_items)
+        logger.info(
+            "方案6: surfaced %d internal escalation(s) into the human gate",
+            len(new_items),
+        )
+    return len(new_items)
 
 
 class HumanReviewPhase(Phase):
@@ -31,6 +75,40 @@ class HumanReviewPhase(Phase):
     async def execute(self, state: MergeState, ctx: PhaseContext) -> PhaseOutcome:
         logger.info("Entering AWAITING_HUMAN status")
 
+        # 方案6 part1: pull any internal escalation that bypassed the plan-stage
+        # gate (commit-replay / skipped auto-merge layers) into the gate so it is
+        # decidable in-run; the O-L4 guard then holds AWAITING_HUMAN until decided.
+        _surface_internal_escalations(state)
+
+        # Bug 1 fix (zod validation, 2026-05-28): surfaced items that come
+        # back with user_choice filled must be actualized here. Without this,
+        # the run path (resume answers plan + conflict rounds, Case 1 fires,
+        # transitions to JUDGE_REVIEWING) never re-enters AUTO_MERGING — so
+        # the O-L5 dispatcher in auto_merge.py never fires and the underlying
+        # FileDecisionRecord stays ESCALATE_HUMAN/auto_executor. The DROPPED
+        # backstop catches it as partial_failure, but the user's take_target
+        # answer was effectively lost. Dispatch surfaced + decided items here.
+        from src.tools.user_choice_dispatcher import dispatch_user_choice
+
+        surfaced_decided = [
+            it
+            for it in state.pending_user_decisions
+            if it.risk_context == "internal_escalation" and it.user_choice is not None
+        ]
+        if surfaced_decided:
+            dispatched = await dispatch_user_choice(
+                state,
+                ctx.git_tool,
+                surfaced_decided,
+                phase="human_review",
+            )
+            if dispatched:
+                logger.info(
+                    "Bug-1 fix: dispatched %d surfaced internal-escalation "
+                    "user_choice(s) to FileDecisionRecord",
+                    len(dispatched),
+                )
+
         # O-6: if conflict decisions are still pending, go to Case 1 first.
         _has_pending_conflict_decisions = bool(
             state.human_decision_requests
@@ -41,7 +119,8 @@ class HumanReviewPhase(Phase):
 
         # Case 0: judge review already ran and paused for human acknowledgement.
         # If the user set `state.judge_resolution` via the CLI (resume
-        # --decisions), route accordingly so --no-tui users are not deadlocked.
+        # --decisions), route accordingly so non-Web (CI/headless) users are
+        # not deadlocked.
         if (
             not _has_pending_conflict_decisions
             and state.judge_verdict is not None
@@ -171,7 +250,18 @@ class HumanReviewPhase(Phase):
                 executor = ctx.agents["executor"]
                 executed = 0
                 for req in state.human_decision_requests.values():
-                    if req.file_path in state.file_decision_records:
+                    # Skip only if this file is ALREADY resolved by a human
+                    # decision. A file that was auto-merged earlier in the run
+                    # (e.g. a rerun's auto_merge wrote a SEMANTIC_MERGE record)
+                    # and then escalated to the operator must have the human's
+                    # override executed — otherwise the auto record persists and
+                    # the operator's take_target/take_current/manual_patch is
+                    # silently dropped, committing the rejected auto-merge.
+                    existing = state.file_decision_records.get(req.file_path)
+                    if (
+                        existing is not None
+                        and existing.decision_source == DecisionSource.HUMAN
+                    ):
                         continue
                     try:
                         record = await executor.execute_human_decision(req, state)
@@ -211,13 +301,6 @@ class HumanReviewPhase(Phase):
                             "that missed AUTO_MERGE on this resume",
                             len(binary_catchup),
                         )
-                        from src.models.decision import (
-                            DecisionSource,
-                            FileDecisionRecord,
-                            MergeDecision,
-                        )
-                        from src.models.diff import FileStatus
-
                         for fp in binary_catchup:
                             try:
                                 content_bytes = ctx.git_tool.get_file_bytes(
@@ -289,13 +372,6 @@ class HumanReviewPhase(Phase):
                             "file(s) that missed AUTO_MERGE on this resume",
                             len(text_catchup),
                         )
-                        from src.models.decision import (
-                            DecisionSource,
-                            FileDecisionRecord,
-                            MergeDecision,
-                        )
-                        from src.models.diff import FileStatus
-
                         for fp in text_catchup:
                             try:
                                 content = ctx.git_tool.get_file_content(

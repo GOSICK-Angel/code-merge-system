@@ -156,6 +156,17 @@ def run_command_impl(
 
     _preflight_check_api_keys(config)
 
+    # P4: surface high-sensitivity config advisories (chunk/max_tokens
+    # self-truncation, reasoning-model floor, missing compile gate) at run start,
+    # not only on `merge validate` — these silently degrade merge behavior.
+    from src.cli.preflight import config_preflight_warnings
+
+    for warn in config_preflight_warnings(config):
+        if ci:
+            print(f"WARNING: {warn}")
+        else:
+            console.print(f"[yellow]⚠ {warn}[/yellow]")
+
     state = MergeState(config=config, dry_run=dry_run)
     if not ci:
         console.print(f"[blue]Starting merge run {state.run_id}[/blue]")
@@ -194,6 +205,17 @@ def run_command_impl(
         else str(final_state.status)
     )
     if final_state.status == SystemStatus.COMPLETED:
+        # P1: mirror resume.py #7B — a COMPLETED run that recorded errors
+        # (deterministic findings, gate-skips, partial-failure signals) is NOT a
+        # clean green. Surface it and exit non-zero instead of printing success.
+        if final_state.errors:
+            console.print(
+                "[yellow]Merge completed WITH WARNINGS "
+                f"({len(final_state.errors)} recorded issue(s)):[/yellow]"
+            )
+            for err in final_state.errors[-5:]:
+                console.print(f"  - {err.get('message', err)}")
+            sys.exit(EXIT_PARTIAL_FAILURE)
         console.print("[green]Merge completed successfully![/green]")
     elif final_state.status == SystemStatus.AWAITING_HUMAN:
         console.print("[yellow]Paused: awaiting human decisions[/yellow]")

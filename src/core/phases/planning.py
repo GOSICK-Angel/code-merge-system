@@ -10,6 +10,7 @@ from src.agents.guardrails import (
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.models.plan import MergePhase
 from src.models.state import MergeState, PhaseResult, SystemStatus
+from src.tools.merge_plan_report import write_merge_plan_report
 
 
 class PlanningPhase(Phase):
@@ -62,6 +63,7 @@ class PlanningPhase(Phase):
                 state.merge_plan = ctx.coordinator.enforce_batch_limits(
                     state.merge_plan, file_size_hints=size_hints
                 )
+            write_merge_plan_report(state)
 
 
 def _build_file_size_hints(state: MergeState) -> dict[str, int]:

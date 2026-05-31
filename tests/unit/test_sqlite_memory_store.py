@@ -72,80 +72,8 @@ class TestAddEntry:
         store.add_entry(_entry("high confidence entry", confidence=0.99))
         for i in range(MAX_ENTRIES):
             store.add_entry(_entry(f"low {i}", confidence=0.01))
-        results = store.query_by_type(MemoryEntryType.PATTERN, limit=MAX_ENTRIES)
-        assert any("high confidence" in r.content for r in results)
-
-
-class TestQueryByPath:
-    def _populated(self, store: SQLiteMemoryStore) -> SQLiteMemoryStore:
-        store.add_entry(
-            _entry(
-                "api model",
-                file_paths=["api/models/user.py", "api/models/team.py"],
-                tags=["api"],
-            )
-        )
-        store.add_entry(
-            _entry("vendor lib", file_paths=["vendor/lib.py"], tags=["vendor"])
-        )
-        return store
-
-    def test_exact_path(self, store: SQLiteMemoryStore) -> None:
-        self._populated(store)
-        results = store.query_by_path("api/models/user.py")
-        assert len(results) >= 1
-        assert any("api" in r.content for r in results)
-
-    def test_prefix_path(self, store: SQLiteMemoryStore) -> None:
-        self._populated(store)
-        results = store.query_by_path("api/models/")
-        assert len(results) >= 1
-
-    def test_no_match(self, store: SQLiteMemoryStore) -> None:
-        self._populated(store)
-        assert store.query_by_path("frontend/components/button.tsx") == []
-
-    def test_limit_respected(self, store: SQLiteMemoryStore) -> None:
-        for i in range(10):
-            store.add_entry(_entry(f"p{i}", file_paths=["api/x.py"]))
-        assert len(store.query_by_path("api/x.py", limit=3)) == 3
-
-
-class TestQueryByTags:
-    def test_matches_one_tag(self, store: SQLiteMemoryStore) -> None:
-        store.add_entry(_entry("A", tags=["alpha", "beta"]))
-        store.add_entry(_entry("B", tags=["gamma"]))
-        results = store.query_by_tags(["alpha"])
-        assert len(results) == 1
-        assert results[0].content == "A"
-
-    def test_matches_any_tag(self, store: SQLiteMemoryStore) -> None:
-        store.add_entry(_entry("A", tags=["alpha"]))
-        store.add_entry(_entry("B", tags=["beta"]))
-        results = store.query_by_tags(["alpha", "beta"])
-        assert len(results) == 2
-
-    def test_no_match(self, store: SQLiteMemoryStore) -> None:
-        store.add_entry(_entry("A", tags=["alpha"]))
-        assert store.query_by_tags(["gamma"]) == []
-
-
-class TestQueryByType:
-    def test_filters_by_type(self, store: SQLiteMemoryStore) -> None:
-        store.add_entry(_entry("P", entry_type=MemoryEntryType.PATTERN))
-        store.add_entry(
-            MemoryEntry(
-                entry_type=MemoryEntryType.DECISION,
-                phase="auto_merge",
-                content="D",
-            )
-        )
-        assert len(store.query_by_type(MemoryEntryType.PATTERN)) == 1
-        assert len(store.query_by_type(MemoryEntryType.DECISION)) == 1
-
-    def test_limit_zero(self, store: SQLiteMemoryStore) -> None:
-        store.add_entry(_entry("X"))
-        assert store.query_by_type(MemoryEntryType.PATTERN, limit=0) == []
+        contents = " ".join(e.content for e in store.to_memory().entries)
+        assert "high confidence" in contents
 
 
 class TestPhaseSummary:

@@ -122,7 +122,7 @@ async def test_analyze_file_prepends_profile_block_to_context():
 
     captured: dict[str, str] = {}
 
-    def fake_build(file_diff, base, current, target, context):
+    def fake_build(file_diff, base, current, target, context, **kwargs):
         captured["context"] = context or ""
         return "PROMPT"
 
@@ -172,7 +172,7 @@ async def test_analyze_file_no_profile_keeps_original_context_unchanged():
 
     captured: dict[str, str] = {}
 
-    def fake_build(file_diff, base, current, target, context):
+    def fake_build(file_diff, base, current, target, context, **kwargs):
         captured["context"] = context or ""
         return "PROMPT"
 

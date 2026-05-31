@@ -128,7 +128,7 @@ async def test_enhance_risk_scores_injects_memory_for_gray_zone():
     _attach_memory(agent, "GRAY_ZONE_HINT_TEST", "planning")
 
     cfg = MergeConfig(upstream_ref="upstream/main", fork_ref="origin/feat")
-    cfg.llm_risk_scoring.enabled = True
+    cfg.llm_assist.mode = "always"
     fd = FileDiff(
         file_path="middle.py",
         file_status=FileStatus.MODIFIED,
@@ -141,6 +141,106 @@ async def test_enhance_risk_scores_injects_memory_for_gray_zone():
     assert captured, "LLM should be invoked for gray-zone file"
     assert "# Prior Knowledge" in captured[0]
     assert "GRAY_ZONE_HINT_TEST" in captured[0]
+
+
+@pytest.mark.asyncio
+async def test_enhance_risk_scores_fans_out_in_parallel():
+    """Fix 5: 121-file gray-zone rescoring must not be sequential.
+
+    Asserts the LLM-fanned-out path goes through ParallelFileRunner so a
+    slow/wedged single call cannot freeze the whole planning phase the
+    way it did during the forgejo run that idled for 21min with 0
+    cost_summary entries.
+    """
+    from src.agents import planner_agent as planner_module
+
+    agent = _make_planner()
+    captured: list[str] = []
+
+    async def fake_call(messages, system=None, **_):
+        captured.append(messages[0]["content"])
+        return '{"llm_risk_score": 0.7}'
+
+    agent._call_llm_with_retry = AsyncMock(side_effect=fake_call)
+
+    cfg = MergeConfig(upstream_ref="upstream/main", fork_ref="origin/feat")
+    cfg.llm_assist.mode = "always"
+    diffs = [
+        FileDiff(
+            file_path=f"src/f{i}.py",
+            file_status=FileStatus.MODIFIED,
+            risk_level=RiskLevel.AUTO_RISKY,
+            risk_score=0.5,
+            change_category=FileChangeCategory.C,
+        )
+        for i in range(6)
+    ]
+
+    from unittest.mock import MagicMock
+
+    spy = MagicMock(wraps=planner_module.ParallelFileRunner.from_api_key_env_list)
+    with patch.object(planner_module.ParallelFileRunner, "from_api_key_env_list", spy):
+        result = await agent._enhance_risk_scores(diffs, cfg)
+
+    # ParallelFileRunner must be invoked (with > 1 gray-zone file so the
+    # fan-out branch genuinely fires).
+    assert spy.call_count >= 1
+    # Every gray-zone file gets rescored (LLM called once per file).
+    assert len(captured) == 6
+    # Output preserves order — index ↔ file_path mapping survives the
+    # parallel runner's result merging.
+    for i, fd in enumerate(result):
+        assert fd.file_path == f"src/f{i}.py"
+
+
+@pytest.mark.asyncio
+async def test_enhance_risk_scores_emits_progress_events():
+    """Each gray-zone rescore completion fires a progress ActivityEvent
+    so the Web UI can render planner activity instead of an opaque
+    'PLANNING…' spinner during the (potentially-long) fan-out."""
+    agent = _make_planner()
+
+    async def fake_call(messages, system=None, **_):
+        return '{"llm_risk_score": 0.6}'
+
+    agent._call_llm_with_retry = AsyncMock(side_effect=fake_call)
+
+    events: list[object] = []
+
+    def collect(ev: object) -> None:
+        events.append(ev)
+
+    agent.set_activity_callback(collect)
+
+    cfg = MergeConfig(upstream_ref="upstream/main", fork_ref="origin/feat")
+    cfg.llm_assist.mode = "always"
+    diffs = [
+        FileDiff(
+            file_path=f"src/f{i}.py",
+            file_status=FileStatus.MODIFIED,
+            risk_level=RiskLevel.AUTO_RISKY,
+            risk_score=0.5,
+            change_category=FileChangeCategory.C,
+        )
+        for i in range(3)
+    ]
+    await agent._enhance_risk_scores(diffs, cfg)
+
+    progress = [
+        e
+        for e in events
+        if getattr(e, "action", None) == "llm_risk_rescore"
+        and getattr(e, "event_type", None) == "progress"
+    ]
+    assert len(progress) >= 3, (
+        f"expected >=3 rescore progress events, got {len(progress)}: {events}"
+    )
+    # Final event must report completed == total so the UI can clear
+    # the in-flight indicator.
+    final = progress[-1]
+    extra = getattr(final, "extra", {}) or {}
+    assert extra.get("total") == 3
+    assert extra.get("completed") == 3
 
 
 def _build_state(cfg: MergeConfig) -> MergeState:

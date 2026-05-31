@@ -1,25 +1,30 @@
-"""Unit tests for the first-run wizard's forks-profile draft offer.
+"""Unit tests for the non-interactive forks-profile drafter.
 
-`_offer_forks_profile_draft` is called once during interactive setup
-after the config has been written. It surveys the fork's deleted-file
-count and, when the divergence crosses
-``FORKS_PROFILE_INIT_THRESHOLD``, asks the user whether to generate a
-draft yaml + open it in ``$EDITOR``.
+``draft_forks_profile_file`` is the post-PR-3 entry point that the
+Web UI launcher calls when the user ticks the "draft forks-profile"
+checkbox during setup. The previous interactive
+``_offer_forks_profile_draft`` + ``_draft_and_open_editor`` pair was
+removed when the browser took over the wizard.
 
-The trigger uses ``git diff --diff-filter=D`` directly so the prompt
-runs in milliseconds even on large repos; the heavyweight drafter
-only fires after explicit user consent.
+These tests pin three contracts the launcher relies on:
+- Existing ``.merge/forks-profile.yaml`` is never overwritten
+  (returns ``None``, leaves the file untouched).
+- A real draft writes a yaml with the canonical "Auto-drafted"
+  header — confirming we go through ``render_profile_yaml`` and not
+  some stubbed code path.
+- Git failures raise (the launcher catches and logs).
 """
 
 from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+
+import pytest
 
 from src.cli.commands.setup import (
     FORKS_PROFILE_INIT_THRESHOLD,
-    _offer_forks_profile_draft,
+    draft_forks_profile_file,
 )
 
 
@@ -33,11 +38,6 @@ def _git(repo: Path, *args: str) -> str:
 
 
 def _init_repo_with_n_deletions(repo: Path, n_deleted: int) -> tuple[str, str]:
-    """Build a repo where the fork branch has deleted ``n_deleted`` files.
-
-    Returns ``(upstream_ref, fork_ref)`` so the test can call the offer
-    function with the same refs the real wizard would use.
-    """
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
     _git(repo, "config", "user.email", "t@t")
     _git(repo, "config", "user.name", "Test")
@@ -63,87 +63,34 @@ def _init_repo_with_n_deletions(repo: Path, n_deleted: int) -> tuple[str, str]:
     return "upstream-main", "fork-main"
 
 
-class TestThresholdGate:
-    def test_below_threshold_silently_skips(self, tmp_path: Path):
+class TestDraftForksProfileFile:
+    def test_writes_yaml_when_not_present(self, tmp_path: Path) -> None:
         upstream, fork = _init_repo_with_n_deletions(
-            tmp_path, FORKS_PROFILE_INIT_THRESHOLD - 5
+            tmp_path, FORKS_PROFILE_INIT_THRESHOLD + 5
         )
-        with patch("src.cli.commands.setup._confirm") as mock_confirm:
-            _offer_forks_profile_draft(upstream, fork, str(tmp_path))
-        mock_confirm.assert_not_called()
-        assert not (tmp_path / ".merge" / "forks-profile.yaml").exists()
+        out = draft_forks_profile_file(upstream, fork, str(tmp_path))
+        assert out is not None
+        text = out.read_text(encoding="utf-8")
+        assert "version: 1" in text
+        assert "Auto-drafted" in text
 
-    def test_at_or_above_threshold_prompts_user(self, tmp_path: Path):
-        upstream, fork = _init_repo_with_n_deletions(
-            tmp_path, FORKS_PROFILE_INIT_THRESHOLD + 2
-        )
-        with patch(
-            "src.cli.commands.setup._confirm", return_value=False
-        ) as mock_confirm:
-            _offer_forks_profile_draft(upstream, fork, str(tmp_path))
-        mock_confirm.assert_called_once()
-
-
-class TestExistingProfileShortCircuits:
-    def test_skips_when_profile_already_exists(self, tmp_path: Path):
+    def test_returns_none_when_profile_already_exists(self, tmp_path: Path) -> None:
         upstream, fork = _init_repo_with_n_deletions(
             tmp_path, FORKS_PROFILE_INIT_THRESHOLD + 5
         )
         merge_dir = tmp_path / ".merge"
         merge_dir.mkdir()
-        (merge_dir / "forks-profile.yaml").write_text("version: 1\n", encoding="utf-8")
-        with patch("src.cli.commands.setup._confirm") as mock_confirm:
-            _offer_forks_profile_draft(upstream, fork, str(tmp_path))
-        mock_confirm.assert_not_called()
+        existing = merge_dir / "forks-profile.yaml"
+        existing.write_text("version: 1\n# preserved\n", encoding="utf-8")
 
+        out = draft_forks_profile_file(upstream, fork, str(tmp_path))
 
-class TestUserDeclines:
-    def test_no_decision_does_not_write_yaml(self, tmp_path: Path):
-        upstream, fork = _init_repo_with_n_deletions(
-            tmp_path, FORKS_PROFILE_INIT_THRESHOLD + 5
-        )
-        with patch("src.cli.commands.setup._confirm", return_value=False):
-            _offer_forks_profile_draft(upstream, fork, str(tmp_path))
-        assert not (tmp_path / ".merge" / "forks-profile.yaml").exists()
+        assert out is None
+        assert existing.read_text(encoding="utf-8") == "version: 1\n# preserved\n"
 
-
-class TestUserAccepts:
-    def test_yes_writes_yaml_and_invokes_editor(self, tmp_path: Path):
-        upstream, fork = _init_repo_with_n_deletions(
-            tmp_path, FORKS_PROFILE_INIT_THRESHOLD + 5
-        )
-        with (
-            patch("src.cli.commands.setup._confirm", return_value=True),
-            patch("click.edit") as mock_edit,
-        ):
-            _offer_forks_profile_draft(upstream, fork, str(tmp_path))
-        profile = tmp_path / ".merge" / "forks-profile.yaml"
-        assert profile.exists()
-        text = profile.read_text(encoding="utf-8")
-        assert "version: 1" in text
-        # Auto-drafted is the canonical header from render_profile_yaml —
-        # confirms we go through the production drafter, not a test path.
-        assert "Auto-drafted" in text
-        mock_edit.assert_called_once()
-        kwargs = mock_edit.call_args.kwargs
-        assert kwargs.get("filename") == str(profile)
-
-    def test_yes_with_editor_failure_still_keeps_yaml(self, tmp_path: Path):
-        upstream, fork = _init_repo_with_n_deletions(
-            tmp_path, FORKS_PROFILE_INIT_THRESHOLD + 5
-        )
-        with (
-            patch("src.cli.commands.setup._confirm", return_value=True),
-            patch("click.edit", side_effect=RuntimeError("no editor")),
-        ):
-            _offer_forks_profile_draft(upstream, fork, str(tmp_path))
-        profile = tmp_path / ".merge" / "forks-profile.yaml"
-        assert profile.exists()
-
-
-class TestGitFailureSilentlySkips:
-    def test_non_git_repo_does_not_raise(self, tmp_path: Path):
-        # No `git init` — `git merge-base` will fail.
-        with patch("src.cli.commands.setup._confirm") as mock_confirm:
-            _offer_forks_profile_draft("upstream/main", "HEAD", str(tmp_path))
-        mock_confirm.assert_not_called()
+    def test_raises_on_non_git_repo(self, tmp_path: Path) -> None:
+        # No `git init` — the underlying GitTool / merge-base call
+        # cannot succeed. ``draft_forks_profile_file`` propagates the
+        # error so the launcher's try/except can log it and continue.
+        with pytest.raises(Exception):
+            draft_forks_profile_file("upstream/main", "HEAD", str(tmp_path))

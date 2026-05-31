@@ -1,4 +1,5 @@
 name: memory_extractor
+version: 1
 inputs:
   - config
   - errors
@@ -6,6 +7,8 @@ inputs:
   - judge_verdicts_log
   - judge_repair_rounds
   - coordinator_directives
+  - dependency_graph
+  - file_categories
 output_schema: list[MemoryEntry]
 gates:
   - M-SYSTEM

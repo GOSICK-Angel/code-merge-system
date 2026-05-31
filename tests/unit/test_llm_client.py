@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from pydantic import BaseModel
@@ -8,6 +10,8 @@ from src.llm.client import (
     ModelOutputError,
     OpenAIClient,
     ParseError,
+    _build_httpx_timeout,
+    uses_openai_wire,
 )
 from src.llm.prompt_caching import CacheStrategy
 from src.models.config import AgentLLMConfig
@@ -41,6 +45,35 @@ def _make_openai_client() -> OpenAIClient:
             max_tokens=1024,
             max_retries=3,
         )
+
+
+class TestBuildHttpxTimeout:
+    """Fix 6: ``request_timeout_seconds`` must drive the httpx ``read``
+    timeout end-to-end. The previous ``min(total, 90)`` cap silently
+    truncated user config — a 300s setting only ever produced a 90s
+    read timeout, which is why planner_judge on Opus timed out for the
+    forgejo run even though config said 300s."""
+
+    def test_read_timeout_honors_full_request_timeout(self):
+        timeout = _build_httpx_timeout(300.0)
+        assert timeout.read == 300.0, (
+            "read timeout must equal the full request_timeout_seconds, "
+            "not the legacy 90s cap"
+        )
+
+    def test_short_timeout_passes_through(self):
+        # Users who want to fail fast (CI, behind Cloudflare with 120s
+        # proxy timeout) can still set a small value and have it honored.
+        timeout = _build_httpx_timeout(45.0)
+        assert timeout.read == 45.0
+
+    def test_connect_write_pool_unchanged(self):
+        # Only ``read`` was capped — the other phases stay at the values
+        # tuned for "dead pool entry shouldn't hang the request".
+        timeout = _build_httpx_timeout(300.0)
+        assert timeout.connect == 10.0
+        assert timeout.write == 30.0
+        assert timeout.pool == 10.0
 
 
 class TestAnthropicClientInit:
@@ -773,6 +806,150 @@ class TestLLMClientFactory:
                         LLMClientFactory.create(config)
 
 
+class TestProviderRegistry:
+    """Gateway: ``openai_compatible`` is an OpenAI-wire provider for
+    self-hosted / proxied gateways, distinguished only by base_url + model.
+    The factory is registry-driven so adding such a provider stays neutral
+    (no vendor names baked into source)."""
+
+    def test_uses_openai_wire_helper(self):
+        assert uses_openai_wire("openai") is True
+        assert uses_openai_wire("openai_compatible") is True
+        assert uses_openai_wire("anthropic") is False
+        assert uses_openai_wire("nonsense") is False
+
+    def test_config_accepts_openai_compatible_provider(self):
+        cfg = AgentLLMConfig(
+            provider="openai_compatible",
+            model="internal-model",
+            api_key_env="GW_KEY",
+            api_base_url_env="GW_URL",
+        )
+        assert cfg.provider == "openai_compatible"
+
+    def test_creates_openai_compatible_client_with_explicit_base_url(self):
+        config = AgentLLMConfig(
+            provider="openai_compatible",
+            model="internal-model",
+            api_key_env="GW_KEY",
+            api_base_url_env="GW_URL",
+        )
+        with patch.dict(
+            "os.environ",
+            {"GW_KEY": "k", "GW_URL": "https://gw.internal/v1"},
+        ):
+            with patch("openai.AsyncOpenAI") as mock:
+                client = LLMClientFactory.create(config)
+        assert isinstance(client, OpenAIClient)
+        assert mock.call_args.kwargs["base_url"] == "https://gw.internal/v1"
+
+    def test_openai_compatible_does_not_auto_append_v1(self):
+        # Internal gateways vary — the user supplies the complete URL; the
+        # factory must not silently rewrite it the way it does for "openai".
+        config = AgentLLMConfig(
+            provider="openai_compatible",
+            model="internal-model",
+            api_key_env="GW_KEY",
+            api_base_url_env="GW_URL",
+        )
+        with patch.dict(
+            "os.environ",
+            {"GW_KEY": "k", "GW_URL": "https://gw.internal/api"},
+        ):
+            with patch("openai.AsyncOpenAI") as mock:
+                LLMClientFactory.create(config)
+        assert mock.call_args.kwargs["base_url"] == "https://gw.internal/api"
+
+    def test_openai_compatible_requires_base_url(self):
+        config = AgentLLMConfig(
+            provider="openai_compatible",
+            model="internal-model",
+            api_key_env="GW_KEY",
+        )
+        with patch.dict("os.environ", {"GW_KEY": "k"}, clear=False):
+            os.environ.pop("OPENAI_BASE_URL", None)
+            with patch("openai.AsyncOpenAI"):
+                with pytest.raises(
+                    EnvironmentError, match="requires an explicit base URL"
+                ):
+                    LLMClientFactory.create(config)
+
+    def test_openai_compatible_bumps_reasoning_model_max_tokens(self):
+        # The reasoning-model guard applies regardless of which OpenAI-wire
+        # provider routes the request.
+        config = AgentLLMConfig(
+            provider="openai_compatible",
+            model="gpt-5.4",
+            max_tokens=8192,
+            api_key_env="GW_KEY",
+            api_base_url_env="GW_URL",
+        )
+        with patch.dict(
+            "os.environ",
+            {"GW_KEY": "k", "GW_URL": "https://gw.internal/v1"},
+        ):
+            with patch("openai.AsyncOpenAI"):
+                client = LLMClientFactory.create(config)
+        assert client.max_tokens == 32768
+        assert client.reasoning_effort == "medium"
+
+    def test_openai_appends_v1_to_custom_base_url(self):
+        config = AgentLLMConfig(
+            provider="openai",
+            model="gpt-4o",
+            api_key_env="OPENAI_API_KEY",
+            api_base_url_env="MY_PROXY_URL",
+        )
+        with patch.dict(
+            "os.environ",
+            {"OPENAI_API_KEY": "k", "MY_PROXY_URL": "https://proxy.example"},
+        ):
+            with patch("openai.AsyncOpenAI") as mock:
+                LLMClientFactory.create(config)
+        assert mock.call_args.kwargs["base_url"] == "https://proxy.example/v1"
+
+
+class TestFactoryOverrides:
+    """The Setup connectivity probe builds clients with explicit creds via
+    ``api_key_override`` / ``base_url_override`` so it never has to mutate
+    ``os.environ`` just to test an un-saved key."""
+
+    def test_api_key_override_skips_env_lookup(self):
+        config = AgentLLMConfig(
+            provider="anthropic",
+            model="claude-opus-4-6",
+            api_key_env="UNSET_KEY_SHOULD_NOT_BE_READ",
+        )
+        with patch("anthropic.AsyncAnthropic") as mock:
+            client = LLMClientFactory.create(config, api_key_override="explicit")
+        assert isinstance(client, AnthropicClient)
+        assert mock.call_args.kwargs["api_key"] == "explicit"
+
+    def test_base_url_override_still_appends_v1_for_openai(self):
+        config = AgentLLMConfig(
+            provider="openai",
+            model="gpt-4o",
+            api_key_env="OPENAI_API_KEY",
+        )
+        with patch("openai.AsyncOpenAI") as mock:
+            LLMClientFactory.create(
+                config, api_key_override="k", base_url_override="https://gw"
+            )
+        assert mock.call_args.kwargs["base_url"] == "https://gw/v1"
+
+    def test_base_url_override_not_appended_for_openai_compatible(self):
+        config = AgentLLMConfig(
+            provider="openai_compatible",
+            model="internal-model",
+            api_key_env="GW_KEY",
+        )
+        with patch("openai.AsyncOpenAI") as mock:
+            LLMClientFactory.create(
+                config, api_key_override="k", base_url_override="https://gw/api"
+            )
+        assert mock.call_args.kwargs["base_url"] == "https://gw/api"
+
+
 class TestAnthropicThinkingBlockParsing:
     """O-B1: Anthropic responses may start with a ThinkingBlock that has no
     ``.text`` attribute. The client must skip it and extract the first text
@@ -877,3 +1054,78 @@ class TestSurrogateSanitization:
         await client.complete([{"role": "user", "content": clean}])
         call_kwargs = client._client.messages.create.call_args.kwargs
         assert call_kwargs["messages"][0]["content"] == clean
+
+
+class TestCompleteMetaStopReason:
+    """``complete_meta`` exposes provider stop_reason normalised across
+    providers. The merge-output quality gate in ``parse_merge_result``
+    depends on this signal — when it goes missing, truncated LLM output
+    can reach ``apply_with_snapshot``.
+    """
+
+    async def test_anthropic_end_turn_normalises_to_stop(self):
+        client = _make_anthropic_client(cache_strategy=CacheStrategy.NONE)
+        mock_content = MagicMock()
+        mock_content.text = "hello"
+        mock_response = MagicMock()
+        mock_response.content = [mock_content]
+        mock_response.stop_reason = "end_turn"
+        client._client.messages.create = AsyncMock(return_value=mock_response)
+
+        result = await client.complete_meta([{"role": "user", "content": "hi"}])
+        assert result.text == "hello"
+        assert result.stop_reason == "stop"
+
+    async def test_anthropic_max_tokens_surfaces_as_max_tokens(self):
+        client = _make_anthropic_client(cache_strategy=CacheStrategy.NONE)
+        mock_content = MagicMock()
+        mock_content.text = "truncated..."
+        mock_response = MagicMock()
+        mock_response.content = [mock_content]
+        mock_response.stop_reason = "max_tokens"
+        client._client.messages.create = AsyncMock(return_value=mock_response)
+
+        result = await client.complete_meta([{"role": "user", "content": "hi"}])
+        assert result.text == "truncated..."
+        assert result.stop_reason == "max_tokens"
+
+    async def test_openai_length_normalises_to_max_tokens(self):
+        client = _make_openai_client()
+        mock_choice = MagicMock()
+        mock_choice.message.content = "truncated..."
+        mock_choice.finish_reason = "length"
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+        client._client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        result = await client.complete_meta([{"role": "user", "content": "hi"}])
+        assert result.text == "truncated..."
+        assert result.stop_reason == "max_tokens"
+
+    async def test_openai_stop_passes_through(self):
+        client = _make_openai_client()
+        mock_choice = MagicMock()
+        mock_choice.message.content = "ok"
+        mock_choice.finish_reason = "stop"
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+        client._client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        result = await client.complete_meta([{"role": "user", "content": "hi"}])
+        assert result.stop_reason == "stop"
+
+    async def test_complete_returns_text_and_stays_backwards_compatible(self):
+        # ``complete`` is the legacy ``-> str`` shape. It must keep
+        # working after the ``complete_meta`` introduction so existing
+        # callers (every non-merge agent) don't have to be touched.
+        client = _make_anthropic_client(cache_strategy=CacheStrategy.NONE)
+        mock_content = MagicMock()
+        mock_content.text = "plain text"
+        mock_response = MagicMock()
+        mock_response.content = [mock_content]
+        mock_response.stop_reason = "end_turn"
+        client._client.messages.create = AsyncMock(return_value=mock_response)
+
+        result = await client.complete([{"role": "user", "content": "hi"}])
+        assert isinstance(result, str)
+        assert result == "plain text"

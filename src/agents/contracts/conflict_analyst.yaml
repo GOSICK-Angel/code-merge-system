@@ -1,17 +1,20 @@
 name: conflict_analyst
+version: 1
 inputs:
-  - _merge_base
+  - merge_base_commit
   - config
   - conflict_analyses
   - file_diffs
   - forks_profile
   - merge_plan
   - status
+  - thresholds
 output_schema: ConflictAnalysis
 gates:
   - CA-SYSTEM
   - CA-THREE-WAY
   - CA-COMMIT-ROUND
+  - CA-DECISION-PROPOSAL
 forbidden:
   - direct_llm_call
 collaboration: compute

@@ -6,9 +6,11 @@ from typing import Any
 
 from src.agents.base_agent import CIRCUIT_BREAKER_THRESHOLD
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
+from src.llm.relevance import weights_from_fanin
 from src.models.conflict import ConflictAnalysis, ConflictType
 from src.models.config import ThresholdConfig
-from src.models.decision import MergeDecision, DecisionSource
+from src.models.decision import MergeDecision
+from src.models.dependency import DependencyImpactHint
 from src.models.diff import FileChangeCategory, FileDiff, FileStatus, RiskLevel
 from src.models.human import HumanDecisionRequest, DecisionOption
 from src.models.plan import MergePhase
@@ -84,8 +86,10 @@ async def _analyze_round_with_bisect(
     file_languages: dict[str, str],
     project_context: str,
     *,
+    per_file_instructions: dict[str, str] | None = None,
     max_depth: int = 2,
     _depth: int = 0,
+    fork_ref: str | None = None,
 ) -> dict[str, ConflictAnalysis]:
     """Run analyze_commit_round; if it returns 0 analyses for a multi-commit
     round, recursively bisect the commit list and merge results. Bounded by
@@ -96,6 +100,8 @@ async def _analyze_round_with_bisect(
         round_llm_files,
         file_languages,
         project_context=project_context,
+        per_file_instructions=per_file_instructions,
+        fork_ref=fork_ref,
     )
 
     can_bisect = _depth < max_depth and len(round_commits) >= 2
@@ -129,8 +135,10 @@ async def _analyze_round_with_bisect(
             sub_files,
             sub_languages,
             project_context,
+            per_file_instructions=per_file_instructions,
             max_depth=max_depth,
             _depth=_depth + 1,
+            fork_ref=fork_ref,
         )
         merged.update(sub_analyses)
     return merged
@@ -201,6 +209,17 @@ def _select_merge_strategy(
     analysis: ConflictAnalysis, thresholds: ThresholdConfig
 ) -> MergeDecision:
     if analysis.is_security_sensitive:
+        return MergeDecision.ESCALATE_HUMAN
+
+    # #12: the analyst rationale referenced a member access fabricated on a real
+    # module (present in neither fork nor upstream, not declared via REQUIRES NEW
+    # API). This is a strong hallucination signal scoped to the fabricated subset
+    # of grounding warnings (verb-mismatch warnings stay advisory) — escalate
+    # rather than auto-merge on a rationale we know is partly invented.
+    if analysis.fabricated_symbols:
+        return MergeDecision.ESCALATE_HUMAN
+
+    if analysis.semantic_compatibility == "incompatible":
         return MergeDecision.ESCALATE_HUMAN
 
     if analysis.conflict_type == ConflictType.LOGIC_CONTRADICTION:
@@ -296,6 +315,7 @@ def _build_human_decision_request(
     upstream_ref: str | None = None,
     fork_ref: str | None = None,
     git_tool: "GitTool | None" = None,
+    impact_hint: "DependencyImpactHint | None" = None,
 ) -> HumanDecisionRequest:
     rec_val = analysis.recommended_strategy
 
@@ -342,6 +362,15 @@ def _build_human_decision_request(
     if analysis.rationale:
         context_summary = f"{context_summary} Rationale: {analysis.rationale}"
 
+    # Phase C §4: surface dependency blast radius on the card.
+    if impact_hint is not None and impact_hint.has_signal:
+        hub = " (dependency hub)" if impact_hint.is_god_node else ""
+        context_summary = (
+            f"{context_summary} Dependency impact: "
+            f"{impact_hint.direct_dependents} direct dependent(s), "
+            f"impact radius {impact_hint.impact_radius}{hub}."
+        )
+
     upstream_intents = [
         cp.upstream_intent.description
         for cp in analysis.conflict_points
@@ -355,12 +384,18 @@ def _build_human_decision_request(
     upstream_change_summary = (
         " · ".join(upstream_intents[:2])
         if upstream_intents
-        else f"Upstream changed (+{fd.lines_added}/-{fd.lines_deleted})"
+        else (
+            take_target_preview
+            or f"Upstream changed (+{fd.lines_added}/-{fd.lines_deleted})"
+        )
     )
     fork_change_summary = (
         " · ".join(fork_intents[:2])
         if fork_intents
-        else f"Fork changed (+{fd.lines_added}/-{fd.lines_deleted})"
+        else (
+            take_current_preview
+            or f"Fork changed (+{fd.lines_added}/-{fd.lines_deleted})"
+        )
     )
 
     return HumanDecisionRequest(
@@ -375,6 +410,12 @@ def _build_human_decision_request(
         analyst_rationale=analysis.rationale,
         options=options,
         created_at=datetime.now(),
+        dependents_count=impact_hint.direct_dependents if impact_hint else 0,
+        blast_radius=impact_hint.impact_radius if impact_hint else 0,
+        is_god_node=impact_hint.is_god_node if impact_hint else False,
+        grounding_warnings=list(analysis.grounding_warnings),
+        required_new_apis=list(analysis.required_new_apis),
+        semantic_compatibility=analysis.semantic_compatibility,
     )
 
 
@@ -533,8 +574,7 @@ class ConflictAnalysisPhase(Phase):
                     )
                 except Exception as exc:
                     logger.warning(
-                        "O-B3/O-B4 in conflict_analysis: binary copy failed "
-                        "for %s: %s",
+                        "O-B3/O-B4 in conflict_analysis: binary copy failed for %s: %s",
                         file_path,
                         exc,
                     )
@@ -555,15 +595,9 @@ class ConflictAnalysisPhase(Phase):
                 "O-B3 in conflict_analysis: routed %d binary asset(s) "
                 "(%d take_target, %d escalate) — skipping LLM",
                 len(binary_resolved),
+                sum(1 for fp in binary_resolved if fp in state.file_decision_records),
                 sum(
-                    1
-                    for fp in binary_resolved
-                    if fp in state.file_decision_records
-                ),
-                sum(
-                    1
-                    for fp in binary_resolved
-                    if fp not in state.file_decision_records
+                    1 for fp in binary_resolved if fp not in state.file_decision_records
                 ),
             )
 
@@ -664,12 +698,20 @@ class ConflictAnalysisPhase(Phase):
                     )
                     for fp in round_llm_files
                 }
+                per_file_instructions = {
+                    it.file_path: it.custom_instruction
+                    for it in state.pending_user_decisions
+                    if it.user_choice == "llm_with_instruction"
+                    and it.custom_instruction
+                }
                 analyses = await _analyze_round_with_bisect(
                     conflict_analyst,
                     round_commits,
                     round_llm_files,
                     file_languages,
                     project_context=state.config.project_context,
+                    per_file_instructions=per_file_instructions or None,
+                    fork_ref=state.config.fork_ref,
                 )
                 parsed_count = len(analyses)
                 requested_count = len(round_llm_files)
@@ -761,10 +803,10 @@ class ConflictAnalysisPhase(Phase):
             )
 
             base_content = target_content = current_content = None
-            if conflict_analyst.git_tool and hasattr(state, "_merge_base"):
+            if conflict_analyst.git_tool and state.merge_base_commit:
                 base_content, current_content, target_content = (
                     conflict_analyst.git_tool.get_three_way_diff(
-                        state._merge_base or "",
+                        state.merge_base_commit,
                         state.config.fork_ref,
                         state.config.upstream_ref,
                         file_path,
@@ -777,6 +819,20 @@ class ConflictAnalysisPhase(Phase):
                 current_content=current_content,
                 target_content=target_content,
                 project_context=state.config.project_context,
+                referenced_names=state.dependency_graph.referenced_symbols(
+                    fd.file_path
+                ),
+                symbol_weights=weights_from_fanin(
+                    state.dependency_graph.symbol_fanin(fd.file_path)
+                ),
+                impact_hint=state.dependency_graph.impact_hint(
+                    fd.file_path,
+                    max_depth=state.config.dependency_graph.max_depth,
+                    god_node_min_dependents=(
+                        state.config.dependency_graph.god_node_min_dependents
+                    ),
+                ),
+                fork_ref=state.config.fork_ref,
             )
             state.conflict_analyses[file_path] = analysis
 
@@ -829,6 +885,13 @@ class ConflictAnalysisPhase(Phase):
                     upstream_ref=state.config.upstream_ref,
                     fork_ref=state.config.fork_ref,
                     git_tool=ctx.git_tool,
+                    impact_hint=state.dependency_graph.impact_hint(
+                        file_path,
+                        max_depth=state.config.dependency_graph.max_depth,
+                        god_node_min_dependents=(
+                            state.config.dependency_graph.god_node_min_dependents
+                        ),
+                    ),
                 )
                 state.human_decision_requests[file_path] = req
             elif strategy == MergeDecision.SEMANTIC_MERGE:

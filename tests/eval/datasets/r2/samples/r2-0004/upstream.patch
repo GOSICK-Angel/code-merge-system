@@ -1,0 +1,644 @@
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index a1b5bfc0..4f37c790 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -33,6 +33,19 @@ jobs:
+         ports:
+           - 5432:5432
+ 
++      mysql:
++        image: mysql:8.0
++        env:
++          MYSQL_DATABASE: difyai
++          MYSQL_ROOT_PASSWORD: difyai123456
++        ports:
++          - 3306:3306
++        options: >-
++          --health-cmd="mysqladmin ping --silent"
++          --health-interval=10s
++          --health-timeout=5s
++          --health-retries=30
++
+     steps:
+       - uses: actions/checkout@v2
+ 
+diff --git a/go.mod b/go.mod
+index 1dcabea4..bd33a5e6 100644
+--- a/go.mod
++++ b/go.mod
+@@ -22,6 +22,7 @@ require (
+ 	github.com/tencentyun/cos-go-sdk-v5 v0.7.62
+ 	github.com/vmihailenco/msgpack/v5 v5.4.1
+ 	github.com/xeipuuv/gojsonschema v1.2.0
++	gorm.io/driver/mysql v1.5.7
+ 	gorm.io/gorm v1.25.11
+ )
+ 
+@@ -50,6 +51,7 @@ require (
+ 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
+ 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
+ 	github.com/fsnotify/fsnotify v1.7.0 // indirect
++	github.com/go-sql-driver/mysql v1.7.0 // indirect
+ 	github.com/google/go-querystring v1.1.0 // indirect
+ 	github.com/hashicorp/hcl v1.0.0 // indirect
+ 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+diff --git a/go.sum b/go.sum
+index 5786e133..8e837459 100644
+--- a/go.sum
++++ b/go.sum
+@@ -109,6 +109,8 @@ github.com/go-playground/universal-translator v0.18.1 h1:Bcnm0ZwsGyWbCzImXv+pAJn
+ github.com/go-playground/universal-translator v0.18.1/go.mod h1:xekY+UJKNuX9WP91TpwSH2VMlDf28Uj24BCp08ZFTUY=
+ github.com/go-playground/validator/v10 v10.22.0 h1:k6HsTZ0sTnROkhS//R0O+55JgM8C4Bx7ia+JlgcnOao=
+ github.com/go-playground/validator/v10 v10.22.0/go.mod h1:dbuPbCMFw/DrkbEynArYaCwl3amGuJotoKCe95atGMM=
++github.com/go-sql-driver/mysql v1.7.0 h1:ueSltNNllEqE3qcWBTD0iQd3IpL/6U+mJxLkazJ7YPc=
++github.com/go-sql-driver/mysql v1.7.0/go.mod h1:OXbVy3sEdcQ2Doequ6Z5BW6fXNQTmx+9S1MCJN5yJMI=
+ github.com/goccy/go-json v0.10.3 h1:KZ5WoDbxAIgm2HNbYckL0se1fHD6rz5j4ywS6ebzDqA=
+ github.com/goccy/go-json v0.10.3/go.mod h1:oq7eo15ShAhp70Anwd5lgX2pLfOS3QCiwU/PULtXL6M=
+ github.com/golang-jwt/jwt/v5 v5.2.1/go.mod h1:pqrtFR0X4osieyHYxtmOUWsAWrfe1Q5UVIyoH402zdk=
+@@ -338,8 +340,11 @@ gopkg.in/warnings.v0 v0.1.2/go.mod h1:jksf8JmL6Qr/oQM2OXTHunEvvTAsrWBLb6OOjuVWRN
+ gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+ gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+ gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
++gorm.io/driver/mysql v1.5.7 h1:MndhOPYOfEp2rHKgkZIhJ16eVUIRf2HmzgoPmh7FCWo=
++gorm.io/driver/mysql v1.5.7/go.mod h1:sEtPWMiqiN1N1cMXoXmBbd8C6/l+TESwriotuRRpkDM=
+ gorm.io/driver/postgres v1.5.9 h1:DkegyItji119OlcaLjqN11kHoUgZ/j13E0jkJZgD6A8=
+ gorm.io/driver/postgres v1.5.9/go.mod h1:DX3GReXH+3FPWGrrgffdvCk3DQ1dwDPdmbenSkweRGI=
++gorm.io/gorm v1.25.7/go.mod h1:hbnx/Oo0ChWMn1BIhpy1oYozzpM15i4YPuHDmfYtwg8=
+ gorm.io/gorm v1.25.11 h1:/Wfyg1B/je1hnDx3sMkX+gAlxrlZpn6X0BXRlwXlvHg=
+ gorm.io/gorm v1.25.11/go.mod h1:xh7N7RHfYlNc5EmcI/El95gXusucDrQnHXe0+CgWcLQ=
+ nullprogram.com/x/optparse v1.0.0/go.mod h1:KdyPE+Igbe0jQUrVfMqDMeJQIJZEuyV7pjYmp6pbG50=
+diff --git a/internal/core/persistence/persistence_test.go b/internal/core/persistence/persistence_test.go
+index daa3ab7f..e8eedb2e 100644
+--- a/internal/core/persistence/persistence_test.go
++++ b/internal/core/persistence/persistence_test.go
+@@ -19,6 +19,7 @@ func TestPersistenceStoreAndLoad(t *testing.T) {
+ 	defer cache.Close()
+ 
+ 	db.Init(&app.Config{
++		DBType:            "postgresql",
+ 		DBUsername:        "postgres",
+ 		DBPassword:        "difyai123456",
+ 		DBHost:            "localhost",
+@@ -79,6 +80,7 @@ func TestPersistenceSaveAndLoadWithLongKey(t *testing.T) {
+ 	}
+ 	defer cache.Close()
+ 	db.Init(&app.Config{
++		DBType:     "postgresql",
+ 		DBUsername: "postgres",
+ 		DBPassword: "difyai123456",
+ 		DBHost:     "localhost",
+@@ -107,6 +109,7 @@ func TestPersistenceDelete(t *testing.T) {
+ 	}
+ 	defer cache.Close()
+ 	db.Init(&app.Config{
++		DBType:     "postgresql",
+ 		DBUsername: "postgres",
+ 		DBPassword: "difyai123456",
+ 		DBHost:     "localhost",
+diff --git a/internal/core/plugin_manager/debugging_runtime/server_test.go b/internal/core/plugin_manager/debugging_runtime/server_test.go
+index c12ef556..68c608cc 100644
+--- a/internal/core/plugin_manager/debugging_runtime/server_test.go
++++ b/internal/core/plugin_manager/debugging_runtime/server_test.go
+@@ -21,19 +21,37 @@ import (
+ 	"github.com/langgenius/dify-plugin-daemon/pkg/entities/plugin_entities"
+ )
+ 
++var defaultConfig = &app.Config{
++	DBType:     "postgresql",
++	DBUsername: "postgres",
++	DBPassword: "difyai123456",
++	DBHost:     "localhost",
++	DBPort:     5432,
++	DBDatabase: "dify_plugin_daemon",
++	DBSslMode:  "disable",
++}
++var mysqlConfig = &app.Config{
++	DBType:     "mysql",
++	DBUsername: "root",
++	DBPassword: "difyai123456",
++	DBHost:     "localhost",
++	DBPort:     3306,
++	DBDatabase: "dify_plugin_daemon",
++	DBSslMode:  "disable",
++}
++
++var testConfig = defaultConfig
++var testConfigs = []*app.Config{
++	defaultConfig,
++	mysqlConfig,
++}
++
+ func init() {
+ 	_mode = _PLUGIN_RUNTIME_MODE_CI
+ }
+ 
+ func preparePluginServer(t *testing.T) (*RemotePluginServer, uint16) {
+-	db.Init(&app.Config{
+-		DBUsername: "postgres",
+-		DBPassword: "difyai123456",
+-		DBHost:     "localhost",
+-		DBPort:     5432,
+-		DBDatabase: "dify_plugin_daemon",
+-		DBSslMode:  "disable",
+-	})
++	db.Init(testConfig)
+ 
+ 	port, err := network.GetRandomPort()
+ 	if err != nil {
+@@ -54,32 +72,40 @@ func preparePluginServer(t *testing.T) (*RemotePluginServer, uint16) {
+ 
+ // TestLaunchAndClosePluginServer tests the launch and close of the plugin server
+ func TestLaunchAndClosePluginServer(t *testing.T) {
+-	// start plugin server
+-	server, _ := preparePluginServer(t)
+-	if server == nil {
+-		return
+-	}
+-
+-	doneChan := make(chan error)
++	defer func() {
++		testConfig = defaultConfig
++	}()
++	for _, conf := range testConfigs {
++		testConfig = conf
++		t.Logf("Start to test on %s database", testConfig.DBType)
+ 
+-	go func() {
+-		err := server.Launch()
+-		if err != nil {
+-			doneChan <- err
++		// start plugin server
++		server, _ := preparePluginServer(t)
++		if server == nil {
++			return
+ 		}
+-	}()
+ 
+-	timer := time.NewTimer(time.Second * 5)
++		doneChan := make(chan error)
+ 
+-	select {
+-	case err := <-doneChan:
+-		t.Errorf("failed to launch plugin server: %s", err.Error())
+-		return
+-	case <-timer.C:
+-		err := server.Stop()
+-		if err != nil {
+-			t.Errorf("failed to stop plugin server: %s", err.Error())
++		go func() {
++			err := server.Launch()
++			if err != nil {
++				doneChan <- err
++			}
++		}()
++
++		timer := time.NewTimer(time.Second * 5)
++
++		select {
++		case err := <-doneChan:
++			t.Errorf("failed to launch plugin server: %s", err.Error())
+ 			return
++		case <-timer.C:
++			err := server.Stop()
++			if err != nil {
++				t.Errorf("failed to stop plugin server: %s", err.Error())
++				return
++			}
+ 		}
+ 	}
+ }
+diff --git a/internal/db/pgsql.go b/internal/db/executor.go
+similarity index 100%
+rename from internal/db/pgsql.go
+rename to internal/db/executor.go
+diff --git a/internal/db/pg_test.go b/internal/db/executor_test.go
+similarity index 73%
+rename from internal/db/pg_test.go
+rename to internal/db/executor_test.go
+index 8cfaeb69..e3fc4949 100644
+--- a/internal/db/pg_test.go
++++ b/internal/db/executor_test.go
+@@ -4,11 +4,13 @@ import (
+ 	"errors"
+ 	"testing"
+ 
++	"github.com/langgenius/dify-plugin-daemon/internal/db/pg"
+ 	"gorm.io/gorm"
+ )
+ 
+ func TestTransaction(t *testing.T) {
+-	if err := initDifyPluginDB("0.0.0.0", 5432, "testing", "postgres", "postgres", "difyai123456", "disable"); err != nil {
++	var err error
++	if DifyPluginDB, err = pg.InitPluginDB("0.0.0.0", 5432, "testing", "postgres", "postgres", "difyai123456", "disable"); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	defer Close()
+@@ -17,7 +19,7 @@ func TestTransaction(t *testing.T) {
+ 		gorm.Model
+ 	}
+ 
+-	err := CreateTable(&TestTable{})
++	err = CreateTable(&TestTable{})
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+diff --git a/internal/db/init.go b/internal/db/init.go
+index 4b23f2af..eec51092 100644
+--- a/internal/db/init.go
++++ b/internal/db/init.go
+@@ -1,81 +1,13 @@
+ package db
+ 
+ import (
+-	"fmt"
+-	"time"
+-
++	"github.com/langgenius/dify-plugin-daemon/internal/db/mysql"
++	"github.com/langgenius/dify-plugin-daemon/internal/db/pg"
+ 	"github.com/langgenius/dify-plugin-daemon/internal/types/app"
+ 	"github.com/langgenius/dify-plugin-daemon/internal/types/models"
+ 	"github.com/langgenius/dify-plugin-daemon/internal/utils/log"
+-	"gorm.io/driver/postgres"
+-	"gorm.io/gorm"
+ )
+ 
+-func initDifyPluginDB(host string, port int, db_name string, default_db_name string, user string, pass string, sslmode string) error {
+-	// first try to connect to target database
+-	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", host, port, user, pass, db_name, sslmode)
+-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+-	if err != nil {
+-		// if connection fails, try to create database
+-		dsn = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", host, port, user, pass, default_db_name, sslmode)
+-		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+-		if err != nil {
+-			return err
+-		}
+-
+-		pgsqlDB, err := db.DB()
+-		if err != nil {
+-			return err
+-		}
+-		defer pgsqlDB.Close()
+-
+-		// check if the db exists
+-		rows, err := pgsqlDB.Query(fmt.Sprintf("SELECT 1 FROM pg_database WHERE datname = '%s'", db_name))
+-		if err != nil {
+-			return err
+-		}
+-
+-		if !rows.Next() {
+-			// create database
+-			_, err = pgsqlDB.Exec(fmt.Sprintf("CREATE DATABASE %s", db_name))
+-			if err != nil {
+-				return err
+-			}
+-		}
+-
+-		// connect to the new db
+-		dsn = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", host, port, user, pass, db_name, sslmode)
+-		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+-		if err != nil {
+-			return err
+-		}
+-	}
+-
+-	pgsqlDB, err := db.DB()
+-	if err != nil {
+-		return err
+-	}
+-
+-	// check if uuid-ossp extension exists
+-	rows, err := pgsqlDB.Query("SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp'")
+-	if err != nil {
+-		return err
+-	}
+-
+-	if !rows.Next() {
+-		// create the uuid-ossp extension
+-		_, err = pgsqlDB.Exec("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
+-		if err != nil {
+-			return err
+-		}
+-	}
+-
+-	pgsqlDB.SetConnMaxIdleTime(time.Minute * 1)
+-	DifyPluginDB = db
+-
+-	return nil
+-}
+-
+ func autoMigrate() error {
+ 	err := DifyPluginDB.AutoMigrate(
+ 		models.Plugin{},
+@@ -130,15 +62,30 @@ func autoMigrate() error {
+ }
+ 
+ func Init(config *app.Config) {
+-	err := initDifyPluginDB(
+-		config.DBHost,
+-		int(config.DBPort),
+-		config.DBDatabase,
+-		config.DBDefaultDatabase,
+-		config.DBUsername,
+-		config.DBPassword,
+-		config.DBSslMode,
+-	)
++	var err error
++	if config.DBType == "postgresql" {
++		DifyPluginDB, err = pg.InitPluginDB(
++			config.DBHost,
++			int(config.DBPort),
++			config.DBDatabase,
++			config.DBDefaultDatabase,
++			config.DBUsername,
++			config.DBPassword,
++			config.DBSslMode,
++		)
++	} else if config.DBType == "mysql" {
++		DifyPluginDB, err = mysql.InitPluginDB(
++			config.DBHost,
++			int(config.DBPort),
++			config.DBDatabase,
++			config.DBDefaultDatabase,
++			config.DBUsername,
++			config.DBPassword,
++			config.DBSslMode,
++		)
++	} else {
++		log.Panic("unsupported database type: %v", config.DBType)
++	}
+ 
+ 	if err != nil {
+ 		log.Panic("failed to init dify plugin db: %v", err)
+diff --git a/internal/db/mysql/dialector.go b/internal/db/mysql/dialector.go
+new file mode 100644
+index 00000000..923e5f14
+--- /dev/null
++++ b/internal/db/mysql/dialector.go
+@@ -0,0 +1,45 @@
++package mysql
++
++import (
++	"gorm.io/driver/mysql"
++	"gorm.io/gorm"
++	"gorm.io/gorm/clause"
++	"gorm.io/gorm/schema"
++)
++
++type myDialector struct {
++	*mysql.Dialector
++}
++
++func (dialector myDialector) Migrator(db *gorm.DB) gorm.Migrator {
++	return myMigrator{dialector.Dialector.Migrator(db).(mysql.Migrator)}
++}
++
++func (dialector myDialector) DataTypeOf(field *schema.Field) string {
++	dataType := dialector.Dialector.DataTypeOf(field)
++	switch dataType {
++	case "uuid":
++		return "char(36)"
++	case "text":
++		return "longtext"
++	default:
++		return dataType
++	}
++}
++
++type myMigrator struct {
++	mysql.Migrator
++}
++
++func (migrator myMigrator) FullDataTypeOf(field *schema.Field) clause.Expr {
++	if field.DataType == "uuid" {
++		field.DataType = "char(36)"
++		if field.HasDefaultValue && field.DefaultValue == "uuid_generate_v4()" {
++			field.HasDefaultValue = false
++			field.DefaultValue = ""
++		}
++	} else if field.DataType == "text" {
++		field.DataType = "longtext"
++	}
++	return migrator.Migrator.FullDataTypeOf(field)
++}
+diff --git a/internal/db/mysql/mysql.go b/internal/db/mysql/mysql.go
+new file mode 100644
+index 00000000..a6478f33
+--- /dev/null
++++ b/internal/db/mysql/mysql.go
+@@ -0,0 +1,82 @@
++package mysql
++
++import (
++	"fmt"
++	"time"
++
++	"gorm.io/driver/mysql"
++	"gorm.io/gorm"
++)
++
++func InitPluginDB(host string, port int, dbName string, defaultDbName string, user string, password string, sslMode string) (*gorm.DB, error) {
++	initializer := mysqlDbInitializer{
++		host:     host,
++		port:     port,
++		user:     user,
++		password: password,
++		sslMode:  sslMode,
++	}
++
++	// first try to connect to target database
++	db, err := initializer.connect(dbName)
++	if err != nil {
++		// if connection fails, try to create database
++		db, err = initializer.connect(defaultDbName)
++		if err != nil {
++			return nil, err
++		}
++
++		err = initializer.createDatabaseIfNotExists(db, dbName)
++		if err != nil {
++			return nil, err
++		}
++
++		// connect to the new db
++		db, err = initializer.connect(dbName)
++		if err != nil {
++			return nil, err
++		}
++	}
++
++	pool, err := db.DB()
++	if err != nil {
++		return nil, err
++	}
++
++	pool.SetConnMaxIdleTime(time.Minute * 1)
++
++	return db, nil
++}
++
++// mysqlDbInitializer initializes database for MySQL.
++type mysqlDbInitializer struct {
++	host     string
++	port     int
++	user     string
++	password string
++	sslMode  string
++}
++
++func (m *mysqlDbInitializer) connect(dbName string) (*gorm.DB, error) {
++	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&tls=%v", m.user, m.password, m.host, m.port, dbName, m.sslMode == "require")
++	return gorm.Open(myDialector{Dialector: mysql.Open(dsn).(*mysql.Dialector)}, &gorm.Config{})
++}
++
++func (m *mysqlDbInitializer) createDatabaseIfNotExists(db *gorm.DB, dbName string) error {
++	pool, err := db.DB()
++	if err != nil {
++		return err
++	}
++	defer pool.Close()
++
++	rows, err := pool.Query(fmt.Sprintf("SELECT 1 FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = '%s'", dbName))
++	if err != nil {
++		return err
++	}
++
++	if !rows.Next() {
++		// create database
++		_, err = pool.Exec(fmt.Sprintf("CREATE DATABASE %s", dbName))
++	}
++	return err
++}
+diff --git a/internal/db/pg/pg.go b/internal/db/pg/pg.go
+new file mode 100644
+index 00000000..7bd82651
+--- /dev/null
++++ b/internal/db/pg/pg.go
+@@ -0,0 +1,73 @@
++package pg
++
++import (
++	"fmt"
++	"time"
++
++	"gorm.io/driver/postgres"
++	"gorm.io/gorm"
++)
++
++func InitPluginDB(host string, port int, db_name string, default_db_name string, user string, pass string, sslmode string) (*gorm.DB, error) {
++	// first try to connect to target database
++	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", host, port, user, pass, db_name, sslmode)
++	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
++	if err != nil {
++		// if connection fails, try to create database
++		dsn = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", host, port, user, pass, default_db_name, sslmode)
++		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
++		if err != nil {
++			return nil, err
++		}
++
++		pgsqlDB, err := db.DB()
++		if err != nil {
++			return nil, err
++		}
++		defer pgsqlDB.Close()
++
++		// check if the db exists
++		rows, err := pgsqlDB.Query(fmt.Sprintf("SELECT 1 FROM pg_database WHERE datname = '%s'", db_name))
++		if err != nil {
++			return nil, err
++		}
++
++		if !rows.Next() {
++			// create database
++			_, err = pgsqlDB.Exec(fmt.Sprintf("CREATE DATABASE %s", db_name))
++			if err != nil {
++				return nil, err
++			}
++		}
++
++		// connect to the new db
++		dsn = fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", host, port, user, pass, db_name, sslmode)
++		db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
++		if err != nil {
++			return nil, err
++		}
++	}
++
++	pgsqlDB, err := db.DB()
++	if err != nil {
++		return nil, err
++	}
++
++	// check if uuid-ossp extension exists
++	rows, err := pgsqlDB.Query("SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp'")
++	if err != nil {
++		return nil, err
++	}
++
++	if !rows.Next() {
++		// create the uuid-ossp extension
++		_, err = pgsqlDB.Exec("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
++		if err != nil {
++			return nil, err
++		}
++	}
++
++	pgsqlDB.SetConnMaxIdleTime(time.Minute * 1)
++
++	return db, nil
++}
+diff --git a/internal/types/app/config.go b/internal/types/app/config.go
+index caaeae86..ca717bf3 100644
+--- a/internal/types/app/config.go
++++ b/internal/types/app/config.go
+@@ -66,6 +66,7 @@ type Config struct {
+ 	RedisUseSsl bool   `envconfig:"REDIS_USE_SSL"`
+ 
+ 	// database
++	DBType            string `envconfig:"DB_TYPE" default:"postgresql"`
+ 	DBUsername        string `envconfig:"DB_USERNAME" validate:"required"`
+ 	DBPassword        string `envconfig:"DB_PASSWORD" validate:"required"`
+ 	DBHost            string `envconfig:"DB_HOST" validate:"required"`
+diff --git a/internal/types/app/default.go b/internal/types/app/default.go
+index c04ee1f3..1eeb98a5 100644
+--- a/internal/types/app/default.go
++++ b/internal/types/app/default.go
+@@ -33,7 +33,11 @@ func (config *Config) SetDefault() {
+ 	setDefaultBoolPtr(&config.ForceVerifyingSignature, true)
+ 	setDefaultBoolPtr(&config.PipPreferBinary, true)
+ 	setDefaultBoolPtr(&config.PipVerbose, true)
+-	setDefaultString(&config.DBDefaultDatabase, "postgres")
++	if config.DBType == "postgresql" {
++		setDefaultString(&config.DBDefaultDatabase, "postgres")
++	} else if config.DBType == "mysql" {
++		setDefaultString(&config.DBDefaultDatabase, "mysql")
++	}
+ 	setDefaultBoolPtr(&config.HealthApiLogEnabled, true)
+ }
+ 
+diff --git a/internal/types/models/base.go b/internal/types/models/base.go
+index 79001b13..0fa5ae77 100644
+--- a/internal/types/models/base.go
++++ b/internal/types/models/base.go
+@@ -2,6 +2,9 @@ package models
+ 
+ import (
+ 	"time"
++
++	"github.com/google/uuid"
++	"gorm.io/gorm"
+ )
+ 
+ type Model struct {
+@@ -9,3 +12,10 @@ type Model struct {
+ 	CreatedAt time.Time `json:"created_at"`
+ 	UpdatedAt time.Time `json:"updated_at"`
+ }
++
++func (m *Model) BeforeCreate(tx *gorm.DB) (err error) {
++	if tx.Dialector.Name() == "mysql" && m.ID == "" {
++		m.ID = uuid.New().String()
++	}
++	return
++}

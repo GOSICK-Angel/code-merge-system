@@ -1,0 +1,8 @@
+diff --git a/tools/qa_chunk/requirements.txt b/tools/qa_chunk/requirements.txt
+index afb0b1b6..a5860088 100644
+--- a/tools/qa_chunk/requirements.txt
++++ b/tools/qa_chunk/requirements.txt
+@@ -1,2 +1,2 @@
+ dify_plugin==0.5.0b15
+-pandas==2.2.3
++pandas==2.2.5

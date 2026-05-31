@@ -1,0 +1,9 @@
+diff --git a/models/localai/requirements.txt b/models/localai/requirements.txt
+index 6ac5656c..b1a5fe72 100644
+--- a/models/localai/requirements.txt
++++ b/models/localai/requirements.txt
+@@ -1,2 +1,2 @@
+-dify_plugin==0.0.1b65
+-openai~=1.55.1
++dify_plugin<0.6.0,>=0.5.0
++openai~=2.3.0

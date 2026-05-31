@@ -1,0 +1,9 @@
+diff --git a/models/gpustack/requirements.txt b/models/gpustack/requirements.txt
+index beb009de..b1a5fe72 100644
+--- a/models/gpustack/requirements.txt
++++ b/models/gpustack/requirements.txt
+@@ -1,2 +1,2 @@
+-dify_plugin>=0.2.0,<0.3.0
+-openai~=1.66.3
++dify_plugin<0.6.0,>=0.5.0
++openai~=2.3.0

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import cast
 
-from src.agents.base_agent import BaseAgent
+from src.agents.base_agent import AgentError, BaseAgent
 from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage, MessageType
 from src.models.plan import MergePlan, MergePhase
@@ -19,12 +19,15 @@ from src.llm.prompts.planner_judge_prompts import (
     build_segment_plan_review_prompt,
     compute_segment_signature,
     is_segment_obviously_safe,
+    precheck_batch_topological_order,
     precheck_plan_integrity,
     REVIEW_SEGMENT_SIZE,
 )
+from src.models.dependency import FileDependencyGraph
 from src.models.plan_review import PlannerIssueResponse
 from src.llm.context import estimate_tokens
 from src.llm.response_parser import parse_plan_judge_verdict
+from src.llm.structured_schemas import PLAN_JUDGE_VERDICT
 
 
 @dataclass
@@ -236,7 +239,13 @@ class PlannerJudgeAgent(BaseAgent):
         file_diffs: list[FileDiff] = view.file_diffs
 
         lang = view.config.output.language
-        verdict = await self.review_plan(view.merge_plan, file_diffs, 0, lang=lang)
+        verdict = await self.review_plan(
+            view.merge_plan,
+            file_diffs,
+            0,
+            lang=lang,
+            dependency_graph=view.dependency_graph,
+        )
 
         return AgentMessage(
             sender=AgentType.PLANNER_JUDGE,
@@ -261,6 +270,7 @@ class PlannerJudgeAgent(BaseAgent):
         out_segment_results: dict[int, SegmentReviewSnapshot] | None = None,
         extra_safelist_patterns: list[str] | None = None,
         lockfile_max_lines: int = 1000,
+        dependency_graph: FileDependencyGraph | None = None,
     ) -> PlanJudgeVerdict:
         system = get_planner_judge_system(lang)
 
@@ -271,10 +281,20 @@ class PlannerJudgeAgent(BaseAgent):
         # MISMATCH (classifier disagrees with batch) and NOT-BATCHED
         # (classifier had a verdict, plan dropped the file). Removed from
         # LLM prompts; LLM only handles semantic / path-name reasoning.
+        # Phase B step 9: batch_ordering (topo violation) issues are appended
+        # from the EXTRACTED dependency edges; empty graph -> none.
         precheck_issues = precheck_plan_integrity(plan, file_diffs)
+        topo_issues = precheck_batch_topological_order(plan, dependency_graph)
+        if topo_issues:
+            self.logger.info(
+                "Plan precheck found %d batch_ordering (topo) issue(s) "
+                "(deterministic, EXTRACTED edges)",
+                len(topo_issues),
+            )
+            precheck_issues = precheck_issues + topo_issues
         if precheck_issues:
             self.logger.info(
-                "Plan precheck found %d MISMATCH/NOT-BATCHED issues "
+                "Plan precheck found %d total integrity issue(s) "
                 "(deterministic, no LLM call)",
                 len(precheck_issues),
             )
@@ -544,7 +564,10 @@ class PlannerJudgeAgent(BaseAgent):
         t0 = time.monotonic()
         try:
             raw = await self._call_llm_with_retry(
-                messages, system=system, json_mode=True
+                messages,
+                system=system,
+                json_mode=True,
+                **self._structured_kwargs(PLAN_JUDGE_VERDICT),
             )
             elapsed = time.monotonic() - t0
             telemetry: dict[str, float | int | None] = {
@@ -561,12 +584,26 @@ class PlannerJudgeAgent(BaseAgent):
         except Exception as e:
             self.logger.error("Plan review failed: %s", e)
             error_type = type(e).__name__
-            is_llm_unavailable = any(
-                marker in error_type
-                for marker in ("AgentExhaustedError", "APIError", "RateLimitError")
-            ) or any(
-                marker in str(e)
-                for marker in ("LLM call failed", "502", "503", "No available accounts")
+            is_llm_unavailable = (
+                isinstance(e, AgentError)
+                or any(
+                    marker in error_type
+                    for marker in (
+                        "AgentExhaustedError",
+                        "CircuitBreakerOpen",
+                        "APIError",
+                        "RateLimitError",
+                    )
+                )
+                or any(
+                    marker in str(e)
+                    for marker in (
+                        "LLM call failed",
+                        "502",
+                        "503",
+                        "No available accounts",
+                    )
+                )
             )
             result = (
                 PlanJudgeResult.LLM_UNAVAILABLE

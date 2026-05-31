@@ -2,7 +2,6 @@
 
 from datetime import datetime
 from unittest.mock import MagicMock, patch
-from uuid import uuid4
 
 import pytest
 
@@ -426,23 +425,32 @@ class TestPlannerLayeredPlan:
         assert "unchanged.py" not in all_files_in_plan
         assert "custom_only.py" not in all_files_in_plan
 
-        layer_ids = [p.layer_id for p in plan.phases if p.layer_id is not None]
-        layer_order = []
-        for lid in layer_ids:
-            if lid not in layer_order:
-                layer_order.append(lid)
+        # Module-aware ordering: layers are ordered WITHIN each module's
+        # contiguous run of phases, not globally (module is the outer sort).
+        from itertools import groupby
+
         layer_by_id = {ly.layer_id: ly for ly in plan.layers}
-        for lid in layer_order:
-            ly = layer_by_id.get(lid)
-            if ly is None:
-                continue
-            idx = layer_order.index(lid)
-            for dep in ly.depends_on:
-                if dep in layer_order:
-                    dep_idx = layer_order.index(dep)
-                    assert dep_idx < idx, (
-                        f"Layer {lid} appears before dependency {dep}: {layer_order}"
-                    )
+        for module, group in groupby(plan.phases, key=lambda p: p.module):
+            layer_order: list[int] = []
+            for p in group:
+                if p.layer_id is not None and p.layer_id not in layer_order:
+                    layer_order.append(p.layer_id)
+            for lid in layer_order:
+                ly = layer_by_id.get(lid)
+                if ly is None:
+                    continue
+                idx = layer_order.index(lid)
+                for dep in ly.depends_on:
+                    if dep in layer_order:
+                        assert layer_order.index(dep) < idx, (
+                            f"Layer {lid} before dep {dep} in module "
+                            f"{module}: {layer_order}"
+                        )
+
+        # Module grouping is on by default — every actionable batch is
+        # tagged and the summary is populated.
+        assert all(p.module for p in plan.phases)
+        assert plan.module_summary
 
         b_phases = [p for p in plan.phases if p.change_category == FileChangeCategory.B]
         for bp in b_phases:
@@ -756,3 +764,78 @@ class TestVerifyLayerDepsBlocking:
         layers = [MergeLayer(layer_id=0, name="base")]
         state = self._make_state_with_layers(layers)
         assert verify_layer_deps(99, set(), state) is True
+
+
+class TestVacuouslyCompleteLayers:
+    """Regression for layered_execution dep-gate false-cascade.
+
+    Real-world repro (t1-0003): planner declared layers 0/1/2 with
+    chain depends_on, but only layer 2 received any AUTO_SAFE /
+    AUTO_RISKY batches. Without pre-fill, layer 2's dep check on
+    layer 1 (empty) returned False and every file in layer 2 got an
+    ``escalate_human`` record with rationale
+    ``"layer 2 skipped: dependencies [1] not in completed_layers"``.
+    """
+
+    def test_empty_layer_marked_complete(self):
+        from src.core.phases._gate_helpers import vacuously_complete_layers
+        from src.models.plan import MergeLayer
+
+        layer_index = {
+            0: MergeLayer(layer_id=0, name="infra"),
+            1: MergeLayer(layer_id=1, name="deps", depends_on=[0]),
+            2: MergeLayer(layer_id=2, name="rest", depends_on=[1]),
+        }
+        # Only layer 2 has any AUTO batch.
+        layers_with_batches: set[int | None] = {2}
+        result = vacuously_complete_layers(layer_index, layers_with_batches)
+        assert result == {0, 1}
+
+    def test_layer_with_batches_not_marked_complete(self):
+        from src.core.phases._gate_helpers import vacuously_complete_layers
+        from src.models.plan import MergeLayer
+
+        layer_index = {
+            0: MergeLayer(layer_id=0, name="a"),
+            1: MergeLayer(layer_id=1, name="b", depends_on=[0]),
+        }
+        # Both layers have batches — nothing is vacuously complete.
+        layers_with_batches: set[int | None] = {0, 1}
+        assert vacuously_complete_layers(layer_index, layers_with_batches) == set()
+
+    def test_none_key_in_batches_ignored(self):
+        """``layer_batches`` may contain ``None`` (batches without a layer);
+        that key must not collide with declared layer IDs."""
+        from src.core.phases._gate_helpers import vacuously_complete_layers
+        from src.models.plan import MergeLayer
+
+        layer_index = {0: MergeLayer(layer_id=0, name="only")}
+        layers_with_batches: set[int | None] = {None}
+        # layer 0 has no batches, so it is vacuously complete.
+        assert vacuously_complete_layers(layer_index, layers_with_batches) == {0}
+
+    def test_empty_plan_returns_empty_set(self):
+        from src.core.phases._gate_helpers import vacuously_complete_layers
+
+        assert vacuously_complete_layers({}, set()) == set()
+
+    def test_resolves_t1_0003_cascade_shape(self):
+        """End-to-end shape: with prefill, layer 2's dep on layer 1 (empty)
+        is satisfied via the prefill, so verify_layer_deps returns True."""
+        from src.core.phases._gate_helpers import (
+            vacuously_complete_layers,
+            verify_layer_deps,
+        )
+        from src.models.plan import MergeLayer
+
+        layers = [
+            MergeLayer(layer_id=0, name="infrastructure"),
+            MergeLayer(layer_id=1, name="dependencies", depends_on=[0]),
+            MergeLayer(layer_id=2, name="everything_else", depends_on=[1]),
+        ]
+        state = TestVerifyLayerDepsBlocking()._make_state_with_layers(layers)
+        layer_index = {ly.layer_id: ly for ly in layers}
+
+        # Layers 0 and 1 have no batches; layer 2 has the only batch.
+        completed = vacuously_complete_layers(layer_index, {2})
+        assert verify_layer_deps(2, completed, state) is True

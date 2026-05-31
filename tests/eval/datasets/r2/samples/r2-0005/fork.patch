@@ -1,0 +1,2479 @@
+diff --git a/.env.example b/.env.example
+index 8b95b80e..d6dc771e 100644
+--- a/.env.example
++++ b/.env.example
+@@ -55,6 +55,10 @@ DB_PASSWORD=difyai123456
+ DB_HOST=localhost
+ DB_PORT=5432
+ DB_DATABASE=dify_plugin
++# Specifies the SSL mode for the database connection. 
++# Possible values include 'disable', 'require', 'verify-ca', and 'verify-full'. 
++# 'disable' means SSL is not used for the connection.
++DB_SSL_MODE=disable
+ 
+ DIFY_INVOCATION_CONNECTION_IDLE_TIMEOUT=120
+ 
+@@ -78,6 +82,12 @@ PPROF_ENABLED=false
+ # if want to install plugin without verifying signature, set this to false
+ FORCE_VERIFYING_SIGNATURE=true
+ 
++# Enable or disable third-party signature verification for plugins
++# Set to "true" to allow verification using additional public keys specified in THIRD_PARTY_SIGNATURE_VERIFICATION_PUBLIC_KEYS
++THIRD_PARTY_SIGNATURE_VERIFICATION_ENABLED=false
++# A comma-separated list of file paths to public keys in addition to the official public key for signature verification
++THIRD_PARTY_SIGNATURE_VERIFICATION_PUBLIC_KEYS=
++
+ # proxy settings, example: HTTP_PROXY=http://host.docker.internal:7890
+ HTTP_PROXY=
+ HTTPS_PROXY=
+\ No newline at end of file
+diff --git a/README.md b/README.md
+index d42d808d..01cecadd 100644
+--- a/README.md
++++ b/README.md
+@@ -32,6 +32,27 @@ Attention that the `PYTHON_INTERPRETER_PATH` is the path to the python interpret
+ 
+ We recommend you to use `vscode` to debug the daemon,  and a `launch.json` file is provided in the `.vscode` directory.
+ 
++### Python environment
++#### UV
++Daemon uses `uv` to manage the dependencies of plugins, before you start the daemon, you need to install [uv](https://github.com/astral-sh/uv) by yourself. 
++
++#### Interpreter
++There is a possibility that you have multiple python versions installed on your machine, a variable `PYTHON_INTERPRETER_PATH` is provided to specify the python interpreter path for you.
++
++## Deployment
++
++Currently, the daemon only supports Linux and MacOS, lots of adaptions are needed for Windows, feel free to contribute if you need it.
++
++### Docker
++
++> **NOTE:** Since the daemon depends on a shared `cwd` directory for running plugins, it's not recommended to use network-based volumes or bind mounts from outside the host machine. This could result in poor performance, such as plugins not launching in a timely manner.
++
++uses docker volume to share the directory with the host machine, it's better for performance.
++
++### Kubernetes
++
++For now, Daemon community edition dose not support smoothly scale out with the number of replicas, If you are interested in this feature, please contact us. we have a more production-ready version for enterprise users.
++
+ ## LICENSE
+ 
+ Dify Plugin Daemon is released under the [Apache-2.0 license](LICENSE).
+diff --git a/cmd/commandline/main.go b/cmd/commandline/main.go
+index 8e7ecaee..da45898c 100644
+--- a/cmd/commandline/main.go
++++ b/cmd/commandline/main.go
+@@ -29,6 +29,12 @@ var (
+ 		Long:  "Bundle related commands",
+ 	}
+ 
++	signatureCommand = &cobra.Command{
++		Use:   "signature",
++		Short: "Signature",
++		Long:  "Signature related commands",
++	}
++
+ 	versionCommand = &cobra.Command{
+ 		Use:   "version",
+ 		Short: "Version",
+@@ -45,6 +51,7 @@ func init() {
+ 	rootCommand.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.dify.yaml)")
+ 	rootCommand.AddCommand(pluginCommand)
+ 	rootCommand.AddCommand(bundleCommand)
++	rootCommand.AddCommand(signatureCommand)
+ 	rootCommand.AddCommand(versionCommand)
+ }
+ 
+diff --git a/cmd/commandline/signature.go b/cmd/commandline/signature.go
+new file mode 100644
+index 00000000..b71e79fc
+--- /dev/null
++++ b/cmd/commandline/signature.go
+@@ -0,0 +1,70 @@
++package main
++
++import (
++	"os"
++
++	"github.com/langgenius/dify-plugin-daemon/cmd/commandline/signature"
++	"github.com/spf13/cobra"
++)
++
++var (
++	signatureGenerateCommand = &cobra.Command{
++		Use:   "generate",
++		Short: "Generate a key pair",
++		Long:  "Generate a key pair",
++		Args:  cobra.ExactArgs(0),
++		Run: func(c *cobra.Command, args []string) {
++			keyPairName := c.Flag("filename").Value.String()
++			if keyPairName == "" {
++				keyPairName = "dify_plugin_signing_key"
++			}
++			err := signature.GenerateKeyPair(keyPairName)
++			if err != nil {
++				os.Exit(1)
++			}
++		},
++	}
++
++	signatureSignCommand = &cobra.Command{
++		Use:   "sign [difypkg_path]",
++		Short: "Sign a difypkg file",
++		Long:  "Sign a difypkg file with the specified private key",
++		Args:  cobra.ExactArgs(1),
++		Run: func(c *cobra.Command, args []string) {
++			difypkgPath := args[0]
++			privateKeyPath := c.Flag("private_key").Value.String()
++			err := signature.Sign(difypkgPath, privateKeyPath)
++			if err != nil {
++				os.Exit(1)
++			}
++		},
++	}
++
++	signatureVerifyCommand = &cobra.Command{
++		Use:   "verify [difypkg_path]",
++		Short: "Verify a difypkg file",
++		Long:  "Verify a difypkg file with the specified public key. If no public key is provided, the official public key will be used",
++		Args:  cobra.ExactArgs(1),
++		Run: func(c *cobra.Command, args []string) {
++			difypkgPath := args[0]
++			publicKeyPath := c.Flag("public_key").Value.String()
++			err := signature.Verify(difypkgPath, publicKeyPath)
++			if err != nil {
++				os.Exit(1)
++			}
++		},
++	}
++)
++
++func init() {
++	signatureCommand.AddCommand(signatureGenerateCommand)
++	signatureCommand.AddCommand(signatureSignCommand)
++	signatureCommand.AddCommand(signatureVerifyCommand)
++
++	signatureGenerateCommand.Flags().StringP("filename", "f", "", "filename of the key pair")
++
++	signatureSignCommand.Flags().StringP("private_key", "p", "", "private key file")
++	signatureSignCommand.MarkFlagRequired("private_key")
++
++	signatureVerifyCommand.Flags().StringP("public_key", "p", "", "public key file")
++}
+diff --git a/cmd/commandline/signature/generate.go b/cmd/commandline/signature/generate.go
+new file mode 100644
+index 00000000..dd884c31
+--- /dev/null
++++ b/cmd/commandline/signature/generate.go
+@@ -0,0 +1,53 @@
++package signature
++
++import (
++	"crypto/rand"
++	"crypto/rsa"
++	"crypto/x509"
++	"encoding/pem"
++	"fmt"
++	"os"
++
++	"github.com/langgenius/dify-plugin-daemon/internal/utils/log"
++)
++
++func GenerateKeyPair(keyPairName string) error {
++	// generate a key pair
++	keyPair, err := rsa.GenerateKey(rand.Reader, 4096)
++	if err != nil {
++		log.Error("Failed to generate key pair: %v", err)
++		return err
++	}
++
++	// marshal the keys to PEM format
++	privateKey := x509.MarshalPKCS1PrivateKey(keyPair)
++	publicKey := x509.MarshalPKCS1PublicKey(&keyPair.PublicKey)
++	privateKeyPem := pem.EncodeToMemory(&pem.Block{
++		Type:  "RSA PRIVATE KEY",
++		Bytes: privateKey,
++	})
++	publicKeyPem := pem.EncodeToMemory(&pem.Block{
++		Type:  "RSA PUBLIC KEY",
++		Bytes: publicKey,
++	})
++
++	// write the keys to files
++	privateKeyPath := fmt.Sprintf("%s.private.pem", keyPairName)
++	publicKeyPath := fmt.Sprintf("%s.public.pem", keyPairName)
++
++	if err := os.WriteFile(privateKeyPath, privateKeyPem, 0644); err != nil {
++		log.Error("Failed to write private key: %v", err)
++		return err
++	}
++
++	if err := os.WriteFile(publicKeyPath, publicKeyPem, 0644); err != nil {
++		log.Error("Failed to write public key: %v", err)
++		return err
++	}
++
++	log.Info("Key pair generated successfully")
++	log.Info("Private key: %s", privateKeyPath)
++	log.Info("Public key: %s", publicKeyPath)
++
++	return nil
++}
+diff --git a/cmd/commandline/signature/sign.go b/cmd/commandline/signature/sign.go
+new file mode 100644
+index 00000000..3a23c83d
+--- /dev/null
++++ b/cmd/commandline/signature/sign.go
+@@ -0,0 +1,57 @@
++package signature
++
++import (
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++
++	"github.com/langgenius/dify-plugin-daemon/internal/utils/encryption"
++	"github.com/langgenius/dify-plugin-daemon/internal/utils/log"
++	"github.com/langgenius/dify-plugin-daemon/pkg/plugin_packager/signer/withkey"
++)
++
++func Sign(difypkgPath string, privateKeyPath string) error {
++	// read the plugin and private key
++	plugin, err := os.ReadFile(difypkgPath)
++	if err != nil {
++		log.Error("Failed to read plugin file: %v", err)
++		return err
++	}
++
++	privateKeyBytes, err := os.ReadFile(privateKeyPath)
++	if err != nil {
++		log.Error("Failed to read private key file: %v", err)
++		return err
++	}
++
++	privateKey, err := encryption.LoadPrivateKey(privateKeyBytes)
++	if err != nil {
++		log.Error("Failed to load private key: %v", err)
++		return err
++	}
++
++	// sign the plugin
++	pluginFile, err := withkey.SignPluginWithPrivateKey(plugin, privateKey)
++	if err != nil {
++		log.Error("Failed to sign plugin: %v", err)
++		return err
++	}
++
++	// write the signed plugin to a file
++	dir := filepath.Dir(difypkgPath)
++	base := filepath.Base(difypkgPath)
++	ext := filepath.Ext(base)
++	name := strings.TrimSuffix(base, ext)
++	outputPath := filepath.Join(dir, fmt.Sprintf("%s.signed%s", name, ext))
++
++	err = os.WriteFile(outputPath, pluginFile, 0644)
++	if err != nil {
++		log.Error("Failed to write signed plugin file: %v", err)
++		return err
++	}
++
++	log.Info("Plugin signed successfully, output path: %s", outputPath)
++
++	return nil
++}
+diff --git a/cmd/commandline/signature/signature_test.go b/cmd/commandline/signature/signature_test.go
+new file mode 100644
+index 00000000..56457916
+--- /dev/null
++++ b/cmd/commandline/signature/signature_test.go
+@@ -0,0 +1,227 @@
++package signature
++
++import (
++	_ "embed"
++	"os"
++	"path/filepath"
++	"testing"
++
++	"github.com/langgenius/dify-plugin-daemon/internal/utils/encryption"
++)
++
++//go:embed testdata/dummy_plugin.difypkg
++var dummyPlugin []byte
++
++func TestGenerateKeyPair(t *testing.T) {
++	// create a temporary directory for testing
++	tempDir := t.TempDir()
++
++	// create a key pair
++	keyPairName := filepath.Join(tempDir, "test_key_pair")
++	GenerateKeyPair(keyPairName)
++	privateKeyPath := keyPairName + ".private.pem"
++	publicKeyPath := keyPairName + ".public.pem"
++
++	// check if the key files are created
++	if _, err := os.Stat(privateKeyPath); os.IsNotExist(err) {
++		t.Errorf("Private key file was not created: %s", privateKeyPath)
++	}
++	if _, err := os.Stat(publicKeyPath); os.IsNotExist(err) {
++		t.Errorf("Public key file was not created: %s", publicKeyPath)
++	}
++
++	// check if the key files can be loaded
++	privateKeyBytes, err := os.ReadFile(privateKeyPath)
++	if err != nil {
++		t.Fatalf("Failed to read private key file: %v", err)
++	}
++	publicKeyBytes, err := os.ReadFile(publicKeyPath)
++	if err != nil {
++		t.Fatalf("Failed to read public key file: %v", err)
++	}
++
++	// check if the keys can be loaded
++	_, err = encryption.LoadPrivateKey(privateKeyBytes)
++	if err != nil {
++		t.Errorf("Failed to load private key: %v", err)
++	}
++	_, err = encryption.LoadPublicKey(publicKeyBytes)
++	if err != nil {
++		t.Errorf("Failed to load public key: %v", err)
++	}
++}
++
++func TestSignAndVerify(t *testing.T) {
++	// create a temporary directory for testing
++	tempDir := t.TempDir()
++
++	// extract the minimal plugin content from the embedded data to a file
++	dummyPluginPath := filepath.Join(tempDir, "dummy_plugin.difypkg")
++	if err := os.WriteFile(dummyPluginPath, dummyPlugin, 0644); err != nil {
++		t.Fatalf("Failed to create dummy plugin file: %v", err)
++	}
++
++	// create two key pairs
++	keyPair1Name := filepath.Join(tempDir, "test_key_pair_1")
++	keyPair2Name := filepath.Join(tempDir, "test_key_pair_2")
++	GenerateKeyPair(keyPair1Name)
++	GenerateKeyPair(keyPair2Name)
++	privateKey1Path := keyPair1Name + ".private.pem"
++	publicKey1Path := keyPair1Name + ".public.pem"
++	privateKey2Path := keyPair2Name + ".private.pem"
++	publicKey2Path := keyPair2Name + ".public.pem"
++
++	// test case definition for table-driven tests
++	type testCase struct {
++		name          string
++		signKeyPath   string
++		verifyKeyPath string
++		expectSuccess bool
++	}
++
++	// test cases
++	tests := []testCase{
++		{
++			name:          "sign with keypair1, verify with keypair1",
++			signKeyPath:   privateKey1Path,
++			verifyKeyPath: publicKey1Path,
++			expectSuccess: true,
++		},
++		{
++			name:          "sign with keypair1, verify with keypair2",
++			signKeyPath:   privateKey1Path,
++			verifyKeyPath: publicKey2Path,
++			expectSuccess: false,
++		},
++		{
++			name:          "sign with keypair2, verify with keypair2",
++			signKeyPath:   privateKey2Path,
++			verifyKeyPath: publicKey2Path,
++			expectSuccess: true,
++		},
++		{
++			name:          "sign with keypair2, verify with keypair1",
++			signKeyPath:   privateKey2Path,
++			verifyKeyPath: publicKey1Path,
++			expectSuccess: false,
++		},
++		{
++			name:          "sign with keypair1, verify without key",
++			signKeyPath:   privateKey1Path,
++			verifyKeyPath: "",
++			expectSuccess: false,
++		},
++		{
++			name:          "sign with keypair2, verify without key",
++			signKeyPath:   privateKey2Path,
++			verifyKeyPath: "",
++			expectSuccess: false,
++		},
++	}
++
++	// execute each test case
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			// create a temporary file for each test case
++			testPluginPath := filepath.Join(tempDir, "test_plugin_"+tt.name+".difypkg")
++			if err := os.WriteFile(testPluginPath, dummyPlugin, 0644); err != nil {
++				t.Fatalf("Failed to create test plugin file: %v", err)
++			}
++
++			// sign the plugin
++			Sign(testPluginPath, tt.signKeyPath)
++
++			// get the path of the signed plugin
++			dir := filepath.Dir(testPluginPath)
++			base := filepath.Base(testPluginPath)
++			ext := filepath.Ext(base)
++			name := base[:len(base)-len(ext)]
++			dummyPluginPath := filepath.Join(dir, name+".signed"+ext)
++
++			// check if the signed plugin file was created
++			if _, err := os.Stat(dummyPluginPath); os.IsNotExist(err) {
++				t.Fatalf("Signed plugin file was not created: %s", dummyPluginPath)
++			}
++
++			// verify the signed plugin and check the result
++			err := Verify(dummyPluginPath, tt.verifyKeyPath)
++			if tt.expectSuccess && err != nil {
++				t.Errorf("Expected verification to succeed, but got error: %v", err)
++			} else if !tt.expectSuccess && err == nil {
++				t.Errorf("Expected verification to fail, but it succeeded")
++			}
++		})
++	}
++}
++
++// TestVerifyUnsigned tests verification of an unsigned difypkg file
++func TestVerifyUnsigned(t *testing.T) {
++	// create a temporary directory for testing
++	tempDir := t.TempDir()
++
++	// extract the minimal plugin content from the embedded data to a file
++	dummyPluginPath := filepath.Join(tempDir, "dummy_plugin.difypkg")
++	if err := os.WriteFile(dummyPluginPath, dummyPlugin, 0644); err != nil {
++		t.Fatalf("Failed to create dummy plugin file: %v", err)
++	}
++
++	// create a key pair
++	keyPairName := filepath.Join(tempDir, "test_key_pair")
++	GenerateKeyPair(keyPairName)
++	publicKeyPath := keyPairName + ".public.pem"
++
++	// Try to verify the unsigned plugin file
++	err := Verify(dummyPluginPath, publicKeyPath)
++	if err == nil {
++		t.Errorf("Expected verification of unsigned file to fail, but it succeeded")
++	}
++}
++
++// TestVerifyTampered tests verification of a tampered signed difypkg file
++func TestVerifyTampered(t *testing.T) {
++	// create a temporary directory for testing
++	tempDir := t.TempDir()
++
++	// extract the minimal plugin content from the embedded data to a file
++	dummyPluginPath := filepath.Join(tempDir, "dummy_plugin.difypkg")
++	if err := os.WriteFile(dummyPluginPath, dummyPlugin, 0644); err != nil {
++		t.Fatalf("Failed to create dummy plugin file: %v", err)
++	}
++
++	// create a key pair
++	keyPairName := filepath.Join(tempDir, "test_key_pair")
++	GenerateKeyPair(keyPairName)
++	privateKeyPath := keyPairName + ".private.pem"
++	publicKeyPath := keyPairName + ".public.pem"
++
++	// Sign the plugin
++	Sign(dummyPluginPath, privateKeyPath)
++
++	// Get the path of the signed plugin
++	dir := filepath.Dir(dummyPluginPath)
++	base := filepath.Base(dummyPluginPath)
++	ext := filepath.Ext(base)
++	name := base[:len(base)-len(ext)]
++	signedDummyPluginPath := filepath.Join(dir, name+".signed"+ext)
++
++	// Read the signed plugin
++	signedPluginData, err := os.ReadFile(signedDummyPluginPath)
++	if err != nil {
++		t.Fatalf("Failed to read signed plugin file: %v", err)
++	}
++
++	// tamper the signed plugin data
++	signedPluginData[len(signedPluginData)-10] = 0
++
++	// write the tampered data back to the file
++	tamperedPluginPath := filepath.Join(tempDir, "tampered_plugin.signed.difypkg")
++	if err := os.WriteFile(tamperedPluginPath, signedPluginData, 0644); err != nil {
++		t.Fatalf("Failed to write tampered plugin file: %v", err)
++	}
++
++	// try to verify the tampered plugin file
++	err = Verify(tamperedPluginPath, publicKeyPath)
++	if err == nil {
++		t.Errorf("Expected verification of tampered file to fail, but it succeeded")
++	}
++}
+diff --git a/cmd/commandline/signature/testdata/dummy_plugin.difypkg b/cmd/commandline/signature/testdata/dummy_plugin.difypkg
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff43d76befbaf32883cce98b1773850446f3fe8b
+GIT binary patch
+literal 2233
+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
+TVlOKjNC7(#E&&F~e=rXKxr#K&
+
+literal 0
+HcmV?d00001
+
+diff --git a/cmd/commandline/signature/verify.go b/cmd/commandline/signature/verify.go
+new file mode 100644
+index 00000000..becb48ce
+--- /dev/null
++++ b/cmd/commandline/signature/verify.go
+@@ -0,0 +1,57 @@
++package signature
++
++import (
++	"crypto/rsa"
++	"os"
++
++	"github.com/langgenius/dify-plugin-daemon/internal/utils/encryption"
++	"github.com/langgenius/dify-plugin-daemon/internal/utils/log"
++	"github.com/langgenius/dify-plugin-daemon/pkg/plugin_packager/decoder"
++)
++
++func Verify(difypkgPath string, publicKeyPath string) error {
++	// read the plugin
++	plugin, err := os.ReadFile(difypkgPath)
++	if err != nil {
++		log.Error("Failed to read plugin file: %v", err)
++		return err
++	}
++
++	decoderInstance, err := decoder.NewZipPluginDecoder(plugin)
++	if err != nil {
++		log.Error("Failed to create plugin decoder, plugin path: %s, error: %v", difypkgPath, err)
++		return err
++	}
++
++	if publicKeyPath == "" {
++		// verify the plugin with the official (bundled) public key
++		err = decoder.VerifyPlugin(decoderInstance)
++		if err != nil {
++			log.Error("Failed to verify plugin with official public key: %v", err)
++			return err
++		}
++	} else {
++		// read the public key
++		publicKeyBytes, err := os.ReadFile(publicKeyPath)
++		if err != nil {
++			log.Error("Failed to read public key file: %v", err)
++			return err
++		}
++
++		publicKey, err := encryption.LoadPublicKey(publicKeyBytes)
++		if err != nil {
++			log.Error("Failed to load public key: %v", err)
++			return err
++		}
++
++		// verify the plugin
++		err = decoder.VerifyPluginWithPublicKeys(decoderInstance, []*rsa.PublicKey{publicKey})
++		if err != nil {
++			log.Error("Failed to verify plugin with provided public key: %v", err)
++			return err
++		}
++	}
++
++	log.Info("Plugin verified successfully")
++	return nil
++}
+diff --git a/docker/local.dockerfile b/docker/local.dockerfile
+index 75cc4c79..6e571446 100644
+--- a/docker/local.dockerfile
++++ b/docker/local.dockerfile
+@@ -46,7 +46,7 @@ RUN mv /usr/lib/python3.12/EXTERNALLY-MANAGED /usr/lib/python3.12/EXTERNALLY-MAN
+     && python3 -m pip install uv \
+     && uv pip install --system dify_plugin \
+     && python3 -c "from uv._find_uv import find_uv_bin;print(find_uv_bin());" \
+-    && python3 -c "import tiktoken; tiktoken.get_encoding('gpt2').special_tokens_set; tiktoken.get_encoding('cl100k_base').special_tokens_set"
++    && python3 -c "import tiktoken; encodings = ['o200k_base', 'cl100k_base', 'p50k_base', 'r50k_base', 'p50k_edit', 'gpt2']; [tiktoken.get_encoding(encoding).special_tokens_set for encoding in encodings]"
+ 
+ ENV PLATFORM=$PLATFORM
+ ENV GIN_MODE=release
+diff --git a/internal/cluster/redirect.go b/internal/cluster/redirect.go
+index f90d8034..192f0c9c 100644
+--- a/internal/cluster/redirect.go
++++ b/internal/cluster/redirect.go
+@@ -6,26 +6,22 @@ import (
+ 	"net/http"
+ )
+ 
+-// RedirectRequest redirects the request to the specified node
+-func (c *Cluster) RedirectRequest(
+-	node_id string, request *http.Request,
+-) (int, http.Header, io.ReadCloser, error) {
+-	node, ok := c.nodes.Load(node_id)
+-	if !ok {
+-		return 0, nil, nil, errors.New("node not found")
+-	}
+-
+-	ips := c.SortIps(node)
+-	if len(ips) == 0 {
+-		return 0, nil, nil, errors.New("no available ip found")
++func constructRedirectUrl(ip address, request *http.Request) string {
++	url := "http://" + ip.fullAddress() + request.URL.Path
++	if request.URL.RawQuery != "" {
++		url += "?" + request.URL.RawQuery
+ 	}
++	return url
++}
+ 
+-	ip := ips[0]
++// basic redirect request
++func redirectRequestToIp(ip address, request *http.Request) (int, http.Header, io.ReadCloser, error) {
++	url := constructRedirectUrl(ip, request)
+ 
+ 	// create a new request
+ 	redirectedRequest, err := http.NewRequest(
+ 		request.Method,
+-		"http://"+ip.fullAddress()+request.URL.Path,
++		url,
+ 		request.Body,
+ 	)
+ 
+@@ -49,3 +45,22 @@ func (c *Cluster) RedirectRequest(
+ 
+ 	return resp.StatusCode, resp.Header, resp.Body, nil
+ }
++
++// RedirectRequest redirects the request to the specified node
++func (c *Cluster) RedirectRequest(
++	node_id string, request *http.Request,
++) (int, http.Header, io.ReadCloser, error) {
++	node, ok := c.nodes.Load(node_id)
++	if !ok {
++		return 0, nil, nil, errors.New("node not found")
++	}
++
++	ips := c.SortIps(node)
++	if len(ips) == 0 {
++		return 0, nil, nil, errors.New("no available ip found")
++	}
++
++	ip := ips[0]
++
++	return redirectRequestToIp(ip, request)
++}
+diff --git a/internal/cluster/redirect_test.go b/internal/cluster/redirect_test.go
+index 9ecaad26..fc1a2158 100644
+--- a/internal/cluster/redirect_test.go
++++ b/internal/cluster/redirect_test.go
+@@ -5,12 +5,14 @@ import (
+ 	"fmt"
+ 	"io"
+ 	"net/http"
++	"strings"
+ 	"sync"
+ 	"testing"
+ 	"time"
+ 
+ 	"github.com/gin-gonic/gin"
+ 	"github.com/langgenius/dify-plugin-daemon/internal/utils/network"
++	"github.com/langgenius/dify-plugin-daemon/pkg/entities/endpoint_entities"
+ )
+ 
+ type SimulationCheckServer struct {
+@@ -19,13 +21,13 @@ type SimulationCheckServer struct {
+ 	port uint16
+ }
+ 
+-func createSimulationSevers(nums int, register_callback func(i int, c *gin.Engine)) ([]*SimulationCheckServer, error) {
++func createSimulationSevers(nums int, registerCallback func(i int, c *gin.Engine)) ([]*SimulationCheckServer, error) {
+ 	gin.SetMode(gin.ReleaseMode)
+ 	engines := make([]*gin.Engine, nums)
+ 	servers := make([]*SimulationCheckServer, nums)
+ 	for i := 0; i < nums; i++ {
+ 		engines[i] = gin.Default()
+-		register_callback(i, engines[i])
++		registerCallback(i, engines[i])
+ 	}
+ 
+ 	// get random port
+@@ -180,3 +182,104 @@ func TestRedirectTraffic(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestRedirectTrafficWithQueryParams(t *testing.T) {
++	request, err := http.NewRequest("GET", "http://localhost:8080/plugin/invoke/tool?a=1&b=2", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	request.Header.Set(endpoint_entities.HeaderXOriginalHost, "localhost:8080")
++
++	ip := address{
++		Ip:   "127.0.0.1",
++		Port: 8080,
++	}
++
++	redirectedRequest := constructRedirectUrl(ip, request)
++	if redirectedRequest != "http://127.0.0.1:8080/plugin/invoke/tool?a=1&b=2" {
++		t.Fatal("redirected request is not correct")
++	}
++}
++
++func TestRedirectTrafficWithOutQueryParams(t *testing.T) {
++	request, err := http.NewRequest("GET", "http://localhost:8080/plugin/invoke/tool", nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	request.Header.Set(endpoint_entities.HeaderXOriginalHost, "localhost:8080")
++
++	ip := address{
++		Ip:   "127.0.0.1",
++		Port: 8080,
++	}
++
++	redirectedRequest := constructRedirectUrl(ip, request)
++	if redirectedRequest != "http://127.0.0.1:8080/plugin/invoke/tool" {
++		t.Fatal("redirected request is not correct")
++	}
++}
++
++func TestRedirectTrafficWithPathStyle(t *testing.T) {
++	payload := `{"a": "1", "b": "2"}`
++
++	server := gin.Default()
++	server.POST("/plugin/invoke/tool", func(c *gin.Context) {
++		content, err := io.ReadAll(c.Request.Body)
++		if err != nil {
++			c.String(http.StatusInternalServerError, err.Error())
++			return
++		}
++		c.String(http.StatusOK, string(content))
++	})
++
++	port, err := network.GetRandomPort()
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	srv := &SimulationCheckServer{
++		Server: http.Server{
++			Addr:    fmt.Sprintf(":%d", port),
++			Handler: server,
++		},
++		port: port,
++	}
++
++	go func() {
++		srv.ListenAndServe()
++	}()
++
++	// wait for server to be ready
++	time.Sleep(3 * time.Second)
++
++	defer srv.Shutdown(context.Background())
++
++	request, err := http.NewRequest("POST", "http://localhost:8080/plugin/invoke/tool", strings.NewReader(payload))
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	// redirect to srv
++	statusCode, _, reader, err := redirectRequestToIp(address{
++		Ip:   "127.0.0.1",
++		Port: port,
++	}, request)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	content, err := io.ReadAll(reader)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	if statusCode != http.StatusOK {
++		t.Fatal("status code is not ok")
++	}
++
++	if string(content) != payload {
++		t.Fatal("content is not correct")
++	}
++}
+diff --git a/internal/core/plugin_manager/manager.go b/internal/core/plugin_manager/manager.go
+index 2b575eee..a41637da 100644
+--- a/internal/core/plugin_manager/manager.go
++++ b/internal/core/plugin_manager/manager.go
+@@ -194,11 +194,11 @@ func (p *PluginManager) BackwardsInvocation() dify_invocation.BackwardsInvocatio
+ 	return p.backwardsInvocation
+ }
+ 
+-func (p *PluginManager) SavePackage(plugin_unique_identifier plugin_entities.PluginUniqueIdentifier, pkg []byte) (
++func (p *PluginManager) SavePackage(plugin_unique_identifier plugin_entities.PluginUniqueIdentifier, pkg []byte, thirdPartySignatureVerificationConfig *decoder.ThirdPartySignatureVerificationConfig) (
+ 	*plugin_entities.PluginDeclaration, error,
+ ) {
+ 	// try to decode the package
+-	packageDecoder, err := decoder.NewZipPluginDecoder(pkg)
++	packageDecoder, err := decoder.NewZipPluginDecoderWithThirdPartySignatureVerificationConfig(pkg, thirdPartySignatureVerificationConfig)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/internal/oss/s3/s3_storage.go b/internal/oss/s3/s3_storage.go
+index 83ff83a8..ca2b4650 100644
+--- a/internal/oss/s3/s3_storage.go
++++ b/internal/oss/s3/s3_storage.go
+@@ -47,7 +47,9 @@ func NewS3Storage(useAws bool, endpoint string, usePathStyle bool, ak string, sk
+ 		}
+ 
+ 		client = s3.NewFromConfig(cfg, func(options *s3.Options) {
+-			options.BaseEndpoint = aws.String(endpoint)
++			if endpoint != "" {
++				options.BaseEndpoint = aws.String(endpoint)
++			}
+ 		})
+ 	} else {
+ 		client = s3.New(s3.Options{
+@@ -179,4 +181,4 @@ func (s *S3Storage) State(key string) (oss.OSSState, error) {
+ 
+ func (s *S3Storage) Type() string {
+ 	return oss.OSS_TYPE_S3
+-}
+\ No newline at end of file
++}
+diff --git a/internal/oss/tencent_cos/tencent_cos_storage.go b/internal/oss/tencent_cos/tencent_cos_storage.go
+index 0855a5ed..e4fe77e9 100644
+--- a/internal/oss/tencent_cos/tencent_cos_storage.go
++++ b/internal/oss/tencent_cos/tencent_cos_storage.go
+@@ -87,7 +87,6 @@ func (s *TencentCOSStorage) List(prefix string) ([]oss.OSSPath, error) {
+ 	}
+ 	isTruncated := true
+ 	var marker string
+-
+ 	for isTruncated {
+ 		if marker != "" {
+ 			opt.Marker = marker
+@@ -98,9 +97,10 @@ func (s *TencentCOSStorage) List(prefix string) ([]oss.OSSPath, error) {
+ 			return nil, err
+ 		}
+ 
+-		// 处理文件
+-		for _, obj := range result.Contents {
+-			key := strings.TrimPrefix(obj.Key, prefix)
++		for _, content := range result.Contents {
++			// remove prefix
++			key := strings.TrimPrefix(content.Key, prefix)
++			// remove leading slash
+ 			key = strings.TrimPrefix(key, "/")
+ 			if key == "" {
+ 				continue
+@@ -112,16 +112,26 @@ func (s *TencentCOSStorage) List(prefix string) ([]oss.OSSPath, error) {
+ 		}
+ 
+ 		for _, commonPrefix := range result.CommonPrefixes {
+-			dir := strings.TrimPrefix(commonPrefix, prefix)
+-			dir = strings.TrimPrefix(dir, "/")
+-			dir = strings.TrimSuffix(dir, "/")
+-			if dir == "" {
++			if commonPrefix == "" {
+ 				continue
+ 			}
++			if !strings.HasSuffix(commonPrefix, "/") {
++				commonPrefix = commonPrefix + "/"
++			}
+ 			keys = append(keys, oss.OSSPath{
+-				Path:  dir,
++				Path:  commonPrefix,
+ 				IsDir: true,
+ 			})
++
++			subKeys, _ := s.List(commonPrefix)
++			if len(subKeys) > 0 {
++				subPrefix := strings.TrimPrefix(commonPrefix, prefix)
++				for i := range subKeys {
++					subKeys[i].Path = subPrefix + subKeys[i].Path
++				}
++				keys = append(keys, subKeys...)
++			}
++
+ 		}
+ 
+ 		isTruncated = result.IsTruncated
+@@ -152,4 +162,4 @@ func (s *TencentCOSStorage) State(key string) (oss.OSSState, error) {
+ 
+ func (s *TencentCOSStorage) Type() string {
+ 	return oss.OSS_TYPE_TENCENT_COS
+-}
+\ No newline at end of file
++}
+diff --git a/internal/server/endpoint.go b/internal/server/endpoint.go
+index ea301ccc..0273e0bd 100644
+--- a/internal/server/endpoint.go
++++ b/internal/server/endpoint.go
+@@ -2,6 +2,8 @@ package server
+ 
+ import (
+ 	"errors"
++	"github.com/langgenius/dify-plugin-daemon/internal/utils/cache"
++	"strings"
+ 	"time"
+ 
+ 	"github.com/gin-gonic/gin"
+@@ -11,6 +13,7 @@ import (
+ 	"github.com/langgenius/dify-plugin-daemon/internal/types/exception"
+ 	"github.com/langgenius/dify-plugin-daemon/internal/types/models"
+ 	"github.com/langgenius/dify-plugin-daemon/internal/utils/log"
++	"github.com/langgenius/dify-plugin-daemon/pkg/entities/endpoint_entities"
+ 	"github.com/langgenius/dify-plugin-daemon/pkg/entities/plugin_entities"
+ )
+ 
+@@ -26,6 +29,11 @@ func (app *App) Endpoint(config *app.Config) func(c *gin.Context) {
+ 		hookId := c.Param("hook_id")
+ 		path := c.Param("path")
+ 
++		// set X-Original-Host
++		if c.Request.Header.Get(endpoint_entities.HeaderXOriginalHost) == "" {
++			c.Request.Header.Set(endpoint_entities.HeaderXOriginalHost, c.Request.Host)
++		}
++
+ 		if app.endpointHandler != nil {
+ 			app.endpointHandler(c, hookId, time.Duration(config.PluginMaxExecutionTimeout)*time.Second, path)
+ 		} else {
+@@ -35,9 +43,21 @@ func (app *App) Endpoint(config *app.Config) func(c *gin.Context) {
+ }
+ 
+ func (app *App) EndpointHandler(ctx *gin.Context, hookId string, maxExecutionTime time.Duration, path string) {
+-	endpoint, err := db.GetOne[models.Endpoint](
+-		db.Equal("hook_id", hookId),
++	endpointCacheKey := strings.Join(
++		[]string{
++			"hook_id",
++			hookId,
++		},
++		":",
+ 	)
++	endpoint, err := cache.AutoGetWithGetter[models.Endpoint](
++		endpointCacheKey,
++		func() (*models.Endpoint, error) {
++			v, err := db.GetOne[models.Endpoint](
++				db.Equal("hook_id", hookId),
++			)
++			return &v, err
++		})
+ 	if err == db.ErrDatabaseNotFound {
+ 		ctx.JSON(404, exception.BadRequestError(errors.New("endpoint not found")).ToResponse())
+ 		return
+@@ -50,9 +70,24 @@ func (app *App) EndpointHandler(ctx *gin.Context, hookId string, maxExecutionTim
+ 	}
+ 
+ 	// get plugin installation
+-	pluginInstallation, err := db.GetOne[models.PluginInstallation](
+-		db.Equal("plugin_id", endpoint.PluginID),
+-		db.Equal("tenant_id", endpoint.TenantID),
++	pluginInstallationCacheKey := strings.Join(
++		[]string{
++			"plugin_id",
++			endpoint.PluginID,
++			"tenant_id",
++			endpoint.TenantID,
++		},
++		":",
++	)
++	pluginInstallation, err := cache.AutoGetWithGetter[models.PluginInstallation](
++		pluginInstallationCacheKey,
++		func() (*models.PluginInstallation, error) {
++			v, err := db.GetOne[models.PluginInstallation](
++				db.Equal("plugin_id", endpoint.PluginID),
++				db.Equal("tenant_id", endpoint.TenantID),
++			)
++			return &v, err
++		},
+ 	)
+ 	if err != nil {
+ 		ctx.JSON(404, exception.BadRequestError(errors.New("plugin installation not found")).ToResponse())
+@@ -73,6 +108,6 @@ func (app *App) EndpointHandler(ctx *gin.Context, hookId string, maxExecutionTim
+ 	if ok, originalError := app.cluster.IsPluginOnCurrentNode(pluginUniqueIdentifier); !ok {
+ 		app.redirectPluginInvokeByPluginIdentifier(ctx, pluginUniqueIdentifier, originalError)
+ 	} else {
+-		service.Endpoint(ctx, &endpoint, &pluginInstallation, maxExecutionTime, path)
++		service.Endpoint(ctx, endpoint, pluginInstallation, maxExecutionTime, path)
+ 	}
+ }
+diff --git a/internal/service/endpoint.go b/internal/service/endpoint.go
+index 9f3af604..bd4764ea 100644
+--- a/internal/service/endpoint.go
++++ b/internal/service/endpoint.go
+@@ -24,6 +24,7 @@ import (
+ 	"github.com/langgenius/dify-plugin-daemon/internal/utils/encryption"
+ 	"github.com/langgenius/dify-plugin-daemon/internal/utils/routine"
+ 	"github.com/langgenius/dify-plugin-daemon/pkg/entities"
++	"github.com/langgenius/dify-plugin-daemon/pkg/entities/endpoint_entities"
+ 	"github.com/langgenius/dify-plugin-daemon/pkg/entities/plugin_entities"
+ 	"github.com/langgenius/dify-plugin-daemon/pkg/entities/requests"
+ )
+@@ -57,13 +58,19 @@ func copyRequest(req *http.Request, hookId string, path string) (*bytes.Buffer,
+ 	newReq.Header.Del("X-Original-Url")
+ 	newReq.Header.Del("X-Original-Host")
+ 
++	// check if X-Original-Host is set
++	if originalHost := req.Header.Get(endpoint_entities.HeaderXOriginalHost); originalHost != "" {
++		// replace host with original host
++		newReq.Host = originalHost
++	}
++
+ 	// setup hook id to request
+ 	newReq.Header.Set("Dify-Hook-Id", hookId)
+ 	// check if Dify-Hook-Url is set
+ 	if url := req.Header.Get("Dify-Hook-Url"); url == "" {
+ 		newReq.Header.Set(
+ 			"Dify-Hook-Url",
+-			fmt.Sprintf("http://%s/e/%s%s", req.Host, hookId, path),
++			fmt.Sprintf("http://%s/e/%s%s", newReq.Host, hookId, path),
+ 		)
+ 	}
+ 
+diff --git a/internal/service/endpoint_test.go b/internal/service/endpoint_test.go
+index fb9e2e29..3c45b08c 100644
+--- a/internal/service/endpoint_test.go
++++ b/internal/service/endpoint_test.go
+@@ -5,6 +5,8 @@ import (
+ 	"io"
+ 	"net/http"
+ 	"testing"
++
++	"github.com/langgenius/dify-plugin-daemon/pkg/entities/endpoint_entities"
+ )
+ 
+ func TestCopyRequest(t *testing.T) {
+@@ -24,3 +26,23 @@ func TestCopyRequest(t *testing.T) {
+ 		t.Fatal("request body is not equal, ", str)
+ 	}
+ }
++
++func TestEndpointWithOriginalHost(t *testing.T) {
++	req, err := http.NewRequest("GET", "http://localhost:8080/test?test=123", nil)
++	req.Header.Set(endpoint_entities.HeaderXOriginalHost, "example.com")
++	if err != nil {
++		t.Fatal(err)
++	}
++	payload := "test"
++	req.Body = io.NopCloser(bytes.NewReader([]byte(payload)))
++
++	buffer, err := copyRequest(req, "123", "/test")
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	str := buffer.String()
++	if str != "GET /test?test=123 HTTP/1.1\r\nHost: example.com\r\nUser-Agent: Go-http-client/1.1\r\nContent-Length: 4\r\nDify-Hook-Id: 123\r\nDify-Hook-Url: http://example.com/e/123/test\r\n\r\ntest" {
++		t.Fatal("request body is not equal, ", str)
++	}
++}
+diff --git a/internal/service/install_service/state.go b/internal/service/install_service/state.go
+index 6335be41..0f7bdac9 100644
+--- a/internal/service/install_service/state.go
++++ b/internal/service/install_service/state.go
+@@ -1,6 +1,8 @@
+ package install_service
+ 
+ import (
++	"github.com/langgenius/dify-plugin-daemon/internal/utils/cache"
++	gostrings "strings"
+ 	"time"
+ 
+ 	"github.com/langgenius/dify-plugin-daemon/internal/db"
+@@ -134,6 +136,14 @@ func GetEndpoint(
+ 
+ // uninstalls a plugin from db
+ func UninstallEndpoint(endpoint *models.Endpoint) error {
++	cacheKey := gostrings.Join(
++		[]string{
++			"hook_id",
++			endpoint.HookID,
++		},
++		":",
++	)
++	_ = cache.AutoDelete[models.Endpoint](cacheKey)
+ 	return db.WithTransaction(func(tx *gorm.DB) error {
+ 		if err := db.Delete(endpoint, tx); err != nil {
+ 			return err
+@@ -202,6 +212,16 @@ func DisabledEndpoint(endpoint_id string, tenant_id string) error {
+ 			return nil
+ 		}
+ 
++		endpointCacheKey := gostrings.Join(
++			[]string{
++				"hook_id",
++				endpoint.HookID,
++			},
++			":",
++		)
++
++		_ = cache.AutoDelete[models.Endpoint](endpointCacheKey)
++
+ 		endpoint.Enabled = false
+ 		if err := db.Update(endpoint, tx); err != nil {
+ 			return err
+diff --git a/internal/service/plugin_decoder.go b/internal/service/plugin_decoder.go
+index 3f699d4c..7218ebb0 100644
+--- a/internal/service/plugin_decoder.go
++++ b/internal/service/plugin_decoder.go
+@@ -29,12 +29,12 @@ func UploadPluginPkg(
+ 		return exception.InternalServerError(err).ToResponse()
+ 	}
+ 
+-	decoder, err := decoder.NewZipPluginDecoderWithSizeLimit(pluginFile, config.MaxPluginPackageSize)
++	decoderInstance, err := decoder.NewZipPluginDecoderWithSizeLimit(pluginFile, config.MaxPluginPackageSize)
+ 	if err != nil {
+ 		return exception.BadRequestError(err).ToResponse()
+ 	}
+ 
+-	pluginUniqueIdentifier, err := decoder.UniqueIdentity()
++	pluginUniqueIdentifier, err := decoderInstance.UniqueIdentity()
+ 	if err != nil {
+ 		return exception.BadRequestError(err).ToResponse()
+ 	}
+@@ -45,7 +45,10 @@ func UploadPluginPkg(
+ 	}
+ 
+ 	manager := plugin_manager.Manager()
+-	declaration, err := manager.SavePackage(pluginUniqueIdentifier, pluginFile)
++	declaration, err := manager.SavePackage(pluginUniqueIdentifier, pluginFile, &decoder.ThirdPartySignatureVerificationConfig{
++		Enabled:        config.ThirdPartySignatureVerificationEnabled,
++		PublicKeyPaths: config.ThirdPartySignatureVerificationPublicKeys,
++	})
+ 	if err != nil {
+ 		return exception.BadRequestError(errors.Join(err, errors.New("failed to save package"))).ToResponse()
+ 	}
+@@ -123,17 +126,20 @@ func UploadPluginBundle(
+ 					return exception.InternalServerError(errors.Join(errors.New("failed to fetch package from bundle"), err)).ToResponse()
+ 				} else {
+ 					// decode and save
+-					decoder, err := decoder.NewZipPluginDecoder(asset)
++					decoderInstance, err := decoder.NewZipPluginDecoder(asset)
+ 					if err != nil {
+ 						return exception.BadRequestError(errors.Join(errors.New("failed to create package decoder"), err)).ToResponse()
+ 					}
+ 
+-					pluginUniqueIdentifier, err := decoder.UniqueIdentity()
++					pluginUniqueIdentifier, err := decoderInstance.UniqueIdentity()
+ 					if err != nil {
+ 						return exception.BadRequestError(errors.Join(errors.New("failed to get package unique identifier"), err)).ToResponse()
+ 					}
+ 
+-					declaration, err := manager.SavePackage(pluginUniqueIdentifier, asset)
++					declaration, err := manager.SavePackage(pluginUniqueIdentifier, asset, &decoder.ThirdPartySignatureVerificationConfig{
++						Enabled:        config.ThirdPartySignatureVerificationEnabled,
++						PublicKeyPaths: config.ThirdPartySignatureVerificationPublicKeys,
++					})
+ 					if err != nil {
+ 						return exception.InternalServerError(errors.Join(errors.New("failed to save package"), err)).ToResponse()
+ 					}
+diff --git a/internal/types/app/config.go b/internal/types/app/config.go
+index 1505dbfb..5c1da71d 100644
+--- a/internal/types/app/config.go
++++ b/internal/types/app/config.go
+@@ -84,6 +84,11 @@ type Config struct {
+ 	// force verifying signature for all plugins, not allowing install plugin not signed
+ 	ForceVerifyingSignature *bool `envconfig:"FORCE_VERIFYING_SIGNATURE"`
+ 
++	// enable or disable third-party signature verification for plugins
++	ThirdPartySignatureVerificationEnabled bool `envconfig:"THIRD_PARTY_SIGNATURE_VERIFICATION_ENABLED"  default:"false"`
++	// a comma-separated list of file paths to public keys in addition to the official public key for signature verification
++	ThirdPartySignatureVerificationPublicKeys []string `envconfig:"THIRD_PARTY_SIGNATURE_VERIFICATION_PUBLIC_KEYS"  default:""`
++
+ 	// lifetime state management
+ 	LifetimeCollectionHeartbeatInterval int `envconfig:"LIFETIME_COLLECTION_HEARTBEAT_INTERVAL"  validate:"required"`
+ 	LifetimeCollectionGCInterval        int `envconfig:"LIFETIME_COLLECTION_GC_INTERVAL" validate:"required"`
+diff --git a/internal/types/models/curd/atomic.go b/internal/types/models/curd/atomic.go
+index be005998..e6755097 100644
+--- a/internal/types/models/curd/atomic.go
++++ b/internal/types/models/curd/atomic.go
+@@ -2,6 +2,8 @@ package curd
+ 
+ import (
+ 	"errors"
++	"github.com/langgenius/dify-plugin-daemon/internal/utils/cache"
++	"strings"
+ 
+ 	"github.com/langgenius/dify-plugin-daemon/internal/db"
+ 	"github.com/langgenius/dify-plugin-daemon/internal/types/models"
+@@ -185,6 +187,18 @@ func UninstallPlugin(
+ 		db.Equal("tenant_id", tenant_id),
+ 	)
+ 
++	pluginInstallationCacheKey := strings.Join(
++		[]string{
++			"plugin_id",
++			plugin_unique_identifier.PluginID(),
++			"tenant_id",
++			tenant_id,
++		},
++		":",
++	)
++
++	_ = cache.AutoDelete[models.PluginInstallation](pluginInstallationCacheKey)
++
+ 	if err != nil {
+ 		if err == db.ErrDatabaseNotFound {
+ 			return nil, errors.New("plugin has not been installed")
+diff --git a/internal/utils/parser/cbor.go b/internal/utils/parser/cbor.go
+index 5b31241c..e59292fb 100644
+--- a/internal/utils/parser/cbor.go
++++ b/internal/utils/parser/cbor.go
+@@ -1,6 +1,26 @@
+ package parser
+ 
+-import "github.com/fxamacker/cbor/v2"
++import (
++	"reflect"
++
++	"github.com/fxamacker/cbor/v2"
++)
++
++var (
++	_defaultCBORMapType        = reflect.TypeOf(map[string]any{})
++	_defaultCBORDecoderOptions = cbor.DecOptions{
++		DefaultMapType: _defaultCBORMapType,
++	}
++	_defaultCBORDecoder cbor.DecMode
++)
++
++func init() {
++	var err error
++	_defaultCBORDecoder, err = _defaultCBORDecoderOptions.DecMode()
++	if err != nil {
++		panic(err)
++	}
++}
+ 
+ func MarshalCBOR[T any](v T) ([]byte, error) {
+ 	return cbor.Marshal(v)
+@@ -8,6 +28,6 @@ func MarshalCBOR[T any](v T) ([]byte, error) {
+ 
+ func UnmarshalCBOR[T any](data []byte) (T, error) {
+ 	var v T
+-	err := cbor.Unmarshal(data, &v)
++	err := _defaultCBORDecoder.Unmarshal(data, &v)
+ 	return v, err
+ }
+diff --git a/internal/utils/parser/cbor_test.go b/internal/utils/parser/cbor_test.go
+new file mode 100644
+index 00000000..ede2913f
+--- /dev/null
++++ b/internal/utils/parser/cbor_test.go
+@@ -0,0 +1,36 @@
++package parser
++
++import (
++	"testing"
++)
++
++func TestMarshalCBORMap(t *testing.T) {
++	data := map[string]any{
++		"type": "object",
++		"properties": map[string]any{
++			"name": map[string]any{
++				"type": "string",
++			},
++		},
++	}
++
++	tool, err := MarshalCBOR(data)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	m, err := UnmarshalCBOR[map[string]any](tool)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	// check properties is map[string]any
++	if _, ok := m["properties"]; !ok {
++		t.Fatal("properties dose not exist")
++	}
++
++	_, ok := m["properties"].(map[string]any)
++	if !ok {
++		t.Fatal("properties is not a map[string]any")
++	}
++}
+diff --git a/pkg/entities/endpoint_entities/endpoint.go b/pkg/entities/endpoint_entities/endpoint.go
+index c80c6963..56be1c51 100644
+--- a/pkg/entities/endpoint_entities/endpoint.go
++++ b/pkg/entities/endpoint_entities/endpoint.go
+@@ -5,3 +5,7 @@ type EndpointResponseChunk struct {
+ 	Headers map[string]string `json:"headers" validate:"omitempty"`
+ 	Result  *string           `json:"result" validate:"omitempty"`
+ }
++
++const (
++	HeaderXOriginalHost = "X-Original-Host"
++)
+diff --git a/pkg/entities/plugin_entities/config.go b/pkg/entities/plugin_entities/config.go
+index 1d1e491c..2741996f 100644
+--- a/pkg/entities/plugin_entities/config.go
++++ b/pkg/entities/plugin_entities/config.go
+@@ -20,6 +20,7 @@ const (
+ 	CONFIG_TYPE_MODEL_SELECTOR ConfigType = MODEL_SELECTOR
+ 	CONFIG_TYPE_APP_SELECTOR   ConfigType = APP_SELECTOR
+ 	// CONFIG_TYPE_TOOL_SELECTOR  ConfigType = TOOL_SELECTOR
++	CONFIG_TYPE_TOOLS_SELECTOR ConfigType = TOOLS_SELECTOR
+ )
+ 
+ type ModelConfigScope string
+@@ -63,7 +64,8 @@ func isCredentialType(fl validator.FieldLevel) bool {
+ 		string(CONFIG_TYPE_SELECT),
+ 		string(CONFIG_TYPE_BOOLEAN),
+ 		string(CONFIG_TYPE_APP_SELECTOR),
+-		string(CONFIG_TYPE_MODEL_SELECTOR):
++		string(CONFIG_TYPE_MODEL_SELECTOR),
++		string(CONFIG_TYPE_TOOLS_SELECTOR):
+ 		return true
+ 	}
+ 	return false
+diff --git a/pkg/entities/plugin_entities/constant.go b/pkg/entities/plugin_entities/constant.go
+index 1d98fd3b..2172d717 100644
+--- a/pkg/entities/plugin_entities/constant.go
++++ b/pkg/entities/plugin_entities/constant.go
+@@ -12,5 +12,5 @@ const (
+ 	APP_SELECTOR   = "app-selector"
+ 	MODEL_SELECTOR = "model-selector"
+ 	// TOOL_SELECTOR  = "tool-selector"
+-	TOOLS_SELECTOR = "array[tools]" // for agent strategy only
++	TOOLS_SELECTOR = "array[tools]"
+ )
+diff --git a/pkg/plugin_packager/decoder/helper.go b/pkg/plugin_packager/decoder/helper.go
+index f0033b92..e48c3612 100644
+--- a/pkg/plugin_packager/decoder/helper.go
++++ b/pkg/plugin_packager/decoder/helper.go
+@@ -272,7 +272,17 @@ func (p *PluginDecoderHelper) Manifest(decoder PluginDecoder) (plugin_entities.P
+ 	dec.FillInDefaultValues()
+ 
+ 	// verify signature
+-	dec.Verified = VerifyPlugin(decoder) == nil
++	// for ZipPluginDecoder, use the third party signature verification if it is enabled
++	if zipDecoder, ok := decoder.(*ZipPluginDecoder); ok {
++		config := zipDecoder.thirdPartySignatureVerificationConfig
++		if config != nil && config.Enabled && len(config.PublicKeyPaths) > 0 {
++			dec.Verified = VerifyPluginWithPublicKeyPaths(decoder, config.PublicKeyPaths) == nil
++		} else {
++			dec.Verified = VerifyPlugin(decoder) == nil
++		}
++	} else {
++		dec.Verified = VerifyPlugin(decoder) == nil
++	}
+ 
+ 	if err := dec.ManifestValidate(); err != nil {
+ 		return plugin_entities.PluginDeclaration{}, err
+diff --git a/pkg/plugin_packager/decoder/verifier.go b/pkg/plugin_packager/decoder/verifier.go
+index 31083a7c..dfaaa6f7 100644
+--- a/pkg/plugin_packager/decoder/verifier.go
++++ b/pkg/plugin_packager/decoder/verifier.go
+@@ -2,27 +2,69 @@ package decoder
+ 
+ import (
+ 	"bytes"
++	"crypto/rsa"
+ 	"crypto/sha256"
+ 	"encoding/base64"
++	"os"
+ 	"path"
+ 	"strconv"
++	"strings"
+ 
+ 	"github.com/langgenius/dify-plugin-daemon/internal/core/license/public_key"
+ 	"github.com/langgenius/dify-plugin-daemon/internal/utils/encryption"
+ )
+ 
+ // VerifyPlugin is a function that verifies the signature of a plugin
+-// It takes a plugin decoder and verifies the signature
++// It takes a plugin decoder and verifies the signature with a bundled public key
+ func VerifyPlugin(decoder PluginDecoder) error {
+-	// load public key
+-	publicKey, err := encryption.LoadPublicKey(public_key.PUBLIC_KEY)
++	var publicKeys []*rsa.PublicKey
++
++	// load official public key
++	officialPublicKey, err := encryption.LoadPublicKey(public_key.PUBLIC_KEY)
++	if err != nil {
++		return err
++	}
++	publicKeys = append(publicKeys, officialPublicKey)
++
++	// verify the plugin
++	return VerifyPluginWithPublicKeys(decoder, publicKeys)
++}
++
++// VerifyPluginWithPublicKeyPaths is a function that verifies the signature of a plugin
++// It takes a plugin decoder and a list of public key paths to verify the signature
++func VerifyPluginWithPublicKeyPaths(decoder PluginDecoder, publicKeyPaths []string) error {
++	var publicKeys []*rsa.PublicKey
++
++	// load official public key
++	officialPublicKey, err := encryption.LoadPublicKey(public_key.PUBLIC_KEY)
+ 	if err != nil {
+ 		return err
+ 	}
++	publicKeys = append(publicKeys, officialPublicKey)
++
++	// load keys provided in the arguments
++	for _, publicKeyPath := range publicKeyPaths {
++		// open file by trimming the spaces in path
++		keyBytes, err := os.ReadFile(strings.TrimSpace(publicKeyPath))
++		if err != nil {
++			return err
++		}
++		publicKey, err := encryption.LoadPublicKey(keyBytes)
++		if err != nil {
++			return err
++		}
++		publicKeys = append(publicKeys, publicKey)
++	}
++
++	return VerifyPluginWithPublicKeys(decoder, publicKeys)
++}
+ 
++// VerifyPluginWithPublicKeys is a function that verifies the signature of a plugin
++// It takes a plugin decoder and a list of public keys to verify the signature
++func VerifyPluginWithPublicKeys(decoder PluginDecoder, publicKeys []*rsa.PublicKey) error {
+ 	data := new(bytes.Buffer)
+ 	// read one by one
+-	err = decoder.Walk(func(filename, dir string) error {
++	err := decoder.Walk(func(filename, dir string) error {
+ 		// read file bytes
+ 		file, err := decoder.ReadFile(path.Join(dir, filename))
+ 		if err != nil {
+@@ -62,6 +104,12 @@ func VerifyPlugin(decoder PluginDecoder) error {
+ 	}
+ 
+ 	// verify signature
+-	err = encryption.VerifySign(publicKey, data.Bytes(), sigBytes)
+-	return err
++	var lastErr error
++	for _, publicKey := range publicKeys {
++		lastErr = encryption.VerifySign(publicKey, data.Bytes(), sigBytes)
++		if lastErr == nil {
++			return nil
++		}
++	}
++	return lastErr
+ }
+diff --git a/pkg/plugin_packager/decoder/zip.go b/pkg/plugin_packager/decoder/zip.go
+index b7ed521f..74bac8af 100644
+--- a/pkg/plugin_packager/decoder/zip.go
++++ b/pkg/plugin_packager/decoder/zip.go
+@@ -26,9 +26,16 @@ type ZipPluginDecoder struct {
+ 
+ 	sig        string
+ 	createTime int64
++
++	thirdPartySignatureVerificationConfig *ThirdPartySignatureVerificationConfig
+ }
+ 
+-func NewZipPluginDecoder(binary []byte) (*ZipPluginDecoder, error) {
++type ThirdPartySignatureVerificationConfig struct {
++    Enabled bool
++    PublicKeyPaths []string
++}
++
++func newZipPluginDecoder(binary []byte, thirdPartySignatureVerificationConfig *ThirdPartySignatureVerificationConfig) (*ZipPluginDecoder, error) {
+ 	reader, err := zip.NewReader(bytes.NewReader(binary), int64(len(binary)))
+ 	if err != nil {
+ 		return nil, errors.New(strings.ReplaceAll(err.Error(), "zip", "difypkg"))
+@@ -37,6 +44,7 @@ func NewZipPluginDecoder(binary []byte) (*ZipPluginDecoder, error) {
+ 	decoder := &ZipPluginDecoder{
+ 		reader: reader,
+ 		err:    err,
++		thirdPartySignatureVerificationConfig: thirdPartySignatureVerificationConfig,
+ 	}
+ 
+ 	err = decoder.Open()
+@@ -51,6 +59,17 @@ func NewZipPluginDecoder(binary []byte) (*ZipPluginDecoder, error) {
+ 	return decoder, nil
+ }
+ 
++// NewZipPluginDecoder is a helper function to create ZipPluginDecoder
++func NewZipPluginDecoder(binary []byte) (*ZipPluginDecoder, error) {
++	return newZipPluginDecoder(binary, nil)
++}
++
++// NewZipPluginDecoderWithThirdPartySignatureVerificationConfig is a helper function
++// to create a ZipPluginDecoder with a third party signature verification
++func NewZipPluginDecoderWithThirdPartySignatureVerificationConfig(binary []byte, thirdPartySignatureVerificationConfig *ThirdPartySignatureVerificationConfig) (*ZipPluginDecoder, error) {
++	return newZipPluginDecoder(binary, thirdPartySignatureVerificationConfig)
++}
++
+ // NewZipPluginDecoderWithSizeLimit is a helper function to create a ZipPluginDecoder with a size limit
+ // It checks the total uncompressed size of the plugin package and returns an error if it exceeds the max size
+ func NewZipPluginDecoderWithSizeLimit(binary []byte, maxSize int64) (*ZipPluginDecoder, error) {
+@@ -70,7 +89,7 @@ func NewZipPluginDecoderWithSizeLimit(binary []byte, maxSize int64) (*ZipPluginD
+ 		}
+ 	}
+ 
+-	return NewZipPluginDecoder(binary)
++	return newZipPluginDecoder(binary, nil)
+ }
+ 
+ func (z *ZipPluginDecoder) Stat(filename string) (fs.FileInfo, error) {
+diff --git a/pkg/plugin_packager/packager_test.go b/pkg/plugin_packager/packager_test.go
+index c8bdb25c..56b07210 100644
+--- a/pkg/plugin_packager/packager_test.go
++++ b/pkg/plugin_packager/packager_test.go
+@@ -1,90 +1,136 @@
+ package plugin_packager
+ 
+ import (
+-	_ "embed"
++	"crypto/rsa"
++	"embed"
+ 	"fmt"
+ 	"os"
++	"path/filepath"
+ 	"strings"
+ 	"testing"
+ 
++	"github.com/langgenius/dify-plugin-daemon/internal/utils/encryption"
+ 	"github.com/langgenius/dify-plugin-daemon/pkg/plugin_packager/decoder"
+ 	"github.com/langgenius/dify-plugin-daemon/pkg/plugin_packager/packager"
+ 	"github.com/langgenius/dify-plugin-daemon/pkg/plugin_packager/signer"
++	"github.com/langgenius/dify-plugin-daemon/pkg/plugin_packager/signer/withkey"
+ )
+ 
+-//go:embed manifest.yaml
++//go:embed testdata/manifest.yaml
+ var manifest []byte
+ 
+-//go:embed neko.yaml
++//go:embed testdata/neko.yaml
+ var neko []byte
+ 
+-//go:embed .difyignore
++//go:embed testdata/.difyignore
+ var dify_ignore []byte
+ 
+-//go:embed ignored
++//go:embed testdata/ignored
+ var ignored []byte
+ 
+-//go:embed _assets/test.svg
++//go:embed testdata/_assets/test.svg
+ var test_svg []byte
+ 
+-func TestPackagerAndVerifier(t *testing.T) {
++//go:embed testdata/keys
++var keys embed.FS
++
++// createMinimalPlugin creates a minimal test plugin and returns the zip file
++func createMinimalPlugin(t *testing.T) []byte {
+ 	// create a temp directory
+-	os.RemoveAll("temp")
+-	if err := os.Mkdir("temp", 0755); err != nil {
+-		t.Errorf("failed to create temp directory: %s", err.Error())
+-		return
++	tempDir := t.TempDir()
++
++	// create basic files
++	if err := os.WriteFile(filepath.Join(tempDir, "manifest.yaml"), manifest, 0644); err != nil {
++		t.Errorf("failed to write manifest: %s", err.Error())
++		return nil
+ 	}
+-	defer func() {
+-		os.RemoveAll("temp")
+-		os.Remove("temp")
+-	}()
++
++	if err := os.WriteFile(filepath.Join(tempDir, "neko.yaml"), neko, 0644); err != nil {
++		t.Errorf("failed to write neko: %s", err.Error())
++		return nil
++	}
++
++	// create _assets directory and files
++	if err := os.MkdirAll(filepath.Join(tempDir, "_assets"), 0755); err != nil {
++		t.Errorf("failed to create _assets directory: %s", err.Error())
++		return nil
++	}
++
++	if err := os.WriteFile(filepath.Join(tempDir, "_assets/test.svg"), test_svg, 0644); err != nil {
++		t.Errorf("failed to write test.svg: %s", err.Error())
++		return nil
++	}
++
++	// create decoder
++	originDecoder, err := decoder.NewFSPluginDecoder(tempDir)
++	if err != nil {
++		t.Errorf("failed to create decoder: %s", err.Error())
++		return nil
++	}
++
++	// create packager
++	packager := packager.NewPackager(originDecoder)
++
++	// pack
++	zip, err := packager.Pack(52428800)
++	if err != nil {
++		t.Errorf("failed to pack: %s", err.Error())
++		return nil
++	}
++
++	return zip
++}
++
++func TestPackagerAndVerifier(t *testing.T) {
++	// create a temp directory
++	tempDir := t.TempDir()
+ 
+ 	// create manifest
+-	if err := os.WriteFile("temp/manifest.yaml", manifest, 0644); err != nil {
++	if err := os.WriteFile(filepath.Join(tempDir, "manifest.yaml"), manifest, 0644); err != nil {
+ 		t.Errorf("failed to write manifest: %s", err.Error())
+ 		return
+ 	}
+ 
+-	if err := os.WriteFile("temp/neko.yaml", neko, 0644); err != nil {
++	if err := os.WriteFile(filepath.Join(tempDir, "neko.yaml"), neko, 0644); err != nil {
+ 		t.Errorf("failed to write neko: %s", err.Error())
+ 		return
+ 	}
+ 
+ 	// create .difyignore
+-	if err := os.WriteFile("temp/.difyignore", dify_ignore, 0644); err != nil {
++	if err := os.WriteFile(filepath.Join(tempDir, ".difyignore"), dify_ignore, 0644); err != nil {
+ 		t.Errorf("failed to write .difyignore: %s", err.Error())
+ 		return
+ 	}
+ 
+ 	// create ignored
+-	if err := os.WriteFile("temp/ignored", ignored, 0644); err != nil {
++	if err := os.WriteFile(filepath.Join(tempDir, "ignored"), ignored, 0644); err != nil {
+ 		t.Errorf("failed to write ignored: %s", err.Error())
+ 		return
+ 	}
+ 
+ 	// create ignored_paths
+-	if err := os.MkdirAll("temp/ignored_paths", 0755); err != nil {
++	if err := os.MkdirAll(filepath.Join(tempDir, "ignored_paths"), 0755); err != nil {
+ 		t.Errorf("failed to create ignored_paths directory: %s", err.Error())
+ 		return
+ 	}
+ 
+ 	// create ignored_paths/ignored
+-	if err := os.WriteFile("temp/ignored_paths/ignored", ignored, 0644); err != nil {
++	if err := os.WriteFile(filepath.Join(tempDir, "ignored_paths/ignored"), ignored, 0644); err != nil {
+ 		t.Errorf("failed to write ignored_paths/ignored: %s", err.Error())
+ 		return
+ 	}
+ 
+-	if err := os.MkdirAll("temp/_assets", 0755); err != nil {
++	if err := os.MkdirAll(filepath.Join(tempDir, "_assets"), 0755); err != nil {
+ 		t.Errorf("failed to create _assets directory: %s", err.Error())
+ 		return
+ 	}
+ 
+-	if err := os.WriteFile("temp/_assets/test.svg", test_svg, 0644); err != nil {
++	if err := os.WriteFile(filepath.Join(tempDir, "_assets/test.svg"), test_svg, 0644); err != nil {
+ 		t.Errorf("failed to write test.svg: %s", err.Error())
+ 		return
+ 	}
+ 
+-	originDecoder, err := decoder.NewFSPluginDecoder("temp")
++	originDecoder, err := decoder.NewFSPluginDecoder(tempDir)
+ 	if err != nil {
+ 		t.Errorf("failed to create decoder: %s", err.Error())
+ 		return
+@@ -160,76 +206,322 @@ func TestPackagerAndVerifier(t *testing.T) {
+ }
+ 
+ func TestWrongSign(t *testing.T) {
+-	// create a temp directory
+-	if err := os.Mkdir("temp", 0755); err != nil {
+-		t.Errorf("failed to create temp directory: %s", err.Error())
++	// create a minimal test plugin
++	zip := createMinimalPlugin(t)
++	if zip == nil {
+ 		return
+ 	}
+-	defer func() {
+-		os.RemoveAll("temp")
+-		os.Remove("temp")
+-	}()
+ 
+-	// create manifest
+-	if err := os.WriteFile("temp/manifest.yaml", manifest, 0644); err != nil {
+-		t.Errorf("failed to write manifest: %s", err.Error())
++	// sign
++	signed, err := signer.SignPlugin(zip)
++	if err != nil {
++		t.Errorf("failed to sign: %s", err.Error())
+ 		return
+ 	}
+ 
+-	if err := os.WriteFile("temp/neko.yaml", neko, 0644); err != nil {
+-		t.Errorf("failed to write neko: %s", err.Error())
++	// modify the signed file, signature is at the end of the file
++	signed[len(signed)-1] = 0
++	signed[len(signed)-2] = 0
++
++	// create a new decoder
++	signedDecoder, err := decoder.NewZipPluginDecoder(signed)
++	if err != nil {
++		t.Errorf("failed to create zip decoder: %s", err.Error())
+ 		return
+ 	}
+ 
+-	// create _assets directory
+-	if err := os.MkdirAll("temp/_assets", 0755); err != nil {
+-		t.Errorf("failed to create _assets directory: %s", err.Error())
++	// verify (expected to fail)
++	err = decoder.VerifyPlugin(signedDecoder)
++	if err == nil {
++		t.Errorf("should fail to verify")
+ 		return
+ 	}
++}
+ 
+-	// create _assets/test.svg
+-	if err := os.WriteFile("temp/_assets/test.svg", test_svg, 0644); err != nil {
+-		t.Errorf("failed to write test.svg: %s", err.Error())
+-		return
++// loadPublicKeyFile loads a key file from the embed.FS and returns the public key
++func loadPublicKeyFile(t *testing.T, keyFile string) *rsa.PublicKey {
++	keyBytes, err := keys.ReadFile(filepath.Join("testdata/keys", keyFile))
++	if err != nil {
++		t.Fatalf("failed to read key file: %s", err.Error())
++	}
++	key, err := encryption.LoadPublicKey(keyBytes)
++	if err != nil {
++		t.Fatalf("failed to load public key: %s", err.Error())
+ 	}
++	return key
++}
+ 
+-	originDecoder, err := decoder.NewFSPluginDecoder("temp")
++// loadPrivateKeyFile loads a key file from the embed.FS and returns the private key
++func loadPrivateKeyFile(t *testing.T, keyFile string) *rsa.PrivateKey {
++	keyBytes, err := keys.ReadFile(filepath.Join("testdata/keys", keyFile))
+ 	if err != nil {
+-		t.Errorf("failed to create decoder: %s", err.Error())
++		t.Fatalf("failed to read key file: %s", err.Error())
++	}
++	key, err := encryption.LoadPrivateKey(keyBytes)
++	if err != nil {
++		t.Fatalf("failed to load private key: %s", err.Error())
++	}
++	return key
++}
++
++// extractPublicKey extracts the key file from the embed.FS and returns the file path
++func extractKeyFile(t *testing.T, keyFile string, tmpDir string) string {
++	keyBytes, err := keys.ReadFile(filepath.Join("testdata/keys", keyFile))
++	if err != nil {
++		t.Fatalf("failed to read key file: %s", err.Error())
++	}
++	keyPath := filepath.Join(tmpDir, keyFile)
++	if err := os.WriteFile(keyPath, keyBytes, 0644); err != nil {
++		t.Fatalf("failed to write key file: %s", err.Error())
++	}
++	return keyPath
++}
++
++func TestSignPluginWithPrivateKey(t *testing.T) {
++	// load public keys from embed.FS
++	publicKey1 := loadPublicKeyFile(t, "test_key_pair_1.public.pem")
++	publicKey2 := loadPublicKeyFile(t, "test_key_pair_2.public.pem")
++
++	// load private keys from embed.FS
++	privateKey1 := loadPrivateKeyFile(t, "test_key_pair_1.private.pem")
++	privateKey2 := loadPrivateKeyFile(t, "test_key_pair_2.private.pem")
++
++	// create a minimal test plugin
++	zip := createMinimalPlugin(t)
++	if zip == nil {
+ 		return
+ 	}
+ 
+-	packager := packager.NewPackager(originDecoder)
++	// sign with private key 1 and create decoder
++	signed1, err := withkey.SignPluginWithPrivateKey(zip, privateKey1)
++	if err != nil {
++		t.Errorf("failed to sign with private key 1: %s", err.Error())
++		return
++	}
++	signedDecoder1, err := decoder.NewZipPluginDecoder(signed1)
++	if err != nil {
++		t.Errorf("failed to create zip decoder: %s", err.Error())
++		return
++	}
+ 
+-	// pack
+-	zip, err := packager.Pack(52428800)
++	// sign with private key 2 and create decoder
++	signed2, err := withkey.SignPluginWithPrivateKey(zip, privateKey2)
+ 	if err != nil {
+-		t.Errorf("failed to pack: %s", err.Error())
++		t.Errorf("failed to sign with private key 2: %s", err.Error())
++		return
++	}
++	signedDecoder2, err := decoder.NewZipPluginDecoder(signed2)
++	if err != nil {
++		t.Errorf("failed to create zip decoder: %s", err.Error())
+ 		return
+ 	}
+ 
+-	// sign
+-	signed, err := signer.SignPlugin(zip)
++	// tamper the signed1 file and create decoder
++	modifiedSigned1 := make([]byte, len(signed1))
++	copy(modifiedSigned1, signed1)
++	modifiedSigned1[len(modifiedSigned1)-10] = 0
++	modifiedDecoder1, err := decoder.NewZipPluginDecoder(modifiedSigned1)
+ 	if err != nil {
+-		t.Errorf("failed to sign: %s", err.Error())
++		t.Errorf("failed to create zip decoder: %s", err.Error())
+ 		return
+ 	}
+ 
+-	// modify the signed file, signature is at the end of the file
+-	signed[len(signed)-1] = 0
+-	signed[len(signed)-2] = 0
++	// define test cases
++	tests := []struct {
++		name          string
++		signedDecoder decoder.PluginDecoder
++		publicKeys    []*rsa.PublicKey
++		expectSuccess bool
++	}{
++		{
++			name:          "verify plugin signed with private key 1 using embedded public key (should fail)",
++			signedDecoder: signedDecoder1,
++			publicKeys:    nil, // use embedded public key
++			expectSuccess: false,
++		},
++		{
++			name:          "verify plugin signed with private key 1 using public key 1 (should succeed)",
++			signedDecoder: signedDecoder1,
++			publicKeys:    []*rsa.PublicKey{publicKey1},
++			expectSuccess: true,
++		},
++		{
++			name:          "verify plugin signed with private key 1 using public key 2 (should fail)",
++			signedDecoder: signedDecoder1,
++			publicKeys:    []*rsa.PublicKey{publicKey2},
++			expectSuccess: false,
++		},
++		{
++			name:          "verify plugin signed with private key 2 using public key 1 (should fail)",
++			signedDecoder: signedDecoder2,
++			publicKeys:    []*rsa.PublicKey{publicKey1},
++			expectSuccess: false,
++		},
++		{
++			name:          "verify plugin signed with private key 2 using public key 2 (should succeed)",
++			signedDecoder: signedDecoder2,
++			publicKeys:    []*rsa.PublicKey{publicKey2},
++			expectSuccess: true,
++		},
++		{
++			name:          "verify modified plugin signed with private key 1 using public key 1 (should fail)",
++			signedDecoder: modifiedDecoder1,
++			publicKeys:    []*rsa.PublicKey{publicKey1},
++			expectSuccess: false,
++		},
++		{
++			name:          "verify modified plugin signed with private key 1 using public key 2 (should fail)",
++			signedDecoder: modifiedDecoder1,
++			publicKeys:    []*rsa.PublicKey{publicKey2},
++			expectSuccess: false,
++		},
++	}
+ 
+-	// create a new decoder
+-	signedDecoder, err := decoder.NewZipPluginDecoder(signed)
++	// run test cases
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			var err error
++			if tt.publicKeys == nil {
++				err = decoder.VerifyPlugin(tt.signedDecoder)
++			} else {
++				err = decoder.VerifyPluginWithPublicKeys(tt.signedDecoder, tt.publicKeys)
++			}
++
++			if tt.expectSuccess && err != nil {
++				t.Errorf("expected success but got error: %s", err.Error())
++			}
++			if !tt.expectSuccess && err == nil {
++				t.Errorf("expected failure but got success")
++			}
++		})
++	}
++}
++
++func TestVerifyPluginWithThirdPartyKeys(t *testing.T) {
++	// create a temporary directory for the public key files (needed for storing the paths in environment variable)
++	tempDir := t.TempDir()
++
++	// extract public keys to files from embed.FS (needed for storing the paths in environment variable)
++	publicKey1Path := extractKeyFile(t, "test_key_pair_1.public.pem", tempDir)
++	publicKey2Path := extractKeyFile(t, "test_key_pair_2.public.pem", tempDir)
++
++	// load private keys from embed.FS
++	privateKey1 := loadPrivateKeyFile(t, "test_key_pair_1.private.pem")
++	privateKey2 := loadPrivateKeyFile(t, "test_key_pair_2.private.pem")
++
++	// create a minimal test plugin
++	zip := createMinimalPlugin(t)
++	if zip == nil {
++		return
++	}
++
++	// sign with private key 1 and create decoder
++	signed1, err := withkey.SignPluginWithPrivateKey(zip, privateKey1)
++	if err != nil {
++		t.Errorf("failed to sign with private key 1: %s", err.Error())
++		return
++	}
++	signedDecoder1, err := decoder.NewZipPluginDecoder(signed1)
+ 	if err != nil {
+ 		t.Errorf("failed to create zip decoder: %s", err.Error())
+ 		return
+ 	}
+ 
+-	// verify
+-	err = decoder.VerifyPlugin(signedDecoder)
+-	if err == nil {
+-		t.Errorf("should fail to verify")
++	// sign with private key 2 and create decoder
++	signed2, err := withkey.SignPluginWithPrivateKey(zip, privateKey2)
++	if err != nil {
++		t.Errorf("failed to sign with private key 2: %s", err.Error())
++		return
++	}
++	signedDecoder2, err := decoder.NewZipPluginDecoder(signed2)
++	if err != nil {
++		t.Errorf("failed to create zip decoder: %s", err.Error())
++		return
++	}
++
++	// tamper the signed1 file and create decoder
++	modifiedSigned1 := make([]byte, len(signed1))
++	copy(modifiedSigned1, signed1)
++	modifiedSigned1[len(modifiedSigned1)-10] = 0
++	modifiedDecoder1, err := decoder.NewZipPluginDecoder(modifiedSigned1)
++	if err != nil {
++		t.Errorf("failed to create zip decoder: %s", err.Error())
+ 		return
+ 	}
++
++	// define test cases
++	tests := []struct {
++		name          string
++		keyPaths      string
++		signedDecoder decoder.PluginDecoder
++		expectSuccess bool
++	}{
++		{
++			name:          "third-party verification with public key 1 (should succeed)",
++			keyPaths:      publicKey1Path,
++			signedDecoder: signedDecoder1,
++			expectSuccess: true,
++		},
++		{
++			name:          "third-party verification with public key 2 (should fail)",
++			keyPaths:      publicKey2Path,
++			signedDecoder: signedDecoder1,
++			expectSuccess: false,
++		},
++		{
++			name:          "third-party verification with both keys (should succeed)",
++			keyPaths:      fmt.Sprintf("%s,%s", publicKey1Path, publicKey2Path),
++			signedDecoder: signedDecoder1,
++			expectSuccess: true,
++		},
++		{
++			name:          "third-party verification with empty key path (should fail)",
++			keyPaths:      "",
++			signedDecoder: signedDecoder1,
++			expectSuccess: false,
++		},
++		{
++			name:          "third-party verification with non-existent key path (should fail)",
++			keyPaths:      "/non/existent/path.pem",
++			signedDecoder: signedDecoder1,
++			expectSuccess: false,
++		},
++		{
++			name:          "third-party verification with multiple keys including non-existent path (should fail)",
++			keyPaths:      fmt.Sprintf("%s,%s,/non/existent/path.pem", publicKey1Path, publicKey2Path),
++			signedDecoder: signedDecoder1,
++			expectSuccess: false,
++		},
++		{
++			name:          "third-party verification with multiple keys including extra spaces (should succeed)",
++			keyPaths:      fmt.Sprintf(" %s , %s ", publicKey1Path, publicKey2Path),
++			signedDecoder: signedDecoder1,
++			expectSuccess: true,
++		},
++		{
++			name:          "third-party verification with both keys, for file signed with key 2 (should succeed)",
++			keyPaths:      fmt.Sprintf("%s,%s", publicKey1Path, publicKey2Path),
++			signedDecoder: signedDecoder2,
++			expectSuccess: true,
++		},
++		{
++			name:          "third-party verification with both keys, for modified file (should fail)",
++			keyPaths:      fmt.Sprintf("%s,%s", publicKey1Path, publicKey2Path),
++			signedDecoder: modifiedDecoder1,
++			expectSuccess: false,
++		},
++	}
++
++	// run test cases
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			err := decoder.VerifyPluginWithPublicKeyPaths(tt.signedDecoder, strings.Split(tt.keyPaths, ","))
++			if tt.expectSuccess && err != nil {
++				t.Errorf("expected success but got error: %s", err.Error())
++			}
++			if !tt.expectSuccess && err == nil {
++				t.Errorf("expected failure but got success")
++			}
++		})
++	}
+ }
+diff --git a/pkg/plugin_packager/signer/sign.go b/pkg/plugin_packager/signer/sign.go
+index ec84573b..1f54a7b8 100644
+--- a/pkg/plugin_packager/signer/sign.go
++++ b/pkg/plugin_packager/signer/sign.go
+@@ -1,19 +1,9 @@
+ package signer
+ 
+ import (
+-	"archive/zip"
+-	"bytes"
+-	"crypto/sha256"
+-	"encoding/base64"
+-	"io"
+-	"path"
+-	"strconv"
+-	"time"
+-
+ 	"github.com/langgenius/dify-plugin-daemon/internal/core/license/private_key"
+ 	"github.com/langgenius/dify-plugin-daemon/internal/utils/encryption"
+-	"github.com/langgenius/dify-plugin-daemon/internal/utils/parser"
+-	"github.com/langgenius/dify-plugin-daemon/pkg/plugin_packager/decoder"
++	"github.com/langgenius/dify-plugin-daemon/pkg/plugin_packager/signer/withkey"
+ )
+ 
+ /*
+@@ -23,7 +13,7 @@ import (
+ */
+ 
+ // SignPlugin is a function that signs a plugin
+-// It takes a plugin as a stream of bytes and signs it with RSA-4096
++// It takes a plugin as a stream of bytes and signs it with RSA-4096 with a bundled private key
+ func SignPlugin(plugin []byte) ([]byte, error) {
+ 	// load private key
+ 	privateKey, err := encryption.LoadPrivateKey(private_key.PRIVATE_KEY)
+@@ -31,83 +21,5 @@ func SignPlugin(plugin []byte) ([]byte, error) {
+ 		return nil, err
+ 	}
+ 
+-	decoder, err := decoder.NewZipPluginDecoder(plugin)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	// create a new zip writer
+-	zipBuffer := new(bytes.Buffer)
+-	zipWriter := zip.NewWriter(zipBuffer)
+-
+-	defer zipWriter.Close()
+-	// store temporary hash
+-	data := new(bytes.Buffer)
+-	// read one by one
+-	err = decoder.Walk(func(filename, dir string) error {
+-		file, err := decoder.ReadFile(path.Join(dir, filename))
+-		if err != nil {
+-			return err
+-		}
+-
+-		// calculate sha256 hash of the file
+-		hash := sha256.New()
+-		hash.Write(file)
+-		hashed := hash.Sum(nil)
+-
+-		// write the hash into data
+-		data.Write(hashed)
+-
+-		// create a new file in the zip writer
+-		fileWriter, err := zipWriter.Create(path.Join(dir, filename))
+-		if err != nil {
+-			return err
+-		}
+-
+-		_, err = io.Copy(fileWriter, bytes.NewReader(file))
+-		if err != nil {
+-			return err
+-		}
+-
+-		return nil
+-	})
+-
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	// get current time
+-	ct := time.Now().Unix()
+-
+-	// convert time to bytes
+-	timeString := strconv.FormatInt(ct, 10)
+-
+-	// write the time into data
+-	data.Write([]byte(timeString))
+-
+-	// sign the data
+-	signature, err := encryption.RSASign(privateKey, data.Bytes())
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	// write the signature into the comment field of the zip file
+-	comments := parser.MarshalJson(map[string]any{
+-		"signature": base64.StdEncoding.EncodeToString(signature),
+-		"time":      ct,
+-	})
+-
+-	// write signature
+-	err = zipWriter.SetComment(comments)
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	// close the zip writer
+-	err = zipWriter.Close()
+-	if err != nil {
+-		return nil, err
+-	}
+-
+-	return zipBuffer.Bytes(), nil
++	return withkey.SignPluginWithPrivateKey(plugin, privateKey)
+ }
+diff --git a/pkg/plugin_packager/signer/withkey/sign_with_key.go b/pkg/plugin_packager/signer/withkey/sign_with_key.go
+new file mode 100644
+index 00000000..0ce5e48a
+--- /dev/null
++++ b/pkg/plugin_packager/signer/withkey/sign_with_key.go
+@@ -0,0 +1,101 @@
++package withkey
++
++import (
++	"archive/zip"
++	"bytes"
++	"crypto/rsa"
++	"crypto/sha256"
++	"encoding/base64"
++	"io"
++	"path"
++	"strconv"
++	"time"
++
++	"github.com/langgenius/dify-plugin-daemon/internal/utils/encryption"
++	"github.com/langgenius/dify-plugin-daemon/internal/utils/parser"
++	"github.com/langgenius/dify-plugin-daemon/pkg/plugin_packager/decoder"
++)
++
++// SignPluginWithPrivateKey is a function that signs a plugin
++// It takes a plugin as a stream of bytes and a private key to sign it with RSA-4096
++func SignPluginWithPrivateKey(plugin []byte, privateKey *rsa.PrivateKey) ([]byte, error) {
++	decoder, err := decoder.NewZipPluginDecoder(plugin)
++	if err != nil {
++		return nil, err
++	}
++
++	// create a new zip writer
++	zipBuffer := new(bytes.Buffer)
++	zipWriter := zip.NewWriter(zipBuffer)
++
++	defer zipWriter.Close()
++	// store temporary hash
++	data := new(bytes.Buffer)
++	// read one by one
++	err = decoder.Walk(func(filename, dir string) error {
++		file, err := decoder.ReadFile(path.Join(dir, filename))
++		if err != nil {
++			return err
++		}
++
++		// calculate sha256 hash of the file
++		hash := sha256.New()
++		hash.Write(file)
++		hashed := hash.Sum(nil)
++
++		// write the hash into data
++		data.Write(hashed)
++
++		// create a new file in the zip writer
++		fileWriter, err := zipWriter.Create(path.Join(dir, filename))
++		if err != nil {
++			return err
++		}
++
++		_, err = io.Copy(fileWriter, bytes.NewReader(file))
++		if err != nil {
++			return err
++		}
++
++		return nil
++	})
++
++	if err != nil {
++		return nil, err
++	}
++
++	// get current time
++	ct := time.Now().Unix()
++
++	// convert time to bytes
++	timeString := strconv.FormatInt(ct, 10)
++
++	// write the time into data
++	data.Write([]byte(timeString))
++
++	// sign the data
++	signature, err := encryption.RSASign(privateKey, data.Bytes())
++	if err != nil {
++		return nil, err
++	}
++
++	// write the signature into the comment field of the zip file
++	comments := parser.MarshalJson(map[string]any{
++		"signature": base64.StdEncoding.EncodeToString(signature),
++		"time":      ct,
++	})
++
++	// write signature
++	err = zipWriter.SetComment(comments)
++	if err != nil {
++		return nil, err
++	}
++
++	// close the zip writer
++	err = zipWriter.Close()
++	if err != nil {
++		return nil, err
++	}
++
++	return zipBuffer.Bytes(), nil
++}
+diff --git a/pkg/plugin_packager/.difyignore b/pkg/plugin_packager/testdata/.difyignore
+similarity index 100%
+rename from pkg/plugin_packager/.difyignore
+rename to pkg/plugin_packager/testdata/.difyignore
+diff --git a/pkg/plugin_packager/_assets/test.svg b/pkg/plugin_packager/testdata/_assets/test.svg
+similarity index 100%
+rename from pkg/plugin_packager/_assets/test.svg
+rename to pkg/plugin_packager/testdata/_assets/test.svg
+diff --git a/pkg/plugin_packager/ignored b/pkg/plugin_packager/testdata/ignored
+similarity index 100%
+rename from pkg/plugin_packager/ignored
+rename to pkg/plugin_packager/testdata/ignored
+diff --git a/pkg/plugin_packager/testdata/keys/test_key_pair_1.private.pem b/pkg/plugin_packager/testdata/keys/test_key_pair_1.private.pem
+new file mode 100644
+index 00000000..cc077907
+--- /dev/null
++++ b/pkg/plugin_packager/testdata/keys/test_key_pair_1.private.pem
+@@ -0,0 +1,51 @@
++-----BEGIN RSA PRIVATE KEY-----
++MIIJKQIBAAKCAgEAygLk/TIn0Wz4RMK16NW8rK/1UWGuYvcilJ+9rKBKX4Wr+0Nm
++6T2mEiGw9S2UUm4HeUS+F42pQTLV282Sz0lLn/mbWCwppXCC2Olfux4oT/w6YKBC
++c0LbXForVPVmNFLPjyZwTxk1N/kAqJY+9Ip3/Nrpfej/C7l5+CH9wIkYDBKzYvTh
++Z6Ud+tcHEozob7b7Hazu5qwmMg1A/+nRUbPnaQFh0PrBhbuBH0CEZ6xkpNOoPmhl
++mmGZNZzSw8RTXznUpar24USLcKJ/nvq8vxoeVmWG9uf68/DgyTyfXp/xrUPiEH5L
++kUANHhC22t4JxpmzAjf/LAYYE0k0zYaOsE853PHdcpNtUe3NNfE8ld2vufupmFY2
++CCtIdBmYB/q41tRKk9wQGCwb4dMApbGXFHJzpq5UlYl8pYclOSX+u/9odcbCwW5g
++vdzv2QekB194hrefriMsP2h840ZlvP2DRfVfa2aDYJHVK1sJSAgcDbERFs/xk1qi
++TXyKNepulfeh/f3EnvkpjX+h25ffQ0nyV35FIXL8Ce3in1f1uBS9O6W1j67Hy9kr
++0Fr+f2mL/ZKdKBS2x0uAdr0FlH6fcyFmOKhy4yTeuWrESxbUSPopQfLh79dj9fG9
++7oQ5SRYtdi2y+DeZId8/3X2PhIZiqsfL6+HwrguLh35xMeWRoSdWqaQU/1kCAwEA
++AQKCAgB29xtprNbcM4NF4zEDzJOPUxRyd8ceCxJ3Wld2SPNjq7Hrh/ccFq0tcl/n
++E4+Mt7V5Ci20az2o4sok5ry1jCGYNYPxehiQkGDOYyl4Zbsx14V9kANyI4ZRrdxk
++7RviZn5LfESZoGvB6cckgU7T7pPY+gaVmthQTEtzAHmSoGnj+kNgXHw98HRmW6mT
++mB3uZGEgSc5rVCguQ7XqwAUAS6VVJnY3fuTm39Sb1f/jmhevJeKn1g03zJBQjWll
++1sGOi90aL0OyyA4iJ+BmfJ0ZIcWJ9cJ0t4sHi+ylNilYrXLDKf4A3o+cG49eDFPT
++Mv2o0q0j+lwwzenxuaP6AWsYk5+r3DBrdy6EpO8F5vMPMDKh/x9ptK5ldeg2jJ8I
++OSMSgSCiq25n/zI6nyTlCs8Px9YvGVzB9gFEdL8ePUITk3Y01tpymW23B+WaVgva
++PBP+JhVR0b+lEmmEh5M5gMdcECjarKbMYrEG5K09WI33WBFc+c6wchbfR0DZt/ew
++b5vN9r27uby/3i6nOFf5UxzC663fMhqWixg/pv0wNQYVfE8zXmDm10WL95XWbhhA
++8I9I78O4CC+uRV+tVkFgof5eYMJH5+CXcCSTjnqxZNKvfV+VJvgBaCyxPAlv/MFQ
++42vH2W3LDoKOtw7IzPsbv/PRAtJOEEPTayap/Cz0SUdmFHTW7QKCAQEAzgcNCk5/
++mg13CUlx0DQdFp3F9fBPHYJnoj0YncOO+RXlNprEvcmXdFHACp7s0PUaW2Ci2ww3
++/pfPqfExcV8+zD5jjjYMLzljiwbTNleksx2nmjN1l02tHjgvn2AW1pRUwBCqVEcq
++ncxhd545ChrMlqtzMIPveOKdHNiDmja4Bm5LFV4p/8qaMtI60hag70Sfb+i/4waD
++eBmmQMXNGGRrmK7W4IuzYt1ds+RzpnBq28vsKo52r6RtrjSOXHzu6OtMegSSzOh1
++raFwaVXMqClgiDRNF612uJLEW6sQG+BzgZL5dWkdg+RCBQiYVkvkWXxLdS71TOMX
++4+Ns9I+PydqMCwKCAQEA+wJ2OhNC7qvSQuNi9v3Zp4rdTMplFbjb+u+9iqn/qw5Y
++TDYEkvQz7ZFHkf7DlF/grb8DvjX8/B8m7T4fTyZuWa9paUZsa2YKAhu2eQO8bZCL
++t+CQ3a8F3JBFOIJqNBXzDeLm49/AIstsZJKNg2J68R2tEFc6uCaLtfTyf4LPWf3Y
++5Cte3QYwEcQQ2goC2SdKr7u8dqdfKGmLEiYZH4sMjicXIUGr0PnpJozH9JjflmX4
++3W/MX9Psjp0WDnHMjm8/aoP6y1WY6T8oWbf5w/OVTvrAndl1OUTydp5n0Nq904X3
++MdbSRYbwQgHogKp+eLFL6y2lEjoZv7qoVyDqdEDcqwKCAQBXn7YTGRm6CloDMCJg
++u5lXghispdzwHwM2hCeRCZgoJgDLfX2JflCU3yP/IGJ16JiiHnKFGShDdouSqost
++vaV2tl4fIKuD9jN48Jkp9pKMv2MF+Tbc9+NWA+11KifscT+uRCg9GdttK3yUpE18
++F7PFrPububFCx5asqwUltHoF+iii2N6h9KgqTzFHIuqleJkavnHF+4I0tSv5RmcZ
++JbSBRnMLIz9TH/T3SoVJV2yLOKqj2t1tjFA9lAqsGVJ+63wmNQW+cmuCQjQOCLi3
++GIn+w8e590OT8o/isNl0EbzucfT405EDBDRz8ZjgsvxWdr+dAjC/16HUgWhYhypP
++XkzLAoIBAQD0K03kam42i2+qX1UanI8IWp2xIES6n6tla6Z+Z6XruLWN1RIX/XMy
++CpuLWj7Ya3e8q84xToU8n/UW3NJKBUFc/rRUkwvOYWEk8d5L06WNEwnGoa1p5+KU
++zsZ3FO3Iov1fKbSeQD6/2hAjuSftgXPEbrC175SQI/bN1mu6O/4GNVexhLrv2CAU
++eBxIbWqd4InXbpEC/wci4aBF1EemFnXtJftq/13ql+AD/vhXaAo/XAx9I060fQtl
++I0ucW3i3qWIP9DiXaTmo0yYmOD+/LIi2XlfWdP2B6x7M4oRsdwwm4e83TRgYSA4Y
++t5B68N67+wO1zx3/IAOCLUmqD7vhwGKnAoIBAQDM41EASffa2lu5jSP3KnYuZ78J
++CTbBeLaXzgWLaxJ/0+blwFXG4VATI28oaA7VbJIUCkUGOrDV3TEEzB/pn/hCCR+Q
++UPOjHlDoYXKKyHuJoLx53rkl/+/GBo6bkw+PCLkvHjYAdo60gF9tT2fsoMVraQnN
++CQEj+hMgtLGvrEV6CIlNUOSXXN/edY9IQLiljXQJYtHYdrzQWQe1gmde7BWMDcPb
++xHNqascnxGwMMkvF5C6XNqWfsHaCLhYFpzyyKEffAqxWkKrF51sSX1aW/fRy1sN/
++qDVlQcEv8LpGihAIRypkjvpTaqxLK6US3Vlm0k7IMquGrvy/ItkUQkH2kD2y
++-----END RSA PRIVATE KEY-----
+diff --git a/pkg/plugin_packager/testdata/keys/test_key_pair_1.public.pem b/pkg/plugin_packager/testdata/keys/test_key_pair_1.public.pem
+new file mode 100644
+index 00000000..52eff48b
+--- /dev/null
++++ b/pkg/plugin_packager/testdata/keys/test_key_pair_1.public.pem
+@@ -0,0 +1,13 @@
++-----BEGIN RSA PUBLIC KEY-----
++MIICCgKCAgEAygLk/TIn0Wz4RMK16NW8rK/1UWGuYvcilJ+9rKBKX4Wr+0Nm6T2m
++EiGw9S2UUm4HeUS+F42pQTLV282Sz0lLn/mbWCwppXCC2Olfux4oT/w6YKBCc0Lb
++XForVPVmNFLPjyZwTxk1N/kAqJY+9Ip3/Nrpfej/C7l5+CH9wIkYDBKzYvThZ6Ud
+++tcHEozob7b7Hazu5qwmMg1A/+nRUbPnaQFh0PrBhbuBH0CEZ6xkpNOoPmhlmmGZ
++NZzSw8RTXznUpar24USLcKJ/nvq8vxoeVmWG9uf68/DgyTyfXp/xrUPiEH5LkUAN
++HhC22t4JxpmzAjf/LAYYE0k0zYaOsE853PHdcpNtUe3NNfE8ld2vufupmFY2CCtI
++dBmYB/q41tRKk9wQGCwb4dMApbGXFHJzpq5UlYl8pYclOSX+u/9odcbCwW5gvdzv
++2QekB194hrefriMsP2h840ZlvP2DRfVfa2aDYJHVK1sJSAgcDbERFs/xk1qiTXyK
++Nepulfeh/f3EnvkpjX+h25ffQ0nyV35FIXL8Ce3in1f1uBS9O6W1j67Hy9kr0Fr+
++f2mL/ZKdKBS2x0uAdr0FlH6fcyFmOKhy4yTeuWrESxbUSPopQfLh79dj9fG97oQ5
++SRYtdi2y+DeZId8/3X2PhIZiqsfL6+HwrguLh35xMeWRoSdWqaQU/1kCAwEAAQ==
++-----END RSA PUBLIC KEY-----
+diff --git a/pkg/plugin_packager/testdata/keys/test_key_pair_2.private.pem b/pkg/plugin_packager/testdata/keys/test_key_pair_2.private.pem
+new file mode 100644
+index 00000000..b749cb8f
+--- /dev/null
++++ b/pkg/plugin_packager/testdata/keys/test_key_pair_2.private.pem
+@@ -0,0 +1,51 @@
++-----BEGIN RSA PRIVATE KEY-----
++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
++-----END RSA PRIVATE KEY-----
+diff --git a/pkg/plugin_packager/testdata/keys/test_key_pair_2.public.pem b/pkg/plugin_packager/testdata/keys/test_key_pair_2.public.pem
+new file mode 100644
+index 00000000..f176542e
+--- /dev/null
++++ b/pkg/plugin_packager/testdata/keys/test_key_pair_2.public.pem
+@@ -0,0 +1,13 @@
++-----BEGIN RSA PUBLIC KEY-----
++MIICCgKCAgEAuMwtWE1RqrQH1dHUq8W9eG7k0JvkHYyBKLC7p8ykptxEFJR1RUCK
++EGEOuw2cVXqAyWekIqTONodH5N+1RzZmnprQ+u34HTL6bhfIBnpBE4ng7zEfFun3
++zRcRweHUj2RfFhgzNRk4CZnPPn5gJj7K12hlazY0XHFmM6jIr5GZJ/P8wwfGJxX7
++mxB5XShVmI4/5E2iFEGlL24/VqC5IA+zGLpeV7Uxr5sq9qwe0SIbbntjWp+ZmUGs
++ZBZ0CJjqGLPkFXTFklNW9T3defLmZoGRZujZxkDIP7jiLoL8rqfwCFVnNflmONHM
++Z3Kj9d5Jth85IO/FYQyNnoiqlLLRXAd/qJ81jWmjiPbBZJvdni2vr4k11FJpV+87
++h0znWufa33P0B9BOJcMA1VEI9RJ8Mf6li3Col9WVf5Th98g3IM8mUAeMutl0tc2G
++66PbH/B5SRINQ+95K1PE49jlgdqqMak+ScImANRyXNQYi3IAPjyjE8l8OvzFRzOk
++esPTEXWeXx8ffMHr6Qnq4djiuLQHHoCgcxOaK17NOmX4nf1eUixbQ1KBf5B2OUiV
++deH91G3MQCDBAcHiThnWywXymbXnvDhFqqy1EeqGBNMA3uIV+YYMgdTh23ZZbHCx
++T73YS8siJACjANVQqBj0qygaRQ+46RpKTjhatGHiKSpXHpXVL8w/mZMCAwEAAQ==
++-----END RSA PUBLIC KEY-----
+diff --git a/pkg/plugin_packager/manifest.yaml b/pkg/plugin_packager/testdata/manifest.yaml
+similarity index 100%
+rename from pkg/plugin_packager/manifest.yaml
+rename to pkg/plugin_packager/testdata/manifest.yaml
+diff --git a/pkg/plugin_packager/neko.yaml b/pkg/plugin_packager/testdata/neko.yaml
+similarity index 100%
+rename from pkg/plugin_packager/neko.yaml
+rename to pkg/plugin_packager/testdata/neko.yaml

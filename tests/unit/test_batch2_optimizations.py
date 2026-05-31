@@ -231,3 +231,128 @@ class TestOM2ShouldLLMExtractMetaReview:
         orch = Orchestrator.__new__(Orchestrator)
         orch.config = MergeConfig(upstream_ref="u", fork_ref="f")
         assert orch._should_llm_extract("judge_review", state) is False
+
+
+class TestJudgeSkipFilterOnSkipDecision:
+    """Regression: SKIP-decision files must not trigger deterministic syntax
+    checks. Empty/missing worktree paths previously tripped ``_check_json("")``
+    → ``[critical] syntax_error`` for every skipped .json file, exhausting the
+    Executor↔Judge dispute loop and dumping placeholder HumanDecisionRequest
+    entries on the user.
+    """
+
+    async def test_review_batch_skips_skip_decision_json_files(self, tmp_path):
+        import git as _git
+
+        from src.agents.judge_agent import JudgeAgent
+        from src.models.config import AgentLLMConfig, MergeConfig, OutputConfig
+        from src.models.decision import (
+            DecisionSource,
+            FileDecisionRecord,
+            MergeDecision,
+        )
+        from src.models.diff import FileDiff, FileStatus, RiskLevel
+        from src.models.state import MergeState
+        from src.tools.git_tool import GitTool
+
+        _git.Repo.init(str(tmp_path))
+        # No file written → abs_path will not exist; previously this would
+        # have produced ``merged_content=""`` and trigger _check_json("").
+        target = "config.json"
+
+        cfg = MergeConfig(
+            upstream_ref="upstream/main",
+            fork_ref="fork/main",
+            repo_path=str(tmp_path),
+            output=OutputConfig(directory=str(tmp_path / "outputs")),
+        )
+        state = MergeState(config=cfg)
+        state.file_diffs.append(
+            FileDiff(
+                file_path=target,
+                file_status=FileStatus.MODIFIED,
+                risk_level=RiskLevel.AUTO_SAFE,
+                risk_score=0.2,
+            )
+        )
+        state.file_decision_records[target] = FileDecisionRecord(
+            file_path=target,
+            file_status=FileStatus.MODIFIED,
+            decision=MergeDecision.SKIP,
+            decision_source=DecisionSource.AUTO_EXECUTOR,
+            confidence=0.8,
+            rationale="executor chose to skip",
+        )
+
+        judge = JudgeAgent(
+            llm_config=AgentLLMConfig(api_key_env="ANTHROPIC_API_KEY"),
+            git_tool=GitTool(str(tmp_path)),
+        )
+        from src.core.read_only_state_view import ReadOnlyStateView
+
+        verdict = await judge.review_batch(
+            layer_id=None,
+            file_paths=[target],
+            state=ReadOnlyStateView(state),
+        )
+        # SKIP filter must drop the file entirely → no syntax_error issues,
+        # batch approved by default.
+        assert verdict.approved is True
+        syntax_issues = [i for i in verdict.issues if i.issue_type == "syntax_error"]
+        assert syntax_issues == []
+
+    async def test_review_batch_still_checks_non_skip_decisions(self, tmp_path):
+        """Guard: only SKIP decisions get filtered; SEMANTIC_MERGE / TAKE_*
+        decisions still go through normal syntax check."""
+        import git as _git
+
+        from src.agents.judge_agent import JudgeAgent
+        from src.models.config import AgentLLMConfig, MergeConfig, OutputConfig
+        from src.models.decision import (
+            DecisionSource,
+            FileDecisionRecord,
+            MergeDecision,
+        )
+        from src.models.diff import FileDiff, FileStatus, RiskLevel
+        from src.core.read_only_state_view import ReadOnlyStateView
+        from src.models.state import MergeState
+        from src.tools.git_tool import GitTool
+
+        _git.Repo.init(str(tmp_path))
+        target = "broken.json"
+        (tmp_path / target).write_text("{not valid json")
+
+        cfg = MergeConfig(
+            upstream_ref="upstream/main",
+            fork_ref="fork/main",
+            repo_path=str(tmp_path),
+            output=OutputConfig(directory=str(tmp_path / "outputs")),
+        )
+        state = MergeState(config=cfg)
+        state.file_diffs.append(
+            FileDiff(
+                file_path=target,
+                file_status=FileStatus.MODIFIED,
+                risk_level=RiskLevel.AUTO_SAFE,
+                risk_score=0.2,
+            )
+        )
+        state.file_decision_records[target] = FileDecisionRecord(
+            file_path=target,
+            file_status=FileStatus.MODIFIED,
+            decision=MergeDecision.SEMANTIC_MERGE,
+            decision_source=DecisionSource.AUTO_EXECUTOR,
+            confidence=0.8,
+            rationale="merged",
+        )
+        judge = JudgeAgent(
+            llm_config=AgentLLMConfig(api_key_env="ANTHROPIC_API_KEY"),
+            git_tool=GitTool(str(tmp_path)),
+        )
+        verdict = await judge.review_batch(
+            layer_id=None,
+            file_paths=[target],
+            state=ReadOnlyStateView(state),
+        )
+        syntax_issues = [i for i in verdict.issues if i.issue_type == "syntax_error"]
+        assert len(syntax_issues) >= 1, "broken JSON content must still flag"

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Literal, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class CompressionConfig(BaseModel):
@@ -15,7 +15,7 @@ class CompressionConfig(BaseModel):
 
 
 class AgentLLMConfig(BaseModel):
-    provider: Literal["anthropic", "openai"] = "anthropic"
+    provider: Literal["anthropic", "openai", "openai_compatible"] = "anthropic"
     model: str = "claude-opus-4-6"
     temperature: float = Field(default=0.2, ge=0.0, le=1.0)
     max_tokens: int = Field(default=8192, ge=512, le=200000)
@@ -50,11 +50,41 @@ class AgentLLMConfig(BaseModel):
         description="OpenAI reasoning-model effort hint ('low', 'medium', 'high'). "
         "Only sent when explicitly set — leave None for proxies that do not support it.",
     )
+    thinking_budget_tokens: int | None = Field(
+        default=None,
+        description="Anthropic extended-thinking budget in tokens (P3-2). When set, "
+        "the Anthropic request enables interleaved thinking with this budget and "
+        "forces temperature=1.0 (an API constraint). Must be >= 1024 and strictly "
+        "less than max_tokens. Leave None to disable (the default for every agent — "
+        "opt in per-agent via config). Ignored for OpenAI providers.",
+    )
     api_style: Literal["chat", "responses"] = Field(
         default="chat",
         description="OpenAI API surface: 'chat' (chat.completions, default) or "
         "'responses' (the Responses API). Some proxies only expose one; pick "
         "the style your endpoint supports.",
+    )
+    use_structured_outputs: bool = Field(
+        default=False,
+        description="P2-1 opt-in: when True, supported agents request native "
+        "Structured Outputs (OpenAI response_format=json_schema / Anthropic "
+        "forced tool-use) so the model returns a well-formed JSON object that "
+        "still flows through the existing response parsers. Falls back "
+        "automatically to prompt-injection JSON when the gateway rejects it. "
+        "Defaults to False (legacy prompt+parse behaviour, zero change).",
+    )
+    high_recall_review: bool = Field(
+        default=False,
+        description="P2-3 opt-in (Judge only): when True, the file-review prompt "
+        "separates the find pass from the filter pass — the Judge reports every "
+        "plausible defect and expresses severity through issue_level/confidence "
+        "rather than staying silent, letting the downstream gate filter. This "
+        "counteracts the more literal 'be conservative' adherence of Opus 4.8, "
+        "which lowers defect recall. Intended ONLY when the Judge is configured "
+        "as Opus 4.8 and MUST be validated with an eval before relying on it; it "
+        "is harmful on reasoning / easily-over-reporting models. Defaults to "
+        "False (zero change to the prompt). Does NOT affect PlannerJudge, whose "
+        "conservatism is a deliberate calibration against B-class drift.",
     )
     fallback: Optional[AgentLLMConfig] = Field(
         default=None,
@@ -68,6 +98,24 @@ class AgentLLMConfig(BaseModel):
         if isinstance(self.api_key_env, list):
             return self.api_key_env
         return [self.api_key_env]
+
+    @model_validator(mode="after")
+    def _validate_thinking_budget(self) -> AgentLLMConfig:
+        budget = self.thinking_budget_tokens
+        if budget is None:
+            return self
+        if budget < 1024:
+            raise ValueError(
+                "thinking_budget_tokens must be >= 1024 when set "
+                f"(Anthropic minimum); got {budget}."
+            )
+        if budget >= self.max_tokens:
+            raise ValueError(
+                "thinking_budget_tokens must be strictly less than max_tokens "
+                f"(thinking and visible output share the budget); got "
+                f"budget={budget}, max_tokens={self.max_tokens}."
+            )
+        return self
 
 
 AgentLLMConfig.model_rebuild()
@@ -150,6 +198,54 @@ class ThresholdConfig(BaseModel):
     human_escalation: float = Field(default=0.60, ge=0.0, le=1.0)
     risk_score_low: float = Field(default=0.30, ge=0.0, le=1.0)
     risk_score_high: float = Field(default=0.60, ge=0.0, le=1.0)
+    classification_large_diff_lines: int = Field(
+        default=200,
+        ge=1,
+        description="P3-3: line-count threshold (added + deleted on one side) "
+        "above which the planner classification prompt treats a diff as 'large'. "
+        "Sourced here so the prompt cannot drift from config; the default 200 "
+        "preserves prior in-prompt behaviour. A large upstream delta on a "
+        "both_changed file forces human_required.",
+    )
+    chunked_aggregation_min_confidence: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "U1: minimum per-chunk confidence required for the chunked "
+            "ConflictAnalyst fast path (unanimous + min_conf >= threshold + "
+            "no security). Below threshold the reducer falls back to slow "
+            "path (precedence + 0.8 penalty). Calibrated against forgejo "
+            "1822-file run; tune via .merge/config.yaml."
+        ),
+    )
+    preservation_min_fork_lines: int = Field(
+        default=50,
+        ge=0,
+        description=(
+            "#11: minimum fork-side (lines_added + lines_deleted vs merge_base) "
+            "for a C-class file to enter the fork-preservation audit. Below this, "
+            "a small fork override that ends up byte-equal to upstream is treated "
+            "as plausibly intentional. Security-sensitive files (FileDiff."
+            "is_security_sensitive) override this to 0 so even a single-line fork "
+            "customization is audited."
+        ),
+    )
+    preservation_fork_survival_floor: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "#11: line-level fork-survival gate. For a C-class file whose worktree "
+            "is NOT byte-equal to upstream (so the wholesale-drop check does not "
+            "fire), flag a preservation loss when at least this fraction of the "
+            "fork's DISTINCTIVE lines (present in fork but in neither merge_base "
+            "nor upstream) are absent from the merged worktree. Heuristic and "
+            "surfacing-only — flagged files route to conflict analysis, never a "
+            "hard veto, so a false positive costs one extra LLM analysis. Raise "
+            "toward 1.0 to flag only near-total drops; lower to catch partial loss."
+        ),
+    )
 
 
 class SecuritySensitiveConfig(BaseModel):
@@ -372,6 +468,33 @@ class FileClassifierConfig(BaseModel):
         "structured-config files whose individual keys carry risk "
         "(e.g. plugin manifests with OAuth scopes / permissions).",
     )
+    migration_dir_patterns: list[str] = Field(
+        default_factory=lambda: ["migrations/", "alembic/"],
+        description=(
+            "Path substrings that identify DB-schema migration directories. "
+            "Used to detect ordering dependencies between upstream-new migration "
+            "files and fork-conflicted model files in the same top-level package. "
+            "Add project-specific patterns (e.g. 'forgejo_migrations/') via "
+            "file_classifier.migration_dir_patterns in config.yaml."
+        ),
+    )
+    c_class_risk_floor: float = Field(
+        default=0.4,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Minimum risk_score applied to category=both_changed (C-class) "
+            "files. Pre-merge, conflict markers do not exist yet, so the "
+            "conflict_density dimension of compute_risk_score is always 0 "
+            "for C-class — a fork-side rewrite of the same function as "
+            "upstream can score as low as ~0.3 with no other signal. "
+            "Flooring to 0.4 (default) lifts C-class above auto_safe band "
+            "without forcing human_required (≥0.6), giving ConflictAnalyst "
+            "a guaranteed look. Strong path-based escalations "
+            "(security_sensitive.patterns → 0.8, always_take_target → 0.1) "
+            "still take precedence over this floor."
+        ),
+    )
 
 
 class OutputConfig(BaseModel):
@@ -390,23 +513,77 @@ class SyntaxCheckConfig(BaseModel):
     languages: list[str] = Field(default_factory=lambda: ["python", "json", "yaml"])
 
 
-class LLMRiskScoringConfig(BaseModel):
-    enabled: bool = False
-    gray_zone_low: float = Field(default=0.25, ge=0.0, le=1.0)
-    gray_zone_high: float = Field(default=0.65, ge=0.0, le=1.0)
+class LLMAssistConfig(BaseModel):
+    """Controls when the planner spends LLM calls to refine the
+    deterministic rule-based plan. ``mode`` is a regime selector, not a
+    per-file switch: under ``auto`` the decision of *which* files get an
+    LLM look is driven entirely by ``compute_complexity`` falling in the
+    uncertainty band (single-file rescore) or above it (batch
+    re-classification), capped by ``budget_max_files``. ``off`` keeps the
+    plan fully deterministic (CI reproducibility / zero cost); ``always``
+    sends every file through at least the rescore tier.
+    """
+
+    mode: Literal["off", "auto", "always"] = "auto"
+    budget_max_files: int = Field(default=200, ge=0)
+    uncertainty_low: float = Field(default=0.30, ge=0.0, le=1.0)
+    uncertainty_high: float = Field(default=0.70, ge=0.0, le=1.0)
     rule_weight: float = Field(default=0.6, ge=0.0, le=1.0)
 
 
-class GitHubConfig(BaseModel):
-    enabled: bool = False
-    token_env: str = "GITHUB_TOKEN"
-    repo: str = ""
-    pr_number: int | None = None
+class ComplexityConfig(BaseModel):
+    """Weights for ``compute_complexity`` — the signal that decides
+    whether a file is worth an LLM look. Distinct from the risk-score
+    weights: risk decides which bucket a file lands in, complexity
+    decides whether spending an LLM call on it is justified. ``w_fanout``
+    measures cross-module spread and stays 0 until module inference is
+    wired (its weight is redistributed across the others when absent).
+    """
+
+    w_size: float = Field(default=0.25, ge=0.0, le=1.0)
+    w_hunks: float = Field(default=0.20, ge=0.0, le=1.0)
+    w_conflict: float = Field(default=0.30, ge=0.0, le=1.0)
+    w_change_ratio: float = Field(default=0.15, ge=0.0, le=1.0)
+    w_fanout: float = Field(default=0.10, ge=0.0, le=1.0)
 
 
 class MergeLayerConfig(BaseModel):
     enabled: bool = True
     custom_layers: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ModuleConfig(BaseModel):
+    """Groups files into functional modules so the plan can be organised
+    by module first and file type/risk second. Target-repo agnostic:
+    module boundaries come from explicit globs, the forks-profile
+    rewritten-module list, or directory topology — never hardcoded names.
+    """
+
+    enabled: bool = True
+    mode: Literal["auto", "config", "off", "graph"] = "auto"
+    container_dirs: list[str] = Field(
+        default_factory=lambda: [
+            "packages",
+            "apps",
+            "plugins",
+            "services",
+            "libs",
+            "src",
+        ],
+        description=(
+            "Monorepo container directories whose immediate child names the "
+            "module (e.g. packages/<mod>/...). Neutral conventions by default; "
+            "override per repo."
+        ),
+    )
+    explicit: dict[str, str] = Field(
+        default_factory=dict,
+        description="Glob → module-name overrides, highest precedence.",
+    )
+    module_depends_on: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Module → modules it depends on, used to order modules.",
+    )
 
 
 class CustomizationVerification(BaseModel):
@@ -580,6 +757,68 @@ class ReverseImpactConfig(BaseModel):
     max_files_per_symbol: int = Field(default=100, ge=1)
 
 
+class DependencyGraphConfig(BaseModel):
+    """Configure the file dependency graph built in the initialize phase.
+
+    The graph is the precise (AST-based) counterpart to the text-grep
+    ``reverse_impact`` scan: planner uses it for topological tie-breaking and
+    an impact-radius fanout dimension; judge uses EXTRACTED edges to flag
+    dependents of a changed interface that were not updated.
+    """
+
+    enabled: bool = True
+    languages: list[str] = Field(
+        default_factory=lambda: [
+            "python",
+            "javascript",
+            "typescript",
+            "tsx",
+            "go",
+        ],
+        description="Languages to attempt extraction for. Non-Python languages "
+        "require the optional [ast] extra (tree-sitter); when absent they "
+        "degrade to no edges.",
+    )
+    max_files: int = Field(
+        default=800,
+        ge=1,
+        description="Upper bound on the number of files scanned into the graph "
+        "(changed files plus reverse-impact scope), to bound build cost.",
+    )
+    max_depth: int = Field(
+        default=3,
+        ge=1,
+        description="Hop limit for impact_radius traversal used by consumers.",
+    )
+    god_node_min_dependents: int = Field(
+        default=8,
+        ge=1,
+        description="Direct-dependent count at which a file is treated as a "
+        "God Node — conflict_analyst raises merge caution for it. Conservative "
+        "default; not calibrated against a specific repo, tune per target.",
+    )
+    god_node_risk_bump: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        description="Additive risk_score bump applied by the planner to a "
+        "changed file that is a God Node (Phase C). Monotonic — only raises "
+        "risk, never lowers. Set 0.0 to disable.",
+    )
+    resolve_aliases: bool = Field(
+        default=False,
+        description="When True, parse tsconfig/jsconfig paths, go.mod module "
+        "and package.json workspaces from the repo to resolve aliased / bare "
+        "imports into graph edges (Phase C §6.3). Default off to stay "
+        "target-repo agnostic; enable only for repos using those ecosystems.",
+    )
+    extra_scan_globs: list[str] = Field(
+        default_factory=list,
+        description="Additional file globs (beyond changed files, D_EXTRA and "
+        "customization.files) to include as graph nodes.",
+    )
+
+
 class SmokeTestCase(BaseModel):
     """A single smoke-test case. Exactly one of cmd/url/tag is used depending on ``kind``."""
 
@@ -606,6 +845,30 @@ class SmokeTestConfig(BaseModel):
     suites: list[SmokeTestSuite] = Field(default_factory=list)
     block_on_failure: bool = True
     max_consecutive_failures: int = Field(default=3, ge=1)
+
+
+class BuildCheckConfig(BaseModel):
+    """Optional post-judge compile/build gate.
+
+    Generic by design: the toolchain command is supplied per target via
+    config (e.g. ``go build ./...``, ``tsc --noEmit``). A non-zero exit
+    downgrades a Judge PASS to FAIL with a veto. Disabled and empty by
+    default so the agent stays target-agnostic.
+    """
+
+    enabled: bool = False
+    command: str = ""
+    working_dir: str = "."
+    timeout_seconds: int = Field(default=600, ge=1)
+    require_for_compiled_langs: bool = Field(
+        default=False,
+        description="P3 (Wave 4): when True and NO compile gate (build_check or a "
+        "gate command) is configured, a merge that auto-merged compiled-language "
+        "files (TS/JS/Go/Rust/Java) is routed to AWAITING_HUMAN instead of "
+        "COMPLETED — the always-on syntax gate is balance-only and cannot catch a "
+        "type error. Default False preserves silent completion; set True for a "
+        "strict 'never green without a compile gate' posture.",
+    )
 
 
 class MigrationConfig(BaseModel):
@@ -677,6 +940,27 @@ class MemoryExtractionConfig(BaseModel):
         "completed phases regardless of error/dispute triggers, so L2 "
         "aggregation grows on long happy-path runs. 0 disables.",
     )
+    outcome_confidence_writeback: bool = Field(
+        default=False,
+        description="OPP-5: after judge_review, nudge each tracked memory "
+        "entry's persisted confidence toward its pass/fail outcome score so "
+        "helpful entries rise and harmful ones fall. Default OFF — write-back "
+        "is irreversible across runs and should prove out before enabling. "
+        "Never touches human-decided or bootstrap (human-authored) entries.",
+    )
+    outcome_writeback_k: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=0.5,
+        description="OPP-5: step size for the outcome confidence nudge — "
+        "new = clamp(confidence + k * outcome_score, 0.05, 0.98).",
+    )
+    outcome_writeback_min_observations: int = Field(
+        default=3,
+        ge=1,
+        description="OPP-5: minimum pass+fail observations before an entry's "
+        "confidence is nudged, so a single run cannot move it.",
+    )
 
 
 class RenameDetectionConfig(BaseModel):
@@ -737,6 +1021,17 @@ class PlanReviewConfig(BaseModel):
         "cap for everyone. Only ever raises the bound — never "
         "lowers a higher ``max_plan_revision_rounds``.",
     )
+    analyst_decision_options_enabled: bool = Field(
+        default=False,
+        description="Opt-in: when True, ConflictAnalyst proposes 1–3 "
+        "file-specific decision options for every HUMAN_REQUIRED file "
+        "right before they're surfaced to the reviewer. Costs roughly "
+        "one extra LLM call per HUMAN_REQUIRED file. Default off so "
+        "small / cost-sensitive runs keep the deterministic base "
+        "ladder unchanged; turn on for large fork-vs-upstream merges "
+        "where the reviewer would benefit from concrete pre-thought "
+        "strategies beyond keep_head / take_target / llm_auto_merge.",
+    )
 
 
 class CoordinatorConfig(BaseModel):
@@ -773,6 +1068,19 @@ class CoordinatorConfig(BaseModel):
             "secondary split kicks in when per-file size hints are supplied "
             "to enforce_batch_limits — prevents single-batch context-window "
             "overflows that the file-count heuristic alone misses."
+        ),
+    )
+    group_batches_by_directory: bool = Field(
+        default=True,
+        description=(
+            "When True, enforce_batch_limits regroups each batch by "
+            "top-level directory before applying the file-count cap. "
+            "Produces tighter, more cohesive batches — e.g. all "
+            "models/auth/* files land in one sub-batch instead of being "
+            "interleaved with tests/ and templates/ in the alphabetic "
+            "split. Reduces Executor rollback blast radius when a single "
+            "file in a large batch fails. Set False to restore the legacy "
+            "flat split."
         ),
     )
     meta_review_enabled: bool = True
@@ -829,9 +1137,10 @@ class MergeConfig(BaseModel):
     file_classifier: FileClassifierConfig = Field(default_factory=FileClassifierConfig)
     output: OutputConfig = Field(default_factory=OutputConfig)
     syntax_check: SyntaxCheckConfig = Field(default_factory=SyntaxCheckConfig)
-    llm_risk_scoring: LLMRiskScoringConfig = Field(default_factory=LLMRiskScoringConfig)
-    github: GitHubConfig = Field(default_factory=GitHubConfig)
+    llm_assist: LLMAssistConfig = Field(default_factory=LLMAssistConfig)
+    complexity: ComplexityConfig = Field(default_factory=ComplexityConfig)
     layer_config: MergeLayerConfig = Field(default_factory=MergeLayerConfig)
+    module_config: ModuleConfig = Field(default_factory=ModuleConfig)
     customizations: list[CustomizationEntry] = Field(default_factory=list)
     shadow_rules_extra: list[ShadowRuleConfig] = Field(
         default_factory=list,
@@ -846,9 +1155,18 @@ class MergeConfig(BaseModel):
         default_factory=ReverseImpactConfig,
         description="P1-1: reverse-impact scan configuration.",
     )
+    dependency_graph: DependencyGraphConfig = Field(
+        default_factory=DependencyGraphConfig,
+        description="File dependency graph build configuration.",
+    )
     smoke_tests: SmokeTestConfig = Field(
         default_factory=SmokeTestConfig,
         description="P1-3: post-judge smoke test configuration.",
+    )
+    build_check: BuildCheckConfig = Field(
+        default_factory=BuildCheckConfig,
+        description="Optional post-judge compile/build gate (config-supplied "
+        "command; disabled by default).",
     )
     sentinels_extra: list[str] = Field(
         default_factory=list,
@@ -928,6 +1246,15 @@ class MergeConfig(BaseModel):
         "as advisories and do not prevent consensus. Must be subset of "
         "{critical, high, medium, low, info}.",
     )
+    judge_cross_file_signature_check: bool = Field(
+        default=True,
+        description="Emit a HIGH issue when a symbol whose upstream signature "
+        "changed has its definition file and a referencing file decided onto "
+        "opposite take_target/take_current sides — a likely cross-file "
+        "compilation break the per-file review cannot see. Text-grep based; "
+        "semantic_merge files are skipped because their merged direction is "
+        "indeterminate.",
+    )
     chunk_size_chars: int = Field(
         default=20000,
         ge=5000,
@@ -947,21 +1274,74 @@ class MergeConfig(BaseModel):
         "None = auto-detect from the number of active API keys for each agent.",
     )
     max_cost_usd: float | None = Field(
-        default=None,
+        default=5.0,
         gt=0,
-        description="7.7: If set, the orchestrator halts with AWAITING_HUMAN when "
-        "the cumulative LLM cost for this run exceeds this threshold (USD). "
-        "Prevents runaway spend on large repos. None = no ceiling.",
+        description="U2 per-run budget cap (USD). Default 5.0 is a safety net "
+        "for runaway spend on large repos; set to None to disable. Two layers "
+        "enforce it: BaseAgent._call_llm_with_retry raises RunBudgetExceeded "
+        "before/after each LLM call (fine-grained), and Orchestrator checks "
+        "between phases as a coarse-grained ceiling fallback. Both transition "
+        "the run to AWAITING_HUMAN with a partial budget report. None = "
+        "no ceiling (legacy compatibility).",
+    )
+    per_run_cost_warn_pct: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="U2: emit a `budget_warning` activity event the first time "
+        "cumulative cost crosses this fraction of max_cost_usd. Default 0.8 "
+        "(80%) gives reviewers ~20% headroom before the hard cap trips. "
+        "Has no effect when max_cost_usd is None.",
+    )
+    max_total_tokens: int | None = Field(
+        default=8_000_000,
+        gt=0,
+        description="#8C pricing-independent budget guardrail: hard ceiling on "
+        "cumulative input+output tokens for the run. Unlike max_cost_usd this "
+        "still trips for unpriced / proxy models (deepseek, self-hosted "
+        "gateways) recorded at $0 cost — without it a runaway resend (the "
+        "observed ~370k-token base-resend storm) has no stop. Enforced "
+        "alongside max_cost_usd in BaseAgent._check_budget and the Orchestrator "
+        "inter-phase ceiling, both transitioning to AWAITING_HUMAN. None = "
+        "no token ceiling. Default 8M ~ a very large multi-hundred-file run.",
     )
     enable_working_branch: bool = Field(
-        default=False,
+        default=True,
         description="When True, the orchestrator creates a new branch from fork_ref "
         "at run start (using the working_branch name template) and operates on it "
         "instead of modifying fork_ref HEAD directly. The branch name supports a "
         "{timestamp} placeholder (e.g. 'merge/auto-{timestamp}'). On resume, the "
-        "existing branch is reused via active_branch in the checkpoint. Default "
-        "False preserves the original behavior of operating directly on fork_ref.",
+        "existing branch is reused via active_branch in the checkpoint. U7: "
+        "default flipped to True so a half-finished run never pollutes fork_ref "
+        "HEAD; set to False explicitly to restore the legacy in-place behavior.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _hoist_top_level_security_sensitive(cls, data: object) -> object:
+        """Allow ``security_sensitive:`` at the top level of config.yaml.
+
+        Pydantic ignores unknown top-level keys, so users who write::
+
+            security_sensitive:
+              patterns: [...]
+
+        at the root of their config get no error and no effect.  This
+        validator intercepts the raw dict *before* field assignment and
+        moves the value into ``file_classifier.security_sensitive`` so
+        both the top-level shorthand and the fully-qualified form work.
+        The fully-qualified form always wins when both are present.
+        """
+        if not isinstance(data, dict):
+            return data
+        sec = data.pop("security_sensitive", None)
+        if sec and isinstance(sec, dict):
+            fc = data.get("file_classifier")
+            if fc is None:
+                data["file_classifier"] = {"security_sensitive": sec}
+            elif isinstance(fc, dict):
+                fc.setdefault("security_sensitive", sec)
+        return data
 
     @field_validator("upstream_ref", "fork_ref")
     @classmethod

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from src.cli.paths import get_report_dir
@@ -29,6 +29,7 @@ from src.llm.prompts.planner_judge_prompts import (
     classify_prior_issues,
     precheck_plan_integrity,
 )
+from src.tools.merge_plan_report import write_merge_plan_report
 from src.tools.report_writer import write_plan_review_report
 
 logger = logging.getLogger(__name__)
@@ -147,9 +148,12 @@ def _aggregate_segment_telemetry(
     segment_results: dict[int, SegmentReviewSnapshot],
 ) -> SegmentTelemetrySummary | None:
     """P3-10: roll up the segment-level telemetry recorded by
-    PlannerJudgeAgent into a per-round summary. Returns None when no
-    LLM segment fired this round (cache-only / safelist-only / empty
-    plan) — the report renderer drops empty rows."""
+    PlannerJudgeAgent into a per-round summary. Returns None only when
+    no segments ran at all. A round where every segment short-circuited
+    (cache- or safelist-only) still gets a summary so the audit log
+    explicitly records that the LLM was skipped — previously this case
+    produced an empty Review Log entry indistinguishable from "Judge
+    never ran"."""
     if not segment_results:
         return None
     summary = SegmentTelemetrySummary()
@@ -166,8 +170,6 @@ def _aggregate_segment_telemetry(
                 summary.total_tokens_in += snap.tokens_in
             if snap.tokens_out is not None:
                 summary.total_tokens_out += snap.tokens_out
-    if summary.llm_segments == 0:
-        return None
     return summary
 
 
@@ -330,6 +332,7 @@ class PlanReviewPhase(Phase):
                     lockfile_max_lines=(
                         state.config.plan_review.safelist_lockfile_max_lines
                     ),
+                    dependency_graph=state.dependency_graph,
                 )
             if verdict.result == PlanJudgeResult.REVISION_NEEDED and not verdict.issues:
                 verdict = verdict.model_copy(
@@ -399,7 +402,7 @@ class PlanReviewPhase(Phase):
                     ),
                 )
                 # Build one UserDecisionItem per actionable file so the
-                # CLI/TUI can surface them as pending decisions even though
+                # CLI/Web UI can surface them as pending decisions even though
                 # the judge never assigned HUMAN_REQUIRED.
                 user_items = self._build_fallback_decision_items(state)
                 state.pending_user_decisions = user_items
@@ -432,7 +435,7 @@ class PlanReviewPhase(Phase):
                     segment_telemetry=round_telemetry,
                 )
                 state.plan_review_log.append(round_log)
-                user_items = self._build_user_decision_items(state)
+                user_items = await self._build_user_decision_items(state, ctx)
                 state.pending_user_decisions = user_items
                 state.review_conclusion = ReviewConclusion(
                     reason=ReviewConclusionReason.SOURCE_CONFLICT,
@@ -475,7 +478,7 @@ class PlanReviewPhase(Phase):
                 )
                 state.plan_review_log.append(round_log)
 
-                user_items = self._build_user_decision_items(state)
+                user_items = await self._build_user_decision_items(state, ctx)
                 state.pending_user_decisions = user_items
                 state.review_conclusion = ReviewConclusion(
                     reason=ReviewConclusionReason.APPROVED,
@@ -642,7 +645,7 @@ class PlanReviewPhase(Phase):
                         "no pending discussions, stopping review loop",
                         round_num,
                     )
-                    user_items = self._build_user_decision_items(state)
+                    user_items = await self._build_user_decision_items(state, ctx)
                     state.pending_user_decisions = user_items
 
                     rej_details = [
@@ -703,7 +706,7 @@ class PlanReviewPhase(Phase):
                 )
                 state.plan_review_log.append(round_log)
 
-                user_items = self._build_user_decision_items(state)
+                user_items = await self._build_user_decision_items(state, ctx)
                 state.pending_user_decisions = user_items
                 state.review_conclusion = ReviewConclusion(
                     reason=ReviewConclusionReason.MAX_ROUNDS,
@@ -771,6 +774,7 @@ class PlanReviewPhase(Phase):
                     "suggested": issue.suggested_classification.value
                     if hasattr(issue.suggested_classification, "value")
                     else str(issue.suggested_classification),
+                    "source": issue.source,
                 }
                 for issue in verdict.issues
             ],
@@ -794,7 +798,7 @@ class PlanReviewPhase(Phase):
         state.phase_results[MergePhase.PLAN_REVIEW.value] = phase_result
 
         if MergePhase.PLAN_REVISING.value not in state.phase_results:
-            revising_status = (
+            revising_status: Literal["completed", "skipped"] = (
                 "completed" if state.plan_revision_rounds > 0 else "skipped"
             )
             state.phase_results[MergePhase.PLAN_REVISING.value] = PhaseResult(
@@ -813,9 +817,17 @@ class PlanReviewPhase(Phase):
             ),
         )
 
+        try:
+            write_merge_plan_report(state)
+        except Exception as exc:
+            logger.warning(
+                "Failed to regenerate MERGE_PLAN report after plan review: %s",
+                exc,
+            )
+
     # When LLM is unavailable we still need explicit user approval, but we
     # cap how many decision items we surface. A 1500-file plan would
-    # otherwise produce 1500 pending decisions and the CLI/TUI is unusable.
+    # otherwise produce 1500 pending decisions and the CLI/Web UI is unusable.
     _FALLBACK_MAX_ITEMS: int = 200
 
     def _build_fallback_decision_items(
@@ -851,10 +863,14 @@ class PlanReviewPhase(Phase):
                     truncated += 1
                     continue
                 context = self._build_risk_context(fp, batch.risk_level, {}, diff_map)
-                options = self._build_decision_options(fp, batch.risk_level, context)
+                options = self._build_decision_options(
+                    fp, batch.risk_level, context, diff_map.get(fp)
+                )
                 description = (
                     "Plan Judge LLM was unavailable; human approval required. "
-                    + self._build_description(fp, batch.risk_level, context)
+                    + self._build_description(
+                        fp, batch.risk_level, context, diff_map.get(fp)
+                    )
                 )
                 items.append(
                     UserDecisionItem(
@@ -879,12 +895,27 @@ class PlanReviewPhase(Phase):
 
     _CONFLICT_PREVIEW_MAX_LINES = 50
 
-    def _build_user_decision_items(self, state: MergeState) -> list[UserDecisionItem]:
+    async def _build_user_decision_items(
+        self,
+        state: MergeState,
+        ctx: PhaseContext | None = None,
+    ) -> list[UserDecisionItem]:
         if state.merge_plan is None:
             return []
 
         issue_reasons = self._collect_issue_reasons(state)
         diff_map = self._collect_file_diff_info(state)
+
+        # Opt-in: ConflictAnalyst proposes file-specific decision options
+        # for HUMAN_REQUIRED files. Off by default — costs ~1 LLM call
+        # per HR file.
+        proposals_by_file: dict[str, list[DecisionOption]] = {}
+        if (
+            ctx is not None
+            and state.config.plan_review.analyst_decision_options_enabled
+            and "conflict_analyst" in ctx.agents
+        ):
+            proposals_by_file = await self._collect_analyst_proposals(state, ctx)
 
         items: list[UserDecisionItem] = []
         for batch in state.merge_plan.phases:
@@ -895,8 +926,18 @@ class PlanReviewPhase(Phase):
                 context = self._build_risk_context(
                     fp, batch.risk_level, issue_reasons, diff_map
                 )
-                options = self._build_decision_options(fp, batch.risk_level, context)
-                description = self._build_description(fp, batch.risk_level, context)
+                options = self._build_decision_options(
+                    fp, batch.risk_level, context, diff_map.get(fp)
+                )
+                analyst_options = proposals_by_file.get(fp, [])
+                if analyst_options:
+                    # Surface analyst proposals BEFORE the base ladder so
+                    # they read as "what the system thinks", with the
+                    # generic ladder as a fallback below.
+                    options = analyst_options + options
+                description = self._build_description(
+                    fp, batch.risk_level, context, diff_map.get(fp)
+                )
                 conflict_preview = self._build_conflict_preview(fp, diff_map)
 
                 items.append(
@@ -912,6 +953,88 @@ class PlanReviewPhase(Phase):
                 )
 
         return items
+
+    async def _collect_analyst_proposals(
+        self,
+        state: MergeState,
+        ctx: PhaseContext,
+    ) -> dict[str, list[DecisionOption]]:
+        """Run ConflictAnalyst.propose_decision_options on every
+        HUMAN_REQUIRED file in the plan. Per-file failures swallowed so
+        one bad LLM call cannot stall the phase — reviewer still sees
+        the base ladder."""
+        import asyncio
+
+        if state.merge_plan is None or ctx.git_tool is None:
+            return {}
+        analyst = ctx.agents.get("conflict_analyst")
+        if analyst is None:
+            return {}
+
+        hr_files: list[str] = []
+        for batch in state.merge_plan.phases:
+            if batch.risk_level != RiskLevel.HUMAN_REQUIRED:
+                continue
+            hr_files.extend(batch.file_paths)
+        if not hr_files:
+            return {}
+
+        diffs_by_path = {fd.file_path: fd for fd in state.file_diffs}
+        base_ref = state.merge_base_commit or ""
+
+        async def _propose_one(fp: str) -> tuple[str, list[DecisionOption]]:
+            try:
+                base_c, fork_c, up_c = ctx.git_tool.get_three_way_diff(
+                    base_ref, state.config.fork_ref, state.config.upstream_ref, fp
+                )
+            except Exception as exc:
+                logger.warning(
+                    "analyst proposal: three-way fetch failed for %s: %s", fp, exc
+                )
+                return fp, []
+            fd = diffs_by_path.get(fp)
+            language = (fd.language or "") if fd is not None else ""
+            try:
+                raw = await analyst.propose_decision_options(
+                    fp,
+                    base_c,
+                    fork_c,
+                    up_c,
+                    language=language,
+                    project_context=state.config.project_context,
+                    max_options=3,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "analyst proposal: propose_decision_options crashed for %s: %s",
+                    fp,
+                    exc,
+                )
+                return fp, []
+            opts: list[DecisionOption] = []
+            for p in raw:
+                key = p.get("key") or ""
+                label = p.get("label") or ""
+                if not key or not label:
+                    continue
+                opts.append(
+                    DecisionOption(
+                        key=f"analyst::{key}",
+                        label=label,
+                        description=p.get("description") or "",
+                        kind="analyst_proposed",
+                        preview=p.get("preview") or None,
+                    )
+                )
+            return fp, opts
+
+        try:
+            results = await asyncio.gather(*(_propose_one(fp) for fp in hr_files))
+        except Exception as exc:
+            logger.warning("analyst proposal: gather failed: %s", exc)
+            return {}
+
+        return {fp: opts for fp, opts in results if opts}
 
     def _collect_issue_reasons(self, state: MergeState) -> dict[str, list[str]]:
         reasons: dict[str, list[str]] = {}
@@ -937,12 +1060,76 @@ class PlanReviewPhase(Phase):
                 "risk_score": fd.risk_score,
                 "lines_added": fd.lines_added,
                 "lines_deleted": fd.lines_deleted,
+                "upstream_lines_added": fd.upstream_lines_added,
+                "upstream_lines_deleted": fd.upstream_lines_deleted,
+                "conflict_count": fd.conflict_count,
+                "change_category": (
+                    fd.change_category.value if fd.change_category is not None else None
+                ),
                 "is_security_sensitive": fd.is_security_sensitive,
                 "language": fd.language,
                 "raw_diff": fd.raw_diff,
                 "risk_factors": fd.risk_factors,
             }
         return result
+
+    @staticmethod
+    def _classify_human_required_reason(
+        diff_info: dict[str, Any] | None,
+    ) -> tuple[str, str]:
+        """Return ``(kind, human-readable explanation)`` describing why a
+        file landed in HUMAN_REQUIRED. The three buckets are:
+
+        * ``policy`` — file matched ``security_sensitive.patterns`` and
+          was floored to ``risk_score >= 0.8`` regardless of conflict
+          severity. The hand-off is a policy gate, not a diff complexity
+          signal.
+        * ``conflict`` — ``conflict_count > 0``: actual merge-conflict
+          markers exist in the working tree, so automatic resolution
+          would silently drop one side.
+        * ``large_diff`` — neither of the above, but the file is C-class
+          (both_changed) with a non-trivial diff that the classifier
+          could not auto-approve.
+
+        When ``diff_info`` is missing (file not in ``state.file_diffs``),
+        fall back to the legacy generic wording.
+        """
+        if not diff_info:
+            return (
+                "unknown",
+                "Both upstream and fork modified this file — "
+                "automatic resolution requires human judgment.",
+            )
+
+        if diff_info.get("conflict_count", 0) > 0:
+            return (
+                "conflict",
+                "Both upstream and fork modified the same regions — "
+                "real three-way conflict markers are present.",
+            )
+
+        if diff_info.get("is_security_sensitive"):
+            return (
+                "policy",
+                "Security policy requires manual sign-off — this path "
+                "matched `security_sensitive.patterns`. The diff itself "
+                "may be straightforward; review is mandated by policy, "
+                "not by content complexity.",
+            )
+
+        if diff_info.get("change_category") == "both_changed":
+            return (
+                "large_diff",
+                "Both sides modified this file. Diff exceeds the "
+                "auto-merge confidence threshold — eyeball needed before "
+                "the executor can commit.",
+            )
+
+        return (
+            "unknown",
+            "Both upstream and fork modified this file — "
+            "automatic resolution requires human judgment.",
+        )
 
     def _build_conflict_preview(
         self,
@@ -1008,9 +1195,11 @@ class PlanReviewPhase(Phase):
         file_path: str,
         risk_level: RiskLevel,
         context: str,
+        diff_info: dict[str, Any] | None = None,
     ) -> str:
         if risk_level == RiskLevel.HUMAN_REQUIRED:
-            return f"This file cannot be auto-merged safely. {context}"
+            _, explanation = self._classify_human_required_reason(diff_info)
+            return f"{explanation} {context}".strip()
         return f"This file can be auto-merged but has elevated risk. {context}"
 
     def _build_decision_options(
@@ -1018,51 +1207,106 @@ class PlanReviewPhase(Phase):
         file_path: str,
         risk_level: RiskLevel,
         context: str,
+        diff_info: dict[str, Any] | None = None,
     ) -> list[DecisionOption]:
         is_security = "security-sensitive" in context
         security_warning = (
             " (⚠ security-sensitive — review carefully)" if is_security else ""
         )
 
-        if risk_level == RiskLevel.HUMAN_REQUIRED:
-            return [
-                DecisionOption(
-                    key="keep_head",
-                    label="Keep current branch (HEAD)",
-                    description="Use the fork branch file as-is; all upstream changes are discarded",
-                ),
-                DecisionOption(
-                    key="take_target",
-                    label="Use target branch version",
-                    description="Use the upstream branch file as-is; all fork changes are discarded"
-                    + security_warning,
-                ),
-                DecisionOption(
-                    key="llm_auto_merge",
-                    label="LLM auto-merge with verification",
-                    description="LLM merges both sides intelligently, then quality gates verify the result"
-                    + (
-                        " (not recommended: security-sensitive file)"
-                        if is_security
-                        else ""
-                    ),
-                ),
-            ]
-
-        return [
+        base: list[DecisionOption] = [
             DecisionOption(
                 key="keep_head",
                 label="Keep current branch (HEAD)",
                 description="Use the fork branch file as-is; all upstream changes are discarded",
+                kind="keep_head",
             ),
             DecisionOption(
                 key="take_target",
                 label="Use target branch version",
-                description="Use the upstream branch file as-is; all fork changes are discarded",
+                description="Use the upstream branch file as-is; all fork changes are discarded"
+                + (security_warning if risk_level == RiskLevel.HUMAN_REQUIRED else ""),
+                kind="take_target",
             ),
             DecisionOption(
                 key="llm_auto_merge",
                 label="LLM auto-merge with verification",
-                description="LLM merges both sides intelligently, then quality gates verify the result",
+                description="LLM merges both sides intelligently, then quality gates verify the result"
+                + (
+                    " (not recommended: security-sensitive file)"
+                    if is_security and risk_level == RiskLevel.HUMAN_REQUIRED
+                    else ""
+                ),
+                kind="llm_default",
             ),
         ]
+
+        if risk_level != RiskLevel.HUMAN_REQUIRED:
+            return base
+
+        # File-specific extensions. Emit union_additions only when both
+        # sides are pure additions on this file — the classic "both
+        # added different fields to the same struct" pattern that the
+        # three default options cannot resolve without losing one side.
+        extras: list[DecisionOption] = []
+        if diff_info is not None:
+            fork_del = diff_info.get("lines_deleted", 0) or 0
+            up_del = diff_info.get("upstream_lines_deleted", 0) or 0
+            fork_add = diff_info.get("lines_added", 0) or 0
+            up_add = diff_info.get("upstream_lines_added", 0) or 0
+            if fork_del == 0 and up_del == 0 and fork_add > 0 and up_add > 0:
+                extras.append(
+                    DecisionOption(
+                        key="union_additions",
+                        label="Keep both sides' additions (union)",
+                        description=(
+                            "Both fork and upstream only added lines to this "
+                            f"file (fork: +{fork_add}, upstream: +{up_add}). "
+                            "Apply a union merge so all new lines from both "
+                            "sides are preserved."
+                        ),
+                        kind="union_additions",
+                    )
+                )
+
+        extras.append(
+            DecisionOption(
+                key="llm_with_instruction",
+                label="LLM merge with my instruction",
+                description=(
+                    "Provide a free-text instruction in the textarea below; "
+                    "the LLM merges per your intent (e.g. \"keep fork's audit "
+                    "logging and upstream's validation order\")."
+                ),
+                kind="llm_with_instruction",
+            )
+        )
+        extras.append(
+            DecisionOption(
+                key="manual_paste",
+                label="Paste resolved content",
+                description=(
+                    "Paste the final file content into the textarea below — "
+                    "the Executor writes it verbatim and bypasses both the "
+                    "LLM merge and git's 3-way merge. Use when you've already "
+                    "resolved the conflict locally and want to surrender the "
+                    "exact bytes."
+                ),
+                kind="manual_paste",
+            )
+        )
+        extras.append(
+            DecisionOption(
+                key="skip",
+                label="Skip for now (resolve later)",
+                description=(
+                    "Leave this file untouched on fork_ref and resolve it "
+                    "in a follow-up PR. The Executor records SKIP and the "
+                    "file is excluded from subsequent auto-merge batches; "
+                    "no working-tree write happens here."
+                ),
+                kind="skip",
+            )
+        )
+
+        return base + extras

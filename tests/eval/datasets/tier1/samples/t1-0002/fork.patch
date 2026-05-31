@@ -1,0 +1,11 @@
+diff --git a/models/azure_openai/manifest.yaml b/models/azure_openai/manifest.yaml
+index 0b986611..03b82e34 100644
+--- a/models/azure_openai/manifest.yaml
++++ b/models/azure_openai/manifest.yaml
+@@ -24,5 +24,5 @@ resource:
+     model:
+       enabled: false
+ type: plugin
+-version: 0.0.44
++version: 0.0.45
+ 

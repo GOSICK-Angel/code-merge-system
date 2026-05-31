@@ -21,8 +21,6 @@ from src.core.phases.conflict_analysis import (
 )
 from src.core.phases.human_review import _unanalyzed_conflict_files
 from src.core.checkpoint import Checkpoint
-from src.core.message_bus import MessageBus
-from src.core.phase_runner import PhaseRunner
 from src.core.state_machine import StateMachine
 from src.memory.store import MemoryStore
 from src.memory.summarizer import PhaseSummarizer
@@ -75,9 +73,7 @@ def _make_ctx(config, **overrides) -> PhaseContext:
         git_tool=MagicMock(),
         gate_runner=MagicMock(),
         state_machine=StateMachine(),
-        message_bus=MessageBus(),
         checkpoint=MagicMock(),
-        phase_runner=PhaseRunner(),
         memory_store=MemoryStore(),
         summarizer=PhaseSummarizer(),
         trace_logger=None,

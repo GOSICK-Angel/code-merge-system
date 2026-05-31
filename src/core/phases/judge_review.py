@@ -10,6 +10,7 @@ from src.core.phases._gate_helpers import (
     run_gates,
 )
 from src.core.read_only_state_view import ReadOnlyStateView
+from src.models.decision import DecisionSource
 from src.models.judge import (
     IssueSeverity,
     IssueResolvability,
@@ -21,6 +22,35 @@ from src.models.plan import MergePhase
 from src.models.state import MergeState, PhaseResult, SystemStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _is_human_decided(state: MergeState, file_path: str) -> bool:
+    record = state.file_decision_records.get(file_path)
+    return record is not None and record.decision_source == DecisionSource.HUMAN
+
+
+def _persist_gate_skips(
+    state: MergeState, gates_skipped: list[dict[str, str]] | None
+) -> None:
+    """P1: persist the Judge's "deterministic gate could not run" records into
+    ``state.errors`` (the read-only Judge cannot write state itself).
+
+    Deduped by message so a persistent skip recurring across dispute rounds does
+    not stack N identical entries. Any entry already present in ``state.errors``
+    (same ``message``) is left untouched.
+    """
+    if not gates_skipped:
+        return
+    seen_msgs = {e.get("message") for e in state.errors}
+    for entry in gates_skipped:
+        if entry.get("message") not in seen_msgs:
+            state.errors.append(entry)
+            seen_msgs.add(entry.get("message"))
+
+
+def _summarize_exc(exc: BaseException, max_chars: int = 120) -> str:
+    msg = str(exc).strip() or type(exc).__name__
+    return msg[:max_chars]
 
 
 class JudgeReviewPhase(Phase):
@@ -51,6 +81,12 @@ class JudgeReviewPhase(Phase):
                 from src.models.judge import JudgeVerdict as JV
 
                 state.judge_verdict = JV.model_validate(verdict_data)
+
+            # P1: the read-only Judge cannot write state.errors; it returns any
+            # "deterministic gate could not run" records in the payload. Persist
+            # them here (Orchestrator side) so a silently-disabled veto pipeline
+            # surfaces as partial_failure instead of a clean PASS.
+            _persist_gate_skips(state, msg.payload.get("gates_skipped"))
 
             customization_violations = judge.verify_customizations(
                 ctx.config.customizations,
@@ -112,13 +148,29 @@ class JudgeReviewPhase(Phase):
                     r for r in rebuttal.repair_instructions if r.is_repairable
                 ]
                 if repairable and round_num < max_rounds - 1:
+                    non_human_repairable = [
+                        r
+                        for r in repairable
+                        if not _is_human_decided(state, r.file_path)
+                    ]
+                    if not non_human_repairable:
+                        logger.info(
+                            "All %d repair target(s) are operator-decided "
+                            "(executor.repair would no-op them); "
+                            "short-circuiting further Judge rounds",
+                            len(repairable),
+                        )
+                        break
                     logger.info(
-                        "Executor accepts all issues; repairing %d items (round %d/%d)",
+                        "Executor accepts all issues; repairing %d/%d items "
+                        "(round %d/%d; %d human-locked skipped)",
+                        len(non_human_repairable),
                         len(repairable),
                         round_num + 1,
                         max_rounds,
+                        len(repairable) - len(non_human_repairable),
                     )
-                    await executor.repair(repairable, state)
+                    await executor.repair(non_human_repairable, state)
                     ctx.checkpoint.save(state, f"phase5_repair_{round_num}")
                 continue
 
@@ -200,13 +252,17 @@ class JudgeReviewPhase(Phase):
 
         # Final routing: consensus reached (PASS) or escalate to human
         if state.judge_verdict.verdict == VerdictType.PASS:
-            await self._run_smoke_tests(state, ctx)
-            # Smoke tests may downgrade verdict to FAIL
+            await self._run_build_check(state, ctx)
+            # Build check (compile gate) may downgrade verdict to FAIL; only
+            # run functional smoke tests if the tree still builds.
+            if state.judge_verdict.verdict == VerdictType.PASS:
+                await self._run_smoke_tests(state, ctx)
+            # Either gate may have downgraded the verdict to FAIL
             if state.judge_verdict.verdict != VerdictType.PASS:
                 reason = (
-                    f"smoke test failed: {state.judge_verdict.veto_reason}"
+                    f"post-judge gate failed: {state.judge_verdict.veto_reason}"
                     if state.judge_verdict.veto_reason
-                    else "smoke test failed"
+                    else "post-judge gate failed"
                 )
                 ctx.state_machine.transition(state, SystemStatus.AWAITING_HUMAN, reason)
                 return PhaseOutcome(
@@ -215,6 +271,34 @@ class JudgeReviewPhase(Phase):
                     checkpoint_tag="after_phase5_smoke",
                     memory_phase="judge_review",
                 )
+            # P3(b): opt-in strict posture — refuse a silent green COMPLETED when
+            # compiled-language files were auto-merged with NO compile gate
+            # configured (the always-on syntax gate is balance-only; a type error
+            # would otherwise reach COMPLETED). JUDGE_REVIEWING → AWAITING_HUMAN is
+            # a legal edge; GENERATING_REPORT → AWAITING_HUMAN is not, so this gate
+            # must live here, not in report_generation. Default-off flag preserves
+            # current behavior; the report-time advisory (P3a) covers the default.
+            if state.config.build_check.require_for_compiled_langs:
+                from src.tools.compile_gate import (
+                    auto_merged_compiled_paths_without_gate,
+                )
+
+                at_risk = auto_merged_compiled_paths_without_gate(state)
+                if at_risk:
+                    reason = (
+                        f"no compile gate configured but {len(at_risk)} "
+                        f"compiled-language file(s) auto-merged "
+                        f"(require_for_compiled_langs=True)"
+                    )
+                    ctx.state_machine.transition(
+                        state, SystemStatus.AWAITING_HUMAN, reason
+                    )
+                    return PhaseOutcome(
+                        target_status=SystemStatus.AWAITING_HUMAN,
+                        reason=reason,
+                        checkpoint_tag="after_phase5",
+                        memory_phase="judge_review",
+                    )
             ctx.state_machine.transition(
                 state, SystemStatus.GENERATING_REPORT, "judge verdict: PASS"
             )
@@ -232,10 +316,17 @@ class JudgeReviewPhase(Phase):
         if ctx.coordinator is not None:
             decision = ctx.coordinator.route_judge_stall(state)
             if decision.action == "meta_review":
-                await self._run_judge_meta_review(state, ctx, decision.reason)
-                reason = (
-                    f"judge stall escalated to meta-review after {rounds_done} rounds"
-                )
+                ok = await self._run_judge_meta_review(state, ctx, decision.reason)
+                if ok:
+                    reason = (
+                        f"judge stall escalated to meta-review after "
+                        f"{rounds_done} rounds"
+                    )
+                else:
+                    reason = (
+                        f"judge stall after {rounds_done} rounds "
+                        "(meta-review unavailable; see coordinator_directives)"
+                    )
                 ctx.state_machine.transition(state, SystemStatus.AWAITING_HUMAN, reason)
                 return PhaseOutcome(
                     target_status=SystemStatus.AWAITING_HUMAN,
@@ -261,29 +352,122 @@ class JudgeReviewPhase(Phase):
         state: MergeState,
         ctx: PhaseContext,
         trigger_reason: str,
-    ) -> None:
+    ) -> bool:
         from src.core.coordinator import Coordinator
+        from src.models.coordinator import MetaReviewResult
 
         judge = ctx.agents.get("judge")
         if judge is None:
-            return
+            return False
         logger.info("Coordinator: running judge meta-review (%s)", trigger_reason)
         try:
             raw = await judge.meta_review(state)
-            if ctx.coordinator is not None:
-                result = Coordinator.build_meta_review_result(
+        except Exception as exc:
+            summary = _summarize_exc(exc)
+            logger.warning("Judge meta-review failed: %s", summary)
+            state.coordinator_directives.append(
+                MetaReviewResult(
                     phase="judge_review",
                     trigger="judge_stall",
-                    raw=raw,
+                    assessment=f"meta-review failed: {summary}"[:200],
+                    recommendation=(
+                        "see judge_verdict.issues; operator decides accept/rerun/abort"
+                    ),
                 )
-                state.coordinator_directives.append(result)
-                logger.info(
-                    "Judge meta-review: assessment=%r recommendation=%r",
-                    result.assessment,
-                    result.recommendation,
+            )
+            return False
+        if ctx.coordinator is not None:
+            result = Coordinator.build_meta_review_result(
+                phase="judge_review",
+                trigger="judge_stall",
+                raw=raw,
+            )
+            state.coordinator_directives.append(result)
+            logger.info(
+                "Judge meta-review: assessment=%r recommendation=%r",
+                result.assessment,
+                result.recommendation,
+            )
+        return True
+
+    async def _run_build_check(self, state: MergeState, ctx: PhaseContext) -> None:
+        """Optional compile/build gate run after Judge PASS.
+
+        Runs the config-supplied ``build_check.command`` in the repo. A
+        non-zero exit (or timeout) downgrades ``state.judge_verdict`` to FAIL
+        with a veto and appends a ``build_check_failed`` issue. This catches
+        cross-file compilation breaks the per-file Judge review cannot see.
+        Skipped when disabled or no command is configured.
+        """
+        import asyncio
+        from pathlib import Path
+
+        cfg = state.config.build_check
+        if not cfg.enabled or not cfg.command.strip():
+            return
+
+        ctx.notify("orchestrator", "Running build check (Phase 5.5)")
+
+        cwd = Path(state.config.repo_path)
+        if cfg.working_dir and cfg.working_dir != ".":
+            cwd = cwd / cfg.working_dir
+
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                cfg.command,
+                cwd=str(cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            try:
+                stdout_bytes, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=cfg.timeout_seconds
                 )
+                returncode = proc.returncode if proc.returncode is not None else 0
+                output = stdout_bytes.decode("utf-8", errors="replace")
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                returncode = -1
+                output = f"build check timed out after {cfg.timeout_seconds}s"
         except Exception as exc:
-            logger.warning("Judge meta-review failed: %s", exc)
+            # #7A: fail CLOSED. A build gate the operator deliberately enabled
+            # that cannot even launch (bad command, missing toolchain, OS error)
+            # must NOT silently leave the verdict at PASS — that is the exact
+            # "the one compile gate fails open" hole. Treat a launch crash as a
+            # build failure and fall through to the downgrade below.
+            logger.error("Build check raised unexpectedly: %s", exc)
+            returncode = -2
+            output = f"build check failed to launch: {exc!r}"
+
+        if returncode == 0:
+            return
+
+        tail = "\n".join(output.strip().splitlines()[-20:])
+        new_issue = JudgeIssue(
+            file_path="(build)",
+            issue_level=IssueSeverity.CRITICAL,
+            issue_type="build_check_failed",
+            description=(
+                f"Build check `{cfg.command}` exited {returncode}. Output tail:\n{tail}"
+            ),
+            must_fix_before_merge=True,
+            veto_condition="Build check failed",
+        )
+        if state.judge_verdict is not None:
+            state.judge_verdict = state.judge_verdict.model_copy(
+                update={
+                    "verdict": VerdictType.FAIL,
+                    "veto_triggered": True,
+                    "veto_reason": (
+                        f"Build check failed (exit {returncode}): {cfg.command}"
+                    ),
+                    "issues": list(state.judge_verdict.issues) + [new_issue],
+                    "critical_issues_count": (
+                        state.judge_verdict.critical_issues_count + 1
+                    ),
+                }
+            )
 
     async def _run_smoke_tests(self, state: MergeState, ctx: PhaseContext) -> None:
         """P1-3 Phase 5.5: run smoke tests after Judge PASS.
@@ -299,19 +483,42 @@ class JudgeReviewPhase(Phase):
 
         ctx.notify("orchestrator", "Running smoke tests (Phase 5.5)")
 
-        from src.agents.smoke_test_agent import SmokeTestAgent
-
-        agent = ctx.agents.get("smoke_test")
-        if agent is None:
-            agent = SmokeTestAgent(
-                state.config.agents.judge,
-                repo_path=state.config.repo_path,
-            )
-
+        # #7A: fail CLOSED on a launch crash. Constructing the agent and running
+        # it are both inside the try so a misconfigured suite / missing harness
+        # downgrades to FAIL (when block_on_failure) instead of silently leaving
+        # the verdict at PASS.
         try:
+            from src.agents.smoke_test_agent import SmokeTestAgent
+
+            agent = ctx.agents.get("smoke_test")
+            if agent is None:
+                agent = SmokeTestAgent(
+                    state.config.agents.judge,
+                    repo_path=state.config.repo_path,
+                )
             await agent.run(state)
         except Exception as exc:
             logger.error("Smoke tests raised unexpectedly: %s", exc)
+            if cfg.block_on_failure and state.judge_verdict is not None:
+                crash_issue = JudgeIssue(
+                    file_path="(smoke)",
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="smoke_test_failed",
+                    description=f"Smoke test harness failed to run: {exc!r}",
+                    must_fix_before_merge=True,
+                    veto_condition="Smoke test launch failed",
+                )
+                state.judge_verdict = state.judge_verdict.model_copy(
+                    update={
+                        "verdict": VerdictType.FAIL,
+                        "veto_triggered": True,
+                        "veto_reason": f"Smoke test harness failed: {exc!r}",
+                        "issues": list(state.judge_verdict.issues) + [crash_issue],
+                        "critical_issues_count": (
+                            state.judge_verdict.critical_issues_count + 1
+                        ),
+                    }
+                )
             return
 
         report = state.smoke_test_report

@@ -15,7 +15,7 @@ from src.models.diff import (
     RiskLevel,
     FileStatus,
 )
-from src.models.config import FileClassifierConfig
+from src.models.config import ComplexityConfig, FileClassifierConfig
 
 if TYPE_CHECKING:
     from src.tools.git_tool import GitTool
@@ -224,9 +224,76 @@ def compute_risk_score(file_diff: FileDiff, config: FileClassifierConfig) -> flo
         )
     ):
         bumped = raw_score + config.security_sensitive.risk_hint_bump
-        return float(round(min(1.0, bumped), 3))
+        return float(
+            round(min(1.0, _apply_c_class_floor(bumped, file_diff, config)), 3)
+        )
 
-    return float(round(raw_score, 3))
+    return float(round(_apply_c_class_floor(raw_score, file_diff, config), 3))
+
+
+def _apply_c_class_floor(
+    score: float, file_diff: FileDiff, config: FileClassifierConfig
+) -> float:
+    """Lift C-class (both_changed) files above the auto_safe band when
+    no stronger path-based signal already escalated. Pre-merge there are
+    no conflict markers yet, so the conflict_density dimension is always
+    0 for C-class — a structural three-way conflict can otherwise score
+    as low as ~0.3 and slip into the auto_safe batch. Files with no
+    content change are excluded so renames don't get spuriously bumped.
+    """
+    if file_diff.change_category != FileChangeCategory.C:
+        return score
+    if file_diff.lines_added == 0 and file_diff.lines_deleted == 0:
+        return score
+    return max(score, config.c_class_risk_floor)
+
+
+def compute_complexity(
+    file_diff: FileDiff,
+    config: ComplexityConfig,
+    *,
+    fanout: float | None = None,
+) -> float:
+    """Estimate how much a file would benefit from an LLM look, 0..1.
+
+    Distinct from ``compute_risk_score``: risk decides which bucket a
+    file lands in, complexity decides whether spending an LLM call on it
+    is justified. ``fanout`` (cross-module spread, 0..1) is supplied by
+    the caller once module inference is available; while it is None its
+    weight is redistributed across the remaining dimensions so the score
+    stays normalised — mirroring the change_ratio drop in
+    ``compute_risk_score``.
+    """
+    weights = {
+        "size": config.w_size,
+        "hunks": config.w_hunks,
+        "conflict": config.w_conflict,
+        "change_ratio": config.w_change_ratio,
+        "fanout": config.w_fanout,
+    }
+    if fanout is None:
+        dropped = weights.pop("fanout")
+        scale = 1.0 / (1.0 - dropped) if dropped < 1.0 else 1.0
+        for k in weights:
+            weights[k] *= scale
+
+    size_score = min(1.0, (file_diff.lines_changed / 500) ** 0.5)
+    hunks_score = min(1.0, len(file_diff.hunks) / 10)
+    conflict_score = min(1.0, file_diff.conflict_count / 5)
+    change_ratio_score = min(
+        1.0, (file_diff.lines_changed / estimate_total_lines(file_diff)) * 2
+    )
+
+    score = (
+        weights["size"] * size_score
+        + weights["hunks"] * hunks_score
+        + weights["conflict"] * conflict_score
+        + weights["change_ratio"] * change_ratio_score
+    )
+    if fanout is not None:
+        score += weights["fanout"] * max(0.0, min(1.0, fanout))
+
+    return float(round(max(0.0, min(1.0, score)), 3))
 
 
 async def compute_llm_risk_score(
@@ -234,13 +301,17 @@ async def compute_llm_risk_score(
     llm_client: Any,
     rule_score: float,
     rule_weight: float = 0.6,
+    risk_score_low: float = 0.30,
+    risk_score_high: float = 0.60,
 ) -> float:
     from src.llm.prompts.risk_scoring_prompts import (
         build_risk_scoring_prompt,
         RISK_SCORING_SYSTEM,
     )
 
-    prompt = build_risk_scoring_prompt(file_diff, rule_score)
+    prompt = build_risk_scoring_prompt(
+        file_diff, rule_score, risk_score_low, risk_score_high
+    )
     messages = [{"role": "user", "content": prompt}]
 
     try:
@@ -291,6 +362,12 @@ def classify_file(
     if file_diff.file_status == FileStatus.DELETED and file_diff.lines_added == 0:
         return RiskLevel.DELETED_ONLY
 
+    # Committed conflict markers (<<<<<<< in the diff) are always a human concern:
+    # the executor cannot resolve them automatically and any auto-apply would embed
+    # the raw markers into the working tree.
+    if file_diff.conflict_count > 0:
+        return RiskLevel.HUMAN_REQUIRED
+
     force_safe_patterns = getattr(config, "force_auto_safe_patterns", [])
     if force_safe_patterns and not file_diff.is_security_sensitive:
         if matches_any_pattern(file_diff.file_path, force_safe_patterns):
@@ -315,6 +392,60 @@ def classify_file(
                 return RiskLevel.HUMAN_REQUIRED
             return RiskLevel.AUTO_RISKY
     return base_level
+
+
+def _fork_deleted_skip_record(file_path: str) -> Any:
+    """Build a SKIP FileDecisionRecord preserving fork's explicit delete.
+
+    Local import to avoid models/agents → file_classifier circular dep.
+    """
+    from datetime import datetime
+    from src.models.decision import (
+        DecisionSource,
+        FileDecisionRecord,
+        MergeDecision,
+    )
+    from src.models.diff import FileStatus
+
+    return FileDecisionRecord(
+        file_path=file_path,
+        file_status=FileStatus.DELETED,
+        decision=MergeDecision.SKIP,
+        decision_source=DecisionSource.AUTO_EXECUTOR,
+        confidence=1.0,
+        rationale=(
+            "Fork explicitly deleted this file (FORK_DELETED divergence); "
+            "preserving deletion rather than restoring from upstream "
+            "(P-γ-1.5-B regression for R2 helper_test.go)."
+        ),
+        phase="auto_merge",
+        agent="fork_delete_preserver",
+        timestamp=datetime.now(),
+    )
+
+
+def is_fork_deleted(state: Any, file_path: str) -> bool:
+    """Return True if ``file_path`` was explicitly deleted by the fork.
+
+    Reads ``state.fork_divergence_map`` (populated in InitializePhase by
+    :func:`compute_fork_divergence_map`). Distinguishes the FORK_DELETED
+    case (base has file + fork removed it + upstream still has it) from
+    the genuine D_MISSING case (file new in upstream after fork branched
+    off).
+
+    The classifier returns ``D_MISSING`` for both cases because both
+    look "missing from fork". Downstream D_MISSING action sites must
+    consult this helper before restoring from upstream — restoring a
+    fork-deleted file silently re-introduces code the fork meant to
+    drop (calibrated via R2 helper_test.go regression, P-γ-1.5-B).
+    """
+    div_map = getattr(state, "fork_divergence_map", None)
+    if not div_map:
+        return False
+    value = div_map.get(file_path)
+    if value is None:
+        return False
+    return bool(value == ForkDivergence.FORK_DELETED.value)
 
 
 def classify_three_way(

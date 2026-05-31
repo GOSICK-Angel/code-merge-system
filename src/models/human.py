@@ -1,8 +1,10 @@
 from datetime import datetime
 from uuid import uuid4
+
 from pydantic import BaseModel, Field
+
+from src.models.conflict import ConflictPoint, SemanticCompatibility
 from src.models.decision import MergeDecision
-from src.models.conflict import ConflictPoint
 
 
 class DecisionOption(BaseModel):
@@ -34,3 +36,11 @@ class HumanDecisionRequest(BaseModel):
     reviewer_notes: str | None = None
     decided_at: datetime | None = None
     is_batch_decision: bool = False
+    # Phase C §4: dependency-graph blast radius shown on the decision card to
+    # help the reviewer weigh impact. Zero/false when the graph is empty.
+    dependents_count: int = 0
+    blast_radius: int = 0
+    is_god_node: bool = False
+    grounding_warnings: list[str] = Field(default_factory=list)
+    required_new_apis: list[str] = Field(default_factory=list)
+    semantic_compatibility: SemanticCompatibility | None = None

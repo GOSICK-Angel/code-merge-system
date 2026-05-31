@@ -6,9 +6,14 @@ import re
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from src.agents.base_agent import CIRCUIT_BREAKER_THRESHOLD
+
+if TYPE_CHECKING:
+    from src.tools.git_tool import GitTool
 from src.agents.executor_agent import ExecutorAgent
+from src.tools.git_tool import GitReadStatus
 from src.agents.judge_agent import JudgeAgent
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.core.phases._gate_helpers import (
@@ -17,6 +22,7 @@ from src.core.phases._gate_helpers import (
     get_layer_gates,
     handle_gate_failure,
     run_gates,
+    vacuously_complete_layers,
     verify_layer_deps,
 )
 from src.core.read_only_state_view import ReadOnlyStateView
@@ -37,7 +43,8 @@ from src.models.plan_review import DecisionOption, UserDecisionItem
 from src.models.state import MergeState, PhaseResult, SystemStatus
 from src.tools.binary_assets import is_binary_asset
 from src.tools.commit_replayer import CommitReplayer
-from src.tools.conflict_markers import file_has_conflict_markers
+from src.tools.conflict_markers import extract_conflict_info, file_has_conflict_markers
+from src.tools.file_classifier import _fork_deleted_skip_record, is_fork_deleted
 from src.tools.git_committer import GitCommitter
 from src.tools.patch_applier import create_escalate_record
 from src.tools.preservation_auditor import audit_fork_preservation
@@ -47,6 +54,60 @@ logger = logging.getLogger(__name__)
 # O-B5: drift count above which we treat the run as systemic-bug and
 # escalate without running the (very expensive) downstream analysis.
 _B_CLASS_DRIFT_FATAL_THRESHOLD = 100
+
+
+def _conflict_marker_decision_options() -> list[DecisionOption]:
+    """Options offered for a file left with unresolved git conflict markers
+    by cherry-pick fall-back (O-M1).
+
+    LLM-merge options are intentionally omitted: feeding marker-laden
+    content to the LLM is the exact anti-pattern O-M1 escalates to avoid.
+    ``manual_paste`` and ``skip`` are the marker-friendly extensions that
+    bring this path closer to the plan-review option set; both are
+    actualized by the O-L5 user_choice executor below. ``kind`` is required
+    on those two so the Web UI renders the paste textarea / hides the input.
+    """
+    return [
+        DecisionOption(
+            key="approve_human",
+            label="Manual review",
+            description=(
+                "You will resolve the conflict markers by hand before continuing"
+            ),
+        ),
+        DecisionOption(
+            key="take_target",
+            label="Take upstream",
+            description="Replace the conflicted file with the upstream version as-is",
+        ),
+        DecisionOption(
+            key="take_current",
+            label="Keep fork",
+            description="Keep the fork version and drop the upstream change for this file",
+        ),
+        DecisionOption(
+            key="manual_paste",
+            label="Paste resolved content",
+            description=(
+                "Paste the final file content into the textarea below — the "
+                "Executor writes it verbatim, replacing the conflict markers. "
+                "Use when you've already resolved the conflict locally."
+            ),
+            kind="manual_paste",
+        ),
+        DecisionOption(
+            key="skip",
+            label="Skip for now (resolve later)",
+            description=(
+                "Defer this file to a follow-up PR. Recorded as SKIP and "
+                "excluded from further auto-merge batches; the conflicted file "
+                "is left in the working tree for you to resolve later (not "
+                "committed with markers)."
+            ),
+            kind="skip",
+        ),
+    ]
+
 
 _DEP_BUMP_RE = re.compile(
     r"(bump|chore[\(\[]deps|update[- ]dep|dependabot|renovate|"
@@ -202,11 +263,20 @@ class AutoMergePhase(Phase):
                         agent="commit_replayer",
                     )
 
+        # C-class files whose markers were reset to fork content above; they
+        # are routed to conflict_analysis via unhandled_conflict_files below.
+        marker_analysis_files: list[str] = []
+
         # --- O-M1: scan working tree for files with unresolved conflict
         # markers (<<<<<<< / ======= / >>>>>>>) left over by cherry-pick
-        # fall-back. Route them directly to human review: skip AUTO_MERGE
-        # and the Judge pipeline, both of which cannot recover from the
-        # markers being part of the stored content. ---
+        # fall-back. Two routes by change category:
+        #   * C-class (both sides modified) → reset to clean fork content and
+        #     route to conflict_analysis, which reads the three-way diff from
+        #     refs (never the marker-laden working tree) and lets the analyst
+        #     produce a semantic recommendation before any human decision.
+        #   * everything else → escalate directly to human review, skipping
+        #     AUTO_MERGE and the Judge pipeline, neither of which can recover
+        #     from the markers being part of the stored content. ---
         repo_path = Path(ctx.git_tool.repo_path)
         files_with_markers: list[str] = []
         for batch in state.merge_plan.phases:
@@ -221,15 +291,59 @@ class AutoMergePhase(Phase):
                     files_with_markers.append(file_path)
 
         if files_with_markers:
+            marker_analysis_files = [
+                fp
+                for fp in files_with_markers
+                if (fd := file_diffs_map.get(fp)) is not None
+                and fd.change_category == FileChangeCategory.C
+            ]
+            marker_analysis_set = set(marker_analysis_files)
+            marker_human_files = [
+                fp for fp in files_with_markers if fp not in marker_analysis_set
+            ]
             logger.warning(
-                "O-M1: %d file(s) contain unresolved conflict markers — "
-                "escalating to human review: %s",
+                "O-M1: %d file(s) with unresolved conflict markers — "
+                "%d C-class routed to conflict_analysis, %d escalated to human: %s",
                 len(files_with_markers),
+                len(marker_analysis_files),
+                len(marker_human_files),
                 ", ".join(files_with_markers[:10])
                 + (" ..." if len(files_with_markers) > 10 else ""),
             )
             marker_set = set(files_with_markers)
-            for fp in files_with_markers:
+
+            # Extract per-file conflict info once so both the decision record
+            # and the UserDecisionItem can reuse it without re-reading.
+            conflict_info: dict[str, tuple[int, str]] = {
+                fp: extract_conflict_info(repo_path, fp) for fp in files_with_markers
+            }
+
+            # Back-fill conflict_count on the FileDiff objects so the
+            # checkpoint accurately reflects the discovered conflicts (the
+            # initialize-phase count was 0 because no working-tree simulation
+            # was run at that point).
+            fp_to_count = {fp: cnt for fp, (cnt, _) in conflict_info.items() if cnt > 0}
+            if fp_to_count:
+                state.file_diffs = [
+                    fd.model_copy(update={"conflict_count": fp_to_count[fd.file_path]})
+                    if fd.file_path in fp_to_count
+                    else fd
+                    for fd in state.file_diffs
+                ]
+
+            # C-class: drop the markers by restoring fork content (index +
+            # working tree). conflict_analysis re-derives the real merge from
+            # refs; no ESCALATE_HUMAN record is seeded so its skip-guard
+            # (``fp in file_decision_records``) does not exclude these files.
+            for fp in marker_analysis_files:
+                if not ctx.git_tool.checkout_file(state.config.fork_ref, fp):
+                    logger.warning(
+                        "O-M1: failed to reset C-class marker file %s to fork "
+                        "content — leaving markers in place for conflict_analysis",
+                        fp,
+                    )
+
+            for fp in marker_human_files:
                 fd_item = file_diffs_map.get(fp)
                 state.file_decision_records[fp] = FileDecisionRecord(
                     file_path=fp,
@@ -259,46 +373,28 @@ class AutoMergePhase(Phase):
             existing_plan_paths = {
                 item.file_path for item in state.pending_user_decisions
             }
-            for fp in files_with_markers:
+            for fp in marker_human_files:
                 if fp in existing_plan_paths:
                     continue
+                cnt, preview = conflict_info.get(fp, (0, ""))
+                conflict_summary = (
+                    f" ({cnt} conflict block{'s' if cnt != 1 else ''} detected)"
+                    if cnt > 0
+                    else ""
+                )
                 state.pending_user_decisions.append(
                     UserDecisionItem(
                         item_id=f"conflict_markers_{fp}",
                         file_path=fp,
                         description=(
                             f"File '{fp}' contains unresolved git conflict "
-                            "markers from cherry-pick fall-back. Needs human "
-                            "resolution before merge can proceed."
+                            f"markers from cherry-pick fall-back{conflict_summary}. "
+                            "Needs human resolution before merge can proceed."
                         ),
                         risk_context="unresolved_conflict_markers",
+                        conflict_preview=preview,
                         current_classification=RiskLevel.HUMAN_REQUIRED.value,
-                        options=[
-                            DecisionOption(
-                                key="approve_human",
-                                label="Manual review",
-                                description=(
-                                    "You will resolve the conflict markers by "
-                                    "hand before continuing"
-                                ),
-                            ),
-                            DecisionOption(
-                                key="take_target",
-                                label="Take upstream",
-                                description=(
-                                    "Replace the conflicted file with the "
-                                    "upstream version as-is"
-                                ),
-                            ),
-                            DecisionOption(
-                                key="take_current",
-                                label="Keep fork",
-                                description=(
-                                    "Keep the fork version and drop the "
-                                    "upstream change for this file"
-                                ),
-                            ),
-                        ],
+                        options=_conflict_marker_decision_options(),
                     )
                 )
 
@@ -455,6 +551,81 @@ class AutoMergePhase(Phase):
                         fp for fp in batch.file_paths if fp not in take_target_set
                     ]
 
+        # --- P-γ-1.5-A: try git's native line-level 3-way merge before LLM ---
+        # Calibration: dify-plugins v3 baseline showed 2/3 WRONG_MERGE
+        # failures were C-class files where fork and upstream edited
+        # disjoint line ranges (manifest.yaml: fork ``author`` line 1 +
+        # upstream ``version`` line 37). The LLM executor reliably picks
+        # ``take_target`` and drops the fork change. ``git merge-file``
+        # resolves these deterministically without LLM cost.
+        #
+        # On clean merge: write via apply_with_snapshot and remove from
+        # batch so the LLM loop skips. On conflict / missing ref / any
+        # error: leave the file in the batch — LLM executor / conflict
+        # analyst will see it unchanged.
+        merge_base = state.merge_base_commit
+        if merge_base:
+            from src.tools.patch_applier import apply_with_snapshot as _apply
+
+            native_merged: set[str] = set()
+            for batch in state.merge_plan.phases:
+                if batch.risk_level not in (RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY):
+                    continue
+                for fp in list(batch.file_paths):
+                    if fp in replayed_set:
+                        continue
+                    if fp in state.file_decision_records:
+                        continue
+                    if is_binary_asset(fp):
+                        continue
+                    merged_content = ctx.git_tool.three_way_merge_file(
+                        base_ref=merge_base,
+                        ours_ref=state.config.fork_ref,
+                        theirs_ref=state.config.upstream_ref,
+                        file_path=fp,
+                    )
+                    if merged_content is None:
+                        continue
+                    try:
+                        record = await _apply(
+                            fp,
+                            merged_content,
+                            ctx.git_tool,
+                            state,
+                            phase="auto_merge",
+                            agent="native_3way_merge",
+                            decision=MergeDecision.SEMANTIC_MERGE,
+                            rationale=(
+                                "Resolved via git's native line-level 3-way "
+                                "merge (no conflicts after fork/base/upstream "
+                                "reconciliation). Bypassed LLM executor."
+                            ),
+                            confidence=0.95,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "native_3way_merge: apply failed for %s: %s — "
+                            "leaving for LLM fallback",
+                            fp,
+                            exc,
+                        )
+                        continue
+                    state.file_decision_records[fp] = record
+                    native_merged.add(fp)
+
+            if native_merged:
+                logger.info(
+                    "native_3way_merge: %d file(s) resolved without LLM: %s",
+                    len(native_merged),
+                    ", ".join(sorted(native_merged)[:10])
+                    + (" ..." if len(native_merged) > 10 else ""),
+                )
+                for batch in state.merge_plan.phases:
+                    if batch.risk_level in (RiskLevel.AUTO_SAFE, RiskLevel.AUTO_RISKY):
+                        batch.file_paths = [
+                            fp for fp in batch.file_paths if fp not in native_merged
+                        ]
+
         # --- Pre-pass: handle HUMAN_REQUIRED and DELETED_ONLY before any merge ---
         # Dedupe: auto_merge may run multiple times (e.g. after conflict
         # analysis rebounds); keep each file's first entry (preferring any
@@ -540,93 +711,21 @@ class AutoMergePhase(Phase):
                 memory_phase="auto_merge",
             )
 
-        # O-L5: execute UserDecisionItem take_target / take_current choices.
-        # Previously these user selections updated state but never wrote any
-        # file — downstream pipelines saw the ESCALATE_HUMAN record that O-M1
-        # / O-B3 seeded and the working tree was never updated. We now
-        # actualize the choice here, overwrite file_decision_records, and
-        # remove the file from future batches.
-        _l5_take_target_keys = {"take_target"}
-        _l5_take_current_keys = {"take_current", "keep_head"}
-        _l5_applied: set[str] = set()
-        for item in state.pending_user_decisions:
-            if item.user_choice not in _l5_take_target_keys | _l5_take_current_keys:
-                continue
-            fp = item.file_path
-            if fp in _l5_applied:
-                continue
-            ref = (
-                state.config.upstream_ref
-                if item.user_choice in _l5_take_target_keys
-                else state.config.fork_ref
-            )
-            decision_value = (
-                MergeDecision.TAKE_TARGET
-                if item.user_choice in _l5_take_target_keys
-                else MergeDecision.TAKE_CURRENT
-            )
-            try:
-                if is_binary_asset(fp):
-                    from src.tools.patch_applier import apply_bytes_with_snapshot
+        # O-L5: execute UserDecisionItem take_target / take_current /
+        # union_additions choices via the shared dispatcher. Previously
+        # this loop lived inline; extracted to user_choice_dispatcher.py
+        # so human_review can actualize part1-surfaced items too (Bug 1
+        # fix, 2026-05-28: surfaced items with user_choice=take_target
+        # reached AWAITING_HUMAN, got a user answer, but never wrote
+        # state.file_decision_records — the run dropped them).
+        from src.tools.user_choice_dispatcher import dispatch_user_choice
 
-                    content_bytes = ctx.git_tool.get_file_bytes(ref, fp)
-                    if content_bytes is None:
-                        raise RuntimeError(f"{ref}:{fp} bytes not found")
-                    record = await apply_bytes_with_snapshot(
-                        fp,
-                        content_bytes,
-                        ctx.git_tool,
-                        state,
-                        phase="auto_merge",
-                        agent="user_choice_executor",
-                        decision=decision_value,
-                        rationale=(
-                            f"O-L5: executing user_choice={item.user_choice!r} "
-                            f"for {item.risk_context or item.item_id} via "
-                            "binary-safe path"
-                        ),
-                    )
-                else:
-                    from src.tools.patch_applier import apply_with_snapshot
-
-                    content = ctx.git_tool.get_file_content(ref, fp)
-                    if content is None:
-                        raise RuntimeError(f"{ref}:{fp} content not found")
-                    record = await apply_with_snapshot(
-                        fp,
-                        content,
-                        ctx.git_tool,
-                        state,
-                        phase="auto_merge",
-                        agent="user_choice_executor",
-                        decision=decision_value,
-                        rationale=(
-                            f"O-L5: executing user_choice={item.user_choice!r} "
-                            f"for {item.risk_context or item.item_id}"
-                        ),
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "O-L5: failed to execute user_choice=%s for %s: %s",
-                    item.user_choice,
-                    fp,
-                    exc,
-                )
-                record = FileDecisionRecord(
-                    file_path=fp,
-                    file_status=FileStatus.MODIFIED,
-                    decision=MergeDecision.ESCALATE_HUMAN,
-                    decision_source=DecisionSource.AUTO_EXECUTOR,
-                    confidence=0.0,
-                    rationale=(
-                        f"O-L5 execute user_choice={item.user_choice!r} failed "
-                        f"({exc!r}); keeping ESCALATE_HUMAN."
-                    ),
-                    phase="auto_merge",
-                    agent="user_choice_executor",
-                )
-            state.file_decision_records[fp] = record
-            _l5_applied.add(fp)
+        _l5_applied = await dispatch_user_choice(
+            state,
+            ctx.git_tool,
+            list(state.pending_user_decisions),
+            phase="auto_merge",
+        )
 
         if _l5_applied:
             logger.info(
@@ -724,6 +823,12 @@ class AutoMergePhase(Phase):
             sorted_layer_ids.append(None)
         sorted_layer_ids.extend(sorted(k for k in layer_batches if k is not None))
 
+        # Layers declared in the plan but with no AUTO_SAFE / AUTO_RISKY
+        # batches are vacuously complete; see vacuously_complete_layers.
+        completed_layers |= vacuously_complete_layers(
+            layer_index, set(layer_batches.keys())
+        )
+
         skipped_layer_files: list[str] = []
 
         for layer_id in sorted_layer_ids:
@@ -757,15 +862,31 @@ class AutoMergePhase(Phase):
                                 and fp not in replayed_set
                                 and fp not in state.file_decision_records
                             ):
-                                record = await executor._copy_from_upstream(fp, state)
-                                state.file_decision_records[fp] = record
-                                phase_changed_files.append(fp)
-                                batch_count += 1
-                                logger.info(
-                                    "D-missing %s copied directly (layer %d deps skipped)",
-                                    fp,
-                                    layer_id,
-                                )
+                                if is_fork_deleted(state, fp):
+                                    state.file_decision_records[fp] = (
+                                        _fork_deleted_skip_record(fp)
+                                    )
+                                    phase_changed_files.append(fp)
+                                    batch_count += 1
+                                    logger.info(
+                                        "FORK_DELETED %s preserved (skip; layer %d "
+                                        "deps skipped path)",
+                                        fp,
+                                        layer_id,
+                                    )
+                                else:
+                                    record = await executor._copy_from_upstream(
+                                        fp, state
+                                    )
+                                    state.file_decision_records[fp] = record
+                                    phase_changed_files.append(fp)
+                                    batch_count += 1
+                                    logger.info(
+                                        "D-missing %s copied directly (layer %d "
+                                        "deps skipped)",
+                                        fp,
+                                        layer_id,
+                                    )
                             else:
                                 skipped_layer_files.append(fp)
                                 if fp not in state.file_decision_records:
@@ -833,6 +954,13 @@ class AutoMergePhase(Phase):
                         )
                         break
 
+                    ctx.notify_comm(
+                        "judge",
+                        "executor",
+                        f"{len(batch_verdict.issues)} blocking issue(s) "
+                        f"· dispute r{dispute_round + 1}",
+                        phase="auto_merge",
+                    )
                     rebuttal = await executor.build_rebuttal(
                         batch_verdict.issues, state
                     )
@@ -840,11 +968,18 @@ class AutoMergePhase(Phase):
                     if rebuttal.accepts_all:
                         if rebuttal.repair_instructions:
                             await executor.repair(rebuttal.repair_instructions, state)
+                            ctx.notify_comm(
+                                "executor",
+                                "judge",
+                                f"repaired {len(rebuttal.repair_instructions)} fix(es)",
+                                phase="auto_merge",
+                            )
                         batch_verdict = await judge.review_batch(
                             layer_id, layer_files, ReadOnlyStateView(state)
                         )
                         continue
 
+                    ctx.notify_comm("executor", "judge", "rebuttal", phase="auto_merge")
                     batch_verdict = await judge.re_evaluate(
                         rebuttal, batch_verdict, ReadOnlyStateView(state)
                     )
@@ -866,6 +1001,7 @@ class AutoMergePhase(Phase):
                         layer_files=layer_files,
                         batch_verdict=batch_verdict,
                         max_dispute=max_dispute,
+                        git_tool=ctx.git_tool,
                     )
                     ctx.state_machine.transition(
                         state,
@@ -935,6 +1071,13 @@ class AutoMergePhase(Phase):
         # agent is dead code in the replay path.
         unhandled_conflict_files: list[str] = []
         seen: set[str] = set(state.file_decision_records.keys())
+        # O-M1 C-class marker files: reset to clean fork content above, no
+        # decision record seeded — route them to the conflict analyst first.
+        for fp in marker_analysis_files:
+            if fp in seen:
+                continue
+            unhandled_conflict_files.append(fp)
+            seen.add(fp)
         for fp in skipped_layer_files:
             if fp in seen:
                 continue
@@ -949,9 +1092,17 @@ class AutoMergePhase(Phase):
                     continue
                 seen.add(fp)
                 fd = file_diffs_map.get(fp)
-                auto_take = fd is not None and (
-                    _is_lock_file(fp) or (is_bump and _is_dep_manifest(fp))
+                # #4: a lock file is a generated artifact — TAKE_TARGET is
+                # correct (the toolchain regenerates it). But a hand-edited
+                # dependency MANIFEST that is C-class (both fork and upstream
+                # changed it) must NOT be blindly overwritten — that silently
+                # drops fork dependency pins / overrides with zero review. Route
+                # C-class manifests to conflict analysis instead.
+                cat = fd.change_category if fd is not None else None
+                manifest_safe = (
+                    is_bump and _is_dep_manifest(fp) and cat != FileChangeCategory.C
                 )
+                auto_take = fd is not None and (_is_lock_file(fp) or manifest_safe)
                 if auto_take and fd is not None:
                     record = await executor.execute_auto_merge(
                         fd, MergeDecision.TAKE_TARGET, state
@@ -1047,12 +1198,31 @@ class AutoMergePhase(Phase):
                 memory_phase="auto_merge",
             )
         elif b_drift:
-            logger.warning(
-                "O-B5: %d B-class files drifted from upstream — adding to "
-                "conflict analysis queue",
-                len(b_drift),
+            # B-class = upstream_only: the correct merged result is upstream
+            # HEAD content verbatim (fork has no changes to preserve). Drift
+            # means a multi-commit file's later commit failed to replay (e.g.
+            # partial cherry-pick bail-out) yet an earlier commit's success
+            # still stamped a take_target "cleanly" record. Repair the loss
+            # deterministically instead of only logging it — the stale record
+            # otherwise blocks both this queue (`fp in seen`) and the
+            # conflict_analysis skip-guard, so the gap would survive to Judge.
+            repaired = await self._repair_b_class_drift(
+                state, ctx, b_drift, file_diffs_map, executor
             )
-            for fp in b_drift:
+            unrepaired = [fp for fp in b_drift if fp not in repaired]
+            logger.warning(
+                "O-B5: %d B-class files drifted from upstream — repaired %d "
+                "via take_target (upstream content), %d routed to conflict "
+                "analysis",
+                len(b_drift),
+                len(repaired),
+                len(unrepaired),
+            )
+            for fp in unrepaired:
+                # Drop the stale auto take_target record so the
+                # conflict_analysis skip-guard does not exclude the file.
+                state.file_decision_records.pop(fp, None)
+                seen.discard(fp)
                 if fp not in seen:
                     unhandled_conflict_files.append(fp)
                     seen.add(fp)
@@ -1090,6 +1260,10 @@ class AutoMergePhase(Phase):
                     seen.add(loss.file_path)
 
         if unhandled_conflict_files:
+            unhandled_conflict_files = self._filter_phantom_files(
+                unhandled_conflict_files, state, ctx
+            )
+
             fork_only_stripped: list[str] = []
             filtered_conflict_files: list[str] = []
             for fp in unhandled_conflict_files:
@@ -1170,6 +1344,7 @@ class AutoMergePhase(Phase):
         layer_files: list[str],
         batch_verdict: BatchVerdict,
         max_dispute: int,
+        git_tool: "GitTool | None" = None,
     ) -> None:
         """O-L3: persist a proper AWAITING_HUMAN signal after batch judge
         dispute exhaustion so the run does not loop.
@@ -1252,11 +1427,14 @@ class AutoMergePhase(Phase):
             )
 
         now = datetime.now()
+        file_diffs_map = {fd.file_path: fd for fd in state.file_diffs}
+        upstream_ref = state.config.upstream_ref
+        fork_ref = state.config.fork_ref
         for file_path in sorted(blocking_files):
             if file_path in state.human_decision_requests:
                 continue
             issue_lines = issues_by_file.get(file_path, [])
-            summary_blob = (
+            issue_blob = (
                 "\n".join(issue_lines)
                 if issue_lines
                 else (
@@ -1264,6 +1442,46 @@ class AutoMergePhase(Phase):
                     f"{max_dispute} dispute rounds."
                 )
             )
+
+            take_target_preview, take_current_preview = "", ""
+            if git_tool is not None and upstream_ref and fork_ref:
+                from src.core.phases.conflict_analysis import _build_diff_preview
+
+                take_target_preview, take_current_preview = _build_diff_preview(
+                    file_path, upstream_ref, fork_ref, git_tool
+                )
+
+            fd = file_diffs_map.get(file_path)
+            if fd is not None:
+                up_shape = (
+                    f"+{fd.upstream_lines_added}/-{fd.upstream_lines_deleted} lines"
+                )
+                if fd.lines_added or fd.lines_deleted:
+                    fork_state = (
+                        f"Fork modified (+{fd.lines_added}/-{fd.lines_deleted} lines)"
+                    )
+                else:
+                    fork_state = "Fork unchanged (upstream-only file)"
+            else:
+                up_shape = "(diff metadata unavailable)"
+                fork_state = "Fork change unavailable"
+
+            # Phase C §4: dependency blast radius for the decision card.
+            _hint = state.dependency_graph.impact_hint(
+                file_path,
+                max_depth=state.config.dependency_graph.max_depth,
+                god_node_min_dependents=(
+                    state.config.dependency_graph.god_node_min_dependents
+                ),
+            )
+            _impact_note = (
+                f" Dependency impact: {_hint.direct_dependents} direct "
+                f"dependent(s), impact radius {_hint.impact_radius}"
+                f"{' (dependency hub)' if _hint.is_god_node else ''}."
+                if _hint.has_signal
+                else ""
+            )
+
             state.human_decision_requests[file_path] = HumanDecisionRequest(
                 file_path=file_path,
                 priority=5,
@@ -1272,19 +1490,18 @@ class AutoMergePhase(Phase):
                     f"AUTO_MERGE layer {layer_tag} batch judge sub-review did "
                     f"not reach consensus after {max_dispute} dispute rounds "
                     f"(O-L3). Executor's repairs did not resolve all "
-                    "remaining blocking issues."
+                    f"remaining blocking issues.{_impact_note}"
                 ),
-                upstream_change_summary=(
-                    "(see Judge issues summary in options.preview_content)"
-                ),
+                upstream_change_summary=f"Upstream changed: {up_shape}",
                 fork_change_summary=(
-                    "(see Judge issues summary in options.preview_content)"
+                    f"{fork_state}; Judge flagged {len(issue_lines)} "
+                    f"blocking issue(s) after {max_dispute} dispute rounds"
                 ),
                 analyst_recommendation=MergeDecision.ESCALATE_HUMAN,
                 analyst_confidence=0.0,
                 analyst_rationale=(
                     f"{len(issue_lines)} remaining Judge issue(s) after "
-                    f"{max_dispute} dispute rounds"
+                    f"{max_dispute} dispute rounds:\n{issue_blob}"
                 ),
                 options=[
                     HumanDecisionOption(
@@ -1294,23 +1511,85 @@ class AutoMergePhase(Phase):
                             "Accept the current merged content as-is "
                             "(advisory issues only)."
                         ),
-                        preview_content=summary_blob,
+                        preview_content=None,
                     ),
                     HumanDecisionOption(
                         option_key="take_target",
                         decision=MergeDecision.TAKE_TARGET,
                         description="Replace with the upstream version as-is.",
-                        preview_content=summary_blob,
+                        preview_content=take_target_preview or None,
                     ),
                     HumanDecisionOption(
                         option_key="take_current",
                         decision=MergeDecision.TAKE_CURRENT,
                         description="Keep the fork version; drop upstream change.",
-                        preview_content=summary_blob,
+                        preview_content=take_current_preview or None,
                     ),
                 ],
                 created_at=now,
+                dependents_count=_hint.direct_dependents,
+                blast_radius=_hint.impact_radius,
+                is_god_node=_hint.is_god_node,
             )
+
+    def _filter_phantom_files(
+        self,
+        unhandled: list[str],
+        state: MergeState,
+        ctx: PhaseContext,
+    ) -> list[str]:
+        """Strip phantom files — paths absent from BOTH upstream and fork HEADs.
+
+        A non-replayable commit may name a file that was added then deleted
+        within the upstream window (and that the fork never adopted). Routing
+        such a path to conflict_analysis synthesizes a two-sided-None FileDiff,
+        which the analyst hallucinates as "no changes / take_target"; executor
+        then escalates with "Could not fetch target content", leaving the file
+        stuck at the human gate. Detect the case here and emit a SKIP record
+        instead so the path never reaches the analyst.
+
+        Returns the input list with phantom paths removed.
+        """
+        if ctx.git_tool is None:
+            return unhandled
+
+        phantom: list[str] = []
+        kept: list[str] = []
+        for fp in unhandled:
+            upstream_has = ctx.git_tool.file_exists_at_ref(
+                state.config.upstream_ref, fp
+            )
+            fork_has = ctx.git_tool.file_exists_at_ref(state.config.fork_ref, fp)
+            if not upstream_has and not fork_has:
+                phantom.append(fp)
+            else:
+                kept.append(fp)
+
+        if phantom:
+            logger.info(
+                "Filtered %d phantom file(s) absent from both upstream and "
+                "fork HEAD (upstream add-then-delete within window; fork "
+                "never adopted) — emitting SKIP records; sample=%s",
+                len(phantom),
+                phantom[:5],
+            )
+            for fp in phantom:
+                state.file_decision_records[fp] = FileDecisionRecord(
+                    file_path=fp,
+                    file_status=FileStatus.DELETED,
+                    decision=MergeDecision.SKIP,
+                    decision_source=DecisionSource.AUTO_EXECUTOR,
+                    confidence=1.0,
+                    rationale=(
+                        "Phantom file: absent from both upstream and fork "
+                        "HEAD (upstream add-then-delete within window + "
+                        "fork already absent) — no-op."
+                    ),
+                    phase="auto_merge",
+                    agent="phantom_filter",
+                    timestamp=datetime.now(),
+                )
+        return kept
 
     async def _b_class_sanity_check(
         self,
@@ -1318,11 +1597,17 @@ class AutoMergePhase(Phase):
         ctx: PhaseContext,
     ) -> list[str]:
         """O-B5: compare worktree blob sha vs upstream blob sha for every
-        B-class file in the plan. Returns the list of drifted paths.
+        pure-upstream file (B-class and D-missing) in the plan. Returns the
+        list of drifted paths.
 
-        B-class means "upstream changed, fork did not" — after auto-merge
-        the worktree should byte-equal upstream. Anything else is a bug
-        in the take_target / cherry-pick path.
+        Both categories are replayed (REPLAYABLE_CATEGORIES) and carry no fork
+        delta, so after auto-merge the worktree must byte-equal upstream.
+        A multi-commit file whose later commit failed to replay (partial
+        cherry-pick bail-out) drifts here while still stamped take_target
+        "cleanly"; checking D-missing too is required because new feature files
+        (e.g. an upstream UI added across create/view/edit commits) land in
+        D-missing batches, not B-class ones. Fork-deleted files are excluded —
+        resurrecting them would undo an intentional fork deletion.
         """
         if state.merge_plan is None:
             return []
@@ -1330,30 +1615,105 @@ class AutoMergePhase(Phase):
         drift: list[str] = []
         checked = 0
         for batch in state.merge_plan.phases:
-            if batch.change_category != FileChangeCategory.B:
+            if batch.change_category not in (
+                FileChangeCategory.B,
+                FileChangeCategory.D_MISSING,
+            ):
                 continue
             for fp in batch.file_paths:
                 existing = state.file_decision_records.get(fp)
-                if (
-                    existing is not None
-                    and existing.decision == MergeDecision.ESCALATE_HUMAN
+                if existing is not None and existing.decision in (
+                    MergeDecision.ESCALATE_HUMAN,
+                    MergeDecision.SKIP,
                 ):
                     continue
-                checked += 1
-                upstream_sha = ctx.git_tool.get_file_hash(upstream_ref, fp)
-                worktree_sha = ctx.git_tool.get_worktree_blob_sha(fp)
-                if upstream_sha is None or worktree_sha is None:
-                    # File missing on one side; downstream conflict path
-                    # already covers this (D-missing / D-extra logic).
+                if is_fork_deleted(state, fp):
                     continue
+                upstream_sha, up_status = ctx.git_tool.get_file_hash_checked(
+                    upstream_ref, fp
+                )
+                worktree_sha, wt_status = ctx.git_tool.get_worktree_blob_sha_checked(fp)
+                if GitReadStatus.GIT_ERROR in (up_status, wt_status):
+                    # W1: a genuine git error (distinct from a legitimately-absent
+                    # blob) disabled the B-class drift sanity for this file —
+                    # alarm so a systemically broken git_tool reports
+                    # partial_failure instead of a falsely-clean 0/N drift.
+                    from src.tools.gate_skip import gate_skip_entry
+
+                    state.errors.append(
+                        gate_skip_entry(
+                            "b_class_drift_sanity",
+                            fp,
+                            "upstream/worktree sha read failed",
+                        )
+                    )
+                    continue
+                if upstream_sha is None or worktree_sha is None:
+                    # File legitimately missing on one side (ABSENT); the
+                    # downstream conflict path already covers this (D-missing /
+                    # D-extra logic). Count only genuinely-compared files below so
+                    # a systemic git failure logs "0/0 drift" rather than a
+                    # falsely-clean "0/N drift".
+                    continue
+                checked += 1
                 if upstream_sha != worktree_sha:
                     drift.append(fp)
         logger.info(
-            "O-B5 sanity-check: %d/%d B-class files drift from upstream",
+            "O-B5 sanity-check: %d/%d pure-upstream (B/D-missing) files drift "
+            "from upstream",
             len(drift),
             checked,
         )
         return drift
+
+    async def _repair_b_class_drift(
+        self,
+        state: MergeState,
+        ctx: PhaseContext,
+        drift: list[str],
+        file_diffs_map: dict[str, FileDiff],
+        executor: "ExecutorAgent",
+    ) -> set[str]:
+        """O-B5 repair: rewrite each drifted B-class file to upstream HEAD
+        content via take_target, overwriting any stale "cherry-picked cleanly"
+        record. B-class is upstream_only, so upstream content is the correct
+        merged result with no fork delta to preserve.
+
+        Returns the set of file paths whose worktree blob now equals upstream
+        after the rewrite. Files without a FileDiff, or that still differ after
+        the rewrite (e.g. encoding round-trip), are left for the caller to
+        route to conflict_analysis.
+        """
+        if ctx.git_tool is None:
+            return set()
+        upstream_ref = state.config.upstream_ref
+        repaired: set[str] = set()
+        for fp in drift:
+            fd = file_diffs_map.get(fp)
+            if fd is None:
+                continue
+            record = await executor.execute_auto_merge(
+                fd, MergeDecision.TAKE_TARGET, state
+            )
+            if record.decision != MergeDecision.TAKE_TARGET:
+                continue
+            upstream_sha = ctx.git_tool.get_file_hash(upstream_ref, fp)
+            worktree_sha = ctx.git_tool.get_worktree_blob_sha(fp)
+            if upstream_sha is None or worktree_sha is None:
+                continue
+            if upstream_sha != worktree_sha:
+                continue
+            state.file_decision_records[fp] = record.model_copy(
+                update={
+                    "rationale": (
+                        "O-B5 drift repair: replay left an intermediate version "
+                        "(a later upstream commit failed to cherry-pick); "
+                        "rewrote to upstream content (take_target)."
+                    )
+                }
+            )
+            repaired.add(fp)
+        return repaired
 
     async def _execute_batch(
         self,
@@ -1378,8 +1738,13 @@ class AutoMergePhase(Phase):
                 category = fd_lookup.change_category if fd_lookup else None
 
             if category == FileChangeCategory.D_MISSING:
-                record = await executor._copy_from_upstream(file_path, state)
-                state.file_decision_records[file_path] = record
+                if is_fork_deleted(state, file_path):
+                    state.file_decision_records[file_path] = _fork_deleted_skip_record(
+                        file_path
+                    )
+                else:
+                    record = await executor._copy_from_upstream(file_path, state)
+                    state.file_decision_records[file_path] = record
                 return file_path
 
             fd_item: FileDiff | None = file_diffs_map.get(file_path)
@@ -1440,6 +1805,9 @@ class AutoMergePhase(Phase):
                 SystemStatus.PLAN_REVISING,
                 f"dispute: {dispute.dispute_reason}",
             )
+            ctx.notify_comm(
+                "planner_judge", "planner", "revision request", phase="plan_review"
+            )
             revised_plan = await planner.handle_dispute(state, dispute)
             state.merge_plan = revised_plan
 
@@ -1447,9 +1815,16 @@ class AutoMergePhase(Phase):
             ctx.state_machine.transition(
                 state, SystemStatus.PLAN_REVIEWING, "dispute revision complete"
             )
+            ctx.notify_comm(
+                "planner", "planner_judge", "revised plan", phase="plan_review"
+            )
 
             verdict = await planner_judge.review_plan(
-                revised_plan, file_diffs, 0, lang=ctx.config.output.language
+                revised_plan,
+                file_diffs,
+                0,
+                lang=ctx.config.output.language,
+                dependency_graph=state.dependency_graph,
             )
             state.plan_judge_verdict = verdict
 

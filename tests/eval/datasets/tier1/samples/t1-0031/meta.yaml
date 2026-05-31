@@ -1,0 +1,19 @@
+sample_id: t1-0031
+tier: 1
+category: C
+loss_class: null         # organic sample (not M-injected); natural shape ~ M3 interface/struct contract
+expected_human: true     # golden preserves both sides → system should escalate (calibration: dataset.md §2.3)
+description: |
+  C-class coverage: models/auth/auth_token.go — fork and upstream both
+  modify the same two regions with INDEPENDENT additions:
+    * enum block: fork adds LongTermAuthorizationGuest, upstream adds
+      LongTermAuthorizationSSO.
+    * AuthorizationToken struct: fork adds CreatedUnix + UserAgent,
+      upstream adds LoginSourceID (optional.Option[int64]).
+  Golden keeps ALL of them (hand-resolved 3-way merge, `go build` verified)
+  and documents the correct both-sides resolution; it is independent human
+  output, NOT the merge system's own (dataset.md §1.4). Pairs with t1-0032,
+  the call-site half of the same upstream loginSourceID interface change.
+  Under single-shot Tier-1 eval the expected outcome is escalation (no
+  human present), so this exercises C-class escalation coverage rather than
+  auto-merge-to-golden.

@@ -23,6 +23,7 @@ from src.llm.prompts.analyst_prompts import (
     ANALYST_SYSTEM,
     build_commit_round_prompt,
     build_conflict_analysis_prompt,
+    build_decision_proposal_prompt,
 )
 from src.llm.prompts.executor_prompts import (
     EXECUTOR_SYSTEM,
@@ -49,6 +50,7 @@ from src.llm.prompts.memory_extractor_prompts import (
 )
 from src.llm.prompts.planner_judge_prompts import (
     build_plan_review_prompt,
+    build_segment_plan_review_prompt,
     get_planner_judge_system,
 )
 from src.llm.prompts.planner_prompts import (
@@ -57,6 +59,10 @@ from src.llm.prompts.planner_prompts import (
     build_evaluation_prompt,
     build_revision_prompt,
     get_planner_system,
+)
+from src.llm.prompts.risk_scoring_prompts import (
+    RISK_SCORING_SYSTEM,
+    build_risk_scoring_prompt,
 )
 
 
@@ -95,6 +101,10 @@ def registered_gate_ids() -> list[str]:
 
 def _planner_system_constant(*_args: Any, **_kwargs: Any) -> str:
     return PLANNER_EVALUATION_SYSTEM
+
+
+def _risk_scoring_system_constant(*_args: Any, **_kwargs: Any) -> str:
+    return RISK_SCORING_SYSTEM
 
 
 def _executor_system_constant(*_args: Any, **_kwargs: Any) -> str:
@@ -147,6 +157,16 @@ register_gate(
     build_evaluation_prompt,
     "Planner evaluation prompt: accept/reject reviewer issues.",
 )
+register_gate(
+    "P-RISK-SCORE",
+    build_risk_scoring_prompt,
+    "Planner single-file risk rescore prompt (tier-2 LLM assist).",
+)
+register_gate(
+    "P-RISK-SCORE-SYSTEM",
+    _risk_scoring_system_constant,
+    "Planner risk rescore system prompt.",
+)
 
 # PlannerJudge (PJ-)
 register_gate(
@@ -158,6 +178,12 @@ register_gate(
     "PJ-PLAN-REVIEW",
     build_plan_review_prompt,
     "PlannerJudge plan review user prompt (handles prior rounds + planner responses).",
+)
+register_gate(
+    "PJ-PLAN-REVIEW-SEGMENT",
+    build_segment_plan_review_prompt,
+    "PlannerJudge per-segment plan review user prompt — the split-send path "
+    "actually used in production (_review_segment) for large file lists.",
 )
 
 # ConflictAnalyst (CA-)
@@ -175,6 +201,13 @@ register_gate(
     "CA-COMMIT-ROUND",
     build_commit_round_prompt,
     "ConflictAnalyst per-commit reasoning round prompt.",
+)
+register_gate(
+    "CA-DECISION-PROPOSAL",
+    build_decision_proposal_prompt,
+    "ConflictAnalyst per-file decision-option proposal prompt — produces "
+    "file-specific actionable options surfaced as UI buttons for "
+    "HUMAN_REQUIRED files (opt-in via plan_review config flag).",
 )
 
 # Executor (E-)

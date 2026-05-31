@@ -131,11 +131,18 @@ class Coordinator:
         model = self._config.agents.planner.model
         max_size = self.compute_max_batch_size(model)
         max_tokens = self._config.coordinator.max_tokens_per_batch
+        group_by_dir = self._config.coordinator.group_batches_by_directory
 
         new_phases: list[PhaseFileBatch] = []
         changed = False
         for batch in plan.phases:
-            sub_batches = self._split_by_count(batch, max_size)
+            if group_by_dir:
+                pre_groups = self._split_by_directory(batch)
+            else:
+                pre_groups = [batch]
+            sub_batches: list[PhaseFileBatch] = []
+            for grp in pre_groups:
+                sub_batches.extend(self._split_by_count(grp, max_size))
             if file_size_hints:
                 sub_batches = self._split_by_tokens(
                     sub_batches, file_size_hints, max_tokens
@@ -144,12 +151,13 @@ class Coordinator:
                 changed = True
                 logger.info(
                     "Coordinator: split batch %s (%d files) into %d sub-batches "
-                    "(max_size=%d, max_tokens=%d, token_aware=%s)",
+                    "(max_size=%d, max_tokens=%d, by_dir=%s, token_aware=%s)",
                     batch.batch_id,
                     len(batch.file_paths),
                     len(sub_batches),
                     max_size,
                     max_tokens,
+                    "yes" if group_by_dir else "no",
                     "yes" if file_size_hints else "no",
                 )
             new_phases.extend(sub_batches)
@@ -157,6 +165,44 @@ class Coordinator:
         if not changed:
             return plan
         return plan.model_copy(update={"phases": new_phases})
+
+    @staticmethod
+    def _split_by_directory(batch: PhaseFileBatch) -> list[PhaseFileBatch]:
+        """Group ``batch.file_paths`` by top-level directory and emit one
+        sub-batch per group. Order of first-occurrence within the source
+        batch is preserved so risk-score ordering survives. Root-level
+        files share the synthetic ``(root)`` bucket.
+
+        A batch whose files all live under a single top-level dir is
+        returned unchanged (no splitting needed).
+        """
+        if len(batch.file_paths) <= 1:
+            return [batch]
+
+        groups: dict[str, list[str]] = {}
+        order: list[str] = []
+        for fp in batch.file_paths:
+            head = fp.split("/", 1)[0] if "/" in fp else "(root)"
+            if head not in groups:
+                groups[head] = []
+                order.append(head)
+            groups[head].append(fp)
+
+        if len(groups) <= 1:
+            return [batch]
+
+        out: list[PhaseFileBatch] = []
+        for key in order:
+            out.append(
+                batch.model_copy(
+                    update={
+                        "batch_id": str(uuid4()),
+                        "file_paths": groups[key],
+                        "original_file_paths": list(groups[key]),
+                    }
+                )
+            )
+        return out
 
     @staticmethod
     def _split_by_count(batch: PhaseFileBatch, max_size: int) -> list[PhaseFileBatch]:
@@ -167,7 +213,11 @@ class Coordinator:
             sub_paths = batch.file_paths[i : i + max_size]
             out.append(
                 batch.model_copy(
-                    update={"batch_id": str(uuid4()), "file_paths": sub_paths}
+                    update={
+                        "batch_id": str(uuid4()),
+                        "file_paths": sub_paths,
+                        "original_file_paths": list(sub_paths),
+                    }
                 )
             )
         return out
@@ -190,6 +240,7 @@ class Coordinator:
                             update={
                                 "batch_id": str(uuid4()),
                                 "file_paths": running,
+                                "original_file_paths": list(running),
                             }
                         )
                     )
@@ -206,6 +257,7 @@ class Coordinator:
                             update={
                                 "batch_id": str(uuid4()),
                                 "file_paths": running,
+                                "original_file_paths": list(running),
                             }
                         )
                     )

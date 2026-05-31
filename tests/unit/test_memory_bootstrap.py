@@ -51,7 +51,7 @@ Python 3.11+, async/await throughout. Pydantic v2.
     assert added == 3
     assert store.entry_count == 3
 
-    contents = [e.content for e in store.query_by_tags(["bootstrap"], limit=10)]
+    contents = [e.content for e in store.to_memory().entries if "bootstrap" in e.tags]
     assert any("Commands" in c for c in contents)
     assert any("Architecture Constraints" in c for c in contents)
     assert any("Code Style" in c for c in contents)
@@ -104,7 +104,7 @@ def test_truncates_long_section(tmp_path: Path) -> None:
     store = _open_store(tmp_path)
     added = bootstrap_from_claude_md(store, tmp_path)
     assert added == 1
-    entry = store.query_by_tags(["bootstrap"], limit=1)[0]
+    entry = next(e for e in store.to_memory().entries if "bootstrap" in e.tags)
     assert len(entry.content) < 1000
     assert entry.content.endswith("...")
 
@@ -115,7 +115,7 @@ def test_entry_has_bootstrap_tag_and_codebase_insight_type(tmp_path: Path) -> No
     _write_claude_md(tmp_path, "## Stuff\n\nuseful conventions here.\n")
     store = _open_store(tmp_path)
     bootstrap_from_claude_md(store, tmp_path)
-    entry = store.query_by_tags(["bootstrap"], limit=1)[0]
+    entry = next(e for e in store.to_memory().entries if "bootstrap" in e.tags)
     assert entry.entry_type == MemoryEntryType.CODEBASE_INSIGHT
     assert entry.confidence_level == ConfidenceLevel.HEURISTIC
     assert "bootstrap" in entry.tags

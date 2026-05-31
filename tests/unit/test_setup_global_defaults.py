@@ -1,18 +1,22 @@
-"""Tests for global config defaults consumed by the first-run wizard.
+"""Tests for global config defaults applied during setup.
 
 Covers:
 - ``_load_global_defaults``: missing file / malformed yaml / whitelist filter
 - ``_deep_merge_dicts``: nested dict merge, scalar replace, new keys
-- ``_interactive_setup``: global defaults seed new project yaml
-- ``_interactive_setup``: explicit wizard threshold answers beat global
-- ``_repeat_run_flow``: existing project yaml is NOT touched by global
+- ``apply_setup_payload``: global defaults seed a new project yaml
+- ``apply_setup_payload``: explicit payload thresholds beat global defaults
+- ``_ask`` / ``_confirm``: readline-safe prompt rendering (still used by
+  ``init_context.py`` even after the terminal setup wizard moved into
+  the browser).
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import yaml
 
 from src.cli.commands.setup import (
@@ -20,7 +24,33 @@ from src.cli.commands.setup import (
     _confirm,
     _deep_merge_dicts,
     _load_global_defaults,
+    apply_setup_payload,
 )
+from src.models.setup import ProviderConfig, SetupPayload, ThresholdsPayload
+
+
+@pytest.fixture(autouse=True)
+def _clean_api_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Wipe API-key env vars so ``apply_setup_payload``'s ``setdefault``
+    doesn't leak between tests."""
+    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GITHUB_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+
+_TEST_MODELS = ["claude-opus-4-7", "claude-haiku-4-5-20251001"]
+
+
+def _payload(**overrides: object) -> SetupPayload:
+    defaults: dict[str, object] = {
+        "target_branch": "upstream/main",
+        "fork_ref": "feature/x",
+        "project_context": "",
+        "anthropic": ProviderConfig(
+            enabled=True, api_key="sk-ant", models=list(_TEST_MODELS)
+        ),
+    }
+    defaults.update(overrides)
+    return SetupPayload.model_validate(defaults)
 
 
 class TestLoadGlobalDefaults:
@@ -128,68 +158,34 @@ class TestDeepMergeDicts:
         assert overlay == {"a": {"c": 2}}
 
 
-def _wizard_mocks(
-    global_path: Path,
-    *,
-    use_defaults: bool,
-    custom_thresholds: list[float] | None = None,
-):
-    """Stack of patches that turns ``_interactive_setup`` into a no-prompt flow."""
-    return [
-        patch(
-            "src.cli.commands.setup.get_global_config_path",
-            return_value=global_path,
-        ),
-        patch(
-            "src.cli.commands.setup._auto_detect_fork_ref",
-            return_value="feature/x",
-        ),
-        patch(
-            "src.cli.commands.setup._resolve_api_keys",
-            return_value={"ANTHROPIC_API_KEY": "ak", "OPENAI_API_KEY": "ok"},
-        ),
-        patch(
-            "src.cli.commands.setup._prompt_api_key",
-            side_effect=lambda name, existing, required: existing,
-        ),
-        patch(
-            "src.cli.commands.setup._offer_forks_profile_draft",
-            return_value=None,
-        ),
-        patch("src.cli.commands.setup._ask", return_value=""),
-        patch("src.cli.commands.setup._confirm", return_value=use_defaults),
-        patch(
-            "src.cli.commands.setup._prompt_float",
-            side_effect=custom_thresholds or [],
-        ),
-    ]
+class TestApplySetupPayloadGlobals:
+    """Global defaults overlay applies on top of ``_default_config_data``.
 
+    ``apply_setup_payload`` is the post-PR-3 single entry point both
+    the Web UI and ``merge --ci`` first-run go through, so these tests
+    have replaced the legacy ``_interactive_setup`` coverage with
+    payload-driven equivalents — no monkeypatched input() needed.
+    """
 
-class TestInteractiveSetupAppliesGlobal:
     def test_no_global_yaml_keeps_factory_defaults(self, tmp_path: Path) -> None:
-        from src.cli.commands.setup import _interactive_setup
-
-        global_path = tmp_path / "missing.yaml"
-        with (
-            _wizard_mocks(global_path, use_defaults=True)[0],
-            _wizard_mocks(global_path, use_defaults=True)[1],
-            _wizard_mocks(global_path, use_defaults=True)[2],
-            _wizard_mocks(global_path, use_defaults=True)[3],
-            _wizard_mocks(global_path, use_defaults=True)[4],
-            _wizard_mocks(global_path, use_defaults=True)[5],
-            _wizard_mocks(global_path, use_defaults=True)[6],
+        with patch(
+            "src.cli.commands.setup.get_global_config_path",
+            return_value=tmp_path / "missing.yaml",
         ):
-            cfg = _interactive_setup("upstream/main", str(tmp_path))
+            cfg = apply_setup_payload(_payload(), str(tmp_path))
 
         assert cfg.thresholds.auto_merge_confidence == 0.85
         written = yaml.safe_load(
             (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
         )
-        assert written["agents"]["planner_judge"]["model"] == "gpt-5.4"
+        # Single-provider payload (anthropic only) — every agent
+        # without an override lands on default_provider.models[0],
+        # which is the first entry in the textarea-derived list.
+        assert written["agents"]["planner_judge"]["provider"] == "anthropic"
+        assert written["agents"]["planner_judge"]["model"] == _TEST_MODELS[0]
+        assert written["agents"]["human_interface"]["model"] == _TEST_MODELS[0]
 
     def test_global_yaml_overrides_hardcoded_model(self, tmp_path: Path) -> None:
-        from src.cli.commands.setup import _interactive_setup
-
         global_path = tmp_path / "global_config.yaml"
         global_path.write_text(
             yaml.dump(
@@ -200,9 +196,11 @@ class TestInteractiveSetupAppliesGlobal:
             ),
             encoding="utf-8",
         )
-        mocks = _wizard_mocks(global_path, use_defaults=True)
-        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6]:
-            cfg = _interactive_setup("upstream/main", str(tmp_path))
+        with patch(
+            "src.cli.commands.setup.get_global_config_path",
+            return_value=global_path,
+        ):
+            cfg = apply_setup_payload(_payload(), str(tmp_path))
 
         written = yaml.safe_load(
             (tmp_path / ".merge" / "config.yaml").read_text(encoding="utf-8")
@@ -212,36 +210,30 @@ class TestInteractiveSetupAppliesGlobal:
         assert written["thresholds"]["auto_merge_confidence"] == 0.92
         assert cfg.thresholds.auto_merge_confidence == 0.92
 
-    def test_explicit_threshold_beats_global(self, tmp_path: Path) -> None:
-        from src.cli.commands.setup import _interactive_setup
-
+    def test_explicit_payload_threshold_beats_global(self, tmp_path: Path) -> None:
         global_path = tmp_path / "global_config.yaml"
         global_path.write_text(
             yaml.dump({"thresholds": {"auto_merge_confidence": 0.92}}),
             encoding="utf-8",
         )
-        mocks = _wizard_mocks(
-            global_path, use_defaults=False, custom_thresholds=[0.99, 0.10, 0.50]
+        payload = _payload(
+            thresholds=ThresholdsPayload(
+                auto_merge_confidence=0.99,
+                risk_score_low=0.10,
+                risk_score_high=0.50,
+            )
         )
-        with (
-            mocks[0],
-            mocks[1],
-            mocks[2],
-            mocks[3],
-            mocks[4],
-            mocks[5],
-            mocks[6],
-            mocks[7],
+        with patch(
+            "src.cli.commands.setup.get_global_config_path",
+            return_value=global_path,
         ):
-            cfg = _interactive_setup("upstream/main", str(tmp_path))
+            cfg = apply_setup_payload(payload, str(tmp_path))
 
         assert cfg.thresholds.auto_merge_confidence == 0.99
         assert cfg.thresholds.risk_score_low == 0.10
         assert cfg.thresholds.risk_score_high == 0.50
 
     def test_global_disallowed_keys_dropped(self, tmp_path: Path) -> None:
-        from src.cli.commands.setup import _interactive_setup
-
         global_path = tmp_path / "global_config.yaml"
         global_path.write_text(
             yaml.dump(
@@ -253,10 +245,14 @@ class TestInteractiveSetupAppliesGlobal:
             ),
             encoding="utf-8",
         )
-        mocks = _wizard_mocks(global_path, use_defaults=True)
-        with mocks[0], mocks[1], mocks[2], mocks[3], mocks[4], mocks[5], mocks[6]:
-            cfg = _interactive_setup("upstream/main", str(tmp_path))
+        with patch(
+            "src.cli.commands.setup.get_global_config_path",
+            return_value=global_path,
+        ):
+            cfg = apply_setup_payload(_payload(), str(tmp_path))
 
+        # payload's fork_ref + repo_path win — global non-whitelisted
+        # keys were filtered out before the deep-merge.
         assert cfg.fork_ref == "feature/x"
         assert cfg.repo_path == str(tmp_path)
         written = yaml.safe_load(
@@ -267,59 +263,10 @@ class TestInteractiveSetupAppliesGlobal:
         assert written["agents"]["planner_judge"]["model"] == "gpt-5.4-custom"
 
 
-class TestRepeatRunIgnoresGlobal:
-    def test_existing_project_yaml_takes_priority(self, tmp_path: Path) -> None:
-        from src.cli.commands.setup import detect_or_setup
-
-        merge_dir = tmp_path / ".merge"
-        merge_dir.mkdir()
-        project_yaml = merge_dir / "config.yaml"
-        project_yaml.write_text(
-            yaml.dump(
-                {
-                    "upstream_ref": "upstream/main",
-                    "fork_ref": "feature/locked",
-                    "repo_path": str(tmp_path),
-                    "agents": {
-                        "planner_judge": {
-                            "provider": "openai",
-                            "model": "project-pinned-model",
-                            "api_key_env": "OPENAI_API_KEY",
-                        }
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        global_path = tmp_path / "global_config.yaml"
-        global_path.write_text(
-            yaml.dump(
-                {"agents": {"planner_judge": {"model": "global-should-not-win"}}}
-            ),
-            encoding="utf-8",
-        )
-
-        with (
-            patch(
-                "src.cli.commands.setup.get_global_config_path",
-                return_value=global_path,
-            ),
-            patch("src.cli.commands.setup._ask", return_value=""),
-        ):
-            cfg = detect_or_setup("upstream/main", str(tmp_path), reconfigure=False)
-
-        assert cfg.agents.planner_judge.model == "project-pinned-model"
-
-
 class TestAskAndConfirmReadlineSafe:
     """Regression: readline must see the rendered prompt as the input() arg.
 
-    If the prompt is pre-printed and ``input("")`` is called (Rich's
-    behaviour), Ctrl+U erases the prompt characters from the screen.
-    These tests pin the contract that ``_ask``/``_confirm`` always pass
-    the rendered prompt string as the *first positional argument* to
-    builtin ``input``.
+    These helpers are still used by ``init_context.py`` post-PR-3.
     """
 
     def test_ask_passes_rendered_prompt_to_input(self) -> None:
@@ -360,3 +307,7 @@ class TestAskAndConfirmReadlineSafe:
         with patch("builtins.input", side_effect=["?", "wat", "y"]) as mock_input:
             assert _confirm("X", default=True) is True
         assert mock_input.call_count == 3
+
+
+# Silence "unused import" if os import lands on test order shuffle.
+_ = os

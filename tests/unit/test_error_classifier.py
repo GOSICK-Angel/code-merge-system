@@ -691,38 +691,3 @@ class TestExhaustedErrorDetails:
         msg = str(exc_info.value)
         assert "1 attempts" in msg
         assert "2 rate-limit waits" in msg
-
-
-# ============================================================================
-# 7. MessageBus error logging
-# ============================================================================
-
-
-class TestMessageBusErrorLogging:
-    def test_subscriber_error_is_logged(self):
-        import logging
-        from src.core.message_bus import MessageBus
-        from src.models.message import AgentMessage, AgentType, MessageType
-        from src.models.plan import MergePhase
-
-        bus = MessageBus()
-
-        def bad_callback(msg: AgentMessage) -> None:
-            raise ValueError("subscriber boom")
-
-        bus.subscribe(AgentType.PLANNER, bad_callback)
-
-        msg = AgentMessage(
-            sender=AgentType.ORCHESTRATOR,
-            receiver=AgentType.PLANNER,
-            phase=MergePhase.PLAN_REVIEW,
-            message_type=MessageType.PHASE_COMPLETED,
-            subject="test",
-            payload={},
-        )
-
-        with patch("src.core.message_bus.logger") as mock_logger:
-            bus.publish(msg)
-            mock_logger.warning.assert_called_once()
-            call_args = mock_logger.warning.call_args
-            assert "Subscriber callback error" in call_args[0][0]

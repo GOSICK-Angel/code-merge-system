@@ -5,7 +5,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 from pydantic import BaseModel, Field
-from src.models.config import MergeConfig
+from src.models.config import MergeConfig, ThresholdConfig
 from src.models.plan import MergePlan, MergePhase
 from src.models.diff import FileDiff, RiskLevel, FileChangeCategory
 from src.models.decision import MergeDecision, FileDecisionRecord
@@ -35,6 +35,23 @@ if TYPE_CHECKING:
     from src.tools.sentinel_scanner import SentinelHit
 
 
+class RunBudgetExceeded(Exception):
+    """Raised when a single run's cumulative LLM cost exceeds the configured cap.
+
+    Carries the per-run cost snapshot at the moment of the check so the
+    Orchestrator can persist a partial report and transition AWAITING_HUMAN.
+    Defined here (not raised) in Phase 0; consumers wire up in Phase 2.
+    """
+
+    def __init__(self, spent: float, limit: float, phase: str) -> None:
+        self.spent = spent
+        self.limit = limit
+        self.phase = phase
+        super().__init__(
+            f"Run budget exceeded in phase {phase!r}: spent={spent} limit={limit}"
+        )
+
+
 class SystemStatus(str, Enum):
     INITIALIZED = "initialized"
     PLANNING = "planning"
@@ -53,7 +70,7 @@ class SystemStatus(str, Enum):
 
 class PhaseResult(BaseModel):
     phase: MergePhase
-    status: Literal["pending", "running", "completed", "failed", "skipped"]
+    status: Literal["pending", "running", "awaiting", "completed", "failed", "skipped"]
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error: str | None = None
@@ -65,6 +82,16 @@ class MergeState(BaseModel):
     status: SystemStatus = SystemStatus.INITIALIZED
     current_phase: MergePhase = MergePhase.ANALYSIS
     phase_results: dict[str, PhaseResult] = Field(default_factory=dict)
+
+    thresholds: ThresholdConfig = Field(
+        default_factory=ThresholdConfig,
+        description=(
+            "U2/lock #27 path A: per-run snapshot of config.thresholds copied "
+            "by InitializePhase. Agents read thresholds via restricted_view "
+            "instead of reaching into config, so the value is stable for the "
+            "lifetime of a run even if config is mutated mid-flight."
+        ),
+    )
 
     merge_plan: MergePlan | None = None
     file_classifications: dict[str, RiskLevel] = Field(default_factory=dict)

@@ -8,10 +8,12 @@ levels — FULL, SIGNATURE, or DROP — while respecting a token budget.
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from src.llm.chunker import ChunkKind, CodeChunk
+from src.llm.chunker import ChunkKind, CodeChunk, chunk_key
 from src.llm.context import estimate_tokens
 
 logger = logging.getLogger(__name__)
@@ -47,12 +49,49 @@ _ENTRY_POINT_NAMES = {
 }
 
 
+_REFERENCE_BASE_SCORE = 0.3
+
+
+def weights_from_fanin(
+    fanin: dict[str, int],
+    *,
+    base: float = 0.25,
+    per_dependent: float = 0.05,
+    cap: float = 1.0,
+) -> dict[str, float]:
+    """Map per-symbol importer counts to relevance weights (OPP-10).
+
+    A symbol imported by N distinct files scores ``base + per_dependent*N``,
+    capped at ``cap``. Defaults are calibrated so a single importer yields
+    0.30 — identical to the prior flat reference boost — while a high-fan-in
+    public interface climbs toward / past the FULL threshold and so stays
+    fully rendered under staged compression. An empty map leaves scoring
+    unchanged.
+    """
+    return {
+        symbol: min(cap, base + per_dependent * count)
+        for symbol, count in fanin.items()
+    }
+
+
 @dataclass(frozen=True)
 class ScoringContext:
     diff_ranges: list[tuple[int, int]]
     conflict_ranges: list[tuple[int, int]] = field(default_factory=list)
-    security_patterns: list[str] = field(default_factory=list)
+    is_security_sensitive: bool = False
     referenced_names: frozenset[str] = field(default_factory=frozenset)
+    # OPP-10: optional per-symbol degree weights; empty -> flat reference boost.
+    symbol_weights: dict[str, float] = field(default_factory=dict)
+
+
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _identifier_tokens(contents: Iterable[str]) -> frozenset[str]:
+    tokens: set[str] = set()
+    for content in contents:
+        tokens.update(_IDENTIFIER_RE.findall(content))
+    return frozenset(tokens)
 
 
 def _ranges_overlap(a: range, b: range) -> bool:
@@ -81,28 +120,30 @@ class RelevanceScorer:
         self,
         chunks: list[CodeChunk],
         budget_tokens: int,
-    ) -> dict[str, RenderLevel]:
+    ) -> dict[tuple[int, int], RenderLevel]:
         if not chunks:
             return {}
 
         scored = [(c, self.score_chunk(c)) for c in chunks]
 
-        full_contents = " ".join(c.content for c, s in scored if s >= FULL_THRESHOLD)
+        full_names = _identifier_tokens(
+            c.content for c, s in scored if s >= FULL_THRESHOLD
+        )
 
         boosted: list[tuple[CodeChunk, float]] = []
         for chunk, score in scored:
-            if score < FULL_THRESHOLD and chunk.name in full_contents:
+            if score < FULL_THRESHOLD and chunk.name and chunk.name in full_names:
                 score = min(1.0, score + 0.3)
             boosted.append((chunk, score))
 
-        levels: dict[str, RenderLevel] = {}
+        levels: dict[tuple[int, int], RenderLevel] = {}
         for chunk, score in boosted:
             if score >= FULL_THRESHOLD:
-                levels[chunk.name] = RenderLevel.FULL
+                levels[chunk_key(chunk)] = RenderLevel.FULL
             elif score >= SIGNATURE_THRESHOLD:
-                levels[chunk.name] = RenderLevel.SIGNATURE
+                levels[chunk_key(chunk)] = RenderLevel.SIGNATURE
             else:
-                levels[chunk.name] = RenderLevel.DROP
+                levels[chunk_key(chunk)] = RenderLevel.DROP
 
         levels = self._demote_to_fit(boosted, levels, budget_tokens)
 
@@ -137,15 +178,14 @@ class RelevanceScorer:
         return 0.0
 
     def _security_score(self, chunk: CodeChunk) -> float:
-        content_lower = chunk.content.lower()
-        for pattern in self._context.security_patterns:
-            if pattern.lower() in content_lower:
-                return 0.3
-        return 0.0
+        return 0.3 if self._context.is_security_sensitive else 0.0
 
     def _reference_score(self, chunk: CodeChunk) -> float:
+        weight = self._context.symbol_weights.get(chunk.name)
+        if weight is not None:
+            return weight
         if chunk.name in self._context.referenced_names:
-            return 0.3
+            return _REFERENCE_BASE_SCORE
         return 0.0
 
     def _entry_point_score(self, chunk: CodeChunk) -> float:
@@ -157,13 +197,13 @@ class RelevanceScorer:
     def _demote_to_fit(
         self,
         scored: list[tuple[CodeChunk, float]],
-        levels: dict[str, RenderLevel],
+        levels: dict[tuple[int, int], RenderLevel],
         budget_tokens: int,
-    ) -> dict[str, RenderLevel]:
+    ) -> dict[tuple[int, int], RenderLevel]:
         def _total_tokens() -> int:
             total = 0
             for chunk, _ in scored:
-                level = levels.get(chunk.name, RenderLevel.DROP)
+                level = levels.get(chunk_key(chunk), RenderLevel.DROP)
                 if level == RenderLevel.FULL:
                     total += estimate_tokens(chunk.content)
                 elif level == RenderLevel.SIGNATURE:
@@ -171,21 +211,25 @@ class RelevanceScorer:
             return total
 
         full_by_score = sorted(
-            [(c, s) for c, s in scored if levels.get(c.name) == RenderLevel.FULL],
+            [(c, s) for c, s in scored if levels.get(chunk_key(c)) == RenderLevel.FULL],
             key=lambda x: x[1],
         )
         for chunk, _score in full_by_score:
             if _total_tokens() <= budget_tokens:
                 break
-            levels[chunk.name] = RenderLevel.SIGNATURE
+            levels[chunk_key(chunk)] = RenderLevel.SIGNATURE
 
         sig_by_score = sorted(
-            [(c, s) for c, s in scored if levels.get(c.name) == RenderLevel.SIGNATURE],
+            [
+                (c, s)
+                for c, s in scored
+                if levels.get(chunk_key(c)) == RenderLevel.SIGNATURE
+            ],
             key=lambda x: x[1],
         )
         for chunk, _score in sig_by_score:
             if _total_tokens() <= budget_tokens:
                 break
-            levels[chunk.name] = RenderLevel.DROP
+            levels[chunk_key(chunk)] = RenderLevel.DROP
 
         return levels

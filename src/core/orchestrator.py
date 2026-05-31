@@ -38,8 +38,6 @@ from src.cli.paths import (
     is_dev_mode,
 )
 from src.core.checkpoint import Checkpoint
-from src.core.message_bus import MessageBus
-from src.core.phase_runner import PhaseRunner
 from src.core.phases import (
     AutoMergePhase,
     ConflictAnalysisPhase,
@@ -55,13 +53,14 @@ from src.core.phases import (
 from src.core.phases.base import ActivityEvent, OnActivityCallback
 from src.core.coordinator import Coordinator
 from src.core.state_machine import StateMachine
-from src.memory.bootstrap import bootstrap_from_claude_md
+from src.memory.bootstrap import _BOOTSTRAP_TAG, bootstrap_from_claude_md
 from src.memory.hit_tracker import MemoryHitTracker
 from src.memory.sqlite_store import SQLiteMemoryStore
 from src.memory.store import MemoryStore
 from src.memory.summarizer import PhaseSummarizer
 from src.models.config import MergeConfig
-from src.models.state import MergeState, SystemStatus
+from src.models.decision import DecisionSource
+from src.models.state import MergeState, RunBudgetExceeded, SystemStatus
 from src.tools.gate_runner import GateRunner
 from src.tools.git_tool import GitTool
 from src.core.hooks import HookManager
@@ -84,6 +83,30 @@ PHASE_MAP: dict[SystemStatus, type[Phase]] = {
     SystemStatus.JUDGE_REVIEWING: JudgeReviewPhase,
     SystemStatus.GENERATING_REPORT: ReportGenerationPhase,
 }
+
+
+def _mark_suspended_phase(state: MergeState, target_status: SystemStatus) -> None:
+    """Flip the just-run phase from ``running`` → ``awaiting`` when it suspends
+    to AWAITING_HUMAN.
+
+    A phase that yields to human review returns without marking its own
+    PhaseResult terminal, so it stays ``running`` forever — and across resume
+    cycles several phases pile up as simultaneously RUNNING in the UI. Reflect
+    the suspension so only a genuinely-executing phase reads as running.
+    """
+    if target_status != SystemStatus.AWAITING_HUMAN:
+        return
+    cur_key = (
+        state.current_phase.value
+        if hasattr(state.current_phase, "value")
+        else str(state.current_phase)
+    )
+    pr = state.phase_results.get(cur_key)
+    if pr is not None and pr.status == "running":
+        state.phase_results[cur_key] = pr.model_copy(
+            update={"status": "awaiting", "completed_at": datetime.now()}
+        )
+
 
 # Per-status activity notifications (agent_name, before_msg, after_msg)
 _PHASE_ACTIVITY: dict[SystemStatus, tuple[str, str, str]] = {
@@ -137,12 +160,10 @@ class Orchestrator:
         self.git_tool = GitTool(config.repo_path)
         self.gate_runner = GateRunner(Path(config.repo_path).resolve())
         self.state_machine = StateMachine()
-        self.message_bus = MessageBus()
         run_dir = Path(config.output.debug_directory) / "checkpoints"
         self.checkpoint = Checkpoint(
             run_dir, debug_checkpoints=config.output.debug_checkpoints
         )
-        self.phase_runner = PhaseRunner(batch_size=10, max_concurrency=5)
 
         # --- agents (B3: registry-based creation with DI override) ---
         agent_map = agents or AgentRegistry.create_all(config, git_tool=self.git_tool)
@@ -177,6 +198,7 @@ class Orchestrator:
 
         # --- logging/activity ---
         self._log_handler: logging.FileHandler | None = None
+        self._run_dir_log_handler: logging.FileHandler | None = None
         self._structured_handler: logging.FileHandler | None = None
         self._trace_logger: TraceLogger | None = None
         self._on_activity: OnActivityCallback | None = None
@@ -241,7 +263,18 @@ class Orchestrator:
             branch = self.git_tool.create_working_branch(
                 self.config.working_branch, self.config.fork_ref
             )
-            state = state.model_copy(update={"active_branch": branch})
+            # In-place assignment is critical: the Web bridge captures
+            # ``state`` by reference in ``MergeWSBridge.__init__`` and
+            # observes mutations live. ``state.model_copy(update=...)``
+            # would swap the local variable to a new object — bridge
+            # would then forever serialize a stale "initialized" status
+            # because subsequent ``state.status = X`` mutations land on
+            # the new object the bridge can't see. The shared
+            # ``messages`` list (shallow-copied by model_copy) made the
+            # bug doubly confusing: messages stayed in sync, status did
+            # not. Direct attribute assignment keeps every observer's
+            # reference valid.
+            state.active_branch = branch
             logger.info(
                 "Working branch created: %s (fork_ref=%s)", branch, self.config.fork_ref
             )
@@ -259,8 +292,20 @@ class Orchestrator:
                     self._finalize_log(state, run_start)
                     return state
 
+                # G5 ceiling check is gated on ``status != AWAITING_HUMAN``
+                # rather than short-circuiting the whole loop. The earlier
+                # blanket guard ("if status == AWAITING_HUMAN: return")
+                # accidentally suppressed ``PHASE_MAP[AWAITING_HUMAN] =
+                # HumanReviewPhase`` dispatch too, which broke the web
+                # approve-flow: ``bridge._apply_user_plan_decisions`` would
+                # write ``plan_human_review`` into in-memory state and wake
+                # the orchestrator, but the guard returned before
+                # HumanReviewPhase could observe the approval and transition
+                # to AUTO_MERGING. The narrower guard below keeps the U-P2.13
+                # invariant (no double-fire of the ceiling transition) while
+                # letting HumanReviewPhase actually run.
                 ceiling = state.config.max_cost_usd
-                if ceiling is not None:
+                if ceiling is not None and state.status != SystemStatus.AWAITING_HUMAN:
                     # _prior_cost_summary holds spending from earlier processes
                     # (resume case); the in-process tracker holds spending
                     # since this Orchestrator started. Add them — never read
@@ -316,6 +361,7 @@ class Orchestrator:
                     state=state,
                 )
                 logger.info("Phase %s completed in %.1fs", phase.name, elapsed)
+                _mark_suspended_phase(state, outcome.target_status)
 
                 if self._trace_logger:
                     self._trace_logger.record_phase_transition(
@@ -342,6 +388,28 @@ class Orchestrator:
                 if outcome.extra.get("paused"):
                     self._finalize_log(state, run_start)
                     return state
+
+        except RunBudgetExceeded as e:
+            logger.warning(
+                "Run budget exceeded: spent=$%.4f >= limit=$%.4f phase=%s",
+                e.spent,
+                e.limit,
+                e.phase,
+            )
+            self._snapshot_telemetry(state)
+            self._write_budget_exceeded_report(state, e)
+            try:
+                self.state_machine.transition(
+                    state,
+                    SystemStatus.AWAITING_HUMAN,
+                    f"run budget exceeded in phase {e.phase!r}: "
+                    f"spent=${e.spent:.4f} limit=${e.limit:.4f}",
+                )
+            except ValueError:
+                # Already in AWAITING_HUMAN (e.g. concurrent ceiling check) —
+                # the partial report + checkpoint tag still wins.
+                pass
+            self.checkpoint.save(state, "budget_exceeded")
 
         except Exception as e:
             logger.error("Orchestration failed: %s", e, exc_info=True)
@@ -379,9 +447,7 @@ class Orchestrator:
             git_tool=self.git_tool,
             gate_runner=self.gate_runner,
             state_machine=self.state_machine,
-            message_bus=self.message_bus,
             checkpoint=self.checkpoint,
-            phase_runner=self.phase_runner,
             memory_store=self._memory_store,  # type: ignore[arg-type]
             summarizer=self._summarizer,
             memory_hit_tracker=self._memory_hit_tracker,
@@ -446,11 +512,59 @@ class Orchestrator:
         if self.memory_extractor is not None and self._should_llm_extract(phase, state):
             try:
                 llm_entries = await self.memory_extractor.extract(phase, state)  # type: ignore[attr-defined]
+                store = self._memory_store
                 for entry in llm_entries:
-                    self._memory_store.add_entry(entry)
+                    store = store.add_entry(entry)
+                self._memory_store = store
                 self._phases_since_last_extract = 0
             except Exception as exc:
                 logger.warning("LLM memory extraction failed for %s: %s", phase, exc)
+
+        if phase == "judge_review":
+            try:
+                self._apply_outcome_confidence_writeback(state)
+            except Exception as exc:
+                logger.warning("Outcome confidence write-back failed: %s", exc)
+
+    def _apply_outcome_confidence_writeback(self, state: MergeState) -> None:
+        """OPP-5: nudge persisted memory confidence toward judge outcomes.
+
+        Default OFF. When enabled, each tracked entry with at least
+        ``min_observations`` pass/fail observations has its stored confidence
+        moved by ``k * outcome_score``. Human-decided files (mirroring the
+        repair-skips-human rule) and bootstrap (human-authored) entries are
+        never touched, so outcome noise cannot demote a human-resolved entry.
+        """
+        cfg = getattr(self.config, "memory", None)
+        if cfg is None or not getattr(cfg, "outcome_confidence_writeback", False):
+            return
+        scores = self._memory_hit_tracker.outcome_scores(
+            cfg.outcome_writeback_min_observations
+        )
+        if not scores:
+            return
+        human_files = {
+            fp
+            for fp, record in state.file_decision_records.items()
+            if record.decision_source
+            in (DecisionSource.HUMAN, DecisionSource.BATCH_HUMAN)
+        }
+        deltas: dict[str, float] = {}
+        for entry in self._memory_store.to_memory().entries:
+            score = scores.get(entry.entry_id)
+            if score is None:
+                continue
+            if _BOOTSTRAP_TAG in entry.tags:
+                continue
+            if human_files and any(fp in human_files for fp in entry.file_paths):
+                continue
+            deltas[entry.entry_id] = cfg.outcome_writeback_k * score
+        if deltas:
+            self._memory_store = self._memory_store.adjust_confidence(deltas)
+            logger.info(
+                "OPP-5: nudged confidence of %d memory entries by judge outcomes",
+                len(deltas),
+            )
 
     def _should_llm_extract(self, phase: str, state: MergeState) -> bool:
         cfg = getattr(self.config, "memory", None)
@@ -492,6 +606,43 @@ class Orchestrator:
     def _inject_cost_tracker(self, phase: str = "") -> None:
         for agent in self._all_agents:
             agent.set_cost_tracker(self._cost_tracker, phase=phase)
+            # U2: every cost-tracked agent also gets the budget cap + the
+            # activity callback so it can emit a one-shot budget_warning
+            # the first time cumulative spend crosses warn_pct.
+            agent.set_budget(
+                self.config.max_cost_usd,
+                self.config.per_run_cost_warn_pct,
+                token_limit=self.config.max_total_tokens,
+            )
+            if self._on_activity is not None:
+                agent.set_activity_callback(self._on_activity)
+
+    def _write_budget_exceeded_report(
+        self, state: MergeState, exc: RunBudgetExceeded
+    ) -> None:
+        """U2: drop a partial-run report when the per-run budget trips.
+
+        Best-effort — write failures are logged but never re-raise so the
+        AWAITING_HUMAN transition itself always wins.
+        """
+        try:
+            run_dir = get_run_dir(self.config.repo_path, state.run_id)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            report_path = run_dir / "budget_exceeded_report.md"
+            report_path.write_text(
+                "# Run Budget Exceeded\n\n"
+                f"- run_id: `{state.run_id}`\n"
+                f"- phase: `{exc.phase}`\n"
+                f"- spent: ${exc.spent:.4f}\n"
+                f"- limit: ${exc.limit:.4f}\n\n"
+                "The orchestrator transitioned the run to "
+                "`AWAITING_HUMAN` once the cumulative LLM cost reached the "
+                "configured `max_cost_usd` ceiling. Resume after raising "
+                "the limit or accept partial results from the checkpoint.\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            logger.debug("budget_exceeded_report.md write failed", exc_info=True)
 
     def _snapshot_telemetry(self, state: MergeState) -> None:
         """Persist CostTracker / MemoryHitTracker summaries onto state.
@@ -614,6 +765,25 @@ class Orchestrator:
 
         self._log_handler = handler
 
+        # Co-locate a copy of the run log next to checkpoint.json so it is
+        # discoverable. The canonical log lives under the platformdirs data
+        # dir (``~/Library/Application Support/...`` on macOS) — far from the
+        # ``.merge/runs/<id>/`` directory users actually open. The Web UI's
+        # "check the merge process logs" hint is useless without this.
+        run_dir = get_run_dir(self.config.repo_path, run_id)
+        if run_dir.resolve() != log_dir.resolve():
+            try:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                run_dir_handler = logging.FileHandler(
+                    run_dir / "run.log", encoding="utf-8"
+                )
+                run_dir_handler.setFormatter(formatter)
+                run_dir_handler.setLevel(logging.DEBUG)
+                root.addHandler(run_dir_handler)
+                self._run_dir_log_handler = run_dir_handler
+            except OSError as exc:
+                logger.warning("Could not open co-located run log: %s", exc)
+
         if self.config.output.structured_logs:
             structured_path = str(log_dir / f"run_{run_id}.jsonl")
             self._structured_handler = create_structured_handler(structured_path)
@@ -632,6 +802,10 @@ class Orchestrator:
             root.removeHandler(self._log_handler)
             self._log_handler.close()
             self._log_handler = None
+        if self._run_dir_log_handler:
+            root.removeHandler(self._run_dir_log_handler)
+            self._run_dir_log_handler.close()
+            self._run_dir_log_handler = None
         if self._structured_handler:
             root.removeHandler(self._structured_handler)
             self._structured_handler.close()

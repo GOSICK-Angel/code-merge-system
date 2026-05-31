@@ -55,7 +55,7 @@ InitializePhase._run_sync():
      c. Find the boundary: last "already synced" commit = effective merge-base
   4. If effective_base != git_merge_base (migration detected):
      → Store migration_info in state
-     → In TUI/report, show detection result and recommended action
+     → In Web UI/report, show detection result and recommended action
      → User can confirm or override via config
   5. Use final merge-base for file classification + commit replay
 ```
@@ -329,11 +329,11 @@ The cherry-pick replay system (from the previous session) already works correctl
 
 No changes needed in `commit_replayer.py` or `auto_merge.py`.
 
-### 3.6 TUI / Report Integration
+### 3.6 Web UI / Report Integration
 
 When migration is detected, the system should:
 
-1. **In TUI**: Display a notification during InitializePhase:
+1. **In Web UI**: Display a notification during InitializePhase:
    ```
    ⚠ Migration detected: 42/100 upstream commits (42%) appear to be
      already present in the fork.
@@ -375,7 +375,7 @@ When migration is detected, the system should:
 | File | Action | 说明 |
 |------|--------|------|
 | `src/tools/merge_plan_report.py` | Modify | 新增 `_migration_section()` |
-| `src/cli/commands/tui.py` | — | TUI 通知未单独实现；通过 `ctx.notify()` 日志可见 |
+| `src/web/ws_bridge.py` | — | Web UI 通知未单独实现；通过 `ctx.notify()` 活动流/日志可见 |
 
 ### Phase 4: Tests
 

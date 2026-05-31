@@ -1,11 +1,13 @@
 name: planner
+version: 1
 inputs:
-  - _merge_base
   - config
   - config_drifts
+  - dependency_graph
   - file_categories
   - file_classifications
   - file_diffs
+  - forks_profile
   - merge_base_commit
   - merge_plan
   - plan_disputes
@@ -21,6 +23,8 @@ gates:
   - P-REVISION
   - P-EVAL-SYSTEM
   - P-EVALUATION
+  - P-RISK-SCORE
+  - P-RISK-SCORE-SYSTEM
   - META-PLAN-SYSTEM
   - META-PLAN-REVIEW
 forbidden:

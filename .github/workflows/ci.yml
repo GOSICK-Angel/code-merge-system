@@ -5,8 +5,40 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+  # Nightly, non-blocking. Drives the eval-tier1 job (fake-merge stub) AND the
+  # W5 Part B `eval-tier-b-realkeys` job (real `merge --ci`, secret-gated) once
+  # per day. Both stay continue-on-error so a nightly failure never blocks;
+  # eval-tier1 gates on `github.event_name != 'pull_request'` and the real-key
+  # job on `== 'schedule'` + present secrets, so PRs are unaffected.
+  schedule:
+    - cron: "0 18 * * *"
 
 jobs:
+  web-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Web UI dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: TypeScript build
+        run: npm run build
+        working-directory: web
+
+      - name: Vitest
+        run: npm test
+        working-directory: web
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -15,6 +47,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build web dist
+        run: npm ci && npm run build
+        working-directory: web
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -37,8 +80,39 @@ jobs:
       - name: Unit tests
         run: pytest tests/unit/ -v --cov=src --cov-report=term-missing --cov-fail-under=80
 
-  tui-typecheck:
+      - name: Integration tests (hermetic, mocked LLM — no API keys)
+        # Wave-4 P5: drive the full orchestrator over the in-memory FakeGitTool
+        # with scripted LLM responses. Key-free, so it runs on every PR. Asserts
+        # the safety gates / routing end-to-end (drifted-expectation cases are
+        # xfailed in tests/integration/conftest.py with a tracked reason).
+        run: pytest tests/integration/ -v
+
+      - name: Lint eval scripts (ruff)
+        run: |
+          ruff check scripts/eval tests/eval
+          ruff format --check scripts/eval tests/eval
+
+      - name: Type check eval scripts (mypy)
+        run: mypy scripts/eval tests/eval
+
+      - name: Eval unit + e2e tests
+        run: pytest tests/eval/unit/ tests/eval/integration/ -v --cov=scripts/eval --cov-report=term-missing --cov-fail-under=80
+
+      - name: Verify dataset locks
+        run: python -m scripts.eval.lock --verify
+
+      - name: Fork name purity check
+        run: python -m scripts.eval._fork_name_check scripts/eval tests/eval
+
+  eval-tier1:
+    # Manual-only evaluation harness. Triggered via workflow_dispatch (and
+    # eventually a nightly cron once the placeholder above is uncommented).
+    # `if: github.event_name != 'pull_request'` + `continue-on-error: true`
+    # combine to guarantee the job never blocks a PR — see facts.md §11
+    # and plan §Phase 9 GO §4.
     runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -47,12 +121,94 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: tui/package-lock.json
+          cache-dependency-path: web/package-lock.json
 
-      - name: Install TUI dependencies
-        run: npm ci
-        working-directory: tui
+      - name: Build web dist
+        run: npm ci && npm run build
+        working-directory: web
 
-      - name: TypeScript type check
-        run: npm run build
-        working-directory: tui
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Eval integration tests
+        run: pytest tests/eval/integration/ -v
+
+  eval-tier-b-realkeys:
+    # W5 Part B: secret-gated REAL-key nightly. Runs the actual `merge --ci`
+    # binary over the real Tier-1 dataset (NOT the fake_merge.sh stub used by
+    # eval-tier1) so a regression where the real pipeline stops escalating a
+    # real C-class conflict is caught — the residual 06 named "no real-key
+    # nightly merge yet".
+    #
+    # SAFETY: schedule/workflow_dispatch only, continue-on-error (never blocks),
+    # and a no-op unless BOTH API-key secrets are configured — the guard step
+    # exits the job early when absent, so forks/contributors without secrets are
+    # unaffected and incur zero LLM spend. Secrets are passed via `env:` and read
+    # as shell vars (never interpolated into a run command).
+    #
+    # COST: invokes real LLM merges over the Tier-1 samples; opt-in via secrets.
+    # STATUS: wired but NOT exercised by PR CI (key-free) — validate once via a
+    # manual `workflow_dispatch` run with secrets present before trusting it.
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    continue-on-error: true
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard — require both API keys (self-skip when absent)
+        id: guard
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY:-}" ] || [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "API key secret(s) absent — skipping real-key nightly merge."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.guard.outputs.run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        if: steps.guard.outputs.run == 'true'
+        run: pip install -e ".[dev]"
+
+      - name: Real-key Tier-1 merge eval (run → diff for escalation scoring)
+        if: steps.guard.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          WD="$RUNNER_TEMP/tierb-eval"
+          mkdir -p "$WD"
+          # Real `merge --ci` over every Tier-1 sample (the C-class triple
+          # t1-0031..33 expect escalation). `--use-real-keys` forwards the env
+          # secrets; the harness bootstraps each sample's git repo and scores
+          # escalation via diff_against_golden (expected_human samples).
+          python -m scripts.eval.run \
+            --tier 1 --workdir "$WD" \
+            --merge-bin merge --merge-args "--ci" \
+            --use-real-keys --concurrency 4
+          python -m scripts.eval.diff_against_golden \
+            --runs "$WD/runs" --datasets tests/eval/datasets \
+            --output "$WD/diff.json" --tier 1
+          echo "Real-key Tier-1 eval artifacts written under $WD"
+
+      - name: Upload eval artifacts
+        if: steps.guard.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier-b-realkeys-eval
+          path: ${{ runner.temp }}/tierb-eval
+          if-no-files-found: ignore
+          retention-days: 7

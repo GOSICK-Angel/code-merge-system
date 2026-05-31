@@ -571,8 +571,6 @@ class TestRepairLoopOrchestration:
     def _make_ctx(config, **overrides):
         from src.core.phases.base import PhaseContext
         from src.core.state_machine import StateMachine
-        from src.core.message_bus import MessageBus
-        from src.core.phase_runner import PhaseRunner
         from src.memory.store import MemoryStore
         from src.memory.summarizer import PhaseSummarizer
 
@@ -581,9 +579,7 @@ class TestRepairLoopOrchestration:
             git_tool=MagicMock(),
             gate_runner=MagicMock(),
             state_machine=StateMachine(),
-            message_bus=MessageBus(),
             checkpoint=MagicMock(),
-            phase_runner=PhaseRunner(),
             memory_store=MemoryStore(),
             summarizer=PhaseSummarizer(),
             trace_logger=None,
@@ -763,3 +759,134 @@ class TestRepairLoopOrchestration:
         assert state.judge_verdict is not None
         assert state.judge_verdict.veto_triggered
         assert "Missing Feature" in (state.judge_verdict.veto_reason or "")
+
+
+class TestExecutorRebuttalChunking:
+    """Forgejo regression: a single 222-issue rebuttal call serialised to
+    54KB input and timed out after 272s. Verify that large issue sets are
+    sharded across multiple LLM calls and the partials are merged."""
+
+    def test_chunk_issues_by_file_keeps_file_groups_intact(self):
+        from src.agents.executor_agent import _chunk_issues_by_file
+
+        issues = [
+            JudgeIssue(
+                file_path=f"file_{i // 3}.py",
+                issue_level=IssueSeverity.HIGH,
+                issue_type="x",
+                description="d",
+            )
+            for i in range(15)  # 5 files × 3 issues
+        ]
+        chunks = _chunk_issues_by_file(issues, chunk_size=5)
+        for chunk in chunks:
+            seen_files = {issue.file_path for issue in chunk}
+            for fp in seen_files:
+                in_chunk = sum(1 for i in chunk if i.file_path == fp)
+                in_total = sum(1 for i in issues if i.file_path == fp)
+                assert in_chunk == in_total, (
+                    f"file {fp} split across chunks: {in_chunk}/{in_total}"
+                )
+
+    @pytest.mark.asyncio
+    async def test_build_rebuttal_chunks_large_issue_sets(self, monkeypatch):
+        from src.agents.executor_agent import ExecutorAgent, _REBUTTAL_CHUNK_SIZE
+        from src.models.config import AgentLLMConfig, MergeConfig
+        from src.models.state import MergeState
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+        issues = [
+            JudgeIssue(
+                file_path=f"file_{i}.py",
+                issue_level=IssueSeverity.HIGH,
+                issue_type="missing_block",
+                description=f"problem {i}",
+                must_fix_before_merge=True,
+            )
+            for i in range(60)
+        ]
+
+        agent = ExecutorAgent(
+            llm_config=AgentLLMConfig(
+                provider="anthropic",
+                model="claude-haiku-4-5",
+                api_key_env="ANTHROPIC_API_KEY",
+            )
+        )
+
+        call_count = 0
+        seen_issue_ids: list[str] = []
+
+        async def fake_call(messages, system=None):
+            nonlocal call_count
+            call_count += 1
+            prompt = messages[0]["content"]
+            chunk_ids = [
+                line.split("[")[1].split("]")[0]
+                for line in prompt.splitlines()
+                if line.startswith("- [")
+            ]
+            seen_issue_ids.extend(chunk_ids)
+            decisions = [{"issue_id": iid, "action": "accept"} for iid in chunk_ids]
+            return (
+                '{"accepts_all": true, "decisions": '
+                + str(decisions).replace("'", '"')
+                + ', "overall_rationale": "ok"}'
+            )
+
+        agent._call_llm_with_retry = AsyncMock(side_effect=fake_call)
+
+        state = MergeState(
+            config=MergeConfig(upstream_ref="upstream/main", fork_ref="feature/fork")
+        )
+        rebuttal = await agent.build_rebuttal(issues, state)
+
+        expected_min_chunks = (
+            len(issues) + _REBUTTAL_CHUNK_SIZE - 1
+        ) // _REBUTTAL_CHUNK_SIZE
+        assert call_count >= expected_min_chunks, (
+            f"expected ≥{expected_min_chunks} chunked LLM calls, got {call_count}"
+        )
+        assert call_count < len(issues), "should chunk, not call once per issue"
+        assert set(seen_issue_ids) == {i.issue_id for i in issues}, (
+            "every issue must be routed to exactly one chunk"
+        )
+        assert len(rebuttal.repair_instructions) == len(issues)
+        assert "chunked rebuttal" in rebuttal.overall_rationale
+
+    @pytest.mark.asyncio
+    async def test_build_rebuttal_small_set_keeps_single_call(self, monkeypatch):
+        from src.agents.executor_agent import ExecutorAgent
+        from src.models.config import AgentLLMConfig, MergeConfig
+        from src.models.state import MergeState
+
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+        issues = [
+            JudgeIssue(
+                file_path=f"f{i}.py",
+                issue_level=IssueSeverity.HIGH,
+                issue_type="x",
+                description="d",
+                must_fix_before_merge=True,
+            )
+            for i in range(5)
+        ]
+
+        agent = ExecutorAgent(
+            llm_config=AgentLLMConfig(
+                provider="anthropic",
+                model="claude-haiku-4-5",
+                api_key_env="ANTHROPIC_API_KEY",
+            )
+        )
+        agent._call_llm_with_retry = AsyncMock(
+            return_value='{"accepts_all": true, "decisions": [], "overall_rationale": "r"}'
+        )
+
+        state = MergeState(
+            config=MergeConfig(upstream_ref="upstream/main", fork_ref="feature/fork")
+        )
+        await agent.build_rebuttal(issues, state)
+        assert agent._call_llm_with_retry.call_count == 1

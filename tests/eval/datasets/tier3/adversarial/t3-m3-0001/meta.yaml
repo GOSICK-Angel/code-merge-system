@@ -1,0 +1,12 @@
+sample_id: t3-m3-0001
+tier: 3
+category: C
+loss_class: M3
+expected_human: false
+description: |
+  M3 (interface change without synchronized caller). Upstream extends
+  add() with an optional c=0 parameter; the caller add(1, 2) is left
+  unchanged. Fork did not modify either file. Golden accepts upstream
+  as-is; the caller continues to work because the new parameter is
+  defaulted. A regression here would mean the merge system failed to
+  flag the contract surface change for review.

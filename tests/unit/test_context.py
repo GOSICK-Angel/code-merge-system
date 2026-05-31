@@ -3,9 +3,6 @@
 import pytest
 
 from src.llm.context import (
-    ContextAssembler,
-    ContextPriority,
-    ContextSection,
     TokenBudget,
     _truncate_text,
     estimate_tokens,
@@ -106,117 +103,17 @@ class TestTruncateText:
         assert result.startswith("A")
         assert result.endswith("B")
 
-
-class TestContextAssembler:
-    def test_all_sections_fit(self):
-        budget = TokenBudget(
-            model="claude-opus-4-6",
-            context_window=200_000,
-            reserved_for_output=8_192,
-        )
-        assembler = ContextAssembler(budget)
-        assembler.add_section(
-            ContextSection(
-                name="system",
-                content="You are a helpful AI.",
-                priority=ContextPriority.CRITICAL,
-            )
-        )
-        assembler.add_section(
-            ContextSection(
-                name="user", content="Hello world", priority=ContextPriority.HIGH
-            )
-        )
-        result, final_budget = assembler.build()
-        assert "You are a helpful AI." in result
-        assert "Hello world" in result
-        assert final_budget.used > 0
-
-    def test_low_priority_dropped_first(self):
-        budget = TokenBudget(
-            model="gpt-4",
-            context_window=100,
-            reserved_for_output=10,
-        )
-        assembler = ContextAssembler(budget)
-        assembler.add_section(
-            ContextSection(
-                name="critical",
-                content="MUST KEEP",
-                priority=ContextPriority.CRITICAL,
-            )
-        )
-        assembler.add_section(
-            ContextSection(
-                name="optional",
-                content="x" * 500,
-                priority=ContextPriority.OPTIONAL,
-                can_truncate=True,
-            )
-        )
-        result, _ = assembler.build()
-        assert "MUST KEEP" in result
-
-    def test_priority_ordering(self):
-        budget = TokenBudget(
-            model="claude-opus-4-6",
-            context_window=200_000,
-            reserved_for_output=8_192,
-        )
-        assembler = ContextAssembler(budget)
-        assembler.add_section(
-            ContextSection(name="low", content="LOW", priority=ContextPriority.LOW)
-        )
-        assembler.add_section(
-            ContextSection(
-                name="critical", content="CRITICAL", priority=ContextPriority.CRITICAL
-            )
-        )
-        assembler.add_section(
-            ContextSection(name="high", content="HIGH", priority=ContextPriority.HIGH)
-        )
-        result, _ = assembler.build()
-        crit_pos = result.index("CRITICAL")
-        high_pos = result.index("HIGH")
-        low_pos = result.index("LOW")
-        assert crit_pos < high_pos < low_pos
-
-    def test_empty_assembler(self):
-        budget = TokenBudget(
-            model="gpt-4o",
-            context_window=10_000,
-            reserved_for_output=2_000,
-        )
-        assembler = ContextAssembler(budget)
-        result, final_budget = assembler.build()
-        assert result == ""
-        assert final_budget.used == 0
-
-    def test_truncation_strategy_applied(self):
-        budget = TokenBudget(
-            model="gpt-4",
-            context_window=50,
-            reserved_for_output=5,
-        )
-        assembler = ContextAssembler(budget)
-        assembler.add_section(
-            ContextSection(
-                name="critical",
-                content="OK",
-                priority=ContextPriority.CRITICAL,
-            )
-        )
-        assembler.add_section(
-            ContextSection(
-                name="big",
-                content="X" * 500,
-                priority=ContextPriority.LOW,
-                can_truncate=True,
-                truncation_strategy="middle",
-            )
-        )
-        result, _ = assembler.build()
-        assert "OK" in result
+    def test_truncation_never_exceeds_budget_at_tiny_budgets(self):
+        # OPP-4 follow-up: when available (= max_chars - marker_len) is 0 or 1,
+        # the "middle" strategy used to emit text[-0:] == the whole string,
+        # blowing the budget ~40x. Every strategy must respect max_chars.
+        text = "x" * 1000
+        for max_chars in range(0, 30):
+            for strategy in ("tail", "head", "middle"):
+                result = _truncate_text(text, max_chars, strategy)
+                assert len(result) <= max_chars, (
+                    f"{strategy} @ max_chars={max_chars} -> len {len(result)}"
+                )
 
 
 class TestBuildStagedContent:
@@ -276,3 +173,116 @@ class TestBuildStagedContent:
             budget_tokens=50000,
         )
         assert result == content
+
+    def test_build_staged_content_no_diff_overlap_falls_back_to_full(self):
+        """Regression: a large file with no diff/conflict overlap (e.g. an
+        upstream_only take_target file under Judge review) must not be elided
+        down to a content-free '# ... (N sections omitted)' placeholder. When
+        relevance scoring drops every chunk but the budget has room, the real
+        content is returned instead of a placeholder the Judge mistakes for an
+        empty file."""
+        builder = self._make_builder()
+        lines = [f"def func_{i}():\n    return {i}\n" for i in range(300)]
+        large_content = "\n".join(lines)
+        # Sanity: this must be big enough to enter the staging path.
+        assert large_content.count("\n") >= 200
+
+        result = builder.build_staged_content(
+            content=large_content,
+            file_path="routers/web/auth/password.py",
+            diff_ranges=[],  # take_target / upstream_only: no diff anchor
+            budget_tokens=1_000_000,  # whole file fits easily
+        )
+
+        assert "sections omitted" not in result
+        assert "func_0" in result
+        assert "func_299" in result
+
+    def test_build_staged_content_security_sensitive_preserves_whole_file(self):
+        """A security-sensitive file with no diff anchor and a budget too small
+        for the full body keeps every chunk at SIGNATURE (file-level boost), so
+        the whole file survives. A non-sensitive file under the same budget
+        drops every chunk and falls back to a middle-truncated view (OPP-4)
+        that loses the middle — proving the security signal is actually wired
+        in."""
+        builder = self._make_builder()
+        bodies = [f"def func_{i}():\n" + "    x = 1\n" * 20 for i in range(100)]
+        large_content = "\n".join(bodies)
+        assert large_content.count("\n") >= 200
+
+        sensitive = builder.build_staged_content(
+            content=large_content,
+            file_path="auth/secrets.py",
+            diff_ranges=[],
+            budget_tokens=2000,
+            is_security_sensitive=True,
+        )
+        plain = builder.build_staged_content(
+            content=large_content,
+            file_path="auth/secrets.py",
+            diff_ranges=[],
+            budget_tokens=2000,
+            is_security_sensitive=False,
+        )
+
+        assert "func_50" in sensitive  # mid-file signature kept by file-level boost
+        assert "func_50" not in plain  # middle-truncated fallback drops the middle
+
+    def test_build_staged_content_referenced_symbol_survives(self):
+        """A symbol other files import (referenced_names) is boosted above the
+        DROP threshold, so it survives staged compression even with no diff
+        anchor. Without the reference signal the same mid-file symbol is lost to
+        the middle-truncated fallback (OPP-4) — proving the dependency-graph
+        signal is wired through to relevance scoring."""
+        builder = self._make_builder()
+        # keep_me sits in the MIDDLE so the middle-truncation fallback drops it
+        # unless the reference boost lifts it above the DROP threshold.
+        bodies = [f"def func_{i}():\n" + "    x = 1\n" * 20 for i in range(25)]
+        bodies.append("def keep_me():\n" + "    y = 2\n" * 20)
+        bodies += [f"def func_{i}():\n" + "    x = 1\n" * 20 for i in range(25, 50)]
+        content = "\n".join(bodies)
+        assert content.count("\n") >= 200
+
+        with_ref = builder.build_staged_content(
+            content=content,
+            file_path="m.py",
+            diff_ranges=[],
+            budget_tokens=2000,
+            referenced_names=frozenset({"keep_me"}),
+        )
+        without_ref = builder.build_staged_content(
+            content=content,
+            file_path="m.py",
+            diff_ranges=[],
+            budget_tokens=2000,
+        )
+
+        assert "keep_me" in with_ref  # referenced mid-file symbol kept (signature)
+        assert "keep_me" not in without_ref  # middle-truncated fallback drops it
+
+    def test_build_staged_content_conflict_region_survives(self):
+        """An unresolved conflict block in the tail of a large file is boosted
+        (conflict markers scanned from the content itself) so it survives staged
+        compression, instead of being dropped to the head-truncated fallback."""
+        builder = self._make_builder()
+        head = [f"def func_{i}():\n" + "    x = 1\n" * 20 for i in range(40)]
+        conflict_block = (
+            "def conflicted():\n"
+            "<<<<<<< HEAD\n"
+            "    a = 1\n"
+            "=======\n"
+            "    a = 2\n"
+            ">>>>>>> upstream\n"
+        )
+        content = "\n".join(head) + "\n" + conflict_block
+        assert content.count("\n") >= 200
+
+        result = builder.build_staged_content(
+            content=content,
+            file_path="m.py",
+            diff_ranges=[],
+            budget_tokens=2000,
+        )
+        # Tail conflict region kept; head functions (no anchor) compressed away.
+        assert "<<<<<<< HEAD" in result
+        assert "func_0" not in result

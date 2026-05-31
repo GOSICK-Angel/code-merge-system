@@ -31,9 +31,7 @@ class TestParseBundleV2:
                 },
                 {
                     "phase": "conflict_resolution",
-                    "decisions": [
-                        {"file_path": "b.py", "decision": "take_target"}
-                    ],
+                    "decisions": [{"file_path": "b.py", "decision": "take_target"}],
                 },
                 {"phase": "judge_review", "judge_resolution": "accept"},
             ],
@@ -75,13 +73,44 @@ class TestParseBundleV2:
         assert len(bundle.rounds) == 1
 
 
+class TestParseBundleV2AutoDetect:
+    """A ``rounds:`` document must parse as V2 even when ``version: 2`` is
+    omitted — otherwise the whole bundle silently collapses into a single
+    empty plan_review round and the operator's decisions are dropped with no
+    error (the failure mode observed in the zod merge test)."""
+
+    def test_rounds_without_version_field_parses_as_v2(self):
+        raw = {
+            "rounds": [
+                {
+                    "phase": "conflict_resolution",
+                    "decisions": [{"file_path": "b.py", "decision": "take_target"}],
+                }
+            ]
+        }
+        bundle = parse_bundle(raw)
+        assert len(bundle.rounds) == 1
+        assert bundle.rounds[0].phase == DecisionPhase.CONFLICT_RESOLUTION
+        assert bundle.rounds[0].decisions[0].file_path == "b.py"
+        assert bundle.rounds[0].decisions[0].decision == "take_target"
+
+    def test_multi_round_without_version_field_preserved(self):
+        raw = {
+            "rounds": [
+                {"phase": "plan_review", "plan_approval": "approve"},
+                {"phase": "judge_review", "judge_resolution": "accept"},
+            ]
+        }
+        bundle = parse_bundle(raw)
+        assert len(bundle.rounds) == 2
+        assert bundle.rounds[1].judge_resolution == "accept"
+
+
 class TestParseBundleV1:
     def test_v1_plan_only_infers_plan_review(self):
         raw = {
             "plan_approval": "approve",
-            "item_decisions": [
-                {"file_path": "x.py", "user_choice": "downgrade_risky"}
-            ],
+            "item_decisions": [{"file_path": "x.py", "user_choice": "downgrade_risky"}],
         }
         bundle = parse_bundle(raw)
         assert len(bundle.rounds) == 1

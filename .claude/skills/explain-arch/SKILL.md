@@ -21,7 +21,7 @@ For each phase, note: what it does, key state fields it reads/writes, and what c
 | conflict_analyst | Analyzes individual conflict hunks | No | Anthropic |
 | executor | Applies patches to working tree | No | OpenAI |
 | judge | Final quality review | Yes (ReadOnlyStateView) | Anthropic |
-| human_interface | Presents decisions to user via TUI | No | Anthropic |
+| human_interface | Presents decisions to user via Web UI | No | Anthropic |
 
 ## Key Data Models
 
@@ -31,9 +31,9 @@ Explain the relationship between: MergeState, MergePlan, FileDiff, PendingDecisi
 
 Single rolling checkpoint.json per run. MergeState is serialized via model_dump(mode="json"). Resume reconstructs via model_validate from checkpoint.
 
-## TUI Communication
+## Web UI Communication
 
-Python ws_bridge.py ↔ WebSocket (default port 8765) ↔ Ink TUI ws-client.ts → Zustand store updates.
+Python ws_bridge.py ↔ WebSocket (default port 8765) ↔ React Web UI (Vite, web/src) → Zustand store updates.
 
 ---
 

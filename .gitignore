@@ -36,8 +36,9 @@ CLAUDE.local.md
 *.swp
 *.swo
 
-# TUI (npm install in tui/)
-tui/node_modules/
+# Node deps + Vite caches (web/, tui/, stray root installs)
+node_modules/
+.vite/
 
 # macOS
 .DS_Store
@@ -45,3 +46,4 @@ tui/node_modules/
 # Environment variables
 .env
 .env.*
+MERGE_RECORD/

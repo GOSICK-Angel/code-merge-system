@@ -30,7 +30,7 @@
 | Tools（扫描器 / 门禁 / Git） | [tools.md](modules/tools.md) |
 | LLM 层 | [llm.md](modules/llm.md) |
 | 记忆系统 | [memory.md](modules/memory.md) |
-| CLI / TUI / Web UI | [cli.md](modules/cli.md) |
+| CLI / Web UI | [cli.md](modules/cli.md) |
 | 新人指南 | [onboarding.md](modules/onboarding.md) |
 
 ## 参考开源项目分析（`references/`）
@@ -58,7 +58,7 @@ Checkpoint 怎么落盘、状态机怎么转移                  → modules/cor
                                                      + multi-agent-optimization-from-merge-experience.md
 LLM 请求如何做成本/预算/熔断                         → modules/llm.md
 记忆在 Agent 间是如何传递的                          → modules/memory.md
-怎么用命令行、TUI 怎么和后端通信                      → modules/cli.md
+怎么用命令行、Web UI 怎么和后端通信                   → modules/cli.md
 Pydantic 模型到底长什么样                            → modules/data-models.md
 fork 被 bulk-copy 迁移过怎么处理                     → migration-aware-merge.md
 为什么要设计这么多扫描器                             → multi-agent-optimization-from-merge-experience.md

@@ -14,21 +14,29 @@ ruff check src/                  # lint
 ruff format src/                 # format
 merge --help                     # CLI entry point
 
-# TUI development (requires Python backend on ws://localhost:8765)
-cd tui && npm run start       # start TUI
-cd tui && npm run dev         # watch mode
-cd tui && npm run build       # TypeScript type check (tsc --noEmit)
+# Web UI development (requires Python backend on ws://localhost:8765)
+cd web && npm install          # install Web UI dev deps (first time only)
+cd web && npm run dev          # start Vite dev server
+cd web && npm run build        # tsc --noEmit + production build → web/dist/
+cd web && npm run lint         # tsc --noEmit only
+cd web && npm test             # vitest
 
-# One-stop flow
-merge <target-branch>            # interactive TUI — auto-setup on first run
-merge <target-branch> --no-tui  # plain text output
-merge <target-branch> --ci      # CI mode (no interaction, JSON summary to stdout)
-merge <target-branch> --dry-run # analysis only, no merge
-merge <target-branch> -r        # force reconfiguration wizard
+# One-stop flow (two invocations — everything else lives in .merge/config.yaml)
+merge                                # opens browser; first run walks Setup wizard
+merge --ci                           # non-interactive; synthesises config from env+git on first run
+merge --ci --auto-decisions <yaml>   # CI with pre-canned AWAITING_HUMAN decisions
+merge --web-port 5173 --ws-port 8765 # override default ports (browser mode only)
+
+# Target branch / API keys / thresholds / dry-run / workflow all live in
+# <repo>/.merge/config.yaml — edit it directly to reconfigure, or `rm` it
+# to re-trigger the browser Setup wizard.
 
 # Utility subcommands
 merge resume --run-id <id>       # resume from checkpoint
 merge validate --config <path>   # validate config + env vars
+merge init [--repo-path .]       # generate per-target CLAUDE.md for merge decisions
+merge plan-suggest [--target ... --candidates ...]   # enumerate baseline commit-windows
+merge forks-profile init         # scaffold .merge/forks-profile.yaml (recommended ≥30 fork-deleted files)
 ```
 
 ## Required Environment Variables
@@ -37,7 +45,7 @@ Each agent reads its API key from its own env var — no key is hardcoded:
 
 | Agent | Env var |
 |-------|---------|
-| planner, conflict_analyst, judge, human_interface | `ANTHROPIC_API_KEY` |
+| planner, conflict_analyst, judge, human_interface, memory_extractor | `ANTHROPIC_API_KEY` |
 | planner_judge, executor | `OPENAI_API_KEY` |
 
 Run `merge validate --config <path>` to check all vars before running.
@@ -120,7 +128,7 @@ fields. Loader behavior:
 
 Every agent that inherits from `BaseAgent` and opts in via `contract_name = "<name>"` has a yaml at `src/agents/contracts/<name>.yaml` that declares its input whitelist, output schema, allowed prompt gate IDs, forbidden behaviors, and collaboration pattern. See `src/agents/contracts/_schema.md` for the full spec.
 
-Prompts are registered in `src/llm/prompts/gate_registry.py` under stable IDs (`P-*`, `PJ-*`, `CA-*`, `E-*`, `J-*`). Agents must reference gates by ID rather than importing prompt builders directly; `tests/unit/test_agent_contracts.py` verifies that every contract-declared gate is registered.
+Prompts are registered in `src/llm/prompts/gate_registry.py` under stable IDs (`P-*`, `PJ-*`, `CA-*`, `E-*`, `J-*`, `M-*`). Agents must reference gates by ID rather than importing prompt builders directly; `tests/unit/test_agent_contracts.py` verifies that every contract-declared gate is registered.
 
 ### Anti-Patterns (enforced by `tests/unit/test_agent_contracts.py`)
 
@@ -136,6 +144,12 @@ Config is YAML-driven. Each agent has its own `AgentLLMConfig` (provider, model,
 
 Key config thresholds: `risk_score_low=0.3`, `risk_score_high=0.6`, `auto_merge_confidence=0.85`. Files matching `security_sensitive.patterns` are forced to `HUMAN_REQUIRED`.
 
+`enable_working_branch` defaults to `True` (U7): each run creates a fresh `merge/auto-{timestamp}` branch from `fork_ref` and operates there, so a half-finished run never pollutes `fork_ref` HEAD. Set to `False` explicitly in `.merge/config.yaml` to restore the legacy in-place behavior.
+
+### Memory subsystem
+
+`src/memory/` persists context across runs (sqlite store at `memory.db`). The `memory_extractor` agent (contract `memory_extractor.yaml`, gates `M-*`) summarizes disputes/decisions/metrics into the store; later runs load relevant entries via `layered_loader.py`. Reviewer-agent read-only rules still apply.
+
 ### `.merge/` Directory (production mode)
 
 When run inside a target project (pip-installed), all artifacts are written under `<repo>/.merge/`:
@@ -145,7 +159,8 @@ When run inside a target project (pip-installed), all artifacts are written unde
   config.yaml          # auto-generated on first run by `merge <branch>`
   .env                 # API keys (gitignored automatically)
   .gitignore           # auto-generated: ignores .env and runs/
-  plans/               # MERGE_PLAN_*.md reports (replaces MERGE_RECORD/)
+  plans/               # MERGE_PLAN_*.md reports
+  memory.db            # cross-run memory store (sqlite)
   runs/<run_id>/
     checkpoint.json    # single rolling checkpoint
     merge_report.md
@@ -153,6 +168,19 @@ When run inside a target project (pip-installed), all artifacts are written unde
 ```
 
 API key resolution order: shell env vars → `.merge/.env` → `~/.config/code-merge-system/.env`
+
+**Dev mode** (running the agent against its own source tree, not pip-installed) writes elsewhere — see `src/cli/paths.py`: checkpoints/logs → `outputs/debug/`, plans → `MERGE_RECORD/`, memory → `outputs/debug/memory.db`.
+
+## Project Skills
+
+`.claude/skills/` ships project-scoped skills — invoke when the task matches:
+
+- **explain-arch** — state machine, phase sequence, agent responsibilities. Read before non-trivial changes.
+- **add-agent** — step-by-step recipe for new agents (contract yaml + gate registry + BaseAgent subclass + tests).
+- **run-integration** — set up + run `tests/integration/` (real API keys, not in CI).
+- **verify** — full validation suite (tests + mypy + ruff) before committing.
+- **control-cli** — local harness to drive/inspect/profile CLI/TUI (used for Web UI bridge debugging).
+- **setup-conflict-test-branches** — build common-ancestor test/upstream + test/fork branch pairs (C-class + HUMAN_REQUIRED coverage) against any target repo.
 
 ## Git Workflow
 
@@ -163,6 +191,8 @@ Branches: `feature/<name>`, `fix/<name>`, `chore/<name>`. PRs squash-merged into
 `asyncio_mode = "auto"` is set globally — all async test functions run without explicit `@pytest.mark.asyncio`. Unit tests use `patch_llm_factory` to mock LLM calls; integration tests (`tests/integration/`) make real API calls and require valid `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
 
 80% coverage is enforced in CI (`--cov-fail-under=80`). Run locally with `pytest tests/unit/ --cov=src --cov-report=term-missing`.
+
+Acceptance gates, correctness thresholds and dataset/procedure definitions live in `doc/evaluation/` (`metrics.md`, `acceptance.md`, `dataset.md`, `procedure.md`) — consult before changing risk-score thresholds, judge stall criteria, or any user-visible decision boundary.
 
 ## Code Style
 

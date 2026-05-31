@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections import defaultdict
 
 from src.memory.models import (
     MemoryEntry,
-    MemoryEntryType,
     MergeMemory,
     PhaseSummary,
 )
@@ -41,6 +41,34 @@ class MemoryStore:
         new_memory = self._memory.model_copy(update={"phase_summaries": summaries})
         return MemoryStore(new_memory)
 
+    def adjust_confidence(self, deltas: dict[str, float]) -> MemoryStore:
+        """Return a new store with per-entry confidence nudged by ``deltas``.
+
+        Keyed by ``entry_id``; each new confidence is clamped to
+        ``[0.05, 0.98]``. Entries absent from ``deltas`` (or with a zero/no-op
+        delta) are returned unchanged, preserving their ``content_hash`` so
+        dedup identity is untouched. Used by the OPP-5 outcome feedback loop;
+        immutable per the store contract."""
+        if not deltas:
+            return self
+        entries: list[MemoryEntry] = []
+        changed = False
+        for entry in self._memory.entries:
+            delta = deltas.get(entry.entry_id)
+            if not delta:
+                entries.append(entry)
+                continue
+            new_conf = min(0.98, max(0.05, entry.confidence + delta))
+            if new_conf == entry.confidence:
+                entries.append(entry)
+                continue
+            entries.append(entry.model_copy(update={"confidence": new_conf}))
+            changed = True
+        if not changed:
+            return self
+        new_memory = self._memory.model_copy(update={"entries": entries})
+        return MemoryStore(new_memory)
+
     def set_codebase_profile(self, key: str, value: str) -> MemoryStore:
         profile = {**self._memory.codebase_profile, key: value}
         new_memory = self._memory.model_copy(update={"codebase_profile": profile})
@@ -56,32 +84,6 @@ class MemoryStore:
         seed the L0 profile so subsequent phases observe the entry.
         """
         self._memory.codebase_profile[key] = value
-
-    def query_by_path(self, file_path: str, limit: int = 5) -> list[MemoryEntry]:
-        results: list[MemoryEntry] = []
-        for entry in self._memory.entries:
-            for fp in entry.file_paths:
-                if file_path.startswith(fp) or fp.startswith(file_path):
-                    results.append(entry)
-                    break
-        results.sort(key=lambda e: (e.confidence, e.created_at), reverse=True)
-        return results[:limit]
-
-    def query_by_tags(self, tags: list[str], limit: int = 5) -> list[MemoryEntry]:
-        tag_set = set(tags)
-        results: list[MemoryEntry] = []
-        for entry in self._memory.entries:
-            if tag_set & set(entry.tags):
-                results.append(entry)
-        results.sort(key=lambda e: (e.confidence, e.created_at), reverse=True)
-        return results[:limit]
-
-    def query_by_type(
-        self, entry_type: MemoryEntryType, limit: int = 10
-    ) -> list[MemoryEntry]:
-        results = [e for e in self._memory.entries if e.entry_type == entry_type]
-        results.sort(key=lambda e: (e.confidence, e.created_at), reverse=True)
-        return results[:limit]
 
     def get_phase_summary(self, phase: str) -> PhaseSummary | None:
         return self._memory.phase_summaries.get(phase)
@@ -116,21 +118,7 @@ class MemoryStore:
         ref_short = current_upstream_ref[:8] if current_upstream_ref else ""
         scored: dict[str, tuple[float, MemoryEntry]] = {}
         for entry in self._memory.entries:
-            path_score = 0.0
-            for fp in file_paths:
-                for efp in entry.file_paths:
-                    if fp == efp:
-                        path_score = max(path_score, 1.0)
-                        continue
-                    if fp.startswith(efp) or efp.startswith(fp):
-                        common = len(_common_prefix(fp, efp))
-                        path_score = max(path_score, common / max(len(fp), len(efp)))
-                    jaccard = _path_jaccard(fp, efp)
-                    if jaccard > 0.0:
-                        path_score = max(path_score, jaccard * 0.85)
-
-            if path_score == 0.0 and not entry.file_paths:
-                path_score = 0.1
+            path_score = score_path_overlap(file_paths, entry.file_paths)
 
             confidence = entry.confidence
             if ref_short:
@@ -199,12 +187,6 @@ class MemoryStore:
             new_memory = self._memory.model_copy(update={"entries": kept})
             return MemoryStore(new_memory)
         return self
-
-    def consolidate(self) -> MemoryStore:
-        """Merge similar entries to reduce count while preserving information."""
-        consolidated = _consolidate_entries(list(self._memory.entries))
-        new_memory = self._memory.model_copy(update={"entries": consolidated})
-        return MemoryStore(new_memory)
 
     def to_memory(self) -> MergeMemory:
         return self._memory.model_copy(deep=True)
@@ -283,14 +265,72 @@ def _path_jaccard(a: str, b: str) -> float:
     return intersection / union
 
 
+def score_path_overlap(query_paths: list[str], entry_paths: list[str]) -> float:
+    """Blend path-overlap signals between query files and an entry's paths.
+
+    Combines three signals (max wins): exact match (1.0), common-prefix ratio
+    (strong for files in the same subtree), and token Jaccard similarity
+    discounted by 0.85 (captures sibling paths sharing most segments but no
+    common prefix, e.g. ``pkg/plugin_manager/manager.go`` vs
+    ``pkg/plugin_runtime/runtime.go``). An entry with no ``file_paths`` gets a
+    0.1 floor so global insights still surface.
+
+    Shared by both ``MemoryStore`` and ``SQLiteMemoryStore`` so their L2
+    retrieval ranking can never drift (OPP-1).
+    """
+    if not entry_paths:
+        return 0.1
+    path_score = 0.0
+    for fp in query_paths:
+        for efp in entry_paths:
+            if fp == efp:
+                path_score = max(path_score, 1.0)
+                continue
+            if fp.startswith(efp) or efp.startswith(fp):
+                common = len(_common_prefix(fp, efp))
+                path_score = max(path_score, common / max(len(fp), len(efp)))
+            jaccard = _path_jaccard(fp, efp)
+            if jaccard > 0.0:
+                path_score = max(path_score, jaccard * 0.85)
+    return path_score
+
+
+def _entry_dir_key(entry: MemoryEntry) -> str:
+    """Directory bucket for consolidation grouping (OPP-8).
+
+    The top-2 path segments of the entry's first file path. PATTERN entries
+    store a directory there directly; DECISION entries store the file path
+    (whose directory we derive). Empty when the entry has no ``file_paths``
+    (e.g. judge-issue patterns) so those still group by tag alone.
+    """
+    if not entry.file_paths:
+        return ""
+    first = entry.file_paths[0]
+    parts = first.split(os.sep)
+    if len(parts) > 1:
+        return os.sep.join(parts[:2])
+    return first
+
+
 def _consolidate_entries(entries: list[MemoryEntry]) -> list[MemoryEntry]:
-    """Group entries by (phase, entry_type, primary_tag) and merge each group."""
-    groups: dict[tuple[str, str, str], list[MemoryEntry]] = defaultdict(list)
+    """Group by (phase, entry_type, primary_tag, dir_bucket) and merge groups.
+
+    The directory bucket (OPP-8) keeps location-distinct patterns from
+    collapsing into one lossy blob — the primary tag alone is often a generic
+    class (``c_class`` / ``conflict_decision``) shared across directories, so
+    same-tag entries in different subtrees must not merge.
+    """
+    groups: dict[tuple[str, str, str, str], list[MemoryEntry]] = defaultdict(list)
     ungroupable: list[MemoryEntry] = []
 
     for entry in entries:
         primary_tag = entry.tags[0] if entry.tags else ""
-        key = (entry.phase, entry.entry_type.value, primary_tag)
+        key = (
+            entry.phase,
+            entry.entry_type.value,
+            primary_tag,
+            _entry_dir_key(entry),
+        )
         groups[key].append(entry)
 
     result: list[MemoryEntry] = []

@@ -99,9 +99,7 @@ class TestHookManagerInPhaseContext:
             git_tool=MagicMock(),
             gate_runner=MagicMock(),
             state_machine=MagicMock(),
-            message_bus=MagicMock(),
             checkpoint=MagicMock(),
-            phase_runner=MagicMock(),
             memory_store=MagicMock(),
             summarizer=MagicMock(),
         )

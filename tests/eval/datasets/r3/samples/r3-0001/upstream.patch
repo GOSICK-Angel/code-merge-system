@@ -1,0 +1,258 @@
+diff --git a/frontend/__tests__/components/chat/action-suggestions.test.tsx b/frontend/__tests__/components/chat/action-suggestions.test.tsx
+index 47ab98334..8de63b4b3 100644
+--- a/frontend/__tests__/components/chat/action-suggestions.test.tsx
++++ b/frontend/__tests__/components/chat/action-suggestions.test.tsx
+@@ -129,4 +129,159 @@ describe("ActionSuggestions", () => {
+     expect(createPRPrompt).toContain("meaningful branch name");
+     expect(createPRPrompt).not.toContain("SAME branch name");
+   });
++
++  it("should use correct provider name based on conversation git_provider, not user authenticated providers", async () => {
++    // Test case for GitHub repository
++    const getConversationSpy = vi.spyOn(OpenHands, "getConversation");
++    getConversationSpy.mockResolvedValue({
++      conversation_id: "test-github",
++      title: "GitHub Test",
++      selected_repository: "test-repo",
++      git_provider: "github",
++      selected_branch: "main",
++      last_updated_at: new Date().toISOString(),
++      created_at: new Date().toISOString(),
++      status: "RUNNING",
++      runtime_status: "STATUS$READY",
++      url: null,
++      session_api_key: null,
++    });
++
++    // Mock user having both GitHub and Bitbucket tokens
++    const getSettingsSpy = vi.spyOn(OpenHands, "getSettings");
++    getSettingsSpy.mockResolvedValue({
++      ...MOCK_DEFAULT_USER_SETTINGS,
++      provider_tokens_set: {
++        github: "github-token",
++        bitbucket: "bitbucket-token",
++      },
++    });
++
++    const onSuggestionsClick = vi.fn();
++    render(<ActionSuggestions onSuggestionsClick={onSuggestionsClick} />, {
++      wrapper: ({ children }) => (
++        <QueryClientProvider client={new QueryClient()}>
++          {children}
++        </QueryClientProvider>
++      ),
++    });
++
++    const buttons = await screen.findAllByTestId("suggestion");
++    const prButton = buttons.find((button) =>
++      button.textContent?.includes("Push & Create PR"),
++    );
++
++    expect(prButton).toBeInTheDocument();
++
++    if (prButton) {
++      prButton.click();
++    }
++
++    // The suggestion should mention GitHub, not Bitbucket
++    expect(onSuggestionsClick).toHaveBeenCalledWith(
++      expect.stringContaining("GitHub")
++    );
++    expect(onSuggestionsClick).not.toHaveBeenCalledWith(
++      expect.stringContaining("Bitbucket")
++    );
++  });
++
++  it("should use GitLab terminology when git_provider is gitlab", async () => {
++    const getConversationSpy = vi.spyOn(OpenHands, "getConversation");
++    getConversationSpy.mockResolvedValue({
++      conversation_id: "test-gitlab",
++      title: "GitLab Test",
++      selected_repository: "test-repo",
++      git_provider: "gitlab",
++      selected_branch: "main",
++      last_updated_at: new Date().toISOString(),
++      created_at: new Date().toISOString(),
++      status: "RUNNING",
++      runtime_status: "STATUS$READY",
++      url: null,
++      session_api_key: null,
++    });
++
++    const getSettingsSpy = vi.spyOn(OpenHands, "getSettings");
++    getSettingsSpy.mockResolvedValue({
++      ...MOCK_DEFAULT_USER_SETTINGS,
++      provider_tokens_set: {
++        gitlab: "gitlab-token",
++      },
++    });
++
++    const onSuggestionsClick = vi.fn();
++    render(<ActionSuggestions onSuggestionsClick={onSuggestionsClick} />, {
++      wrapper: ({ children }) => (
++        <QueryClientProvider client={new QueryClient()}>
++          {children}
++        </QueryClientProvider>
++      ),
++    });
++
++    const buttons = await screen.findAllByTestId("suggestion");
++    const prButton = buttons.find((button) =>
++      button.textContent?.includes("Push & Create PR"),
++    );
++
++    if (prButton) {
++      prButton.click();
++    }
++
++    // Should mention GitLab and "merge request" instead of "pull request"
++    expect(onSuggestionsClick).toHaveBeenCalledWith(
++      expect.stringContaining("GitLab")
++    );
++    expect(onSuggestionsClick).toHaveBeenCalledWith(
++      expect.stringContaining("merge request")
++    );
++  });
++
++  it("should use Bitbucket terminology when git_provider is bitbucket", async () => {
++    const getConversationSpy = vi.spyOn(OpenHands, "getConversation");
++    getConversationSpy.mockResolvedValue({
++      conversation_id: "test-bitbucket",
++      title: "Bitbucket Test",
++      selected_repository: "test-repo",
++      git_provider: "bitbucket",
++      selected_branch: "main",
++      last_updated_at: new Date().toISOString(),
++      created_at: new Date().toISOString(),
++      status: "RUNNING",
++      runtime_status: "STATUS$READY",
++      url: null,
++      session_api_key: null,
++    });
++
++    const getSettingsSpy = vi.spyOn(OpenHands, "getSettings");
++    getSettingsSpy.mockResolvedValue({
++      ...MOCK_DEFAULT_USER_SETTINGS,
++      provider_tokens_set: {
++        bitbucket: "bitbucket-token",
++      },
++    });
++
++    const onSuggestionsClick = vi.fn();
++    render(<ActionSuggestions onSuggestionsClick={onSuggestionsClick} />, {
++      wrapper: ({ children }) => (
++        <QueryClientProvider client={new QueryClient()}>
++          {children}
++        </QueryClientProvider>
++      ),
++    });
++
++    const buttons = await screen.findAllByTestId("suggestion");
++    const prButton = buttons.find((button) =>
++      button.textContent?.includes("Push & Create PR"),
++    );
++
++    if (prButton) {
++      prButton.click();
++    }
++
++    // Should mention Bitbucket
++    expect(onSuggestionsClick).toHaveBeenCalledWith(
++      expect.stringContaining("Bitbucket")
++    );
++  });
+ });
+diff --git a/frontend/src/components/features/chat/action-suggestions.tsx b/frontend/src/components/features/chat/action-suggestions.tsx
+index a027487c9..91f85a4a8 100644
+--- a/frontend/src/components/features/chat/action-suggestions.tsx
++++ b/frontend/src/components/features/chat/action-suggestions.tsx
+@@ -19,8 +19,11 @@ export function ActionSuggestions({
+   const [hasPullRequest, setHasPullRequest] = React.useState(false);
+ 
+   const providersAreSet = providers.length > 0;
+-  const isGitLab = providers.includes("gitlab");
+-  const isBitbucket = providers.includes("bitbucket");
++
++  // Use the git_provider from the conversation, not the user's authenticated providers
++  const currentGitProvider = conversation?.git_provider;
++  const isGitLab = currentGitProvider === "gitlab";
++  const isBitbucket = currentGitProvider === "bitbucket";
+ 
+   const pr = isGitLab ? "merge request" : "pull request";
+   const prShort = isGitLab ? "MR" : "PR";
+diff --git a/openhands/integrations/templates/resolver/github/issue_comment_conversation_instructions.j2 b/openhands/integrations/templates/resolver/github/issue_comment_conversation_instructions.j2
+index 2431e6803..2007b490e 100644
+--- a/openhands/integrations/templates/resolver/github/issue_comment_conversation_instructions.j2
++++ b/openhands/integrations/templates/resolver/github/issue_comment_conversation_instructions.j2
+@@ -4,7 +4,7 @@ A comment on the issue has been addressed to you.
+ 
+ # Steps to Handle the Comment
+ 
+-1. Address the comment. Use the GitHub API to read issue title, body, and comments if you need more context
++1. Address the comment. Use the $GITHUB_TOKEN and GitHub API to read issue title, body, and comments if you need more context
+ 2. For all changes to actual application code (e.g. in Python or Javascript), add an appropriate test to the testing directory to make sure that the issue has been fixed
+ 3. Run the tests, and if they pass you are done!
+ 4. You do NOT need to write new tests if there are only changes to documentation or configuration files.
+diff --git a/openhands/integrations/templates/resolver/github/issue_labeled_conversation_instructions.j2 b/openhands/integrations/templates/resolver/github/issue_labeled_conversation_instructions.j2
+index e28d265bc..37af2552e 100644
+--- a/openhands/integrations/templates/resolver/github/issue_labeled_conversation_instructions.j2
++++ b/openhands/integrations/templates/resolver/github/issue_labeled_conversation_instructions.j2
+@@ -1,6 +1,6 @@
+ Your tasking is to fix an issue in your repository. Do the following
+ 
+-1. Read the issue body and comments using the Github API
++1. Read the issue body and comments using the $GITHUB_TOKEN and Github API
+ 2. For all changes to actual application code (e.g. in Python or Javascript), add an appropriate test to the testing directory to make sure that the issue has been fixed
+ 3. Run the tests, and if they pass you are done!
+ 4. You do NOT need to write new tests if there are only changes to documentation or configuration files.
+diff --git a/openhands/integrations/templates/resolver/github/pr_update_conversation_instructions.j2 b/openhands/integrations/templates/resolver/github/pr_update_conversation_instructions.j2
+index 0362e597c..95ee50e96 100644
+--- a/openhands/integrations/templates/resolver/github/pr_update_conversation_instructions.j2
++++ b/openhands/integrations/templates/resolver/github/pr_update_conversation_instructions.j2
+@@ -6,7 +6,7 @@ A comment on the PR has been addressed to you. Do NOT respond to this comment vi
+ # Steps to Handle the Comment
+ 
+ ## Understand the PR Context
+-Use the GitHub API to:
++Use the $GITHUB_TOKEN and GitHub API to:
+     1. Retrieve the diff against main to understand the changes
+     2. Fetch the PR body and the linked issue for context
+ 
+diff --git a/openhands/integrations/templates/resolver/gitlab/issue_comment_conversation_instructions.j2 b/openhands/integrations/templates/resolver/gitlab/issue_comment_conversation_instructions.j2
+index fdfcf2b38..0b6d90b65 100644
+--- a/openhands/integrations/templates/resolver/gitlab/issue_comment_conversation_instructions.j2
++++ b/openhands/integrations/templates/resolver/gitlab/issue_comment_conversation_instructions.j2
+@@ -4,7 +4,7 @@ A comment on the issue has been addressed to you.
+ 
+ # Steps to Handle the Comment
+ 
+-1. Address the comment. Use the GitLab API to read issue title, body, and comments if you need more context
++1. Address the comment. Use the $GITLAB_TOKEN and GitLab API to read issue title, body, and comments if you need more context
+ 2. For all changes to actual application code (e.g. in Python or Javascript), add an appropriate test to the testing directory to make sure that the issue has been fixed
+ 3. Run the tests, and if they pass you are done!
+ 4. You do NOT need to write new tests if there are only changes to documentation or configuration files.
+diff --git a/openhands/integrations/templates/resolver/gitlab/issue_labeled_conversation_instructions.j2 b/openhands/integrations/templates/resolver/gitlab/issue_labeled_conversation_instructions.j2
+index 04fab3554..583b04a2e 100644
+--- a/openhands/integrations/templates/resolver/gitlab/issue_labeled_conversation_instructions.j2
++++ b/openhands/integrations/templates/resolver/gitlab/issue_labeled_conversation_instructions.j2
+@@ -1,6 +1,6 @@
+ Your tasking is to fix an issue in your repository. Do the following
+ 
+-1. Read the issue body and comments using the GitLab API
++1. Read the issue body and comments using the $GITLAB_TOKEN and GitLab API
+ 2. For all changes to actual application code (e.g. in Python or Javascript), add an appropriate test to the testing directory to make sure that the issue has been fixed
+ 3. Run the tests, and if they pass you are done!
+ 4. You do NOT need to write new tests if there are only changes to documentation or configuration files.
+diff --git a/openhands/integrations/templates/resolver/gitlab/mr_update_conversation_instructions.j2 b/openhands/integrations/templates/resolver/gitlab/mr_update_conversation_instructions.j2
+index 33813825e..7c2c47fa0 100644
+--- a/openhands/integrations/templates/resolver/gitlab/mr_update_conversation_instructions.j2
++++ b/openhands/integrations/templates/resolver/gitlab/mr_update_conversation_instructions.j2
+@@ -6,7 +6,7 @@ A comment on the MR has been addressed to you. Do NOT respond to this comment vi
+ # Steps to Handle the Comment
+ 
+ ## Understand the MR Context
+-Use the GitLab API to:
++Use the $GITLAB_TOKEN and GitLab API to:
+     1. Retrieve the diff against main to understand the changes
+     2. Fetch the MR body and the linked issue for context
+ 

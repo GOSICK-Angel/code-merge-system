@@ -15,7 +15,12 @@ from src.memory.models import (
     MergeMemory,
     PhaseSummary,
 )
-from src.memory.store import CONSOLIDATION_THRESHOLD, MAX_ENTRIES, _consolidate_entries
+from src.memory.store import (
+    CONSOLIDATION_THRESHOLD,
+    MAX_ENTRIES,
+    _consolidate_entries,
+    score_path_overlap,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +197,30 @@ class SQLiteMemoryStore:
             )
         return self
 
+    def adjust_confidence(self, deltas: dict[str, float]) -> "SQLiteMemoryStore":
+        """Nudge per-entry confidence by ``deltas`` (keyed by entry_id),
+        clamped to ``[0.05, 0.98]``. A plain UPDATE — the UNIQUE index is on
+        ``content_hash`` (unchanged), so it never conflicts. Used by the OPP-5
+        outcome feedback loop."""
+        if not deltas:
+            return self
+        with self._conn() as conn:
+            for entry_id, delta in deltas.items():
+                if not delta:
+                    continue
+                row = conn.execute(
+                    "SELECT confidence FROM memory_entries WHERE entry_id = ?",
+                    (entry_id,),
+                ).fetchone()
+                if row is None:
+                    continue
+                new_conf = min(0.98, max(0.05, float(row["confidence"]) + delta))
+                conn.execute(
+                    "UPDATE memory_entries SET confidence = ? WHERE entry_id = ?",
+                    (str(new_conf), entry_id),
+                )
+        return self
+
     def set_codebase_profile(self, key: str, value: str) -> "SQLiteMemoryStore":
         with self._conn() as conn:
             conn.execute(
@@ -222,43 +251,6 @@ class SQLiteMemoryStore:
     # Query API
     # ------------------------------------------------------------------
 
-    def query_by_path(self, file_path: str, limit: int = 5) -> list[MemoryEntry]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM memory_entries ORDER BY confidence DESC, created_at DESC"
-            ).fetchall()
-        results = []
-        for row in rows:
-            for fp in json.loads(row["file_paths"]):
-                if file_path.startswith(fp) or fp.startswith(file_path):
-                    results.append(_row_to_entry(row))
-                    break
-        results.sort(key=lambda e: (e.confidence, e.created_at), reverse=True)
-        return results[:limit]
-
-    def query_by_tags(self, tags: list[str], limit: int = 5) -> list[MemoryEntry]:
-        tag_set = set(tags)
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM memory_entries ORDER BY confidence DESC, created_at DESC"
-            ).fetchall()
-        results = [
-            _row_to_entry(r) for r in rows if tag_set & set(json.loads(r["tags"]))
-        ]
-        results.sort(key=lambda e: (e.confidence, e.created_at), reverse=True)
-        return results[:limit]
-
-    def query_by_type(
-        self, entry_type: MemoryEntryType, limit: int = 10
-    ) -> list[MemoryEntry]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM memory_entries WHERE entry_type = ? "
-                "ORDER BY confidence DESC, created_at DESC LIMIT ?",
-                (entry_type.value, limit),
-            ).fetchall()
-        return [_row_to_entry(r) for r in rows]
-
     def get_phase_summary(self, phase: str) -> PhaseSummary | None:
         with self._conn() as conn:
             row = conn.execute(
@@ -283,17 +275,7 @@ class SQLiteMemoryStore:
         for row in rows:
             entry = _row_to_entry(row)
             entry_fps: list[str] = json.loads(row["file_paths"])
-            path_score = 0.0
-            for fp in file_paths:
-                for efp in entry_fps:
-                    if fp == efp:
-                        path_score = max(path_score, 1.0)
-                    elif fp.startswith(efp) or efp.startswith(fp):
-                        common = len(_common_prefix(fp, efp))
-                        path_score = max(path_score, common / max(len(fp), len(efp)))
-
-            if path_score == 0.0 and not entry_fps:
-                path_score = 0.1
+            path_score = score_path_overlap(file_paths, entry_fps)
 
             confidence = entry.confidence
             if ref_short:
@@ -365,11 +347,6 @@ class SQLiteMemoryStore:
                 )
         return self
 
-    def consolidate(self) -> "SQLiteMemoryStore":
-        with self._conn() as conn:
-            self._maybe_consolidate(conn)
-        return self
-
     # ------------------------------------------------------------------
     # Serialisation
     # ------------------------------------------------------------------
@@ -406,12 +383,3 @@ class SQLiteMemoryStore:
         with self._conn() as conn:
             rows = conn.execute("SELECT key, value FROM kv_store").fetchall()
         return {r["key"]: r["value"] for r in rows}
-
-
-def _common_prefix(a: str, b: str) -> str:
-    prefix_len = 0
-    for ca, cb in zip(a, b):
-        if ca != cb:
-            break
-        prefix_len += 1
-    return a[:prefix_len]

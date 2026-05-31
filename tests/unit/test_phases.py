@@ -82,9 +82,7 @@ def _make_ctx(**overrides):
         "git_tool": MagicMock(),
         "gate_runner": MagicMock(),
         "state_machine": MagicMock(),
-        "message_bus": MagicMock(),
         "checkpoint": MagicMock(),
-        "phase_runner": MagicMock(),
         "memory_store": MagicMock(),
         "summarizer": MagicMock(),
     }
@@ -582,6 +580,42 @@ class TestReportGenerationPhase:
         )
 
     @pytest.mark.asyncio
+    async def test_report_uses_cumulative_cost_summary_not_live_tracker(self):
+        """On a resumed run the in-process CostTracker only holds the current
+        session's calls; the markdown report must use the cumulative
+        state.cost_summary (merged across resumes) so it matches the JSON
+        report and Web UI — otherwise it under-reports cost."""
+        state = _make_state(status=SystemStatus.GENERATING_REPORT)
+        # Cumulative across resumes (what JSON / Web UI show).
+        state.cost_summary = {"total_calls": 21, "total_cost_usd": 0.0397}
+
+        live_tracker = MagicMock()
+        live_tracker.summary.return_value = {
+            "total_calls": 13,
+            "total_cost_usd": 0.024,
+        }
+        ctx = _make_ctx(cost_tracker=live_tracker)
+
+        captured = {}
+
+        def _capture(*args, **kwargs):
+            captured["cost_summary"] = kwargs.get("cost_summary")
+
+        phase = ReportGenerationPhase()
+        with (
+            patch("src.core.phases.report_generation.write_json_report"),
+            patch(
+                "src.core.phases.report_generation.write_markdown_report",
+                side_effect=_capture,
+            ),
+            patch("src.core.phases.report_generation.write_living_plan_report"),
+        ):
+            await phase.execute(state, ctx)
+
+        assert captured["cost_summary"] == state.cost_summary
+        assert captured["cost_summary"]["total_calls"] == 21
+
+    @pytest.mark.asyncio
     async def test_report_failure_still_completes(self):
         state = _make_state(status=SystemStatus.GENERATING_REPORT)
 
@@ -601,6 +635,172 @@ class TestReportGenerationPhase:
         assert outcome.target_status == SystemStatus.COMPLETED
         assert len(state.errors) == 1
         assert "disk full" in state.errors[0]["message"]
+
+    @pytest.mark.asyncio
+    async def test_verification_findings_recorded_as_errors_partial_failure(self):
+        from src.tools.merge_verification import VerificationFinding
+        from src.tools.ci_reporter import build_ci_summary
+
+        state = _make_state(status=SystemStatus.GENERATING_REPORT)
+        ctx = _make_ctx()
+
+        finding = VerificationFinding(
+            file_path="schemas.ts",
+            check="duplicate_symbol",
+            severity="high",
+            detail="const 'X' declared 2x at top level",
+        )
+
+        phase = ReportGenerationPhase()
+        with (
+            patch(
+                "src.core.phases.report_generation.gather_findings_from_git",
+                return_value=[finding],
+            ),
+            patch("src.core.phases.report_generation.write_json_report"),
+            patch("src.core.phases.report_generation.write_markdown_report"),
+            patch("src.core.phases.report_generation.write_living_plan_report"),
+        ):
+            outcome = await phase.execute(state, ctx)
+
+        # Run stays COMPLETED — no new SystemStatus, resume/state machine untouched.
+        assert outcome.target_status == SystemStatus.COMPLETED
+        ctx.state_machine.transition.assert_called_once_with(
+            state, SystemStatus.COMPLETED, "reports generated"
+        )
+        # Finding is recorded as an error so CI downgrades the green status.
+        verification_errors = [
+            e for e in state.errors if e.get("phase") == "verification"
+        ]
+        assert len(verification_errors) == 1
+        assert "schemas.ts" in verification_errors[0]["message"]
+        # With status COMPLETED + errors present, CI reports partial_failure.
+        state.status = SystemStatus.COMPLETED
+        assert build_ci_summary(state)["status"] == "partial_failure"
+
+    @pytest.mark.asyncio
+    async def test_report_skips_verification_in_dry_run(self):
+        state = _make_state(status=SystemStatus.GENERATING_REPORT, dry_run=True)
+        ctx = _make_ctx()
+
+        phase = ReportGenerationPhase()
+        with (
+            patch(
+                "src.core.phases.report_generation.gather_findings_from_git"
+            ) as gather,
+            patch("src.core.phases.report_generation.write_json_report"),
+            patch("src.core.phases.report_generation.write_markdown_report"),
+            patch("src.core.phases.report_generation.write_living_plan_report"),
+        ):
+            outcome = await phase.execute(state, ctx)
+
+        gather.assert_not_called()
+        assert outcome.target_status == SystemStatus.COMPLETED
+        assert [e for e in state.errors if e.get("phase") == "verification"] == []
+
+    def _escalated_record(self, file_path: str, source):
+        from src.models.decision import FileDecisionRecord
+        from src.models.diff import FileStatus
+
+        return FileDecisionRecord(
+            file_path=file_path,
+            file_status=FileStatus.MODIFIED,
+            decision=MergeDecision.ESCALATE_HUMAN,
+            decision_source=source,
+            confidence=0.0,
+            rationale="internal escalate",
+        )
+
+    @pytest.mark.asyncio
+    async def test_ungated_escalation_flagged_as_dropped(self):
+        from src.models.decision import DecisionSource
+        from src.tools.ci_reporter import build_ci_summary
+
+        state = _make_state(status=SystemStatus.GENERATING_REPORT)
+        state.file_decision_records["treeshake/x.ts"] = self._escalated_record(
+            "treeshake/x.ts", DecisionSource.AUTO_EXECUTOR
+        )
+        ctx = _make_ctx()
+
+        phase = ReportGenerationPhase()
+        with (
+            patch(
+                "src.core.phases.report_generation.gather_findings_from_git",
+                return_value=[],
+            ),
+            patch("src.core.phases.report_generation.write_json_report"),
+            patch("src.core.phases.report_generation.write_markdown_report"),
+            patch("src.core.phases.report_generation.write_living_plan_report"),
+        ):
+            await phase.execute(state, ctx)
+
+        dropped = [e for e in state.errors if e.get("phase") == "finalize"]
+        assert len(dropped) == 1
+        assert "treeshake/x.ts" in dropped[0]["message"]
+        state.status = SystemStatus.COMPLETED
+        assert build_ci_summary(state)["status"] == "partial_failure"
+
+    @pytest.mark.asyncio
+    async def test_human_resolved_escalation_not_flagged(self):
+        # A human resolution rewrites the record to source=HUMAN → not dropped.
+        from src.models.decision import DecisionSource
+
+        state = _make_state(status=SystemStatus.GENERATING_REPORT)
+        state.file_decision_records["resolved.ts"] = self._escalated_record(
+            "resolved.ts", DecisionSource.HUMAN
+        )
+        ctx = _make_ctx()
+
+        phase = ReportGenerationPhase()
+        with (
+            patch(
+                "src.core.phases.report_generation.gather_findings_from_git",
+                return_value=[],
+            ),
+            patch("src.core.phases.report_generation.write_json_report"),
+            patch("src.core.phases.report_generation.write_markdown_report"),
+            patch("src.core.phases.report_generation.write_living_plan_report"),
+        ):
+            await phase.execute(state, ctx)
+
+        assert [e for e in state.errors if e.get("phase") == "finalize"] == []
+
+    @pytest.mark.asyncio
+    async def test_gated_but_undecided_escalation_still_flagged(self):
+        # 方案6: an escalation surfaced into the gate but left undecided by
+        # report time is still a dropped file — gating no longer exempts it.
+        from src.models.decision import DecisionSource
+        from src.models.plan_review import UserDecisionItem
+
+        state = _make_state(status=SystemStatus.GENERATING_REPORT)
+        state.file_decision_records["seen.ts"] = self._escalated_record(
+            "seen.ts", DecisionSource.AUTO_EXECUTOR
+        )
+        state.pending_user_decisions.append(
+            UserDecisionItem(
+                item_id="i1",
+                file_path="seen.ts",
+                description="surfaced but undecided",
+                current_classification="human_required",
+            )
+        )
+        ctx = _make_ctx()
+
+        phase = ReportGenerationPhase()
+        with (
+            patch(
+                "src.core.phases.report_generation.gather_findings_from_git",
+                return_value=[],
+            ),
+            patch("src.core.phases.report_generation.write_json_report"),
+            patch("src.core.phases.report_generation.write_markdown_report"),
+            patch("src.core.phases.report_generation.write_living_plan_report"),
+        ):
+            await phase.execute(state, ctx)
+
+        dropped = [e for e in state.errors if e.get("phase") == "finalize"]
+        assert len(dropped) == 1
+        assert "seen.ts" in dropped[0]["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +840,31 @@ class TestSelectMergeStrategy:
 
     def test_high_confidence_coexist_semantic_merge(self):
         analysis = self._make_analysis(confidence=0.95, can_coexist=True)
+        thresholds = ThresholdConfig()
+        result = _select_merge_strategy(analysis, thresholds)
+        assert result == MergeDecision.SEMANTIC_MERGE
+
+    def test_fabricated_symbols_escalate_even_at_high_confidence(self):
+        # #12: a fabricated member access in the analyst rationale is a strong
+        # hallucination signal — escalate regardless of confidence / can_coexist.
+        analysis = self._make_analysis(
+            confidence=0.99,
+            can_coexist=True,
+            fabricated_symbols=["core._isoWeek"],
+        )
+        thresholds = ThresholdConfig()
+        result = _select_merge_strategy(analysis, thresholds)
+        assert result == MergeDecision.ESCALATE_HUMAN
+
+    def test_no_fabricated_symbols_does_not_escalate(self):
+        # Verb-mismatch grounding warnings (advisory) must NOT escalate — only
+        # the fabricated_symbols subset gates.
+        analysis = self._make_analysis(
+            confidence=0.95,
+            can_coexist=True,
+            grounding_warnings=["Rationale claims fork added, but diff facts ..."],
+            fabricated_symbols=[],
+        )
         thresholds = ThresholdConfig()
         result = _select_merge_strategy(analysis, thresholds)
         assert result == MergeDecision.SEMANTIC_MERGE

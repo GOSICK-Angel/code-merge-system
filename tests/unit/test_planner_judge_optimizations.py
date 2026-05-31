@@ -549,15 +549,26 @@ def test_aggregate_segment_telemetry_counts_by_source() -> None:
     assert out.total_tokens_out == 320
 
 
-def test_aggregate_segment_telemetry_returns_none_when_no_llm() -> None:
-    """Cache-only / safelist-only round → no LLM cost to report."""
+def test_aggregate_segment_telemetry_preserves_no_llm_audit() -> None:
+    """A round where every segment short-circuited (cache- or safelist-
+    only) still gets a SegmentTelemetrySummary so the audit log can
+    explicitly record "skipped LLM" provenance. The previous behavior
+    (returning None) made such rounds indistinguishable from rounds
+    where Judge never ran at all."""
     from src.core.phases.plan_review import _aggregate_segment_telemetry
 
     seg_results = {
         0: _make_snap(0, "cache"),
         1: _make_snap(1, "safelist"),
     }
-    assert _aggregate_segment_telemetry(seg_results) is None
+    out = _aggregate_segment_telemetry(seg_results)
+    assert out is not None
+    assert out.llm_segments == 0
+    assert out.cache_hit_segments == 1
+    assert out.safelist_segments == 1
+    assert out.total_latency_s == 0.0
+    assert out.total_tokens_in == 0
+    assert out.total_tokens_out == 0
 
 
 def test_aggregate_segment_telemetry_returns_none_for_empty_input() -> None:
@@ -659,6 +670,79 @@ def test_segment_telemetry_summary_renders_into_report() -> None:
     assert "1 cache" in rendered
     assert "~4000 tokens-in" in rendered
     assert "3.5s total" in rendered
+
+
+def test_zero_llm_round_renders_skipped_provenance() -> None:
+    """A round where every segment short-circuited still appears in the
+    rendered plan-review markdown with explicit "skipped LLM" wording so
+    audit cannot mistake it for "Judge never ran"."""
+    import tempfile
+    from datetime import datetime as _dt
+    from pathlib import Path
+
+    from src.models.config import MergeConfig
+    from src.models.plan import (
+        MergePhase as MP,
+        MergePlan as MPlan,
+        PhaseFileBatch,
+        RiskSummary,
+    )
+    from src.models.plan_judge import PlanJudgeResult
+    from src.models.plan_review import PlanReviewRound, SegmentTelemetrySummary
+    from src.models.state import MergeState
+    from src.tools.report_writer import write_plan_review_report
+
+    state = MergeState(
+        config=MergeConfig(upstream_ref="upstream/main", fork_ref="origin/main")
+    )
+    state.run_id = "test-zero-llm"
+    state.merge_plan = MPlan(
+        created_at=_dt.now(),
+        upstream_ref="upstream/main",
+        fork_ref="origin/main",
+        merge_base_commit="abc",
+        phases=[
+            PhaseFileBatch(
+                batch_id="b0",
+                phase=MP.AUTO_MERGE,
+                file_paths=["a.py"],
+                risk_level=RiskLevel.AUTO_SAFE,
+            )
+        ],
+        risk_summary=RiskSummary(
+            total_files=1,
+            auto_safe_count=1,
+            auto_risky_count=0,
+            human_required_count=0,
+            deleted_only_count=0,
+            binary_count=0,
+            excluded_count=0,
+            estimated_auto_merge_rate=1.0,
+        ),
+        project_context_summary="",
+    )
+    state.plan_review_log = [
+        PlanReviewRound(
+            round_number=0,
+            verdict_result=PlanJudgeResult.APPROVED,
+            verdict_summary="ok",
+            issues_count=0,
+            segment_telemetry=SegmentTelemetrySummary(
+                llm_segments=0,
+                cache_hit_segments=1,
+                safelist_segments=3,
+            ),
+        )
+    ]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = write_plan_review_report(state, tmp)
+        rendered = Path(path).read_text(encoding="utf-8")
+
+    assert "0 LLM segment(s)" in rendered
+    assert "1 cache" in rendered
+    assert "3 safelist" in rendered
+    assert "skipped LLM entirely" in rendered
 
 
 # =========================================================================
@@ -990,7 +1074,7 @@ def test_generate_plan_returns_tuple_of_plan_and_diffs() -> None:
     from src.models.state import MergeState
 
     config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/fork")
-    config.llm_risk_scoring.enabled = False
+    config.llm_assist.mode = "off"
     state = MergeState(config=config)
     state.file_diffs = [_make_fd("src/a.py"), _make_fd("src/b.py")]
 
@@ -1787,10 +1871,10 @@ def test_run_writes_rescored_diffs_back_to_state() -> None:
     from src.models.state import MergeState
 
     config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/fork")
-    config.llm_risk_scoring.enabled = True
-    config.llm_risk_scoring.gray_zone_low = 0.0
-    config.llm_risk_scoring.gray_zone_high = 1.0
-    config.llm_risk_scoring.rule_weight = 0.0  # let LLM dominate
+    config.llm_assist.mode = "auto"
+    config.llm_assist.uncertainty_low = 0.0
+    config.llm_assist.uncertainty_high = 1.0
+    config.llm_assist.rule_weight = 0.0  # let LLM dominate
 
     state = MergeState(config=config)
     original = _make_fd("src/borderline.py", lines_added=5, lines_deleted=0)
@@ -1842,7 +1926,7 @@ def test_run_does_not_reassign_when_rescoring_disabled() -> None:
     from src.models.state import MergeState
 
     config = MergeConfig(upstream_ref="upstream/main", fork_ref="feature/fork")
-    config.llm_risk_scoring.enabled = False
+    config.llm_assist.mode = "off"
 
     state = MergeState(config=config)
     state.file_diffs = [_make_fd("src/foo.py")]

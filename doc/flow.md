@@ -51,7 +51,7 @@
 
 ### 1.3 状态观察者
 
-`StateMachine.add_observer(cb)` 允许挂接回调，TUI 通过这个机制实时推送状态变更到前端（见 `src/web/ws_bridge.py`）。
+`StateMachine.add_observer(cb)` 允许挂接回调，Web UI 前端通过 `src/web/ws_bridge.py` 把状态变更经 WebSocket 实时推送到浏览器。
 
 ---
 
@@ -67,7 +67,7 @@ class Phase(ABC):
     async def run(state, ctx)       # 串联上述三步，Orchestrator 调用它
 ```
 
-`PhaseContext` 是只读的依赖容器：`config / git_tool / gate_runner / state_machine / message_bus / checkpoint / phase_runner / memory_store / summarizer / trace_logger / emit / hooks / cost_tracker / agents / coordinator`。其中 `coordinator: Coordinator | None` 供 Phase 咨询异常路由决策（见 §4 各 Phase 详细描述）。
+`PhaseContext` 是只读的依赖容器：`config / git_tool / gate_runner / state_machine / checkpoint / memory_store / summarizer / memory_hit_tracker / trace_logger / emit / hooks / cost_tracker / agents / coordinator`。其中 `coordinator: Coordinator | None` 供 Phase 咨询异常路由决策（见 §4 各 Phase 详细描述）。
 
 `PhaseOutcome` 告诉 Orchestrator 下一步：
 
@@ -279,7 +279,7 @@ git commit -m "merge(auto_merge): resolve N files\n\nUpstream commits:\n..."
 
 - 入口：AWAITING_HUMAN
 - `HumanInterface.run()` 渲染决策模板（Markdown + YAML）
-- 从 CLI/TUI/文件加载 `human_decisions`
+- 从 CLI/Web UI/文件加载 `human_decisions`
 - **永远不填默认值**：未决 item 保持 `ESCALATE_HUMAN`，等下次人工
 - 所有 item 决完 → 转到下一阶段（由 Plan/Analysis 上下文决定）
 
@@ -342,7 +342,7 @@ for round in 0..max_dispute_rounds:
 [Phase 暂停]  AWAITING_HUMAN + checkpoint 落盘
     │
     │ 用户操作（三选一）：
-    │   ① TUI 中点击决策按钮
+    │   ① Web UI 中点击决策按钮
     │   ② merge run --export-decisions decisions.yaml  → 编辑 → 下一次自带文件
     │   ③ merge resume --run-id <id> --decisions decisions.yaml
     ▼

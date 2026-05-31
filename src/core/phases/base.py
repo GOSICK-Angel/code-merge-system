@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -9,9 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from src.models.config import MergeConfig
 from src.models.state import MergeState, SystemStatus
 from src.core.state_machine import StateMachine
-from src.core.message_bus import MessageBus
 from src.core.checkpoint import Checkpoint
-from src.core.phase_runner import PhaseRunner
 from src.tools.git_tool import GitTool
 from src.tools.gate_runner import GateRunner
 from src.tools.trace_logger import TraceLogger
@@ -33,6 +32,13 @@ class ActivityEvent:
     phase: str
     event_type: Literal["start", "progress", "complete", "error"]
     elapsed: float | None = None
+    # When set, this event is a communication/handoff from ``agent`` to
+    # ``target`` (e.g. judge → executor with N blocking issues) rather than a
+    # solo run-state change. The topology renders it as a directed edge.
+    target: str | None = None
+    # Wall-clock emit time (epoch seconds) so the UI can tick a live elapsed
+    # timer for a still-running agent.
+    ts: float = field(default_factory=time.time)
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -52,9 +58,7 @@ class PhaseContext:
     git_tool: GitTool
     gate_runner: GateRunner
     state_machine: StateMachine
-    message_bus: MessageBus
     checkpoint: Checkpoint
-    phase_runner: PhaseRunner
     memory_store: MemoryStore
     summarizer: PhaseSummarizer
     memory_hit_tracker: MemoryHitTracker | None = None
@@ -70,6 +74,25 @@ class PhaseContext:
             self.emit(
                 ActivityEvent(
                     agent=agent, action=action, phase="", event_type="progress"
+                )
+            )
+
+    def notify_comm(
+        self, sender: str, receiver: str, action: str, phase: str = ""
+    ) -> None:
+        """Emit a directed communication/handoff event (sender → receiver).
+
+        Used at real inter-agent handoff points (e.g. judge → executor in the
+        dispute loop) so the topology can draw a labeled, transient edge.
+        """
+        if self.emit is not None:
+            self.emit(
+                ActivityEvent(
+                    agent=sender,
+                    action=action,
+                    phase=phase,
+                    event_type="progress",
+                    target=receiver,
                 )
             )
 

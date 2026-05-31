@@ -48,107 +48,155 @@ def _load_repo_env(repo_path: str) -> None:
 console = Console()
 
 
-class _DefaultGroup(click.Group):
-    """Forwards unrecognised first arguments to the 'merge' subcommand.
+class _DefaultMergeGroup(click.Group):
+    """Treat ``merge <flags>`` as ``merge merge <flags>``.
 
-    Lets users type `merge upstream/main` without the explicit 'merge'
-    token while keeping all named subcommands (resume, validate, …) unchanged.
+    The installed entry point is named ``merge`` (see pyproject.toml),
+    so users naturally type ``merge`` / ``merge --ci`` without the
+    extra ``merge`` subcommand token. Click's default group resolution
+    requires a named subcommand though — without this override,
+    ``merge --ci`` fails with "no such option". The existing
+    subcommands (resume / validate / init / ...) keep working because
+    Click resolves real subcommand names before falling back here.
     """
 
     def resolve_command(
         self, ctx: click.Context, args: list[str]
     ) -> tuple[str | None, click.Command | None, list[str]]:
-        try:
-            return super().resolve_command(ctx, args)
-        except click.UsageError:
+        # No args at all → invoke the ``merge`` subcommand with no flags.
+        if not args:
+            merge_cmd = self.commands.get("merge")
+            if merge_cmd is not None:
+                return "merge", merge_cmd, []
+        # First arg starts with `-` (a flag) → caller meant the default
+        # merge command, not a subcommand. Forward as-is.
+        if args and args[0].startswith("-") and args[0] != "--help":
             merge_cmd = self.commands.get("merge")
             if merge_cmd is not None:
                 return "merge", merge_cmd, args
-            raise
+        return super().resolve_command(ctx, args)
 
 
-@click.group(cls=_DefaultGroup)
-def cli() -> None:
+@click.group(
+    cls=_DefaultMergeGroup,
+    invoke_without_command=True,
+    # ``merge --ci`` must reach the merge subcommand without Click
+    # rejecting ``--ci`` as an unknown group-level option. Same for
+    # ``--web-port`` / ``--ws-port`` / ``--auto-decisions`` — they're
+    # all subcommand flags that the resolver routes to ``merge``.
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+@click.pass_context
+def cli(ctx: click.Context) -> None:
     load_env()
+    # When invoked with zero args (``merge`` alone), Click would
+    # normally render the help screen. Override that: route to the
+    # ``merge`` subcommand so ``merge`` (no args) opens the browser.
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(
+            merge_command, ci=False, web_port=5173, ws_port=8765, auto_decisions=None
+        )
 
 
 @cli.command("merge")
-@click.argument("target_branch")
 @click.option(
-    "--ci", is_flag=True, help="CI mode: no interaction, JSON summary to stdout"
-)
-@click.option("--no-tui", is_flag=True, help="Disable interactive TUI")
-@click.option("--dry-run", is_flag=True, help="Analyze only, do not merge")
-@click.option("--ws-port", default=8765, type=int, help="WebSocket port for TUI bridge")
-@click.option("--reconfigure", "-r", is_flag=True, help="Force reconfiguration wizard")
-@click.option(
-    "--workflow",
-    "-w",
-    default=None,
+    "--ci",
+    is_flag=True,
     help=(
-        "Named workflow preset from config/workflows.yaml "
-        "(standard|careful|fast|analysis-only). Overrides legacy flags where they overlap."
+        "CI mode: no browser, no prompts. Uses .merge/config.yaml if "
+        "present, otherwise synthesises one from env vars + git "
+        "(printing the path so you can review/tweak before next run)."
     ),
+)
+@click.option(
+    "--web-port",
+    default=5173,
+    type=int,
+    help="HTTP static port for the Web UI",
+)
+@click.option(
+    "--ws-port",
+    default=8765,
+    type=int,
+    help="WebSocket port for the Web UI bridge",
 )
 @click.option(
     "--auto-decisions",
     default=None,
     type=click.Path(exists=True),
     help=(
-        "V2 decisions YAML pre-populated with rounds for every AWAITING_HUMAN "
-        "cycle (plan_review / conflict_marker / conflict_resolution / "
-        "judge_review). Drives the run end-to-end without operator "
-        "intervention; intended for CI."
+        "V2 decisions YAML pre-populated with rounds for every "
+        "AWAITING_HUMAN cycle. Drives the run end-to-end without "
+        "operator intervention; intended for --ci."
     ),
 )
 def merge_command(
-    target_branch: str,
     ci: bool,
-    no_tui: bool,
-    dry_run: bool,
+    web_port: int,
     ws_port: int,
-    reconfigure: bool,
-    workflow: str | None,
     auto_decisions: str | None,
 ) -> None:
-    """Merge TARGET_BRANCH into the current branch (one-stop flow)."""
+    """Merge upstream into the current branch.
+
+    Two invocations:
+      merge          interactive — opens the browser, walks Setup on first
+                     run, then drops into the dashboard.
+      merge --ci     non-interactive — uses .merge/config.yaml, or
+                     generates one from env vars + git state if missing.
+
+    The target branch, API keys, thresholds and dry-run / workflow
+    selections all live in .merge/config.yaml (created/edited via the
+    browser wizard or directly on disk for --ci).
+    """
     _load_repo_env(".")
 
-    from src.cli.commands.setup import detect_or_setup
+    if ci:
+        _run_ci(repo_path=".", auto_decisions=auto_decisions)
+        return
 
-    config = detect_or_setup(
-        target_branch,
+    from src.cli.commands.web import web_command_impl
+
+    web_command_impl(
         repo_path=".",
-        reconfigure=reconfigure,
-        non_interactive=ci,
+        ws_port=ws_port,
+        web_port=web_port,
+        open_browser=True,
     )
 
-    if workflow is not None:
-        from src.core.workflow_loader import apply_workflow_by_name, load_workflows
 
-        try:
-            catalog = load_workflows()
-            config = apply_workflow_by_name(config, workflow, catalog)
-            wf_def = catalog.workflows[workflow]
-            if wf_def.dry_run:
-                dry_run = True
-            console.print(
-                f"[cyan]Workflow applied:[/cyan] [bold]{workflow}[/bold] "
-                f"(review_mode={wf_def.review_mode}, dry_run={wf_def.dry_run})"
-            )
-        except (FileNotFoundError, KeyError, ValueError) as e:
-            console.print(f"[red]Workflow error: {e}[/red]")
-            sys.exit(2)
+def _run_ci(repo_path: str, auto_decisions: str | None) -> None:
+    """Non-interactive entry. Auto-generates config on first run.
 
-    if not ci and not no_tui:
-        from src.cli.commands.tui import tui_command_impl
+    First-run behaviour: when no ``.merge/config.yaml`` exists yet,
+    synthesise one from env vars (ANTHROPIC_API_KEY / OPENAI_API_KEY /
+    GITHUB_TOKEN) and git state (current branch / ``origin/HEAD``).
+    The path is printed so the operator can review/tweak before the
+    next ``--ci`` run. This is the "no terminal wizard" promise: a
+    fresh checkout never blocks on prompts, even in CI.
+    """
+    from src.cli.commands.setup import (
+        apply_setup_payload,
+        build_default_payload,
+    )
+    from src.cli.paths import get_config_path
 
-        tui_command_impl(config, ws_port, dry_run)
-        return
+    config_path = get_config_path(repo_path)
+    if config_path.exists():
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config = MergeConfig.model_validate(raw)
+    else:
+        payload = build_default_payload(repo_path)
+        config = apply_setup_payload(payload, repo_path)
+        console.print(
+            f"[cyan]Generated default config:[/cyan] {config_path}\n"
+            f"  target_branch: [bold]{payload.target_branch}[/bold] "
+            f"→ fork_ref: [bold]{payload.fork_ref}[/bold]\n"
+            f"  review and edit before the next `merge --ci` run."
+        )
 
     from src.cli.commands.run import run_command_impl
 
-    run_command_impl(config, dry_run, ci=ci, auto_decisions=auto_decisions)
+    run_command_impl(config, dry_run=False, ci=True, auto_decisions=auto_decisions)
 
 
 @cli.command("resume")
@@ -173,25 +221,38 @@ def merge_command(
     "overridden to keep resume consistent with the frozen plan.",
 )
 @click.option(
-    "--tui",
+    "--web",
     is_flag=True,
     default=False,
-    help="Resume inside the interactive TUI (same React Ink dashboard as "
-    "`merge <branch>`) instead of plain-text output. Initial frame reflects "
-    "the checkpoint's current_phase / status.",
+    help="Resume inside the interactive Web UI (browser) instead of "
+    "plain-text output. Initial frame reflects the checkpoint's "
+    "current_phase / status.",
+)
+@click.option(
+    "--no-browser",
+    is_flag=True,
+    help="With --web, skip opening browser and print URL only.",
+)
+@click.option(
+    "--web-port",
+    default=5173,
+    type=int,
+    help="HTTP static port for the Web UI (only used with --web).",
 )
 @click.option(
     "--ws-port",
     default=8765,
     type=int,
-    help="WebSocket port for the TUI bridge (only used with --tui).",
+    help="WebSocket port for the Web UI bridge (only used with --web).",
 )
 def resume_command(
     run_id: str | None,
     checkpoint: str | None,
     decisions: str | None,
     reload_config: bool,
-    tui: bool,
+    web: bool,
+    no_browser: bool,
+    web_port: int,
     ws_port: int,
 ) -> None:
     """Resume execution from a checkpoint"""
@@ -203,8 +264,10 @@ def resume_command(
         checkpoint,
         decisions,
         reload_config=reload_config,
-        tui=tui,
+        web=web,
         ws_port=ws_port,
+        web_port=web_port,
+        open_browser=not no_browser,
     )
 
 
@@ -332,6 +395,8 @@ def validate_command(config: str) -> None:
 
     errors = validate_config_and_env(merge_config)
 
+    warnings = validate_config_warnings(merge_config)
+
     if errors:
         console.print("[red]Validation errors:[/red]")
         for err in errors:
@@ -341,6 +406,19 @@ def validate_command(config: str) -> None:
         console.print(
             "[green]Config is valid. All required environment variables are set.[/green]"
         )
+        for warn in warnings:
+            console.print(f"[yellow]⚠ {warn}[/yellow]")
+
+
+def validate_config_warnings(config: MergeConfig) -> list[str]:
+    """Non-fatal advisories that should not fail validation but do warn the
+    operator about silently degraded behavior. P4: delegates to the shared
+    ``config_preflight_warnings`` so ``merge validate`` and a real ``merge`` run
+    surface the same set (chunk/max_tokens self-truncation, reasoning-model
+    floor, missing compile gate, tree-sitter grammars)."""
+    from src.cli.preflight import config_preflight_warnings
+
+    return config_preflight_warnings(config)
 
 
 def validate_config_and_env(config: MergeConfig) -> list[str]:

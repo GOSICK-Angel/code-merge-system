@@ -4,7 +4,8 @@ import hashlib
 from pathlib import Path
 
 from src.models.plan import MergePlan
-from src.models.diff import FileDiff, RiskLevel
+from src.models.diff import FileDiff, FileChangeCategory, RiskLevel
+from src.models.dependency import ConfidenceLabel, FileDependencyGraph
 from src.models.plan_judge import PlanIssue
 from src.models.plan_review import PlannerIssueResponse, IssueResponseAction
 from src.tools.file_classifier import matches_any_pattern
@@ -62,13 +63,37 @@ SAFELIST_PATTERNS: list[str] = [
 ]
 
 
-def is_segment_obviously_safe(
-    segment: list[FileDiff],
+_SAFELIST_RISK_KEYWORDS: tuple[str, ...] = (
+    "auth",
+    "otp",
+    "verify",
+    "secret",
+    "credential",
+    "password",
+    "token",
+    "login",
+    "permission",
+    "signature",
+    "oauth",
+    "signin",
+    "signup",
+)
+
+_SAFELIST_SAFE_EXTS: frozenset[str] = frozenset(
+    {".yaml", ".yml", ".toml", ".json", ".md", ".txt", ".lock"}
+)
+
+
+def file_is_obviously_safe(
+    fd: FileDiff,
     batch_risk_map: dict[str, str],
     extra_safelist_patterns: list[str] | None = None,
     lockfile_max_lines: int = 1000,
 ) -> bool:
-    """Return True iff EVERY file in the segment is trivially safe.
+    """Return True iff this single file is trivially safe — same rules
+    as is_segment_obviously_safe but on one file. Extracted so a future
+    split-send pass can pre-filter a segment without sending the safe
+    portion to the LLM.
 
     A file is trivially safe when:
       - conflict_count == 0
@@ -83,64 +108,58 @@ def is_segment_obviously_safe(
             (per-repo extension supplied by caller), OR
           * lines_added + lines_deleted < 50 AND extension in
             {.yaml, .toml, .json, .md, .txt, .lock} AND file_path
-            does NOT contain any risk-keyword substring (auth, otp,
-            verify, secret, credential, password, token, login,
-            permission, signature)
+            does NOT contain any risk-keyword substring.
     """
+    if fd.conflict_count > 0:
+        return False
+    if fd.is_security_sensitive:
+        return False
+
+    batch_rl = batch_risk_map.get(fd.file_path)
+    if batch_rl is None:
+        return False
+    if fd.risk_level in _MISMATCH_TRACKED_LEVELS and batch_rl != fd.risk_level.value:
+        return False
+
+    if matches_any_pattern(fd.file_path, LOCKFILE_PATTERNS):
+        return fd.lines_added + fd.lines_deleted < lockfile_max_lines
+    if matches_any_pattern(fd.file_path, SAFELIST_PATTERNS):
+        return True
     extra = extra_safelist_patterns or []
-    risk_keywords = (
-        "auth",
-        "otp",
-        "verify",
-        "secret",
-        "credential",
-        "password",
-        "token",
-        "login",
-        "permission",
-        "signature",
-        "oauth",
-        "signin",
-        "signup",
-    )
-    safe_exts = {".yaml", ".yml", ".toml", ".json", ".md", ".txt", ".lock"}
+    if extra and matches_any_pattern(fd.file_path, extra):
+        return True
 
-    for fd in segment:
-        if fd.conflict_count > 0:
-            return False
-        if fd.is_security_sensitive:
-            return False
+    ext = Path(fd.file_path).suffix.lower()
+    if ext not in _SAFELIST_SAFE_EXTS:
+        return False
 
-        batch_rl = batch_risk_map.get(fd.file_path)
-        if batch_rl is None:
-            return False
-        if (
-            fd.risk_level in _MISMATCH_TRACKED_LEVELS
-            and batch_rl != fd.risk_level.value
-        ):
-            return False
+    if fd.lines_added + fd.lines_deleted >= 50:
+        return False
 
-        if matches_any_pattern(fd.file_path, LOCKFILE_PATTERNS):
-            if fd.lines_added + fd.lines_deleted >= lockfile_max_lines:
-                return False
-            continue
-        if matches_any_pattern(fd.file_path, SAFELIST_PATTERNS):
-            continue
-        if extra and matches_any_pattern(fd.file_path, extra):
-            continue
-
-        ext = Path(fd.file_path).suffix.lower()
-        if ext not in safe_exts:
-            return False
-
-        if fd.lines_added + fd.lines_deleted >= 50:
-            return False
-
-        path_lower = fd.file_path.lower()
-        if any(kw in path_lower for kw in risk_keywords):
-            return False
+    path_lower = fd.file_path.lower()
+    if any(kw in path_lower for kw in _SAFELIST_RISK_KEYWORDS):
+        return False
 
     return True
+
+
+def is_segment_obviously_safe(
+    segment: list[FileDiff],
+    batch_risk_map: dict[str, str],
+    extra_safelist_patterns: list[str] | None = None,
+    lockfile_max_lines: int = 1000,
+) -> bool:
+    """Return True iff EVERY file in the segment is trivially safe.
+
+    Delegates to ``file_is_obviously_safe`` for the per-file decision so
+    a future split-send pass can share the same predicate.
+    """
+    return all(
+        file_is_obviously_safe(
+            fd, batch_risk_map, extra_safelist_patterns, lockfile_max_lines
+        )
+        for fd in segment
+    )
 
 
 def compute_segment_signature(
@@ -226,6 +245,81 @@ def precheck_plan_integrity(
     return issues
 
 
+# Phase B step 9: cap on topological-order issues per review. Cross-module
+# EXTRACTED edges can be numerous on a large fork; an unbounded flag set would
+# stall convergence (plan §8). This is a noise ceiling, not a correctness
+# bound — tune per target repo if real violations are being truncated.
+_MAX_TOPO_ISSUES = 25
+
+
+def precheck_batch_topological_order(
+    plan: MergePlan,
+    dependency_graph: FileDependencyGraph | None,
+) -> list[PlanIssue]:
+    """Deterministically flag plan batch orderings that merge a dependent
+    before the file it depends on (subclass before base, plan §7 step 9).
+
+    The flat merge order is ``[fp for batch in plan.phases for fp in
+    batch.file_paths]``. For each EXTRACTED edge ``source -> target`` (source
+    imports/inherits target, so target must merge first), a violation is when
+    ``source`` appears earlier than ``target`` in that order. Only EXTRACTED
+    edges raise an issue (risk monotonicity, plan §5); INFERRED / AMBIGUOUS are
+    ignored. One issue per offending source file, ``issue_type=batch_ordering``
+    (deliberately outside ``SHORTCIRCUIT_SAFE_ISSUE_TYPES`` so it forces an LLM
+    re-check rather than a reclassification short-circuit). ``suggested ==
+    current`` classification: the remedy is reordering, not reclassifying.
+
+    Empty / absent graph -> ``[]`` (safe degrade)."""
+    if dependency_graph is None or not dependency_graph.edges:
+        return []
+
+    order: list[str] = []
+    batch_risk_map: dict[str, RiskLevel] = {}
+    for batch in plan.phases:
+        for fp in batch.file_paths:
+            order.append(fp)
+            batch_risk_map[fp] = batch.risk_level
+    position = {fp: idx for idx, fp in enumerate(order)}
+
+    # source_file -> dependencies it is merged ahead of.
+    violations: dict[str, list[str]] = {}
+    for edge in dependency_graph.edges:
+        if edge.confidence != ConfidenceLabel.EXTRACTED:
+            continue
+        src, tgt = edge.source_file, edge.target_file
+        if src == tgt or src not in position or tgt not in position:
+            continue
+        if position[src] < position[tgt]:
+            deps = violations.setdefault(src, [])
+            if tgt not in deps:
+                deps.append(tgt)
+
+    issues: list[PlanIssue] = []
+    for src in sorted(violations):
+        if len(issues) >= _MAX_TOPO_ISSUES:
+            break
+        deps = sorted(violations[src])
+        listed = ", ".join(deps[:3]) + (" ..." if len(deps) > 3 else "")
+        rl = batch_risk_map[src]
+        issues.append(
+            PlanIssue(
+                file_path=src,
+                current_classification=rl,
+                # Reordering, not reclassification — keep the level unchanged so
+                # the planner does not silently move the file's risk batch.
+                suggested_classification=rl,
+                reason=(
+                    f"BATCH-ORDERING: '{src}' is merged before its dependency "
+                    f"({listed}). The dependency must merge first or the "
+                    "intermediate build may break — reorder the batches."
+                ),
+                issue_type="batch_ordering",
+                source="precheck",
+            )
+        )
+    return issues
+
+
 _PLANNER_JUDGE_SYSTEM_BASE = """You are an independent reviewer of code merge plans. Your task is to verify that \
 high-risk files are correctly classified — NOT to find as many issues as possible.
 
@@ -289,9 +383,27 @@ def _build_file_manifest(
         flags: list[str] = []
         if fd.is_security_sensitive:
             flags.append("SEC")
-        if fd.conflict_count > 0:
-            flags.append(f"conflicts={fd.conflict_count}")
-        if fd.lines_added + fd.lines_deleted > 100:
+        is_c_class = fd.change_category == FileChangeCategory.C
+        if is_c_class:
+            flags.append("C")
+        flags.append(f"conflicts={fd.conflict_count}")
+        if is_c_class:
+            # Pre-merge there are no conflict markers, so conflict_count
+            # is always 0 for C-class — surface both-side line deltas and
+            # fork-side hunk regions so Judge has semantic signal beyond
+            # path name. Without this, Rule 6 ("flag C-class auto_risky
+            # in auth dirs") had nothing but the path string to lean on.
+            flags.append(f"fork=+{fd.lines_added}/-{fd.lines_deleted}")
+            flags.append(
+                f"upstream=+{fd.upstream_lines_added}/-{fd.upstream_lines_deleted}"
+            )
+            if fd.hunks:
+                regions = [
+                    f"{h.start_line_current}-{h.end_line_current}" for h in fd.hunks[:3]
+                ]
+                suffix = "" if len(fd.hunks) <= 3 else f";+{len(fd.hunks) - 3}"
+                flags.append(f"regions={';'.join(regions)}{suffix}")
+        elif fd.lines_added + fd.lines_deleted > 100:
             flags.append(f"+{fd.lines_added}/-{fd.lines_deleted}")
         if batch_risk_map is not None and fd.risk_level in _MISMATCH_TRACKED_LEVELS:
             batch_rl = batch_risk_map.get(fd.file_path)
@@ -448,6 +560,48 @@ def _build_planner_responses_section(
     return "".join(lines)
 
 
+# Review-task rules + return schema shared by the whole-plan and per-segment
+# review prompts so the two cannot drift (rule 6's auth-keyword list in
+# particular). NOTE: this LLM-facing keyword list is intentionally distinct
+# from the deterministic ``_SAFELIST_RISK_KEYWORDS`` tuple above — they drive
+# different mechanisms (LLM C-class confirmation vs. trivial-safe short-circuit
+# exclusion) and are not meant to be identical.
+_REVIEW_TASKS_RULES = """## Your Review Tasks (raise issues ONLY with concrete evidence)
+1. Files where `is_security_sensitive=true` but classified below `auto_risky` → flag
+2. Files where `conflict_count > 0` but NOT classified `human_required` → flag
+3. Files that are obviously security-critical by name/path, classified `auto_safe`, AND show `[SEC]` or `conflicts>0` in the manifest → flag. Path name alone is NOT sufficient when `conflicts=0` and no `[SEC]` flag is present.
+4. Dangerous batch ordering that would break a dependency → flag (name both files)
+5. Files with `conflict_count=0` and `is_security_sensitive=false` → do NOT flag regardless of diff size, UNLESS rule 6 applies
+6. C-class files (marked `[C]` in the manifest) classified `auto_risky` whose path contains any of {auth, token, user, permission, session, oauth, credential, password, signin, signup, login, otp, secret, signature} as a path segment — flag to confirm the classification is intentional and not the result of a missing `security_sensitive` pattern. Use the manifest's `fork=+A/-D`, `upstream=+A/-D`, and `regions=...` flags as evidence: if fork and upstream both touched non-trivial line counts in overlapping regions, suggest `human_required`. Pure path-name match without supporting hunk evidence is NOT sufficient."""
+
+_MISMATCH_NOTE = """Note: MISMATCH / NOT-BATCHED divergence between the classifier and the
+batch is verified deterministically before this prompt is built; you
+do not need to re-detect it. Focus on semantic / path-based judgment."""
+
+_ZH_LANG_NOTE = "⚠️ 语言要求：'summary' 和每个 issue 的 'reason' 字段必须使用中文撰写，禁止使用英文句子（技术术语如文件路径、枚举值除外）。"
+
+
+def _return_schema_block(summary_text: str) -> str:
+    """Return-JSON schema shared by both review prompts. Only the ``summary``
+    placeholder text varies between the whole-plan and per-segment callers."""
+    return f"""Return JSON with:
+{{
+  "result": "approved" | "revision_needed" | "critical_replan",
+  "issues": [
+    {{
+      "file_path": "path/to/file",
+      "current_classification": "<MUST be exactly one of: auto_safe, auto_risky, human_required, deleted_only, binary, excluded>",
+      "suggested_classification": "<MUST be exactly one of: auto_safe, auto_risky, human_required, deleted_only, binary, excluded>",
+      "reason": "Specific reason why classification is wrong",
+      "issue_type": "risk_underestimated | wrong_batch | missing_dependency | security_missed"
+    }}
+  ],
+  "approved_files_count": 0,
+  "flagged_files_count": 0,
+  "summary": "{summary_text}"
+}}"""
+
+
 def build_plan_review_prompt(
     plan: MergePlan,
     file_diffs: list[FileDiff],
@@ -501,37 +655,15 @@ def build_plan_review_prompt(
 ## All Files (path: classification [flags])
 {manifest}
 {prior_section}{planner_response_section}
-## Your Review Tasks (raise issues ONLY with concrete evidence)
-1. Files where `is_security_sensitive=true` but classified below `auto_risky` → flag
-2. Files where `conflict_count > 0` but NOT classified `human_required` → flag
-3. Files that are obviously security-critical by name/path but classified `auto_safe` → flag
-4. Dangerous batch ordering that would break a dependency → flag (name both files)
-5. Files with `conflict_count=0` and `is_security_sensitive=false` → do NOT flag regardless of diff size
-{"6. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
+{_REVIEW_TASKS_RULES}
+{"7. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
 
-Note: MISMATCH / NOT-BATCHED divergence between the classifier and the
-batch is verified deterministically before this prompt is built; you
-do not need to re-detect it. Focus on semantic / path-based judgment.
+{_MISMATCH_NOTE}
 
-Return JSON with:
-{{
-  "result": "approved" | "revision_needed" | "critical_replan",
-  "issues": [
-    {{
-      "file_path": "path/to/file",
-      "current_classification": "<MUST be exactly one of: auto_safe, auto_risky, human_required, deleted_only, binary, excluded>",
-      "suggested_classification": "<MUST be exactly one of: auto_safe, auto_risky, human_required, deleted_only, binary, excluded>",
-      "reason": "Specific reason why classification is wrong",
-      "issue_type": "risk_underestimated | wrong_batch | missing_dependency | security_missed"
-    }}
-  ],
-  "approved_files_count": 0,
-  "flagged_files_count": 0,
-  "summary": "Overall assessment"
-}}
+{_return_schema_block("Overall assessment")}
 
 CRITICAL: Each issue MUST reference a SINGLE file_path. The "current_classification" and "suggested_classification" fields MUST be exactly one of the enum values listed above — do NOT combine multiple values or add free text.
-{"⚠️ 语言要求：'summary' 和每个 issue 的 'reason' 字段必须使用中文撰写，禁止使用英文句子（技术术语如文件路径、枚举值除外）。" if lang == "zh" else ""}
+{_ZH_LANG_NOTE if lang == "zh" else ""}
 Respond with ONLY the JSON object. No other text."""
 
 
@@ -602,37 +734,15 @@ def build_segment_plan_review_prompt(
 ## Files in This Segment (path: classification [flags])
 {manifest}
 {prior_section}{planner_response_section}
-## Your Review Tasks (raise issues ONLY with concrete evidence)
-1. Files where `is_security_sensitive=true` but classified below `auto_risky` → flag
-2. Files where `conflict_count > 0` but NOT classified `human_required` → flag
-3. Files that are obviously security-critical by name/path but classified `auto_safe` → flag
-4. Dangerous batch ordering that would break a dependency → flag (name both files)
-5. Files with `conflict_count=0` and `is_security_sensitive=false` → do NOT flag regardless of diff size
-{"6. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
+{_REVIEW_TASKS_RULES}
+{"7. Do NOT re-raise issues already marked as resolved above" if revision_round > 0 else ""}
 
-Note: MISMATCH / NOT-BATCHED divergence between the classifier and the
-batch is verified deterministically before this prompt is built; you
-do not need to re-detect it. Focus on semantic / path-based judgment.
+{_MISMATCH_NOTE}
 
 Only report issues for files listed in this segment. The other segments will cover the remaining files.
 
-Return JSON with:
-{{
-  "result": "approved" | "revision_needed" | "critical_replan",
-  "issues": [
-    {{
-      "file_path": "path/to/file",
-      "current_classification": "<MUST be exactly one of: auto_safe, auto_risky, human_required, deleted_only, binary, excluded>",
-      "suggested_classification": "<MUST be exactly one of: auto_safe, auto_risky, human_required, deleted_only, binary, excluded>",
-      "reason": "Specific reason why classification is wrong",
-      "issue_type": "risk_underestimated | wrong_batch | missing_dependency | security_missed"
-    }}
-  ],
-  "approved_files_count": 0,
-  "flagged_files_count": 0,
-  "summary": "Assessment of this segment"
-}}
+{_return_schema_block("Assessment of this segment")}
 
 CRITICAL: Each issue MUST reference a SINGLE file_path from this segment. The "current_classification" and "suggested_classification" fields MUST be exactly one of the enum values listed above.
-{"⚠️ 语言要求：'summary' 和每个 issue 的 'reason' 字段必须使用中文撰写，禁止使用英文句子（技术术语如文件路径、枚举值除外）。" if lang == "zh" else ""}
+{_ZH_LANG_NOTE if lang == "zh" else ""}
 Respond with ONLY the JSON object. No other text."""

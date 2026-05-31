@@ -1,0 +1,220 @@
+[HIGH] (compile-gate) JS/TS/Go/Java/Rust merges are never syntax-validated — every syntax gate is vacuous for the target language, so a broken .ts merge reaches COMPLETED
+    loc: src/tools/syntax_checker.py:34-36
+    impact: A TypeScript/JS/Go/Java/Rust merge with unbalanced braces, a truncated function body, a bad import, or a hallucinated symbol passes the only always-on per-file static gate vacuously and is recorded as a successful decision. Because the duplicate-symbol checker only catches re-declarations (not gener
+    fix: Add a best-effort non-Python checker for the languages already in _LANG_MAP. At minimum a structural brace/paren/bracket-balance + unterminated-string check for .ts/.tsx/.js/.go/.java/.rs (LLM-free, no toolchain needed), returning valid=False with the offending line on imbalance. Optionally shell ou
+
+[HIGH] (compile-gate) build_check and smoke_test launch crashes are swallowed and leave verdict at PASS — a tree that never compiled reaches COMPLETED
+    loc: src/core/phases/judge_review.py:380-382
+    impact: When an operator HAS enabled build_check (the documented compile gate, e.g. `tsc --noEmit` / `go build ./...`), a misconfigured command, missing interpreter, or harness crash makes the gate silently pass. A tree that never actually compiled reports COMPLETED/success, and because no state.errors entr
+    fix: On the launch-exception path, treat the gate as failed: append a build_check_failed/smoke_test_failed CRITICAL JudgeIssue and downgrade the verdict to FAIL+veto exactly as the non-zero-exit path does (judge_review.py:398-411), or at minimum append to state.errors so CI reports PARTIAL_FAILURE. A gat
+
+[HIGH] (compile-gate) Phase-5 per-file syntax review only covers high-risk files; low-risk auto-merged / replayed / take_* files are never parse-checked
+    loc: src/agents/judge_agent.py:88-95
+    impact: A low-risk Python file with a plain SyntaxError introduced by a replay/native-3way write reaches COMPLETED uncaught (Python is the one language whose checker actually works, yet these files never reach it). For TS files this compounds with the vacuous-checker bug. The bulk of a merge's files have no
+    fix: Run a deterministic syntax/conflict-marker check (_review_file_deterministic) over ALL files in state.file_decision_records before the verdict, not just high_risk_records — it is LLM-free and cheap. Emit CRITICAL syntax_error issues for any file regardless of risk class so the deterministic verdict 
+
+[HIGH] (halluc-symbol) Whole-file semantic merge (the common ≤20KB case) has NO hallucinated-symbol guard — fabricated base.member commits clean
+    loc: src/agents/executor_agent.py:533-565
+    impact: An LLM that fabricates a member access on a genuinely-imported object (e.g. core._isoWeek where neither fork nor upstream defines it — the exact zod failure class) is written to disk and committed as a successful SEMANTIC_MERGE decision (confidence from the analyst, ~0.85+). The TypeScript will fail
+    fix: Call find_invented_member_accesses(merged_content, [orig_current_content, orig_target_content], file_diff.file_path) immediately after the _foreign_chars block (executor_agent.py:535), mirroring the chunked-path escalation at :672-689 — on non-empty result return create_escalate_record with the same
+
+[HIGH] (halluc-symbol) Non-overlapping finditer misses fabricated leaf in chained member access (core.schemas._isoWeek) — the zod namespace pattern
+    loc: src/tools/hallucinated_symbol_guard.py:74
+    impact: Even the chunked path (and the whole-file path once it gets the guard from the fix above) cannot catch a fabricated member at the END of a dotted chain — the most common shape for namespace/builder APIs. A merge inventing core.schemas._isoWeek or z.iso._isoWeek commits clean despite the guard nomina
+    fix: Make the leaf scan overlapping. Either iterate every trailing `.member` token: for each match of r"([A-Za-z_$][\w$]*)\.([A-Za-z_$][\w$]*)" use re.finditer with a lookahead-based pattern, or post-split each chain on '.' and check every adjacent (parent, child) pair so `schemas._isoWeek` is tested ind
+
+[HIGH] (elision-drop) Single-shot semantic merge has NO dropped-code / hallucinated-symbol guard — silent fork-code loss and invented ASCII symbols commit clean
+    loc: src/agents/executor_agent.py:533-565
+    impact: A fabricated cross-module symbol (compile-breaking TS/Go reference) or a silently dropped fork feature is committed as a high-confidence SEMANTIC_MERGE decision and reaches COMPLETED. This is precisely the 'LLM hallucinations slip through' / 'merge OUTPUT has code defects' complaint, on the most-tra
+    fix: In execute_semantic_merge, after parse_merge_result and before apply_with_snapshot (around line 533-548), run the same two guards the chunked path uses: `merged_content = remove_duplicate_top_level_symbols(merged_content, file_path)` and `invented_refs = find_invented_member_accesses(merged_content,
+
+[HIGH] (elision-drop) Gate-4 truncation floor is computed from the TRIMMED staged size, so a heavily-elided merge passes when staging compressed the inputs
+    loc: src/agents/executor_agent.py:465-517
+    impact: The only length-based truncation/elision defense on the whole-file path is measured against the wrong baseline; under a raised chunk_size or small-context executor it silently accepts a merge that dropped 40-80% of the real file as 'complete', committing massive code loss.
+    fix: Pass the UNTRIMMED original sizes to parse_merge_result on the whole-file path: change lines 515-516 to `current_size=len(orig_current_content), target_size=len(orig_target_content)`. The floor then reflects the real file, matching the repair() path which already passes untrimmed sizes (906-907). Ve
+
+[HIGH] (chunk-merge) Force-split of a single oversized function splits mid-body at an arbitrary non-boundary line, producing brace-unbalanced chunks merged in isolation with no brace/syntax check at the seam
+    loc: src/tools/chunk_processor.py:186-188
+    impact: A large single function/class is merged as two brace-imbalanced halves stitched together → extra or missing braces → uncompilable output committed as a successful SEMANTIC_MERGE (apply_with_snapshot at executor_agent.py:695). For TS/JS/Go this is never caught (check_syntax returns valid=True for non
+    fix: Avoid blind mid-statement force-splitting: when a unit exceeds chunk_size*2 with no internal boundary, route the whole file to whole-file semantic merge (or escalate) rather than splitting mid-body, OR after merge_chunks run a language-aware brace/paren balance check on the concatenated result and e
+
+[HIGH] (conflict-cost) Chunked conflict analysis injects the FULL merge-base file into every chunk prompt (6-8x ~62k-token resend for one file)
+    loc: src/agents/conflict_analyst_agent.py:431 (within _analyze_chunk, called from _chunked_analyze_file at 426-443; base passed unchunked at 264-266)
+    impact: One C-class file's conflict analysis costs ~370k+ input tokens (6-8 chunks x ~62k tokens) instead of ~2x ~10k; 16+ min wall-clock for 7 files and mid-run interruption. The base duplication is pure waste (the same bytes re-sent N times) and is the dominant driver of the runaway cost and latency. It a
+    fix: In _chunked_analyze_file, split base_content into chunks aligned to the current/target chunk pairs (or pass only the relevant base slice / no base at all per chunk) instead of the whole file. Minimal version: split base via split_by_semantic_boundary the same way and zip the i-th base chunk into pai
+
+[HIGH] (parse-robust) Missing analyst `confidence` field defaults to 0.5 and silently drives an auto-merge directional pick (anti-pattern #3 in a decision-bearing parser)
+    loc: src/llm/response_parser.py:219
+    impact: A truncated-but-brace-balanced or sloppy analyst reply that omits `confidence` causes a silent fork-content drop: the system auto-takes upstream (or fork) for a real C-class both-sides-modified file with a fabricated 0.5 confidence, no grounding warning, and no escalation. Dropped fork feature commi
+    fix: Mirror the commit-round behavior but stricter: when `confidence` is absent from the parsed object, do NOT default. Either raise ParseError (the single-shot caller already converts that to ESCALATE_HUMAN at conflict_analyst_agent.py:362-374) or force `recommended = MergeDecision.ESCALATE_HUMAN` whene
+
+[HIGH] (parse-robust) Truncated judge batch review silently downgrades to 'no issues found' for every file in the chunk
+    loc: src/llm/response_parser.py:673-676
+    impact: A judge batch review whose output is cut at the 2048-token ceiling reports the merge as defect-free for every file in that chunk; the deterministic FAIL-on-CRITICAL/HIGH gate never fires because the issue list is empty. A broken merge (dropped logic, invented symbol, unresolved semantics) passes Jud
+    fix: Route judge review through `_call_llm_with_retry_meta` (or a json-mode meta variant) and feed the LLMResponse to a stop_reason check before parsing; on stop_reason in {max_tokens,length} raise/escalate the batch instead of treating it as parseable. At minimum, in `parse_batch_file_review_issues`, di
+
+[HIGH] (parse-robust) Analyst/judge/planner never see provider truncation: stop_reason is captured by complete_meta but thrown away on the non-meta path
+    loc: src/agents/base_agent.py:709
+    impact: Output-cap truncation on analyst/judge/planner is invisible. For the analyst it manifests as 0-parse -> bisect re-run loop (burning tokens, observed in the run as repeated ~219k prompts); for the judge it manifests as fewer/zero issues -> verdict flips toward PASS. A truncated verdict can silently m
+    fix: Add a meta-aware JSON entry point: have analyst/judge call a `_call_llm_with_retry_meta(json_mode=True)` and inspect `stop_reason` before handing the text to the domain parser; raise ParseError (-> ESCALATE / retry with bumped max_tokens) when stop_reason in {max_tokens,length}. This reuses the exec
+
+[HIGH] (det-merge) Native 3-way merge of C-class files commits blended output with confidence 0.95 and is then skipped by Judge's high-confidence filter on default config — no LLM/Judge review of a both-sides-modified file
+    loc: src/core/phases/auto_merge.py:570-626
+    impact: A both-sides-modified C-class file (the highest-risk category) can be silently auto-resolved with a semantically-wrong line-level git merge and committed at confidence 0.95 with zero LLM or Judge semantic review on a default-configured run. Fork logic interleaved with an upstream refactor of the sam
+    fix: Restrict the native 3-way loop to non-C categories (only run it for B / single-side files), OR keep it for C but write the record with confidence < judge_skip_confidence_threshold (e.g. 0.84) and agent="native_3way_merge" so the O-J1 skip cannot drop a both-sides-modified file out of Judge LLM revie
+
+[HIGH] (judge-eff) High-confidence skip (judge_skip_high_confidence=True by default) drops semantic-merge files out of LLM review with a vacuous syntax check, and the Judge has NO deterministic invented-symbol guard — hallucinated symbols in single-shot merges reach COMPLETED uninspected
+    loc: src/agents/judge_agent.py:127-148 (skip) + 477-492 (_local_syntax_ok) + 1039-1081 (only duplicate-symbol check, no invented-member check)
+    impact: A pure-ASCII hallucinated symbol (the exact zod failure class) on a high-confidence single-shot semantic merge of a TS/JS/Go file is committed and the file is recorded as Judge-reviewed-clean (passed_files). Verdict is PASS; run reaches COMPLETED with an uncompilable/incorrect merge. This is the dom
+    fix: In the high-confidence skip block, only skip when check_file_syntax actually validated the language (i.e. _local_syntax_ok returns True because a real checker ran, not vacuously). Add a `language_is_checkable(file_path)` guard so unsupported extensions (.ts/.js/.go/.java/.rs) never qualify for the s
+
+[HIGH] (judge-eff) Layered-path batch Judge review swallows ParseError and returns empty issue lists per file — a truncated/malformed batch review silently becomes 'no issues found' for every AUTO_SAFE/AUTO_RISKY file in the chunk
+    loc: src/agents/judge_agent.py:1694-1714 (_review_files_batch_llm) + src/llm/response_parser.py:672-676 (parse_batch_file_review_issues swallow)
+    impact: A truncated batch review of risky auto-merged files silently downgrades to PASS for the whole chunk — the opposite of fail-safe. Defects the Judge LLM would have caught in those files are never surfaced; the merge proceeds. Reachable on every layered auto_merge dispute round with a large/verbose bat
+    fix: Have parse_batch_file_review_issues distinguish 'no issues' from 'parse failed': on ParseError raise or return a sentinel that _review_files_batch_llm converts into a deterministic CRITICAL 'batch_review_unparseable' issue (must_fix) for each file in the chunk, rather than silently returning empty l
+
+[MEDIUM] (compile-gate) On a default config a non-compiling / feature-dropping merge reaches COMPLETED — all three executable gates are off and deterministic findings are non-blocking
+    loc: src/core/phases/report_generation.py:230
+    impact: A merged tree that does not compile cross-file, or that silently dropped a fork-added export, transitions to COMPLETED. The only signal is a CI-mode exit-code downgrade (run.py:56) — invisible to interactive/browser operators, who see a green COMPLETED. The missing_additive_export check (the dropped
+    fix: Make _run_deterministic_verification findings blocking: after gathering, if any CRITICAL-class finding exists (duplicate_symbol, missing_additive_export), route to AWAITING_HUMAN instead of COMPLETED (mirroring the Judge veto path), rather than only appending to state.errors. Keep the dry_run early-
+
+[MEDIUM] (compile-gate) Report-generation exception still transitions to COMPLETED — a run whose reports failed to write looks fully green
+    loc: src/core/phases/report_generation.py:250
+    impact: A run whose merge report failed to write reaches COMPLETED with exit 0 in interactive mode and prints 'Merge completed successfully!'. The operator has no merge report and no indication anything went wrong. COMPLETED is effectively the default terminal state for anything past Judge routing.
+    fix: On report-write failure, transition to a non-success terminal (e.g. keep AWAITING_HUMAN or add a degraded status) or at least make the interactive path surface state.errors (see the run.py finding). Marking a run COMPLETED when its own report could not be produced hides real failures.
+
+[MEDIUM] (halluc-symbol) Recombination check uses substring `ref in src` — a fabricated member mentioned anywhere in a source (comment/string/longer name) is whitelisted
+    loc: src/tools/hallucinated_symbol_guard.py:76
+    impact: A hallucinated symbol whose name happens to appear as a substring anywhere in either source — a comment, a docstring, a string literal, or as a fragment of a longer identifier (e.g. `core._isoWeek` is a substring of a hypothetical `core._isoWeekFoo`) — is treated as legitimately recombined and never
+    fix: Tighten the recombination test from substring to a word-boundary match of the exact qualified ref in a code context, e.g. precompute the set of base.member pairs actually present in each source using the same _QUALIFIED_REF tokenizer and check membership in that set rather than `ref in src`. This el
+
+[MEDIUM] (halluc-symbol) Analyst grounding/hallucination warnings are advisory-only — a fabricated symbol in the rationale still drives a high-confidence auto SEMANTIC_MERGE
+    loc: src/core/phases/conflict_analysis.py:408
+    impact: When the analyst confidently grounds its recommendation on a hallucinated symbol (the exact case scan_rationale_for_hallucinations was written to catch), the file is auto-routed to the executor merge with no human gate and no confidence/risk penalty. The warning is surfaced only if the file independ
+    fix: Have _select_merge_strategy (or the loop at conflict_analysis.py before it) treat a non-empty analysis.grounding_warnings (the fabricated channel, distinct from required_new_apis) as a hard ESCALATE_HUMAN override, or at minimum subtract a fixed penalty from confidence so it drops below auto_merge_c
+
+[MEDIUM] (chunk-merge) align_chunks equal-count fast path zips by INDEX, pairing non-corresponding fork/upstream content when an upstream insertion shifts the split point — drops or duplicates whole functions
+    loc: src/tools/chunk_processor.py:129-130
+    impact: A fork-only or fork-modified top-level function/class is silently dropped from the merged file (lost fork feature) or duplicated across the seam (TS2393/redeclare compile error). The exact 'merge OUTPUT has code defects' the user reports. No downstream guard catches it: _foreign_chars is non-ASCII o
+    fix: The equal-count case must not be assumed to be content-aligned. Either (a) when counts are equal but the per-chunk boundary symbol sets differ, fall through to a content-anchored alignment that pairs chunks by the top-level declaration names they contain (align by symbol overlap rather than index), 
+
+[MEDIUM] (chunk-merge) align_chunks count-mismatch path can produce a pair with an EMPTY upstream target, sending the LLM a degenerate 'merge fork against empty upstream, incorporate upstream changes' prompt that invites dropping fork content
+    loc: src/tools/chunk_processor.py:145-153
+    impact: Fork-only code in an unmatched region can be silently dropped (LLM interprets empty upstream as a deletion), and the only length-based truncation defense (gate-4) is disabled for that pair. Contributes to silent fork-feature loss on count-mismatched large C-class files.
+    fix: In _execute_chunked_semantic_merge, when tgt_chunk is empty, skip the LLM call entirely and pass the fork chunk through verbatim (a fork-only region has nothing to merge) — this both preserves fork content deterministically and avoids the misleading prompt. If a merge is still desired, _build_chunk_
+
+[MEDIUM] (chunk-merge) remove_duplicate_top_level_symbols cannot dedup a seam-duplicated top-level `function` in JS/TS, so chunked-merge function duplication compiles to a TS2393 error uncaught
+    loc: src/tools/duplicate_symbol_check.py:42-47
+    impact: A chunk-seam-duplicated top-level function (a likely outcome of the index-zip misalignment bug) produces an uncompilable file that passes both the executor dedup auto-fix AND the Judge duplicate-symbol veto, reaching COMPLETED. Pure-function-bearing files (common in zod-style TS) are the exact blind
+    fix: For the seam-dedup auto-fix path specifically, detect duplicated top-level `function foo` IMPLEMENTATIONS (a function declaration with a body `{`, as opposed to an overload signature ending in `;`) and dedup/escalate those, while still ignoring overload signature lines. The overload-false-positive c
+
+[MEDIUM] (conflict-cost) $0-priced model defeats the run budget cap, so the runaway resend has no cost ceiling to stop it
+    loc: src/tools/cost_tracker.py:135-148 (PRICING_TABLE miss -> $0) feeding src/agents/base_agent.py:304-311 (_check_budget)
+    impact: For any model not in PRICING_TABLE, the run budget guardrail is silently a no-op: an unbounded number of ~62k-token calls can run with zero apparent spend. Combined with the per-chunk base duplication, a single file can burn hundreds of thousands of tokens with the budget cap unable to intervene; co
+    fix: When pricing is missing, do not record $0 silently: either (a) use a conservative non-zero fallback price so total_cost_usd grows and the budget cap can still trip, or (b) track a separate token-based budget (sum input_tokens+output_tokens) and have _check_budget enforce a max-token ceiling independ
+
+[MEDIUM] (conflict-cost) Chunked analyst path re-sends full enriched_context + ANALYST_SYSTEM + worked examples per chunk, multiplying fixed scaffolding cost
+    loc: src/agents/conflict_analyst_agent.py:428-441 (per-chunk build_conflict_analysis_prompt + system) 
+    impact: Adds a multiplied fixed-token tax (~2-4KB examples + grounding + context) per chunk on top of the duplicated base, further inflating the per-file token count and latency for large C-class files.
+    fix: Hoist invariant scaffolding out of the per-chunk loop: build the fixed context/examples once and either reference them via prompt caching (cache_strategy) or pass a stripped per-chunk prompt that omits the worked examples after the first chunk. At minimum, drop _ANALYSIS_EXAMPLES from chunk prompts 
+
+[MEDIUM] (conflict-cost) Transport-timeout retries re-send the unchanged ~219k-char prompt verbatim (no shrink before retry)
+    loc: src/agents/base_agent.py:884-921 (retry loop: only CONTEXT_OVERFLOW compresses; TRANSPORT/FORMAT re-send unchanged) + src/llm/error_classifier.py:126-135 (transport retryable, should_compress=False)
+    impact: On a flaky gateway, every retry of an already-oversized chunk prompt re-spends ~62k input tokens with no progress; a single slow file can consume its full retry budget at full prompt size, amplifying the latency/cost blowup that interrupted the run.
+    fix: On retryable TRANSPORT/timeout for an oversized prompt, reduce the request before re-sending (e.g. drop the merge-base section or trim to the staged view) rather than re-sending verbatim; or cap per-call prompt size for the chunked analyst path so a retry cannot re-bill 62k tokens. Pairing this with
+
+[MEDIUM] (parse-robust) complete_meta base default returns stop_reason=None, so an OpenAI-compatible gateway that omits finish_reason defeats the executor truncation gate
+    loc: src/llm/client.py:144-145
+    impact: On exactly the proxy/gateway setup the user is running (deepseek-v4-pro, OpenAI-compatible, 8192 output cap), an output-cap truncation that the gateway does not flag with finish_reason='length' can pass all parse_merge_result gates and commit a truncated/elided merge.
+    fix: Treat unknown/None stop_reason on a provider that is expected to report it as suspicious: when stop_reason is None AND output length is near the configured max_tokens budget (e.g. estimate_tokens(text) >= 0.95*max_tokens), raise the truncation ParseError. Alternatively pass the UNTRIMMED orig_curren
+
+[MEDIUM] (parse-robust) parse_commit_round_analyses swallows ParseError to an empty dict, misattributing output-cap truncation to LLM failure and triggering a wasteful bisect re-run
+    loc: src/llm/response_parser.py:579-582
+    impact: Output-truncation failures are silently retried as if they were input ambiguity, doubling/tripling token cost per failed round (the user reported ~370k+ input tokens for one file, 16+ min for 7 files). No correctness loss directly, but a real, reachable cost/latency defect that also masks the true f
+    fix: Capture stop_reason on the commit-round call (meta path) and, when truncation is detected, retry with a larger max_tokens or split by output size rather than blindly bisecting the commit list; and have parse_commit_round_analyses distinguish 'parse failed' (raise/flag) from 'no files matched' (legit
+
+[MEDIUM] (det-merge) Dep-bump manifest auto-TAKE_TARGET silently overwrites fork dependency pins with no diff/override check and is excluded from Judge LLM review
+    loc: src/core/phases/auto_merge.py:1085-1103
+    impact: A fork that pinned a security-patched dependency version, a private registry, or a forked package in package.json/requirements.txt/pyproject.toml has that pin silently replaced by the upstream bump on any commit whose message contains bump/upgrade/dependabot/renovate/security-update. The dependency 
+    fix: Before auto-taking a dep MANIFEST (not lock file), check the file's change_category: if C-class (fork also modified it vs merge_base), route to conflict_analysis instead of TAKE_TARGET, or at minimum diff the fork manifest against the merge_base to detect fork-only pins/overrides and escalate when a
+
+[MEDIUM] (preservation) Native-3way-merged C-class files are removed from batch.file_paths before audit_fork_preservation runs, so the preservation auditor never inspects them
+    loc: src/core/phases/auto_merge.py:622-626
+    impact: A C-class file where git merge-file produced a clean result that dropped/mangled fork content (and, in the byte-equals-upstream sub-case the auditor checks, fully reverted fork work) is committed at confidence 0.95, removed from the batch, AUTO_SAFE-scoped for the final Judge (judge_agent.py:92 admi
+    fix: Have audit_fork_preservation iterate `batch.original_file_paths` instead of `batch.file_paths` (preservation_auditor.py:82), the same fix already used elsewhere to read the plan 'as signed off' (plan.py:151-153). It already gates on state.file_decision_records and the byte-equality test, so re-inclu
+
+[MEDIUM] (preservation) audit_fork_preservation only flags exact worktree==upstream byte-equality and skips fork deltas <50 lines, so partial fork loss in native-3way merges escapes entirely
+    loc: src/tools/preservation_auditor.py:93-102
+    impact: Partial fork loss — git merge-file silently discarding interleaved fork edits while keeping upstream, or any sub-50-line security/feature fork change being overwritten — is committed clean with no human review and no audit flag. This is the dominant fork-loss vector for native-3way merges, which rar
+    fix: Strengthen the C-class preservation check beyond byte-equality: for C-class files compute fork-added top-level symbols (feature_preservation.added_exported_symbols already exists) and the set of fork-only lines from the fork-vs-base diff, then flag when the merged worktree is missing those symbols/l
+
+[MEDIUM] (preservation) missing_additive_export / feature_preservation drop-detection is never wired as a blocking gate inside the merge path — only as a post-commit report finding
+    loc: src/tools/feature_preservation.py:104-110
+    impact: A merge that drops a fork-added export (function/class/const the fork team added on top of upstream) reaches COMPLETED. The drop is detectable deterministically and cheaply but the detector is positioned only as a non-blocking post-commit report line that, per the orchestration map, doesn't even cha
+    fix: Call feature_preservation.missing_symbols inside the executor before apply_with_snapshot on both semantic-merge paths (compute added_exported_symbols from base_content vs fork_content, then check the merged output); on a non-empty missing set, create_escalate_record like the existing _foreign_chars/
+
+[MEDIUM] (judge-eff) take_target/take_current files are skipped from LLM review by byte-equality, but TAKE_TARGET byte-equality on a C-class file confirms (not flags) full fork loss — recorded as 'reviewed, no issues'
+    loc: src/agents/judge_agent.py:105-123 (skip wiring) + 418-475 (_verify_take_decisions)
+    impact: A C-class file whose fork customization was discarded by a take_target decision passes Judge review as clean (no LLM call, no issue). The fork-loss net is delegated entirely to auto_merge's audit_fork_preservation, which only fires at >=50 fork lines and exact upstream equality — small but material 
+    fix: In _verify_take_decisions, when a TAKE_TARGET record's file is category C (both-sides-modified per state.file_categories), do NOT short-circuit on upstream byte-equality — keep it in the LLM review path (or emit at least an INFO/HIGH fork-preservation check) since equality there proves fork content 
+
+[MEDIUM] (prompt-quality) E-SEMANTIC-MERGE user prompt closes with bare 'Return ONLY the merged file content' and tells the model to 'Preserve fork's private/custom logic' over staged/elided content — actively invites fabrication and silent code loss on the single-shot path
+    loc: src/llm/prompts/executor_prompts.py:147-153 (build_semantic_merge_prompt tail) + src/agents/executor_agent.py:465-482 (staged content rebind) + src/llm/chunker.py:578,606,612 (render_signature emits '{sig}  ...', render_file_staged emits '# ... (N sections omitted)')
+    impact: On the single-shot semantic-merge path (the common case for files that fit the buffer), the model is asked to merge from an elided/signature-only fork view while being told to preserve fork logic. It will either (a) silently drop the omitted fork sections — committed as a 'complete' merge because th
+    fix: Add an explicit fidelity clause to the user prompt tail in build_semantic_merge_prompt: 'Reproduce every line of unchanged code verbatim. If a region in the provided content is a signature stub or marked omitted, you MUST NOT invent its body — emit OUTPUT_TOO_LARGE so the orchestrator falls back to 
+
+[LOW] (compile-gate) Interactive / browser run path ignores state.errors — partial_failure (dropped exports, dropped escalations, duplicate symbols, per-file exceptions) is invisible without --ci
+    loc: src/cli/commands/run.py:196-197
+    impact: An operator running `merge` in the default (browser/interactive) mode sees 'Merge completed successfully!' and exit 0 even when the run recorded duplicate symbols, dropped fork exports, or dropped (unresolved) escalations. The partial-failure signal these checks produce is wired into exactly one of 
+    fix: In the non-CI COMPLETED branch, after the success print, check `if final_state.errors:` and print a yellow 'Completed with N verification finding(s)' block listing each finding's message, and exit with EXIT_PARTIAL_FAILURE there too (or at least a distinct non-zero code). Apply the same to resume.py
+
+[LOW] (halluc-symbol) diff_facts_grounding verb check only matches `<side> <verb>` English adjacency — most contradicting rationales slip past, and it is advisory-only
+    loc: src/tools/diff_facts_grounding.py:26
+    impact: The diff-fact safety net catches only the narrowest phrasing of a side-attributed verb claim; any paraphrase, passive construction, synonym, or unattributed claim that contradicts the deterministic diff is not flagged. Since it is advisory-only anyway, a missed contradiction has no gating consequenc
+    fix: This is documented-narrow by design and non-blocking, so lowest priority. If hardening: broaden _VERB_TO_KEY with synonyms (created/introduced→added, deleted/dropped→removed), allow `<verb> ... by <side>` reversed order via a second alternation, and pair with the gating change above so a confirmed c
+
+[LOW] (halluc-symbol) Renamed/aliased imports make every fabricated member silent — base treated as brand-new
+    loc: src/tools/hallucinated_symbol_guard.py:78-80
+    impact: A merge that both renames an import binding and invents a member on the renamed binding produces a compile error that no deterministic guard catches on any path, because the base looks new. Less common than direct fabrication but fully unguarded when it occurs.
+    fix: Lower priority given the design tradeoff. If desired, cross-reference the imported_symbols surface already harvested at executor_agent.py:491 (_safe_harvest_symbols) to recognize aliased namespace imports, so a member on a freshly-aliased-but-known module can still be validated against the harvested
+
+[LOW] (elision-drop) looks_truncated short-circuits to (False,None) on any output ending in a healthy brace/semicolon, regardless of how much was dropped
+    loc: src/tools/elision_detector.py:217-218
+    impact: Provider truncation that ends on a brace and drops a meaningful fraction of a large file slips past the only length-based gate; relies entirely on stop_reason==max_tokens (Gate 1), which is absent on non-meta paths and is None for proxies/gateways that omit finish_reason.
+    fix: Add a length-only branch: when sizes are provided and len(content) < floor, flag truncation EVEN IF the tail ends healthy (a healthy-looking tail does not prove completeness when the body is far shorter than both inputs). Keep the current tail-heuristic as an additional independent trigger. This mak
+
+[LOW] (elision-drop) Inline chunk-merge prompt is unregistered and strips all grounding (no symbol surface, no dependents, no OUTPUT_TOO_LARGE contract) on the very path that lacks cross-chunk context
+    loc: src/agents/executor_agent.py:1254-1275
+    impact: Per-chunk merges on large C-class files (the zod schemas.ts case, routed chunked at 22736 chars) get the least-grounded prompt and no cross-chunk symbol context, producing seam fabrications and dropped imports; merge_chunks (chunk_processor.py) only re-inserts a newline and does no brace-balance/com
+    fix: Route the chunk-merge prompt through the registered E-gate and pass per-pair grounding the whole-file path already computes: imported_symbols harvested from orig fork content, and the file-level referenced_symbols/dependents (constant across chunks). Even without neighbor text, supplying the importe
+
+[LOW] (conflict-cost) Truncated-but-brace-balanced analyst JSON is silently completed with confidence=0.5, conflict_type=UNKNOWN defaults (no truncation gate on analyst path)
+    loc: src/llm/response_parser.py:35-39 (_extract_json brace-slice) + 205-219 (parse_conflict_analysis defaults); analyst calls _call_llm_with_retry (conflict_analyst_agent.py:347-353, 438-442) which discards stop_reason
+    impact: A truncated or malformed analyst reply can be accepted as a valid low-confidence analysis (conf=0.5) and drive a directional auto-merge (take_target/take_current) at the 0.4 floor, instead of being detected as truncation and escalated. Violates contract anti-pattern #3 (no silent default-fill) on a 
+    fix: Route analyst calls through _call_llm_with_retry_meta and refuse output whose stop_reason is in {max_tokens,length} (raise ParseError -> escalate), mirroring the executor. Separately, make confidence a required field in parse_conflict_analysis: if `confidence` is absent from the parsed object, raise
+
+[LOW] (parse-robust) Single-shot analyst confidence out-of-range raises but missing-vs-garbage handling is inconsistent between single-shot and commit-round parsers
+    loc: src/llm/response_parser.py:219 vs 603-606
+    impact: Inconsistent defaulting means a malformed confidence in a commit-round batch silently becomes 0.5 and can auto-apply a directional take (>=0.4 floor) for that file, while the same input in single-shot would escalate. Divergent safety guarantees by code path for no principled reason; the commit-round
+    fix: Make both parsers fail closed on a present-but-invalid OR missing confidence: drop the `except`/default in the commit-round path and instead set recommended=ESCALATE_HUMAN when confidence cannot be validated, so a garbage/absent confidence never clears the auto-merge floor.
+
+[LOW] (det-merge) Native 3-way merge result decoded with surrogateescape can write non-UTF-8 / corrupt content; conflict detection uses loose substring framing that can miss a marker the canonical detector would catch
+    loc: src/tools/git_tool.py:131-138
+    impact: A clean-looking native 3-way result that actually still contains an edge-framed conflict marker, or surrogate-escaped bytes, is written for C-class files. Currently caught by the apply-side canonical detector, but the duplicated/inconsistent marker logic across git_tool and conflict_markers is a lat
+    fix: Replace the substring checks in three_way_merge_file (git_tool.py:136) with the canonical conflict_markers.has_conflict_markers detector so both call sites agree, and reject (return None) when the decoded text contains surrogate codepoints rather than committing surrogateescape bytes.
+
+[LOW] (judge-eff) Judge LLM grounding downgrade reclassifies CRITICAL/HIGH to MEDIUM when the model paraphrases evidence instead of quoting it verbatim from merged_content — a real dropped-feature finding falls below the FAIL band
+    loc: src/llm/response_parser.py:487-527 (_validate_evidence_grounded) + 466-484 (_apply_grounding_rule) + 286-291 (verdict from CRITICAL/HIGH only)
+    impact: A genuinely blocking defect the Judge LLM identified is silently demoted out of the blocking band purely on a verbatim-quoting technicality; the merge passes. Combined with the prompt telling the model this will happen, it biases the Judge toward citing trivially-quotable lines over describing seman
+    fix: Restrict _validate_evidence_grounded downgrade to cases where the excerpt matches NEITHER merged nor fork nor upstream content (true fabrication). For a near-match (e.g. normalized-whitespace or fuzzy substring) keep the original severity; only fabricated-evidence (no source match anywhere) should d
+
+[LOW] (prompt-quality) Inline chunk-merge prompt says 'Merge these two sections' with no instruction against cross-chunk references and omits all grounding (symbol surface, dependents, OUTPUT_TOO_LARGE) — maximizing hallucination on the only path that has the invented-symbol guard
+    loc: src/agents/executor_agent.py:1254-1275 (_build_chunk_merge_prompt), used at executor_agent.py:609-617
+    impact: The model sees only one slice of each side with the weakest grounding in the codebase, so it is most likely to (a) fabricate a cross-chunk reference (a symbol defined in chunk 1 used in chunk 3), or (b) duplicate/redefine a helper it assumes is missing. This is precisely the path that DOES run find_
+    fix: Register the chunk-merge prompt as an E- gate and enrich it: (1) add the Imported Symbol Surface block (reuse _format_symbol_surface_block) so per-chunk grounding matches the single-shot path; (2) add an explicit instruction 'You are merging ONE slice of a larger file. Do NOT introduce, redefine, or
+
+[LOW] (prompt-quality) Analyst change_volume_signal injects imperative 'Strongly prefer take_target/take_current' steering from line-count ratios, competing with the grounding rules in the same prompt and nudging the model to discard small load-bearing fork edits
+    loc: src/llm/prompts/analyst_prompts.py:406-439 (size_signal) embedded at analyst_prompts.py:477-479 (<change_volume_signal>)
+    impact: The analyst's recommended_strategy can be biased to take_target on exactly the files where fork delta is small-but-critical (auth checks, feature-flag defaults, pinned security patches). That strategy flows to execute_auto_merge(TAKE_TARGET), byte-overwriting fork content; preservation_auditor's 50-
+    fix: Demote the imperative wording to neutral observation: replace 'Strongly prefer take_target' / 'take_target is usually safe' with 'Upstream changed substantially more lines, but line count does not measure importance — judge whether the fork's change is load-bearing (security, config, feature flags) 
+

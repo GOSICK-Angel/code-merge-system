@@ -193,6 +193,26 @@ class TestEnforceBatchLimits:
         ids = [b.batch_id for b in result.phases]
         assert len(ids) == len(set(ids))
 
+    def test_split_resnapshots_original_file_paths(self):
+        """model_copy skips the original_file_paths snapshot validator, so
+        each split sub-batch must re-freeze it to its own slice. Otherwise
+        every sub-batch inherits the parent's full pre-split list, which the
+        plan-review report renders verbatim — making N sub-batches look
+        identical."""
+        cfg = _make_config()
+        cfg.coordinator.max_files_per_batch = 2
+        files = [f"f{i}.py" for i in range(6)]
+        plan = _make_plan([_make_batch(files)])
+
+        c = Coordinator(cfg)
+        result = c.enforce_batch_limits(plan)
+
+        assert len(result.phases) == 3
+        for sub in result.phases:
+            assert sub.original_file_paths == sub.file_paths
+        rendered = [f for sub in result.phases for f in sub.original_file_paths]
+        assert sorted(rendered) == sorted(files)
+
     def test_compute_max_batch_size_respects_hard_cap(self):
         cfg = _make_config()
         cfg.coordinator.max_files_per_batch = 7
@@ -258,6 +278,97 @@ class TestEnforceBatchLimitsTokenAware:
         result = c.enforce_batch_limits(plan, file_size_hints=hints)
         assert len(result.phases) == 1
         assert result.phases[0].file_paths == ["known", "unknown"]
+
+
+class TestEnforceBatchLimitsByDirectory:
+    """`group_batches_by_directory` regroups files by top-level dir
+    before the count cap kicks in. Produces cohesive sub-batches so the
+    Executor's rollback blast radius is contained to one functional
+    area when a file blows up mid-batch.
+    """
+
+    def test_mixed_dirs_split_into_one_batch_per_dir(self):
+        cfg = _make_config()
+        cfg.coordinator.max_files_per_batch = 100  # well above file count
+        cfg.coordinator.group_batches_by_directory = True
+        files = [
+            "models/auth/a.go",
+            "models/auth/b.go",
+            "routers/web/auth/c.go",
+            "templates/user/d.tmpl",
+            "models/user/e.go",
+        ]
+        plan = _make_plan([_make_batch(files)])
+
+        c = Coordinator(cfg)
+        result = c.enforce_batch_limits(plan)
+
+        # 3 distinct top-level dirs: models / routers / templates.
+        assert len(result.phases) == 3
+        paths_by_batch = [b.file_paths for b in result.phases]
+        assert ["models/auth/a.go", "models/auth/b.go", "models/user/e.go"] in (
+            paths_by_batch
+        )
+        assert ["routers/web/auth/c.go"] in paths_by_batch
+        assert ["templates/user/d.tmpl"] in paths_by_batch
+
+    def test_root_level_files_bucketed_separately(self):
+        cfg = _make_config()
+        cfg.coordinator.max_files_per_batch = 100
+        cfg.coordinator.group_batches_by_directory = True
+        files = ["go.mod", "go.sum", "src/foo.go"]
+        plan = _make_plan([_make_batch(files)])
+
+        c = Coordinator(cfg)
+        result = c.enforce_batch_limits(plan)
+
+        assert len(result.phases) == 2  # (root) + src
+        sets = {tuple(b.file_paths) for b in result.phases}
+        assert ("go.mod", "go.sum") in sets
+        assert ("src/foo.go",) in sets
+
+    def test_directory_grouping_respects_count_cap(self):
+        # Even within one top-level dir, the file-count cap is applied.
+        cfg = _make_config()
+        cfg.coordinator.max_files_per_batch = 2
+        cfg.coordinator.group_batches_by_directory = True
+        files = [f"src/f{i}.go" for i in range(5)]
+        plan = _make_plan([_make_batch(files)])
+
+        c = Coordinator(cfg)
+        result = c.enforce_batch_limits(plan)
+
+        # 5 files in one dir, cap=2 → 3 sub-batches all under src/.
+        assert len(result.phases) == 3
+        for sub in result.phases:
+            assert all(fp.startswith("src/") for fp in sub.file_paths)
+        assert sum(len(b.file_paths) for b in result.phases) == 5
+
+    def test_grouping_disabled_keeps_legacy_flat_split(self):
+        cfg = _make_config()
+        cfg.coordinator.max_files_per_batch = 100
+        cfg.coordinator.group_batches_by_directory = False
+        files = ["models/a.go", "routers/b.go", "templates/c.tmpl"]
+        plan = _make_plan([_make_batch(files)])
+
+        c = Coordinator(cfg)
+        result = c.enforce_batch_limits(plan)
+
+        # Below the cap and grouping disabled → batch returned untouched.
+        assert result is plan
+
+    def test_single_dir_batch_returned_unchanged(self):
+        # No directory diversity → no split needed regardless of flag.
+        cfg = _make_config()
+        cfg.coordinator.max_files_per_batch = 100
+        cfg.coordinator.group_batches_by_directory = True
+        files = ["models/auth/a.go", "models/auth/b.go", "models/auth/c.go"]
+        plan = _make_plan([_make_batch(files)])
+
+        c = Coordinator(cfg)
+        result = c.enforce_batch_limits(plan)
+
+        assert result is plan
 
 
 class TestBuildMetaReviewResult:

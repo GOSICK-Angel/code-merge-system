@@ -10,10 +10,13 @@ rather than mutating in place.
 
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -63,6 +66,18 @@ PRICING_TABLE: dict[str, PricingEntry] = {
         cache_read_per_m=0.3,
         cache_write_per_m=3.75,
     ),
+    "claude-opus-4-7": PricingEntry(
+        input_per_m=15.0,
+        output_per_m=75.0,
+        cache_read_per_m=1.5,
+        cache_write_per_m=18.75,
+    ),
+    "claude-sonnet-4-7": PricingEntry(
+        input_per_m=3.0,
+        output_per_m=15.0,
+        cache_read_per_m=0.3,
+        cache_write_per_m=3.75,
+    ),
     "claude-haiku-4-5-20251001": PricingEntry(
         input_per_m=0.80,
         output_per_m=4.0,
@@ -73,6 +88,10 @@ PRICING_TABLE: dict[str, PricingEntry] = {
     "gpt-4o-mini": PricingEntry(input_per_m=0.15, output_per_m=0.60),
     "gpt-4.1": PricingEntry(input_per_m=2.0, output_per_m=8.0),
     "gpt-5.4": PricingEntry(input_per_m=10.0, output_per_m=30.0),
+    # ESTIMATE — verify against the provider's published pricing. mimo-v2.5-pro
+    # is served via an OpenAI-compatible endpoint as a cheap judge/plan-review
+    # model; these placeholder rates keep its cost visible rather than $0.
+    "mimo-v2.5-pro": PricingEntry(input_per_m=0.50, output_per_m=2.0),
 }
 
 
@@ -102,6 +121,7 @@ class CostTracker:
         self._pricing = pricing or PRICING_TABLE
         self._entries: list[CostEntry] = []
         self._lock = threading.Lock()
+        self._unknown_models: set[str] = set()
 
     def record(
         self,
@@ -112,9 +132,20 @@ class CostTracker:
         usage: TokenUsage,
         elapsed_seconds: float = 0.0,
     ) -> CostEntry:
-        pricing = self._pricing.get(
-            model, PricingEntry(input_per_m=0.0, output_per_m=0.0)
-        )
+        pricing = self._pricing.get(model)
+        if pricing is None:
+            with self._lock:
+                first_seen = model not in self._unknown_models
+                self._unknown_models.add(model)
+            if first_seen:
+                logger.warning(
+                    "No pricing entry for model %r (provider=%s) — its cost is "
+                    "recorded as $0 and will understate the run total. Add it to "
+                    "PRICING_TABLE in cost_tracker.py.",
+                    model,
+                    provider,
+                )
+            pricing = PricingEntry(input_per_m=0.0, output_per_m=0.0)
         cost = _calculate_cost(usage, pricing)
         entry = CostEntry(
             agent=agent,
@@ -144,6 +175,15 @@ class CostTracker:
         with self._lock:
             return len(self._entries)
 
+    @property
+    def total_tokens(self) -> int:
+        """Cumulative input+output tokens across all calls. Unlike
+        ``total_cost_usd`` this is pricing-independent, so it provides a real
+        budget guardrail even for unpriced / proxy models (deepseek-v4-pro,
+        self-hosted gateways) whose dollar cost is recorded as $0 (#8C)."""
+        with self._lock:
+            return sum(e.usage.total_tokens for e in self._entries)
+
     def summary(self) -> dict[str, Any]:
         """Aggregate summary for reporting (C5)."""
         with self._lock:
@@ -157,6 +197,7 @@ class CostTracker:
                 "by_agent": {},
                 "by_phase": {},
                 "by_model": {},
+                "untracked_models": [],
             }
 
         total_input = sum(e.usage.input_tokens for e in entries)
@@ -188,6 +229,13 @@ class CostTracker:
         total_elapsed = sum(e.elapsed_seconds for e in entries)
         avg_latency = total_elapsed / len(entries) if entries else 0.0
 
+        # Models seen in entries that have no pricing entry — their cost is $0
+        # and the total is therefore a lower bound. Surface them explicitly so
+        # the report does not silently understate spend.
+        untracked_models = sorted(
+            {e.model for e in entries if e.model not in self._pricing}
+        )
+
         return {
             "total_cost_usd": round(sum(e.cost_usd for e in entries), 4),
             "total_calls": len(entries),
@@ -201,4 +249,5 @@ class CostTracker:
             "by_agent": by_agent,
             "by_phase": by_phase,
             "by_model": by_model,
+            "untracked_models": untracked_models,
         }

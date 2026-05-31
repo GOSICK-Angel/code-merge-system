@@ -17,6 +17,7 @@ from src.models.plan_review import (
     IssueResponseAction,
     PlannerIssueResponse,
     PlanDiffEntry,
+    ReviewConclusionReason,
 )
 from src.models.state import MergeState
 
@@ -584,9 +585,168 @@ class TestPlanReviewConvergence:
         assert outcome.target_status == SystemStatus.AWAITING_HUMAN
         assert len(state.pending_user_decisions) == 1
         assert state.pending_user_decisions[0].file_path == "b.py"
-        assert len(state.pending_user_decisions[0].options) == 3
         option_keys = {o.key for o in state.pending_user_decisions[0].options}
-        assert option_keys == {"keep_head", "take_target", "llm_auto_merge"}
+        # Base ladder (keep_head / take_target / llm_auto_merge) plus
+        # always-emitted Round-2/3 extras: llm_with_instruction,
+        # manual_paste, skip. The union_additions extra is data-driven
+        # (requires both sides to be pure additions); absent here
+        # because the synthetic plan carries no FileDiff entries.
+        assert option_keys == {
+            "keep_head",
+            "take_target",
+            "llm_auto_merge",
+            "llm_with_instruction",
+            "manual_paste",
+            "skip",
+        }
+        kinds_by_key = {o.key: o.kind for o in state.pending_user_decisions[0].options}
+        assert kinds_by_key["keep_head"] == "keep_head"
+        assert kinds_by_key["take_target"] == "take_target"
+        assert kinds_by_key["llm_auto_merge"] == "llm_default"
+        assert kinds_by_key["llm_with_instruction"] == "llm_with_instruction"
+        assert kinds_by_key["manual_paste"] == "manual_paste"
+        assert kinds_by_key["skip"] == "skip"
+
+
+class TestPlanRevisingViaPrecheck:
+    """Exercise plan_revising through the *real* deterministic precheck —
+    no mocked Judge verdict. A plan that under-classifies a file (classifier
+    says AUTO_RISKY, plan parks it in an AUTO_SAFE batch) is a plan the
+    PlannerJudge must reject; the phase then runs a revision round and
+    converges once the Planner accepts the escalation. This is the
+    LLM-independent path that makes plan_revising reachable even when the
+    Judge LLM approves everything."""
+
+    def _judge(self):
+        from src.agents.planner_judge_agent import PlannerJudgeAgent
+
+        with patch.dict("os.environ", {"TEST_KEY": "sk-test-dummy"}):
+            return PlannerJudgeAgent(llm_config=_make_llm_config())
+
+    def _planner(self) -> PlannerAgent:
+        with patch.dict("os.environ", {"TEST_KEY": "sk-test-dummy"}):
+            return PlannerAgent(llm_config=_make_llm_config())
+
+    def _diff(self, fp: str, level: RiskLevel) -> FileDiff:
+        return FileDiff(
+            file_path=fp,
+            file_status=FileStatus.MODIFIED,
+            risk_level=level,
+            risk_score=0.5,
+            lines_added=3,
+            lines_deleted=1,
+            lines_changed=4,
+            conflict_count=0,
+            hunks=[],
+            is_security_sensitive=False,
+            change_category=FileChangeCategory.B,
+        )
+
+    def _approved_verdict(self) -> PlanJudgeVerdict:
+        return PlanJudgeVerdict(
+            result=PlanJudgeResult.APPROVED,
+            issues=[],
+            approved_files_count=2,
+            flagged_files_count=0,
+            summary="LLM sees nothing wrong",
+            judge_model="test",
+            timestamp=datetime.now(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_precheck_rejects_underclassified_plan(self):
+        """Even with the LLM approving, a classifier/batch risk MISMATCH
+        forces REVISION_NEEDED — the deterministic dispute that the
+        plan_revising loop hinges on."""
+        judge = self._judge()
+        judge._review_single = AsyncMock(return_value=(self._approved_verdict(), {}))
+
+        plan = _make_plan([("auto_merge", ["safe.py", "under.py"], "auto_safe")])
+        file_diffs = [
+            self._diff("safe.py", RiskLevel.AUTO_SAFE),
+            self._diff("under.py", RiskLevel.AUTO_RISKY),
+        ]
+
+        verdict = await judge.review_plan(plan, file_diffs, revision_round=0)
+
+        assert verdict.result == PlanJudgeResult.REVISION_NEEDED
+        flagged = {iss.file_path for iss in verdict.issues}
+        assert "under.py" in flagged
+        under = next(iss for iss in verdict.issues if iss.file_path == "under.py")
+        assert under.source == "precheck"
+        assert under.suggested_classification == RiskLevel.AUTO_RISKY
+
+    @pytest.mark.asyncio
+    async def test_phase_drives_plan_revising_to_convergence(self):
+        from src.core.phases.plan_review import PlanReviewPhase
+        from src.models.state import SystemStatus
+
+        judge = self._judge()
+        judge._review_single = AsyncMock(return_value=(self._approved_verdict(), {}))
+
+        planner = self._planner()
+
+        async def _accept_all(plan, issues, lang="en", file_diffs=None):
+            return [
+                PlannerIssueResponse(
+                    issue_id=iss.issue_id,
+                    file_path=iss.file_path,
+                    action=IssueResponseAction.ACCEPT,
+                    reason="agreed — escalate",
+                )
+                for iss in issues
+            ]
+
+        planner._evaluate_judge_issues = AsyncMock(side_effect=_accept_all)
+
+        plan = _make_plan([("auto_merge", ["safe.py", "under.py"], "auto_safe")])
+        state = MergeState(
+            config=MergeConfig(
+                upstream_ref="upstream/main",
+                fork_ref="origin/main",
+                max_plan_revision_rounds=3,
+            )
+        )
+        state.merge_plan = plan
+        state.file_diffs = [
+            self._diff("safe.py", RiskLevel.AUTO_SAFE),
+            self._diff("under.py", RiskLevel.AUTO_RISKY),
+        ]
+        state.file_classifications = {
+            "safe.py": RiskLevel.AUTO_SAFE,
+            "under.py": RiskLevel.AUTO_RISKY,
+        }
+
+        mock_sm = MagicMock()
+        mock_sm.transition = MagicMock()
+
+        ctx = MagicMock()
+        ctx.agents = {"planner": planner, "planner_judge": judge}
+        ctx.config = state.config
+        ctx.state_machine = mock_sm
+
+        phase = PlanReviewPhase()
+        with patch("src.core.phases.plan_review.write_plan_review_report"):
+            outcome = await phase.execute(state, ctx)
+
+        # A revision round actually ran (not short-circuited at round 0).
+        planner._evaluate_judge_issues.assert_awaited()
+        transition_targets = [c.args[1] for c in mock_sm.transition.call_args_list]
+        assert SystemStatus.PLAN_REVISING in transition_targets
+        assert state.plan_revision_rounds == 1
+
+        # ...and the loop converged once the Planner accepted the escalation.
+        assert state.review_conclusion.reason == ReviewConclusionReason.APPROVED
+        risky = {
+            fp
+            for batch in state.merge_plan.phases
+            if batch.risk_level == RiskLevel.AUTO_RISKY
+            for fp in batch.file_paths
+        }
+        assert "under.py" in risky
+        # No HUMAN_REQUIRED files remain, so the converged plan proceeds
+        # straight to auto-merge.
+        assert outcome.target_status == SystemStatus.AUTO_MERGING
 
 
 class TestClassifyPriorIssues:

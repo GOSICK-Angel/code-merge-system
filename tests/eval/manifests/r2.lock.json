@@ -1,0 +1,36 @@
+{
+  "eval_version": "0.1.0",
+  "generated_at": "2026-05-16T17:40:55.266303Z",
+  "samples": [
+    {
+      "content_sha256": "6155fee911636c81815239fe86ab5b8d168b70c8ef8ab8d6a2f14afc540a784c",
+      "relative_path": "samples/r2-0001",
+      "sample_id": "r2-0001",
+      "tier": 2
+    },
+    {
+      "content_sha256": "550c485a0b262e752dec3cb7e3d8b1427b849e6b2e5af353f6f197eb8044c9c3",
+      "relative_path": "samples/r2-0002",
+      "sample_id": "r2-0002",
+      "tier": 2
+    },
+    {
+      "content_sha256": "7d759e58669634bf515385b6c9cb6e49941ddee88f0d74cf59fe7ddc35d826d2",
+      "relative_path": "samples/r2-0003",
+      "sample_id": "r2-0003",
+      "tier": 2
+    },
+    {
+      "content_sha256": "a375825836e940bc50ab38915d7bc517d1dd63aa217c9d9f82511e09e74c7c3e",
+      "relative_path": "samples/r2-0004",
+      "sample_id": "r2-0004",
+      "tier": 2
+    },
+    {
+      "content_sha256": "890c74b91ddb574f4dca7f1dae189535c01601a359d439b131870df3c5ac4f42",
+      "relative_path": "samples/r2-0005",
+      "sample_id": "r2-0005",
+      "tier": 2
+    }
+  ]
+}

@@ -7,6 +7,8 @@ languages.  Each chunk can be rendered at three levels: FULL, SIGNATURE, or DROP
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import logging
 import re
 from collections.abc import Mapping
@@ -45,6 +47,20 @@ class CodeChunk(BaseModel, frozen=True):
     byte_range: tuple[int, int] = (0, 0)
 
 
+def chunk_key(chunk: CodeChunk) -> tuple[int, int]:
+    """Stable unique key for a chunk within one rendered file.
+
+    Chunks of a file occupy disjoint, ordered line spans, so
+    ``(start_line, end_line)`` identifies a chunk uniquely even when two
+    chunks share a ``name`` — overloaded / conditionally-redefined defs, or
+    statement blocks whose first line repeats. Keying render levels by
+    ``name`` silently collapsed such chunks onto one level, dropping a
+    relevant block or expanding an irrelevant one. ``byte_range`` is not used
+    because the indent-fallback chunker leaves it at its ``(0, 0)`` default.
+    """
+    return (chunk.start_line, chunk.end_line)
+
+
 LANGUAGE_MAP: dict[str, str] = {
     ".py": "python",
     ".js": "javascript",
@@ -72,13 +88,12 @@ def detect_language(file_path: str) -> str | None:
 # Step 2: AST Chunker (tree-sitter) — optional dependency
 # ---------------------------------------------------------------------------
 
-_HAS_TREE_SITTER = False
-try:
-    import tree_sitter  # type: ignore[import-not-found]
-
-    _HAS_TREE_SITTER = True
-except ImportError:
-    tree_sitter = None
+# Resolved via a runtime import string and typed ``Any`` so the optional
+# tree-sitter dependency is invisible to mypy whether or not it (or its
+# stubs) is installed — avoids env-dependent unused-ignore / assignment
+# errors from a plain ``import tree_sitter`` guard.
+_HAS_TREE_SITTER = importlib.util.find_spec("tree_sitter") is not None
+tree_sitter: Any = importlib.import_module("tree_sitter") if _HAS_TREE_SITTER else None
 
 
 CHUNK_BOUNDARY_NODES: dict[str, dict[str, ChunkKind]] = {
@@ -172,24 +187,32 @@ def _get_parser(language: str) -> Any | None:
         return None
 
     try:
-        import importlib
-
         lang_mod = importlib.import_module(module_name)
-        lang_fn = lang_mod.language
-
-        if language == "tsx":
-            lang_obj = tree_sitter.Language(lang_fn("tsx"))
-        elif language == "typescript":
-            lang_obj = tree_sitter.Language(lang_fn("typescript"))
-        else:
-            lang_obj = tree_sitter.Language(lang_fn())
-
+        lang_obj = tree_sitter.Language(_resolve_grammar(lang_mod, language))
         parser = tree_sitter.Parser(lang_obj)
         _PARSER_CACHE[language] = parser
         return parser
     except Exception:
         logger.debug("Failed to load tree-sitter parser for %s", language)
         return None
+
+
+def _resolve_grammar(lang_mod: Any, language: str) -> Any:
+    """Return the grammar PyCapsule across tree-sitter binding API shapes.
+
+    The combined ``tree_sitter_typescript`` package exposes per-dialect
+    ``language_typescript()`` / ``language_tsx()`` (no-arg) in current
+    releases; older builds shipped a single ``language(name)`` taking the
+    dialect name. Single-language grammars expose a no-arg ``language()``.
+    """
+    if language == "typescript" and hasattr(lang_mod, "language_typescript"):
+        return lang_mod.language_typescript()
+    if language == "tsx" and hasattr(lang_mod, "language_tsx"):
+        return lang_mod.language_tsx()
+    lang_fn = lang_mod.language
+    if language in ("typescript", "tsx"):
+        return lang_fn(language)
+    return lang_fn()
 
 
 def _node_text(node: object, source: str) -> str:
@@ -233,15 +256,38 @@ def _extract_child_method_names(node: object, source: str, language: str) -> lis
     return methods
 
 
+def _signature_cutoff(text: str) -> int | None:
+    """Index of the signature terminator (``:`` for Python, body ``{`` for
+    C-like languages), searched at bracket depth 0.
+
+    A naive ``text.find(":")`` lands on the first parameter type annotation —
+    ``def f(a: int):`` → ``def f(a:`` — truncating the signature mid-parameter.
+    Tracking ``() [] {}`` depth and only accepting a ``:`` / ``{`` at depth 0
+    skips colons and braces inside parameter lists, default values, type
+    annotations, and dict literals, so the cutoff falls at the real end of the
+    signature. Returns ``None`` when no depth-0 terminator exists (e.g. a
+    parameter list that runs past the captured text)."""
+    depth = 0
+    for i, ch in enumerate(text):
+        if ch == "{" and depth == 0:
+            return i
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        elif ch == ":" and depth == 0:
+            return i
+    return None
+
+
 def _extract_signature(
     node: object, source: str, kind: ChunkKind, language: str
 ) -> str:
     text = _node_text(node, source)
     if kind in (ChunkKind.FUNCTION, ChunkKind.METHOD):
-        for delimiter in (":", "{"):
-            idx = text.find(delimiter)
-            if idx != -1:
-                return text[: idx + 1].strip()
+        idx = _signature_cutoff(text)
+        if idx is not None:
+            return text[: idx + 1].strip()
         return text.split("\n")[0].strip()
 
     if kind == ChunkKind.CLASS:
@@ -459,10 +505,9 @@ def _infer_chunk_kind(content: str) -> ChunkKind:
 def _extract_indent_signature(content: str, kind: ChunkKind) -> str:
     first_line = content.strip().split("\n")[0].strip() if content.strip() else ""
     if kind in (ChunkKind.FUNCTION, ChunkKind.METHOD):
-        for delimiter in (":", "{"):
-            idx = first_line.find(delimiter)
-            if idx != -1:
-                return first_line[: idx + 1]
+        idx = _signature_cutoff(first_line)
+        if idx is not None:
+            return first_line[: idx + 1]
         return first_line
     return first_line
 
@@ -544,13 +589,13 @@ def render_chunk(chunk: CodeChunk, level: str) -> str:
 
 def render_file_staged(
     chunks: list[CodeChunk],
-    levels: dict[str, str] | Mapping[str, str],
+    levels: Mapping[tuple[int, int], str],
 ) -> str:
     parts: list[str] = []
     consecutive_drops = 0
 
     for chunk in sorted(chunks, key=lambda c: c.start_line):
-        level = levels.get(chunk.name, "drop")
+        level = levels.get(chunk_key(chunk), "drop")
         rendered = render_chunk(chunk, level)
 
         if not rendered:

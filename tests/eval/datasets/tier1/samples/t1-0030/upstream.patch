@@ -1,0 +1,10 @@
+diff --git a/datasources/aws_s3_storage/requirements.txt b/datasources/aws_s3_storage/requirements.txt
+index be4bb7b2..ae244b9d 100644
+--- a/datasources/aws_s3_storage/requirements.txt
++++ b/datasources/aws_s3_storage/requirements.txt
+@@ -1,2 +1,2 @@
+-dify_plugin==0.5.0b14
+-boto3
+\ No newline at end of file
++dify_plugin<0.6.0,>=0.5.0
++boto3

@@ -5,12 +5,17 @@ import time
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 from pydantic import BaseModel
 from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage
 from src.models.state import MergeState
-from src.llm.client import LLMClient, LLMClientFactory
+from src.llm.client import (
+    LLMClient,
+    LLMClientFactory,
+    LLMResponse,
+    uses_openai_wire,
+)
 from src.llm.context import (
     TokenBudget,
     estimate_tokens,
@@ -147,6 +152,12 @@ class BaseAgent(ABC):
         self._current_phase: str = ""
         self._hooks: HookManager | None = None
         self._contract: Any | None = None
+        # U2 budget cap state.
+        self._budget_limit_usd: float | None = None
+        self._budget_warn_pct: float = 0.8
+        self._budget_token_limit: int | None = None
+        self._budget_warning_emitted: bool = False
+        self._on_activity: Any | None = None
         self._fallback_llm: LLMClient | None = (
             LLMClientFactory.create(llm_config.fallback)
             if llm_config.fallback is not None
@@ -236,6 +247,109 @@ class BaseAgent(ABC):
 
     def set_hooks(self, hooks: HookManager) -> None:
         self._hooks = hooks
+
+    def set_budget(
+        self,
+        limit_usd: float | None,
+        warn_pct: float = 0.8,
+        token_limit: int | None = None,
+    ) -> None:
+        """Configure U2 per-run budget. ``None`` disables a given cap.
+
+        When set, ``_call_llm_with_retry`` checks ``cost_tracker`` before and
+        after each LLM call and raises ``RunBudgetExceeded`` once cumulative
+        spend reaches ``limit_usd`` OR cumulative tokens reach ``token_limit``
+        (#8C — the token cap is pricing-independent so it still fires for
+        unpriced/proxy models). The first crossing of ``limit_usd * warn_pct``
+        emits a ``budget_warning`` activity event.
+        """
+        self._budget_limit_usd = limit_usd
+        self._budget_warn_pct = warn_pct
+        self._budget_token_limit = token_limit
+        self._budget_warning_emitted = False
+
+    def set_activity_callback(self, cb: Any) -> None:
+        """Register the Orchestrator's activity callback so the agent can
+        emit ``budget_warning`` events directly (rather than only through
+        phase boundaries)."""
+        self._on_activity = cb
+
+    def _emit_activity(
+        self,
+        event_type: Literal["start", "progress", "complete", "error"],
+        action: str = "",
+        elapsed: float | None = None,
+    ) -> None:
+        """Emit a per-agent run-state event (start/complete/error of an LLM
+        call) so the topology can show genuine live agent activity.
+
+        No-op when no activity callback is wired (unit tests / standalone use).
+        Consumers fold the stream with "latest event per agent wins", so the
+        nesting introduced by retry/fallback recursion is harmless.
+        """
+        if self._on_activity is None:
+            return
+        from src.core.phases.base import ActivityEvent
+
+        self._on_activity(
+            ActivityEvent(
+                agent=self.agent_type.value,
+                action=action or self._current_phase,
+                phase=self._current_phase,
+                event_type=event_type,
+                elapsed=elapsed,
+            )
+        )
+
+    def _check_budget(self) -> None:
+        """U2: raise ``RunBudgetExceeded`` when cumulative cost meets limit;
+        emit a one-shot warning on first crossing of ``warn_pct``.
+
+        Called twice per LLM call (pre + post) so a single big call that
+        pushes spend over the cap is still detected promptly. The warning
+        is gated on ``_budget_warning_emitted`` to avoid flooding the event
+        stream when the agent stays in the warn band.
+        """
+        if self._cost_tracker is None:
+            return
+        # #8C: pricing-independent token ceiling — fires even when total_cost_usd
+        # stays $0 (unpriced/proxy models). Reuses RunBudgetExceeded so the
+        # Orchestrator's existing partial-report + AWAITING_HUMAN handling
+        # applies; spent/limit carry token counts here.
+        if self._budget_token_limit is not None:
+            tokens = self._cost_tracker.total_tokens
+            if tokens >= self._budget_token_limit:
+                from src.models.state import RunBudgetExceeded
+
+                raise RunBudgetExceeded(
+                    spent=float(tokens),
+                    limit=float(self._budget_token_limit),
+                    phase=self._current_phase,
+                )
+        if self._budget_limit_usd is None:
+            return
+        spent = self._cost_tracker.total_cost_usd
+        limit = self._budget_limit_usd
+        if spent >= limit:
+            from src.models.state import RunBudgetExceeded
+
+            raise RunBudgetExceeded(spent=spent, limit=limit, phase=self._current_phase)
+        warn_threshold = limit * self._budget_warn_pct
+        if spent >= warn_threshold and not self._budget_warning_emitted:
+            self._budget_warning_emitted = True
+            if self._on_activity is not None:
+                from src.core.phases.base import ActivityEvent
+
+                ratio = spent / limit if limit > 0 else 0.0
+                self._on_activity(
+                    ActivityEvent(
+                        agent=self.agent_type.value,
+                        action="budget_warning",
+                        phase=self._current_phase,
+                        event_type="progress",
+                        extra={"pct": ratio},
+                    )
+                )
 
     @property
     def consecutive_failures(self) -> int:
@@ -359,18 +473,38 @@ class BaseAgent(ABC):
             return False
 
     def _on_fallback_needed(self, classified: ClassifiedError) -> bool:
-        """Hook for provider fallback (extension point for C2 credential pool).
+        """Switch to the configured fallback LLM provider, if any.
 
-        Subclasses or future multi-provider support can override this to
-        switch to a different LLM provider on permanent auth failures.
-        Returns True if fallback succeeded.
+        Default implementation: if ``self._fallback_llm`` is wired (yaml has
+        ``fallback:``) and we are not already running on it, mutate
+        ``self.llm`` / ``self.llm_config`` to the fallback, reset the
+        circuit breaker, and return True so the retry loop continues.
+        The swap is sticky for the agent's lifetime — primary credentials
+        that produce a permanent-auth or empty-content failure don't get
+        re-tried on later calls. Subclasses can override for richer policies
+        (e.g. credential pool rotation in C2).
         """
+        if self._fallback_llm is None or self._using_fallback:
+            self.logger.warning(
+                "Provider fallback requested but no fallback provider "
+                "configured / already on fallback (category=%s)",
+                classified.category.value,
+            )
+            return False
+        fallback_cfg = self.llm_config.fallback
+        assert fallback_cfg is not None
         self.logger.warning(
-            "Provider fallback requested but no fallback provider configured "
-            "(category=%s)",
+            "Switching to fallback provider %s/%s (category=%s)",
+            fallback_cfg.provider,
+            fallback_cfg.model,
             classified.category.value,
         )
-        return False
+        self.llm = self._fallback_llm
+        self.llm_config = fallback_cfg
+        self._using_fallback = True
+        self._consecutive_failures = 0
+        self._sliding_window.clear()
+        return True
 
     def _mitigate_context_pressure(
         self,
@@ -403,6 +537,52 @@ class BaseAgent(ABC):
             )
         return result
 
+    async def _call_llm_with_retry_meta(
+        self,
+        messages: list[dict[str, Any]],
+        system: str | None = None,
+        max_retries: int | None = None,
+        json_mode: bool = False,
+    ) -> LLMResponse:
+        """Variant of ``_call_llm_with_retry`` that returns ``LLMResponse``.
+
+        Use when the caller needs ``stop_reason`` (the output quality
+        gate in ``parse_merge_result`` does — a ``stop_reason ==
+        "max_tokens"`` means the LLM was truncated and the text must
+        not be written to disk). Schema/structured-output is NOT
+        supported here on purpose: ``complete_structured`` returns a
+        validated pydantic model where truncation either fails parsing
+        or surfaces as ``ModelOutputError`` upstream.
+        """
+        result = await self._call_llm_with_retry(
+            messages,
+            system=system,
+            schema=None,
+            max_retries=max_retries,
+            json_mode=json_mode,
+            _return_meta=True,
+        )
+        if isinstance(result, LLMResponse):
+            return result
+        # Defensive: should be unreachable given _return_meta=True with
+        # schema=None — but if a subclass / mock returns plain text we
+        # wrap it as a stop_reason-less response rather than crashing.
+        return LLMResponse(text=str(result), stop_reason=None)
+
+    def _structured_kwargs(self, schema_name: str) -> dict[str, Any]:
+        """P2-1: structured-output kwargs for ``_call_llm_with_retry``.
+
+        Returns ``{json_schema, schema_name}`` when this agent has opted into
+        ``use_structured_outputs``; an empty dict otherwise (legacy path).
+        The returned JSON string is parsed by the agent's existing parser, so
+        enabling the flag is shape-only — semantics stay in response_parser.
+        """
+        if not self.llm_config.use_structured_outputs:
+            return {}
+        from src.llm.structured_schemas import wire_schema
+
+        return {"json_schema": wire_schema(schema_name), "schema_name": schema_name}
+
     async def _call_llm_with_retry(
         self,
         messages: list[dict[str, Any]],
@@ -410,7 +590,14 @@ class BaseAgent(ABC):
         schema: type[BaseModel] | None = None,
         max_retries: int | None = None,
         json_mode: bool = False,
-    ) -> str | BaseModel:
+        json_schema: dict[str, Any] | None = None,
+        schema_name: str = "response",
+        _return_meta: bool = False,
+    ) -> str | BaseModel | LLMResponse:
+        # U2: pre-call budget gate. Skipped when limit is None or no
+        # cost_tracker is wired (unit tests / standalone usage).
+        self._check_budget()
+
         if self._consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
             if self._fallback_llm is not None and not self._using_fallback:
                 self.logger.warning(
@@ -427,7 +614,14 @@ class BaseAgent(ABC):
                 self._consecutive_failures = 0
                 try:
                     return await self._call_llm_with_retry(
-                        messages, system, schema, max_retries, json_mode
+                        messages,
+                        system,
+                        schema,
+                        max_retries,
+                        json_mode,
+                        json_schema=json_schema,
+                        schema_name=schema_name,
+                        _return_meta=_return_meta,
                     )
                 finally:
                     self.llm, self.llm_config = saved_llm, saved_config
@@ -495,6 +689,7 @@ class BaseAgent(ABC):
                 estimated_tokens=estimated_tokens,
                 phase=self._current_phase,
             )
+        self._emit_activity("start")
 
         retry_budget = RetryBudget(max_retries=retries)
         last_error: Exception | None = None
@@ -506,25 +701,49 @@ class BaseAgent(ABC):
 
             t0 = time.monotonic()
             try:
-                llm_result: str | BaseModel
+                llm_result: str | BaseModel | LLMResponse
                 if schema is not None:
                     llm_result = await self.llm.complete_structured(
                         messages, schema, system=system
                     )
+                elif json_schema is not None:
+                    # P2-1 reliability layer: native Structured Outputs return
+                    # a well-formed JSON string that the agent's existing
+                    # response_parser still consumes (grounding / sanitisation
+                    # / deterministic-verdict logic stays in the parser).
+                    llm_result = await self.llm.structured_json(
+                        messages,
+                        json_schema=json_schema,
+                        schema_name=schema_name,
+                        system=system,
+                    )
                 else:
                     extra: dict[str, Any] = {}
-                    if json_mode and self.llm_config.provider == "openai":
+                    if json_mode and uses_openai_wire(self.llm_config.provider):
                         from src.llm.client import _is_openai_reasoning_model
 
                         if self.llm_config.api_style == "responses":
                             extra["response_format"] = {"type": "json_object"}
                         elif not _is_openai_reasoning_model(self.llm_config.model):
                             extra["response_format"] = {"type": "json_object"}
-                    llm_result = await self.llm.complete(
-                        messages, system=system, **extra
-                    )
+                    if _return_meta:
+                        llm_result = await self.llm.complete_meta(
+                            messages, system=system, **extra
+                        )
+                    else:
+                        llm_result = await self.llm.complete(
+                            messages, system=system, **extra
+                        )
                 elapsed = time.monotonic() - t0
-                resp_str = str(llm_result)
+                # Telemetry strings work off the visible text — when the
+                # result is an ``LLMResponse`` the dataclass repr would
+                # otherwise leak ``LLMResponse(text=..., stop_reason=...)``
+                # into trace logs and cost-tracker counts.
+                resp_str = (
+                    llm_result.text
+                    if isinstance(llm_result, LLMResponse)
+                    else str(llm_result)
+                )
                 resp_len = len(resp_str)
                 self.logger.info(
                     "LLM response: attempt=%d/%d, elapsed=%.1fs, response_chars=%d",
@@ -576,7 +795,13 @@ class BaseAgent(ABC):
                         response_chars=resp_len,
                         attempt=retry_budget.attempt + 1,
                     )
+                self._emit_activity("complete", elapsed=time.monotonic() - t_call_start)
                 model_override.__exit__(None, None, None)
+                # U2: post-call budget gate. The call we just made may have
+                # pushed cumulative spend over the cap; raise before returning
+                # so the orchestrator can transition AWAITING_HUMAN with a
+                # partial report rather than letting the next call slip in.
+                self._check_budget()
                 return llm_result
             except Exception as e:
                 last_error = e
@@ -672,6 +897,9 @@ class BaseAgent(ABC):
                             response_chars=0,
                             attempt=retry_budget.attempt + 1,
                         )
+                    self._emit_activity(
+                        "error", elapsed=time.monotonic() - t_call_start
+                    )
                     model_override.__exit__(None, None, None)
                     raise AgentError(classified.message, classified) from e
 
@@ -716,6 +944,20 @@ class BaseAgent(ABC):
                         retry_budget.rate_limit_waits,
                     )
                     await asyncio.sleep(delay)
+                elif (
+                    classified.should_fallback
+                    and self._fallback_llm is not None
+                    and not self._using_fallback
+                ):
+                    # O-F1: the primary provider exhausted its local retries on
+                    # a retryable-but-fallback-worthy error (sustained 5xx /
+                    # overload). The immediate-category, sliding-window and
+                    # circuit-breaker triggers can't catch this for a single-call
+                    # agent, so swap to the configured fallback provider and give
+                    # it a fresh retry budget before giving up.
+                    if self._on_fallback_needed(classified):
+                        retry_budget = RetryBudget(max_retries=retries)
+                        continue
 
         if last_classified and last_classified.category in _CIRCUIT_BREAKER_CATEGORIES:
             self._consecutive_failures += 1
@@ -735,6 +977,7 @@ class BaseAgent(ABC):
                 response_chars=0,
                 attempt=retry_budget.attempt,
             )
+        self._emit_activity("error", elapsed=time.monotonic() - t_call_start)
         model_override.__exit__(None, None, None)
         raise AgentExhaustedError(
             f"Agent {self.agent_type.value}: LLM call failed after "

@@ -1,0 +1,18 @@
+{
+  "run_id": "FIXTURE",
+  "status": "COMPLETED",
+  "file_decision_records": {
+    "hello.py": {
+      "file_path": "hello.py",
+      "file_status": "MODIFIED",
+      "decision": "semantic_merge",
+      "decision_source": "auto_executor",
+      "confidence": 0.95,
+      "rationale": "Combined upstream signature change with fork comment via semantic merge.",
+      "discarded_content": null,
+      "phase": "execute",
+      "agent": "executor"
+    }
+  },
+  "errors": []
+}

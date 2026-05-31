@@ -9,8 +9,9 @@ made multiple calls.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
+import pytest
 import git as _git
 
 from src.core.orchestrator import Orchestrator
@@ -122,8 +123,23 @@ class TestTelemetrySnapshot:
 class TestCostCeiling:
     """Verify max_cost_usd halts the orchestrator when threshold exceeded."""
 
-    def test_max_cost_usd_field_defaults_none(self, tmp_path):
+    def test_max_cost_usd_defaults_to_five_dollars(self, tmp_path):
         config = _make_config(tmp_path)
+        assert config.max_cost_usd == 5.0
+        assert isinstance(config.max_cost_usd, float)
+
+    def test_max_cost_usd_can_be_disabled_with_none(self, tmp_path):
+        """Explicit None still legal — backwards-compatible disable path
+        (plan §3.1 Q1; orchestrator ceiling check short-circuits on None)."""
+        if not (tmp_path / ".git").exists():
+            _git.Repo.init(str(tmp_path))
+        config = MergeConfig(
+            upstream_ref="upstream/main",
+            fork_ref="fork/main",
+            repo_path=str(tmp_path),
+            output=OutputConfig(directory=str(tmp_path / "outputs")),
+            max_cost_usd=None,
+        )
         assert config.max_cost_usd is None
 
     async def test_orchestrator_halts_when_cost_ceiling_exceeded(self, tmp_path):
@@ -165,6 +181,52 @@ class TestCostCeiling:
         assert result.status == SystemStatus.AWAITING_HUMAN
 
 
+class TestSuspendedPhaseStatus:
+    """A phase that suspends to AWAITING_HUMAN must read as ``awaiting``, not
+    ``running`` — otherwise the pipeline shows several phases RUNNING at once.
+    """
+
+    def _state_with_running(self, tmp_path, phase):
+        from src.models.state import PhaseResult
+
+        config = _make_config(tmp_path)
+        state = MergeState(config=config)
+        state.current_phase = phase
+        state.phase_results[phase.value] = PhaseResult(phase=phase, status="running")
+        return state
+
+    def test_running_phase_flips_to_awaiting_on_suspend(self, tmp_path):
+        from src.core.orchestrator import _mark_suspended_phase
+        from src.models.plan import MergePhase
+
+        state = self._state_with_running(tmp_path, MergePhase.AUTO_MERGE)
+        _mark_suspended_phase(state, SystemStatus.AWAITING_HUMAN)
+        assert state.phase_results["auto_merge"].status == "awaiting"
+        assert state.phase_results["auto_merge"].completed_at is not None
+
+    def test_non_awaiting_target_leaves_running(self, tmp_path):
+        from src.core.orchestrator import _mark_suspended_phase
+        from src.models.plan import MergePhase
+
+        state = self._state_with_running(tmp_path, MergePhase.AUTO_MERGE)
+        _mark_suspended_phase(state, SystemStatus.AUTO_MERGING)
+        assert state.phase_results["auto_merge"].status == "running"
+
+    def test_completed_phase_not_downgraded(self, tmp_path):
+        from src.core.orchestrator import _mark_suspended_phase
+        from src.models.plan import MergePhase
+        from src.models.state import PhaseResult
+
+        config = _make_config(tmp_path)
+        state = MergeState(config=config)
+        state.current_phase = MergePhase.JUDGE_REVIEW
+        state.phase_results["judge_review"] = PhaseResult(
+            phase=MergePhase.JUDGE_REVIEW, status="completed"
+        )
+        _mark_suspended_phase(state, SystemStatus.AWAITING_HUMAN)
+        assert state.phase_results["judge_review"].status == "completed"
+
+
 class TestDryRun:
     """Verify that dry_run=True stops the orchestrator before AUTO_MERGING."""
 
@@ -202,3 +264,56 @@ class TestDryRun:
                 result = await orch.run(state)
 
         assert result.status == SystemStatus.AWAITING_HUMAN
+
+
+class TestTokenCeiling:
+    """#8C: pricing-independent token ceiling fires even at $0 cost
+    (unpriced / proxy models like deepseek-v4-pro)."""
+
+    def _agent(self):
+        from src.agents.planner_agent import PlannerAgent
+        from src.models.config import AgentLLMConfig
+
+        return PlannerAgent(
+            AgentLLMConfig(
+                provider="openai", model="deepseek-v4-pro", api_key_env="OPENAI_API_KEY"
+            )
+        )
+
+    def test_token_ceiling_trips_at_zero_dollar_cost(self):
+        from src.tools.cost_tracker import CostTracker, TokenUsage
+        from src.models.state import RunBudgetExceeded
+
+        tracker = CostTracker()
+        # Unpriced model -> cost_usd stays 0.0, but tokens accumulate.
+        tracker.record(
+            "planner",
+            "planning",
+            "deepseek-v4-pro",
+            "openai",
+            TokenUsage(input_tokens=60_000, output_tokens=2_000),
+        )
+        assert tracker.total_cost_usd == 0.0
+        assert tracker.total_tokens == 62_000
+
+        agent = self._agent()
+        agent.set_cost_tracker(tracker, phase="planning")
+        agent.set_budget(limit_usd=None, token_limit=50_000)
+        with pytest.raises(RunBudgetExceeded):
+            agent._check_budget()
+
+    def test_token_ceiling_none_disables(self):
+        from src.tools.cost_tracker import CostTracker, TokenUsage
+
+        tracker = CostTracker()
+        tracker.record(
+            "planner",
+            "planning",
+            "deepseek-v4-pro",
+            "openai",
+            TokenUsage(input_tokens=999_999, output_tokens=1),
+        )
+        agent = self._agent()
+        agent.set_cost_tracker(tracker, phase="planning")
+        agent.set_budget(limit_usd=None, token_limit=None)
+        agent._check_budget()  # no raise

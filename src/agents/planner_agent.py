@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, cast
 from uuid import uuid4
 from src.agents.base_agent import BaseAgent
-from src.models.config import AgentLLMConfig, MergeConfig
+from src.models.config import AgentLLMConfig, MergeConfig, ModuleConfig
 from src.models.message import AgentType, AgentMessage, MessageType
 from src.models.plan import (
     MergePlan,
@@ -24,15 +24,45 @@ from src.llm.prompts.planner_prompts import (
     build_classification_prompt,
     build_evaluation_prompt,
 )
+from src.llm.structured_schemas import META_REVIEW, PLAN_CLASSIFICATION
 from src.models.plan_review import (
     PlannerIssueResponse,
     IssueResponseAction,
     PlanDiffEntry,
 )
-from src.tools.file_classifier import compute_risk_score, classify_file
+from src.tools.file_classifier import (
+    compute_complexity,
+    classify_file,
+)
+from src.tools.module_inference import infer_communities, infer_modules
+from src.models.dependency import ConfidenceLabel
+from src.llm.prompts.gate_registry import get_gate
+from src.core.parallel_file_runner import (
+    ParallelFileRunner,
+    assert_disjoint_file_shards,
+)
+import asyncio
 import fnmatch
 import json
 import json as json_lib
+from collections import Counter
+
+
+# Module co-change count that saturates the fanout dimension to 1.0. A
+# generic normalisation scale, not target-repo-specific: a file sharing a
+# module with ~10+ concurrently-changing files is treated as maximally
+# entangled for complexity purposes.
+_FANOUT_SATURATION = 10
+
+
+# Sub-chunk size for one classification LLM call. ``max_files_per_run``
+# (config, default 500) is the OUTER batch size; this constant slices each
+# outer batch further so a single LLM call never carries more than ~100
+# file lines. Calibrated against the forgejo case where one 500-file
+# classification prompt serialised to ~125KB input + ~25KB JSON output
+# and skirted the model's long-request envelope. 100 keeps a single call
+# at ~25KB / ~5KB respectively with comfortable headroom.
+_CLASSIFY_FILE_CHUNK_SIZE = 100
 
 
 class PlannerAgent(BaseAgent):
@@ -82,10 +112,17 @@ class PlannerAgent(BaseAgent):
         # legacy). Running it before the layered branch decision means
         # the updated risk_level flows into _build_layered_plan's
         # _split_by_risk_level grouping.
-        if state.config.llm_risk_scoring.enabled:
+        if state.config.llm_assist.mode != "off":
             all_file_diffs = await self._enhance_risk_scores(
-                all_file_diffs, state.config
+                all_file_diffs,
+                state.config,
+                rename_pairs=state.rename_pairs or None,
+                fanout_map=self._compute_fanout_map(all_file_diffs, state),
             )
+
+        # Phase C: deterministic God Node risk bump (runs regardless of
+        # llm_assist mode). Empty graph / bump=0 -> unchanged.
+        all_file_diffs = self._apply_god_node_risk(all_file_diffs, state)
 
         if state.file_categories:
             return self._build_layered_plan(all_file_diffs, state), all_file_diffs
@@ -120,6 +157,7 @@ class PlannerAgent(BaseAgent):
                 idx,
                 total_batches,
                 rename_pairs=state.rename_pairs or None,
+                large_diff_lines=state.config.thresholds.classification_large_diff_lines,
             )
             all_plan_data.append(plan_data)
 
@@ -181,78 +219,104 @@ class PlannerAgent(BaseAgent):
             FileChangeCategory.C: RiskLevel.AUTO_RISKY,
         }
 
-        d_missing_all = [
-            fp
-            for fp, cat in actionable_files.items()
-            if cat == FileChangeCategory.D_MISSING
-        ]
-        if d_missing_all:
-            d_safe, d_risky, d_human = self._split_by_risk_level(
-                d_missing_all,
+        fallback_set = set(fallback_paths)
+        path_layer: dict[str, int] = {}
+        for lid, paths in file_layer_map.items():
+            for fp in paths:
+                path_layer[fp] = lid
+
+        module_map, ordered_modules = self._assign_modules(
+            list(actionable_files.keys()), state
+        )
+        files_by_module: dict[str | None, list[str]] = {}
+        for fp in actionable_files:
+            files_by_module.setdefault(module_map.get(fp), []).append(fp)
+
+        # Dependency topological ranks (lower = earlier = depended-upon).
+        # Used only as a within-bucket tiebreaker so base classes / imported
+        # modules merge before their dependents at equal risk_score.
+        topo_rank: dict[str, int] = {}
+        graph = getattr(state, "dependency_graph", None)
+        if graph is not None and graph.edges:
+            ordered = graph.topological_order(list(actionable_files.keys()))
+            topo_rank = {fp: idx for idx, fp in enumerate(ordered)}
+
+        def _emit(
+            paths: list[str],
+            cat: FileChangeCategory,
+            module: str | None,
+            layer_id: int | None,
+        ) -> None:
+            if not paths:
+                return
+            safe, risky, human = self._split_by_risk_level(
+                paths,
                 diffs_by_path,
                 shadow_paths,
-                fallback_risk=category_fallback[FileChangeCategory.D_MISSING],
+                fallback_risk=category_fallback[cat],
+                topo_rank=topo_rank,
             )
             self._emit_risk_split_batches(
                 phases,
-                d_safe,
-                d_risky,
-                d_human,
-                layer_id=None,
-                change_category=FileChangeCategory.D_MISSING,
+                safe,
+                risky,
+                human,
+                layer_id=layer_id,
+                change_category=cat,
+                module=module,
             )
 
-        if fallback_paths:
-            fb_by_cat: dict[FileChangeCategory, list[str]] = {}
-            for fp in fallback_paths:
-                fb_by_cat.setdefault(actionable_files[fp], []).append(fp)
-            for cat in (FileChangeCategory.B, FileChangeCategory.C):
-                paths = fb_by_cat.get(cat, [])
-                if not paths:
-                    continue
-                safe, risky, human = self._split_by_risk_level(
-                    paths,
-                    diffs_by_path,
-                    shadow_paths,
-                    fallback_risk=category_fallback[cat],
-                )
-                self._emit_risk_split_batches(
-                    phases,
-                    safe,
-                    risky,
-                    human,
-                    layer_id=None,
-                    change_category=cat,
-                )
-
-        for layer in layers:
-            layer_files = file_layer_map.get(layer.layer_id, [])
-            if not layer_files:
+        for module in ordered_modules:
+            mod_paths = files_by_module.get(module, [])
+            if not mod_paths:
                 continue
 
-            by_category: dict[FileChangeCategory, list[str]] = {}
-            for fp in layer_files:
-                cat = actionable_files[fp]
-                by_category.setdefault(cat, []).append(fp)
+            # D_MISSING first: upstream-new files (including migrations)
+            # merge before the conflicted model files in the same module,
+            # turning the migration-ordering hint into real batch order.
+            _emit(
+                [
+                    fp
+                    for fp in mod_paths
+                    if actionable_files[fp] == FileChangeCategory.D_MISSING
+                ],
+                FileChangeCategory.D_MISSING,
+                module,
+                None,
+            )
 
-            for change_cat in (FileChangeCategory.B, FileChangeCategory.C):
-                cat_paths = by_category.get(change_cat, [])
-                if not cat_paths:
-                    continue
-                safe, risky, human = self._split_by_risk_level(
-                    cat_paths,
-                    diffs_by_path,
-                    shadow_paths,
-                    fallback_risk=category_fallback[change_cat],
+            # B/C files unassigned to any real layer (fallback bucket).
+            for cat in (FileChangeCategory.B, FileChangeCategory.C):
+                _emit(
+                    [
+                        fp
+                        for fp in mod_paths
+                        if fp in fallback_set and actionable_files[fp] == cat
+                    ],
+                    cat,
+                    module,
+                    None,
                 )
-                self._emit_risk_split_batches(
-                    phases,
-                    safe,
-                    risky,
-                    human,
-                    layer_id=layer.layer_id,
-                    change_category=change_cat,
-                )
+
+            # B/C files per real layer, in topological layer order.
+            for layer in layers:
+                for cat in (FileChangeCategory.B, FileChangeCategory.C):
+                    _emit(
+                        [
+                            fp
+                            for fp in mod_paths
+                            if path_layer.get(fp) == layer.layer_id
+                            and actionable_files[fp] == cat
+                        ],
+                        cat,
+                        module,
+                        layer.layer_id,
+                    )
+
+        module_summary: dict[str, int] = {}
+        for fp, mod in module_map.items():
+            if mod is not None:
+                module_summary[mod] = module_summary.get(mod, 0) + 1
 
         cat_summary = self._build_category_summary(categories)
         risk_summary = self._build_risk_summary(file_diffs, actionable_files)
@@ -260,8 +324,6 @@ class PlannerAgent(BaseAgent):
         self._assert_plan_integrity(phases, actionable_files, decided_paths)
 
         merge_base = state.merge_base_commit
-        if not merge_base and hasattr(state, "_merge_base"):
-            merge_base = state._merge_base or ""
 
         self.logger.info(
             "Layered plan: %d layers, %d phases, %d actionable files (B=%d C=%d D=%d)",
@@ -301,6 +363,13 @@ class PlannerAgent(BaseAgent):
                 f"(treat old/new paths as related): {rename_lines}"
             )
 
+        migration_dep = _build_migration_dependency_hint(
+            file_diffs,
+            migration_dir_patterns=state.config.file_classifier.migration_dir_patterns,
+        )
+        if migration_dep:
+            special_instructions.append(migration_dep)
+
         return MergePlan(
             created_at=datetime.now(),
             upstream_ref=state.config.upstream_ref,
@@ -310,8 +379,9 @@ class PlannerAgent(BaseAgent):
             risk_summary=risk_summary,
             category_summary=cat_summary,
             layers=layers,
-            project_context_summary=state.config.project_context or "",
+            project_context_summary=state.user_project_context or "",
             special_instructions=special_instructions,
+            module_summary=module_summary,
         )
 
     def _resolve_layers(self, config: MergeConfig) -> list[MergeLayer]:
@@ -348,9 +418,91 @@ class PlannerAgent(BaseAgent):
         has_catchall = any(p == "**" or p == "*" for p in layer.path_patterns)
         return (1 if has_catchall else 0, layer.layer_id)
 
+    def _assign_modules(
+        self, paths: list[str], state: MergeState
+    ) -> tuple[dict[str, str | None], list[str | None]]:
+        """Map actionable paths to module names and return the modules in
+        the order their batches should be emitted. When module grouping is
+        disabled every path maps to ``None`` (untagged) and the single
+        ``[None]`` pass reproduces the pre-module layered plan exactly.
+        """
+        cfg = state.config.module_config
+        if not cfg.enabled or cfg.mode == "off":
+            return {fp: None for fp in paths}, [None]
+
+        rewritten = [
+            rm.path
+            for rm in (
+                state.forks_profile.rewritten_modules if state.forks_profile else []
+            )
+        ]
+        graph = getattr(state, "dependency_graph", None)
+        if cfg.mode == "graph" and graph is not None and graph.edges:
+            # Phase C §6.4: graph-driven communities replace path topology.
+            # Name communities via the path-topology fallback (mode="auto"
+            # copy so explicit/rewritten/topology naming still applies).
+            fallback = infer_modules(
+                paths, cfg.model_copy(update={"mode": "auto"}), rewritten or None
+            )
+            edges = [
+                (e.source_file, e.target_file)
+                for e in graph.edges
+                if e.confidence != ConfidenceLabel.AMBIGUOUS
+            ]
+            module_map: dict[str, str | None] = dict(
+                infer_communities(edges, paths, fallback)
+            )
+        else:
+            module_map = dict(infer_modules(paths, cfg, rewritten or None))
+        ordered = self._order_modules(
+            {m for m in module_map.values() if m is not None}, cfg
+        )
+        return module_map, list(ordered)
+
+    @staticmethod
+    def _order_modules(modules: set[str], config: ModuleConfig) -> list[str]:
+        """Topologically order modules so a module's declared dependencies
+        merge first; ties broken alphabetically for determinism. A
+        dependency cycle falls back to alphabetical order rather than
+        aborting the plan."""
+        mods = sorted(modules)
+        present = set(mods)
+        deps = config.module_depends_on
+        in_degree = {m: 0 for m in mods}
+        dependents: dict[str, list[str]] = {m: [] for m in mods}
+        for m in mods:
+            for d in deps.get(m, []):
+                if d in present:
+                    in_degree[m] += 1
+                    dependents[d].append(m)
+
+        queue = sorted(m for m in mods if in_degree[m] == 0)
+        out: list[str] = []
+        while queue:
+            m = queue.pop(0)
+            out.append(m)
+            for child in sorted(dependents[m]):
+                in_degree[child] -= 1
+                if in_degree[child] == 0:
+                    queue.append(child)
+
+        if len(out) != len(mods):
+            return mods
+        return out
+
     def _matches_layer(self, file_path: str, patterns: list[str]) -> bool:
         for pattern in patterns:
             if fnmatch.fnmatch(file_path, pattern):
+                return True
+            # `**/foo` is meant to mean "foo at any depth, including
+            # the repo root". Python's stdlib fnmatch treats `**` as a
+            # plain `*` and additionally requires the literal `/` to
+            # match — so `**/go.mod` matches `sub/go.mod` but NOT the
+            # root-level `go.mod`. Re-try the pattern's trailing tail
+            # (after the leading `**/`) directly against the file path
+            # so root-level lockfiles / manifests land in L1 instead of
+            # falling through to the L2 catch-all.
+            if pattern.startswith("**/") and fnmatch.fnmatch(file_path, pattern[3:]):
                 return True
             parts = file_path.split("/")
             for i in range(len(parts)):
@@ -368,6 +520,7 @@ class PlannerAgent(BaseAgent):
         shadow_paths: set[str],
         *,
         fallback_risk: RiskLevel = RiskLevel.AUTO_SAFE,
+        topo_rank: dict[str, int] | None = None,
     ) -> tuple[list[str], list[str], list[str]]:
         safe: list[str] = []
         risky: list[str] = []
@@ -396,11 +549,17 @@ class PlannerAgent(BaseAgent):
         # P1-6: order each bucket by ascending risk_score so the
         # Executor processes the safest files first; if a later file
         # blows up the rollback cost is bounded to the riskier tail.
-        # Path is the secondary key for deterministic ordering.
-        def _score_key(fp: str) -> tuple[float, str]:
+        # ``topo_rank`` (dependency topological position from the file
+        # dependency graph) is the secondary key so a dependency merges
+        # before its dependent at equal risk; path is the final
+        # deterministic tiebreaker. An empty rank map (graph disabled /
+        # empty) collapses this back to the prior (risk_score, path) order.
+        ranks = topo_rank or {}
+
+        def _score_key(fp: str) -> tuple[float, int, str]:
             fd = diffs_by_path.get(fp)
             score = fd.risk_score if fd is not None else 0.0
-            return (score, fp)
+            return (score, ranks.get(fp, 0), fp)
 
         safe.sort(key=_score_key)
         risky.sort(key=_score_key)
@@ -460,6 +619,7 @@ class PlannerAgent(BaseAgent):
         *,
         layer_id: int | None,
         change_category: FileChangeCategory,
+        module: str | None = None,
     ) -> None:
         # P1-6: respect the (risk_score asc, path asc) ordering produced
         # by ``_split_by_risk_level``. Calling ``sorted()`` here would
@@ -473,6 +633,7 @@ class PlannerAgent(BaseAgent):
                     file_paths=list(safe),
                     risk_level=RiskLevel.AUTO_SAFE,
                     layer_id=layer_id,
+                    module=module,
                     change_category=change_category,
                     can_parallelize=True,
                 )
@@ -485,6 +646,7 @@ class PlannerAgent(BaseAgent):
                     file_paths=list(risky),
                     risk_level=RiskLevel.AUTO_RISKY,
                     layer_id=layer_id,
+                    module=module,
                     change_category=change_category,
                     can_parallelize=True,
                 )
@@ -497,6 +659,7 @@ class PlannerAgent(BaseAgent):
                     file_paths=list(human),
                     risk_level=RiskLevel.HUMAN_REQUIRED,
                     layer_id=layer_id,
+                    module=module,
                     change_category=change_category,
                     can_parallelize=False,
                 )
@@ -582,9 +745,104 @@ class PlannerAgent(BaseAgent):
         batch_index: int,
         total_batches: int,
         rename_pairs: list[tuple[str, str]] | None = None,
+        large_diff_lines: int = 200,
+    ) -> dict[str, Any]:
+        if len(file_diffs) <= _CLASSIFY_FILE_CHUNK_SIZE:
+            return await self._run_single_classify(
+                file_diffs,
+                project_context,
+                system_prompt,
+                batch_index,
+                total_batches,
+                rename_pairs,
+                large_diff_lines,
+            )
+
+        # Sub-chunked path: outer batch is too big for one LLM call. Slice
+        # into ``_CLASSIFY_FILE_CHUNK_SIZE`` groups, run them concurrently,
+        # then re-use ``_merge_batch_plans`` (already capable of stitching
+        # multiple per-file classification JSONs without loss).
+        chunks = [
+            file_diffs[i : i + _CLASSIFY_FILE_CHUNK_SIZE]
+            for i in range(0, len(file_diffs), _CLASSIFY_FILE_CHUNK_SIZE)
+        ]
+        self.logger.info(
+            "Classify batch %d/%d: %d files → sub-chunking into %d × ≤%d",
+            batch_index + 1,
+            total_batches,
+            len(file_diffs),
+            len(chunks),
+            _CLASSIFY_FILE_CHUNK_SIZE,
+        )
+
+        async def _process(idx: int) -> dict[str, Any]:
+            chunk = chunks[idx]
+            chunk_paths = {fd.file_path for fd in chunk}
+            scoped_renames = (
+                [
+                    (old, new)
+                    for old, new in rename_pairs
+                    if old in chunk_paths or new in chunk_paths
+                ]
+                if rename_pairs
+                else None
+            )
+            return await self._run_single_classify(
+                chunk,
+                project_context,
+                system_prompt,
+                batch_index,
+                total_batches,
+                scoped_renames,
+                large_diff_lines,
+            )
+
+        # U5: sub-chunks of ``_classify_batch`` partition the file list into
+        # disjoint groups; assert it explicitly so a future rewrite of the
+        # chunking heuristic can't silently produce overlap.
+        assert_disjoint_file_shards(
+            [[fd.file_path for fd in chunk] for chunk in chunks]
+        )
+        runner = ParallelFileRunner.from_api_key_env_list(
+            self.llm_config.api_key_env_list,
+            override=None,
+        )
+        results = await runner.run_files(list(range(len(chunks))), _process)
+
+        sub_plans: list[dict[str, Any]] = []
+        for idx in range(len(chunks)):
+            result = results.get(idx)
+            if isinstance(result, BaseException):
+                self.logger.warning(
+                    "Classify sub-chunk %d/%d crashed in runner: %s — using fallback",
+                    idx + 1,
+                    len(chunks),
+                    result,
+                )
+                sub_plans.append(self._create_fallback_plan_data(chunks[idx]))
+            else:
+                assert isinstance(result, dict)
+                sub_plans.append(result)
+
+        return self._merge_batch_plans(sub_plans, file_diffs)
+
+    async def _run_single_classify(
+        self,
+        file_diffs: list[FileDiff],
+        project_context: str,
+        system_prompt: str,
+        batch_index: int,
+        total_batches: int,
+        rename_pairs: list[tuple[str, str]] | None = None,
+        large_diff_lines: int = 200,
     ) -> dict[str, Any]:
         prompt = build_classification_prompt(
-            file_diffs, project_context, batch_index, total_batches, rename_pairs
+            file_diffs,
+            project_context,
+            batch_index,
+            total_batches,
+            rename_pairs,
+            large_diff_lines,
         )
         file_paths = [fd.file_path for fd in file_diffs]
         memory_text = self.get_memory_context(self._current_phase, file_paths)
@@ -594,7 +852,9 @@ class PlannerAgent(BaseAgent):
 
         try:
             raw_response = await self._call_llm_with_retry(
-                messages, system=system_prompt
+                messages,
+                system=system_prompt,
+                **self._structured_kwargs(PLAN_CLASSIFICATION),
             )
             raw_str = str(raw_response).strip()
             if raw_str.startswith("```"):
@@ -827,9 +1087,7 @@ class PlannerAgent(BaseAgent):
             top_risk_files=rs_data.get("top_risk_files", []),
         )
 
-        merge_base = ""
-        if hasattr(state, "_merge_base"):
-            merge_base = state._merge_base or ""
+        merge_base = state.merge_base_commit
 
         return MergePlan(
             created_at=datetime.now(),
@@ -858,7 +1116,7 @@ class PlannerAgent(BaseAgent):
         }
 
         responses = await self._evaluate_judge_issues(
-            state.merge_plan, judge_issues, lang
+            state.merge_plan, judge_issues, lang, file_diffs=state.file_diffs
         )
 
         accepted_issues = [
@@ -922,11 +1180,14 @@ class PlannerAgent(BaseAgent):
         plan: MergePlan,
         judge_issues: list[PlanIssue],
         lang: str = "en",
+        file_diffs: list[FileDiff] | None = None,
     ) -> list[PlannerIssueResponse]:
         if not judge_issues:
             return []
 
-        prompt = build_evaluation_prompt(plan, judge_issues, lang)
+        prompt = build_evaluation_prompt(
+            plan, judge_issues, lang, file_diffs=file_diffs
+        )
         messages = [{"role": "user", "content": prompt}]
 
         try:
@@ -1125,43 +1386,163 @@ class PlannerAgent(BaseAgent):
         plan, _responses, _diff = await self.revise_plan(state, issues)
         return plan
 
-    async def _enhance_risk_scores(
-        self, file_diffs: list[FileDiff], config: MergeConfig
-    ) -> list[FileDiff]:
-        from src.llm.prompts.risk_scoring_prompts import (
-            build_risk_scoring_prompt,
-            RISK_SCORING_SYSTEM,
-        )
+    def _compute_fanout_map(
+        self, file_diffs: list[FileDiff], state: MergeState
+    ) -> dict[str, float] | None:
+        """Per-file coupling footprint, 0..1, feeding the ``compute_complexity``
+        fanout dimension.
 
-        gray_low = config.llm_risk_scoring.gray_zone_low
-        gray_high = config.llm_risk_scoring.gray_zone_high
-        rule_weight = config.llm_risk_scoring.rule_weight
+        Two signals, combined monotonically (``max``) so the dependency graph
+        can only *raise* a file's fanout, never lower the rule heuristic
+        (risk-monotonicity guard):
+
+        * **Dependency graph** (preferred when available): ``impact_radius(f)``
+          — the real count of downstream files that (transitively) depend on
+          ``f``, normalised by ``_FANOUT_SATURATION``.
+        * **Module co-change** (legacy proxy): how many sibling files in the
+          same inferred module are co-changing.
+
+        Returns ``None`` only when *both* signals are unavailable (module
+        grouping disabled and the graph empty), so the fanout dimension is
+        dropped from ``compute_complexity`` exactly as before.
+        """
+        paths = [fd.file_path for fd in file_diffs]
+
+        graph_fanout: dict[str, float] | None = None
+        graph = getattr(state, "dependency_graph", None)
+        if graph is not None and graph.edges:
+            max_depth = state.config.dependency_graph.max_depth
+            graph_fanout = {
+                p: min(
+                    1.0,
+                    len(graph.impact_radius(p, max_depth=max_depth))
+                    / _FANOUT_SATURATION,
+                )
+                for p in paths
+            }
+
+        module_fanout: dict[str, float] | None = None
+        cfg = state.config.module_config
+        if cfg.enabled and cfg.mode != "off":
+            rewritten = [
+                rm.path
+                for rm in (
+                    state.forks_profile.rewritten_modules if state.forks_profile else []
+                )
+            ]
+            module_map = infer_modules(paths, cfg, rewritten or None)
+            sizes = Counter(module_map.values())
+            module_fanout = {
+                p: min(1.0, max(0, sizes[module_map[p]] - 1) / _FANOUT_SATURATION)
+                for p in paths
+            }
+
+        if graph_fanout is None and module_fanout is None:
+            return None
+        if graph_fanout is None:
+            return module_fanout
+        if module_fanout is None:
+            return graph_fanout
+        return {p: max(graph_fanout[p], module_fanout[p]) for p in paths}
+
+    async def _enhance_risk_scores(
+        self,
+        file_diffs: list[FileDiff],
+        config: MergeConfig,
+        rename_pairs: list[tuple[str, str]] | None = None,
+        fanout_map: dict[str, float] | None = None,
+    ) -> list[FileDiff]:
+        """Spend LLM calls to refine the deterministic plan, complexity-driven.
+
+        Tier selection is governed by ``compute_complexity`` rather than a
+        per-file flag: files in the uncertainty band get a single-file
+        rescore (tier 2), files above it get a full batch re-classification
+        (tier 3, the strong-judgment layer). ``budget_max_files`` caps the
+        combined set by descending complexity so the most uncertain files
+        are served first and tier 3 is never starved by the cut.
+
+        ``fanout_map`` (path → cross-module footprint, 0..1) feeds the
+        ``w_fanout`` complexity dimension when module grouping is active;
+        ``None`` drops the dimension (weight redistributed).
+        """
+        assist = config.llm_assist
+        if assist.mode == "off":
+            return list(file_diffs)
 
         enhanced_diffs = list(file_diffs)
-
-        gray_paths = [
-            fd.file_path
+        low, high = assist.uncertainty_low, assist.uncertainty_high
+        complexity = [
+            compute_complexity(
+                fd,
+                config.complexity,
+                fanout=(fanout_map.get(fd.file_path) if fanout_map else None),
+            )
             for fd in enhanced_diffs
-            if gray_low <= fd.risk_score <= gray_high
         ]
-        memory_text = (
-            self.get_memory_context(self._current_phase, gray_paths)
-            if gray_paths
-            else ""
+
+        tier3 = {i for i, c in enumerate(complexity) if c > high}
+        if assist.mode == "always":
+            tier2 = {i for i in range(len(enhanced_diffs)) if i not in tier3}
+        else:  # auto
+            tier2 = {i for i, c in enumerate(complexity) if low <= c <= high}
+
+        selected = tier2 | tier3
+        if not selected:
+            return enhanced_diffs
+
+        if len(selected) > assist.budget_max_files:
+            selected = set(
+                sorted(selected, key=lambda i: complexity[i], reverse=True)[
+                    : assist.budget_max_files
+                ]
+            )
+            tier3 = {i for i in selected if complexity[i] > high}
+            tier2 = selected - tier3
+
+        self.logger.info(
+            "LLM assist (%s): %d files (tier2 rescore=%d, tier3 reclassify=%d), "
+            "budget=%d",
+            assist.mode,
+            len(selected),
+            len(tier2),
+            len(tier3),
+            assist.budget_max_files,
         )
 
-        for i, fd in enumerate(enhanced_diffs):
-            if not (gray_low <= fd.risk_score <= gray_high):
-                continue
+        if tier2:
+            enhanced_diffs = await self._rescore_files(
+                enhanced_diffs, sorted(tier2), config
+            )
+        if tier3:
+            enhanced_diffs = await self._reclassify_files(
+                enhanced_diffs, sorted(tier3), config, rename_pairs
+            )
+        return enhanced_diffs
 
-            prompt = build_risk_scoring_prompt(fd, fd.risk_score)
+    async def _rescore_files(
+        self,
+        enhanced_diffs: list[FileDiff],
+        indices: list[int],
+        config: MergeConfig,
+    ) -> list[FileDiff]:
+        """Tier 2: blend a single-file LLM risk score into the rule score."""
+        rule_weight = config.llm_assist.rule_weight
+        result = list(enhanced_diffs)
+        paths = [result[i].file_path for i in indices]
+        memory_text = self.get_memory_context(self._current_phase, paths)
+        total = len(indices)
+        progress_lock = asyncio.Lock()
+
+        async def _rescore_one(idx: int) -> float | None:
+            fd = result[idx]
+            prompt = get_gate("P-RISK-SCORE").render(fd, fd.risk_score)
             if memory_text:
                 prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
             messages = [{"role": "user", "content": prompt}]
-
+            llm_score: float | None
             try:
                 raw = await self._call_llm_with_retry(
-                    messages, system=RISK_SCORING_SYSTEM
+                    messages, system=get_gate("P-RISK-SCORE-SYSTEM").render()
                 )
                 raw_str = str(raw).strip()
                 if raw_str.startswith("```"):
@@ -1174,16 +1555,117 @@ class PlannerAgent(BaseAgent):
                     0.0,
                     min(1.0, float(data.get("llm_risk_score", fd.risk_score))),
                 )
-            except Exception:
-                continue
+            except Exception as exc:
+                self.logger.debug("risk rescore failed for %s: %s", fd.file_path, exc)
+                llm_score = None
+            await self._emit_rescore_progress(
+                progress_lock, fd.file_path, total, llm_score is not None
+            )
+            return llm_score
 
-            blended = rule_weight * fd.risk_score + (1.0 - rule_weight) * llm_score
+        runner = ParallelFileRunner.from_api_key_env_list(
+            self.llm_config.api_key_env_list,
+            override=None,
+        )
+        results = await runner.run_files(indices, _rescore_one)
+
+        for idx in indices:
+            scored = results.get(idx)
+            if isinstance(scored, BaseException) or scored is None:
+                continue
+            fd = result[idx]
+            blended = rule_weight * fd.risk_score + (1.0 - rule_weight) * scored
             blended = round(max(0.0, min(1.0, blended)), 3)
             new_fd = fd.model_copy(update={"risk_score": blended})
             new_level = classify_file(new_fd, config.file_classifier)
-            enhanced_diffs[i] = new_fd.model_copy(update={"risk_level": new_level})
+            result[idx] = new_fd.model_copy(update={"risk_level": new_level})
 
-        return enhanced_diffs
+        return result
+
+    async def _reclassify_files(
+        self,
+        enhanced_diffs: list[FileDiff],
+        indices: list[int],
+        config: MergeConfig,
+        rename_pairs: list[tuple[str, str]] | None,
+    ) -> list[FileDiff]:
+        """Tier 3 (strong judgment): run the batch classification prompt on
+        the most complex files and let its categorical risk_level override
+        the rule classification — no blend, the LLM decision wins."""
+        tier3_diffs = [enhanced_diffs[i] for i in indices]
+        system_prompt = get_planner_system(config.output.language)
+        tier3_paths = {fd.file_path for fd in tier3_diffs}
+        scoped_renames = (
+            [
+                (old, new)
+                for old, new in rename_pairs
+                if old in tier3_paths or new in tier3_paths
+            ]
+            if rename_pairs
+            else None
+        )
+        plan_data = await self._classify_batch(
+            tier3_diffs,
+            config.project_context,
+            system_prompt,
+            0,
+            1,
+            scoped_renames,
+            large_diff_lines=config.thresholds.classification_large_diff_lines,
+        )
+
+        risk_by_path: dict[str, RiskLevel] = {}
+        for phase in plan_data.get("phases", []):
+            try:
+                rl = RiskLevel(phase.get("risk_level", "auto_safe"))
+            except ValueError:
+                rl = RiskLevel.AUTO_SAFE
+            for fp in phase.get("file_paths", []):
+                risk_by_path[fp] = rl
+
+        result = list(enhanced_diffs)
+        for i in indices:
+            fd = result[i]
+            new_level = risk_by_path.get(fd.file_path)
+            if new_level is not None and new_level != fd.risk_level:
+                result[i] = fd.model_copy(update={"risk_level": new_level})
+        return result
+
+    async def _emit_rescore_progress(
+        self,
+        lock: "asyncio.Lock",
+        file_path: str,
+        total: int,
+        ok: bool,
+    ) -> None:
+        """Notify any registered activity callback that one more gray-zone
+        rescore completed. Counter is incremented under a lock so the
+        ``completed`` field is monotonic in the face of the parallel
+        runner's concurrent callbacks.
+        """
+        if self._on_activity is None:
+            return
+        async with lock:
+            self._rescore_completed = getattr(self, "_rescore_completed", 0) + 1
+            done = self._rescore_completed
+            if done >= total:
+                self._rescore_completed = 0
+        from src.core.phases.base import ActivityEvent
+
+        self._on_activity(
+            ActivityEvent(
+                agent=self.agent_type.value,
+                action="llm_risk_rescore",
+                phase=self._current_phase,
+                event_type="progress",
+                extra={
+                    "completed": done,
+                    "total": total,
+                    "file_path": file_path,
+                    "ok": ok,
+                },
+            )
+        )
 
     def can_handle(self, state: MergeState) -> bool:
         from src.models.state import SystemStatus
@@ -1216,13 +1698,42 @@ class PlannerAgent(BaseAgent):
         raw = await self._call_llm_with_retry(
             [{"role": "user", "content": prompt}],
             system=system,
+            **self._structured_kwargs(META_REVIEW),
         )
         return _parse_meta_review_json(str(raw))
 
-    def _classify_file(self, file_diff: FileDiff, config: MergeConfig) -> RiskLevel:
-        score = compute_risk_score(file_diff, config.file_classifier)
-        updated = file_diff.model_copy(update={"risk_score": score})
-        return classify_file(updated, config.file_classifier)
+    def _apply_god_node_risk(
+        self, file_diffs: list[FileDiff], state: MergeState
+    ) -> list[FileDiff]:
+        """Phase C §6.4: raise the risk_score of changed files that are
+        dependency-graph God Nodes (high direct-dependent count), then
+        re-derive risk_level. Monotonic — only raises risk (plan §5). Empty
+        graph or ``god_node_risk_bump == 0`` leaves the list unchanged
+        (byte-identical, safe degrade)."""
+        cfg = state.config.dependency_graph
+        bump = cfg.god_node_risk_bump
+        graph = getattr(state, "dependency_graph", None)
+        if bump <= 0.0 or graph is None or not graph.edges:
+            return file_diffs
+
+        result: list[FileDiff] = []
+        changed = False
+        for fd in file_diffs:
+            hint = graph.impact_hint(
+                fd.file_path,
+                max_depth=cfg.max_depth,
+                god_node_min_dependents=cfg.god_node_min_dependents,
+            )
+            if hint.is_god_node:
+                new_score = min(1.0, fd.risk_score + bump)
+                if new_score > fd.risk_score:
+                    bumped = fd.model_copy(update={"risk_score": new_score})
+                    new_level = classify_file(bumped, state.config.file_classifier)
+                    result.append(bumped.model_copy(update={"risk_level": new_level}))
+                    changed = True
+                    continue
+            result.append(fd)
+        return result if changed else file_diffs
 
 
 def _parse_meta_review_json(raw: str) -> dict[str, str]:
@@ -1241,6 +1752,56 @@ def _parse_meta_review_json(raw: str) -> dict[str, str]:
         }
     except Exception:
         return {"assessment": raw[:200], "recommendation": ""}
+
+
+def _build_migration_dependency_hint(
+    file_diffs: list[FileDiff],
+    migration_dir_patterns: list[str] | None = None,
+) -> str:
+    """Return a special_instruction when migration files and both_changed
+    model files share a common directory prefix.
+
+    DB migrations must be applied before the model code that references the
+    new schema columns.  When the plan contains upstream-new migration files
+    (D-missing) alongside fork-conflicted model files (C-class) in the same
+    top-level package directory, an explicit ordering reminder is emitted so
+    the Executor and human reviewers know to merge migrations first.
+
+    ``migration_dir_patterns`` is a list of path substrings (case-insensitive)
+    that identify migration directories.  Defaults come from
+    ``FileClassifierConfig.migration_dir_patterns``; callers pass
+    ``state.config.file_classifier.migration_dir_patterns`` so projects can
+    extend the list via config.yaml without touching production code.
+    """
+    patterns = [
+        p.lower() for p in (migration_dir_patterns or ["migrations/", "alembic/"])
+    ]
+
+    migration_dirs: set[str] = set()
+    conflict_dirs: set[str] = set()
+
+    for fd in file_diffs:
+        parts = fd.file_path.split("/")
+        top_dir = parts[0] if len(parts) > 1 else ""
+        path_lower = fd.file_path.lower()
+        if fd.change_category == FileChangeCategory.D_MISSING and any(
+            pat in path_lower for pat in patterns
+        ):
+            migration_dirs.add(top_dir)
+        elif fd.change_category == FileChangeCategory.C:
+            conflict_dirs.add(top_dir)
+
+    overlapping = migration_dirs & conflict_dirs
+    if not overlapping:
+        return ""
+
+    dirs_str = ", ".join(sorted(overlapping))
+    return (
+        f"ORDERING DEPENDENCY: upstream-new migration file(s) and fork-conflicted "
+        f"model file(s) share the same top-level package(s): [{dirs_str}]. "
+        "Apply migration batches BEFORE merging the conflicted model files — "
+        "the migrations introduce DB schema changes that the model code depends on."
+    )
 
 
 from src.agents.registry import AgentRegistry  # noqa: E402

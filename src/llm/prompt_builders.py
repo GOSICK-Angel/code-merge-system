@@ -7,6 +7,7 @@ from src.llm.context import (
     ContextSection,
     TokenBudget,
     _CHARS_PER_TOKEN,
+    _truncate_text,
     estimate_tokens,
     get_context_window,
 )
@@ -14,6 +15,7 @@ from src.memory.hit_tracker import MemoryHitTracker
 from src.memory.layered_loader import LayeredMemoryLoader
 from src.memory.store import MemoryStore
 from src.models.config import AgentLLMConfig
+from src.tools.conflict_markers import conflict_marker_line_numbers
 
 logger = logging.getLogger(__name__)
 
@@ -100,10 +102,16 @@ class AgentPromptBuilder:
         file_path: str,
         diff_ranges: list[tuple[int, int]],
         budget_tokens: int,
-        conflict_ranges: list[tuple[int, int]] | None = None,
-        security_patterns: list[str] | None = None,
+        is_security_sensitive: bool = False,
+        referenced_names: frozenset[str] = frozenset(),
+        symbol_weights: dict[str, float] | None = None,
     ) -> str:
-        from src.llm.chunker import ASTChunker, detect_language, render_file_staged
+        from src.llm.chunker import (
+            ASTChunker,
+            chunk_key,
+            detect_language,
+            render_file_staged,
+        )
         from src.llm.relevance import RenderLevel, RelevanceScorer, ScoringContext
 
         line_count = content.count("\n") + 1
@@ -112,19 +120,32 @@ class AgentPromptBuilder:
             and len(content) < STAGED_THRESHOLD_CHARS
         ):
             max_chars = int(budget_tokens * _CHARS_PER_TOKEN)
-            return content[:max_chars]
+            return _truncate_text(content, max_chars, "tail")
+
+        # When the whole file fits the budget, stage nothing — return it
+        # verbatim. Relevance scoring drops every chunk below SIGNATURE_THRESHOLD
+        # purely on score, so a large review budget can sit ~idle while the
+        # rendered output is a near-empty set of fragments (the forgejo Judge
+        # saw tokens=309/98789 then capped its verdict citing "truncated
+        # content"). Returning the full file when it fits removes the false
+        # truncation without ever exceeding budget.
+        if estimate_tokens(content) <= budget_tokens:
+            return content
 
         language = detect_language(file_path)
         chunks = ASTChunker.chunk(content, language)
 
         if not chunks:
             max_chars = int(budget_tokens * _CHARS_PER_TOKEN)
-            return content[:max_chars]
+            return _truncate_text(content, max_chars, "middle")
 
+        conflict_ranges = [(ln, ln) for ln in conflict_marker_line_numbers(content)]
         context = ScoringContext(
             diff_ranges=diff_ranges,
-            conflict_ranges=conflict_ranges or [],
-            security_patterns=security_patterns or [],
+            conflict_ranges=conflict_ranges,
+            is_security_sensitive=is_security_sensitive,
+            referenced_names=referenced_names,
+            symbol_weights=symbol_weights or {},
         )
         scorer = RelevanceScorer(context)
         levels = scorer.score_and_assign(chunks, budget_tokens)
@@ -134,9 +155,9 @@ class AgentPromptBuilder:
         drop_count = sum(1 for v in levels.values() if v == RenderLevel.DROP)
         used_tokens = sum(
             estimate_tokens(c.content)
-            if levels.get(c.name) == RenderLevel.FULL
+            if levels.get(chunk_key(c)) == RenderLevel.FULL
             else estimate_tokens(c.signature)
-            if levels.get(c.name) == RenderLevel.SIGNATURE
+            if levels.get(chunk_key(c)) == RenderLevel.SIGNATURE
             else 0
             for c in chunks
         )
@@ -150,5 +171,16 @@ class AgentPromptBuilder:
             used_tokens,
             budget_tokens,
         )
+
+        # Floor: relevance scoring can drop every chunk when a file has no diff
+        # or conflict anchor (e.g. an upstream_only take_target file under Judge
+        # review). render_file_staged would then emit only a content-free
+        # "# ... (N sections omitted)" placeholder, which downstream LLMs — the
+        # Judge in particular — mistake for an empty / unverifiable file. When
+        # nothing real was rendered, fall back to the actual content (trimmed to
+        # the token budget) instead of the placeholder.
+        if used_tokens == 0:
+            max_chars = int(budget_tokens * _CHARS_PER_TOKEN)
+            return _truncate_text(content, max_chars, "middle")
 
         return render_file_staged(chunks, levels)

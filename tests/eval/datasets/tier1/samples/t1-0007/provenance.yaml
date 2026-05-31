@@ -1,0 +1,15 @@
+# Capture provenance — sibling of meta.yaml, not consumed by prepare.
+# Kept for audit trail (dataset.md §2.4 maintenance rules) so reviewers
+# can re-derive the sample from the original git history.
+repo: /Users/angel/AI/project/dify-official-plugins
+base_ref: dbfc53994d9b4b673b0e21eb7b940d451e56cf9f
+upstream_ref: 3eac13f49b34c9574ea004a4e6e542a799eff77e
+fork_ref: dbfc53994d9b4b673b0e21eb7b940d451e56cf9f
+golden_ref: 69e05b7327cfe67c66f2f95fdb7fb2f2cffd0828
+paths: ['tools/image_collage']
+# F8: files touched in base→golden but in neither base→upstream nor
+# base→fork — content the human added directly during the merge commit.
+# Reviewers should weigh whether to keep the sample (the merge system
+# cannot reconstruct these files from the two patches alone, so they
+# surface as MISS_UPSTREAM / MISS_FORK in eval diffs).
+noisy_paths: []

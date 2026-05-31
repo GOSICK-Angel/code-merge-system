@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 from src.llm.client import ParseError
+from src.llm.rationale_sanitizer import sanitize_hedging
 from src.models.plan_judge import PlanJudgeVerdict, PlanJudgeResult, PlanIssue
 from src.models.conflict import (
     ConflictAnalysis,
@@ -41,6 +42,33 @@ def _extract_json(raw: str | dict[str, Any]) -> dict[str, Any]:
         raise ParseError(f"Cannot extract JSON from response: {e}\nRaw: {raw[:500]}")
 
 
+def _stop_reason_gate(
+    raw: "str | dict[str, Any] | LLMResponseLike", strict_json: bool
+) -> "str | dict[str, Any]":
+    """W2: provider-truncation fail-closed for the legacy-parser consumers.
+
+    When ``raw`` is an ``LLMResponse`` (duck-typed to dodge the import cycle) and
+    ``strict_json`` is set, ``stop_reason in {"max_tokens", "length"}`` raises
+    ``ParseError`` — mirroring ``parse_merge_result`` gate #1. This closes the
+    residual that ``strict_json`` alone cannot: a truncation that still left an
+    earlier balanced object yields partial-but-valid JSON which ``_extract_json``
+    salvages (find('{')/rfind('}')), so it never raises — the only signal the
+    text was cut is ``stop_reason``. Returns the ``.text`` (or the unchanged
+    str/dict) to feed ``_extract_json`` for non-truncated / legacy callers.
+    """
+    if hasattr(raw, "text") and hasattr(raw, "stop_reason"):
+        stop_reason = getattr(raw, "stop_reason", None)
+        if strict_json and stop_reason in {"max_tokens", "length"}:
+            raise ParseError(
+                f"Refusing truncated LLM response (stop_reason={stop_reason!r}): "
+                f"the output ran past the max_tokens ceiling and the trailing "
+                f"bytes are not in the response. Escalate to human review / bump "
+                f"max_tokens instead of parsing a partial-but-salvageable object."
+            )
+        return str(getattr(raw, "text"))
+    return raw
+
+
 def _validate_confidence(value: float) -> float:
     if not isinstance(value, (int, float)):
         raise ParseError(f"Confidence must be a number, got {type(value)}")
@@ -60,6 +88,62 @@ def _validate_enum(value: str, enum_class: Any, field_name: str) -> str:
     raise ParseError(
         f"Invalid {field_name} value '{value}'. Must be one of: {valid_values}"
     )
+
+
+_SEMANTIC_COMPATIBILITY_VALUES: tuple[str, ...] = (
+    "compatible",
+    "incompatible",
+    "orthogonal",
+)
+_INTENT_DESCRIPTION_MIN_LEN = 10
+
+
+def _read_semantic_compatibility(
+    data: dict[str, Any],
+) -> tuple[str | None, list[str]]:
+    """Extract analyst's semantic_compatibility label, with warnings.
+
+    PR-B Slice 3: missing or unknown values are non-fatal — we record a
+    grounding_warning so the reviewer sees the gap without aborting the
+    round. Same channel as PR-A's fabrication warnings.
+    """
+    warnings: list[str] = []
+    raw = data.get("semantic_compatibility")
+    if raw is None:
+        warnings.append(
+            "semantic_compatibility missing from analyst output — "
+            "cannot tell if the two sides are compatible / incompatible / orthogonal."
+        )
+        return None, warnings
+    if not isinstance(raw, str) or raw not in _SEMANTIC_COMPATIBILITY_VALUES:
+        warnings.append(
+            f"semantic_compatibility value {raw!r} is not one of "
+            f"{_SEMANTIC_COMPATIBILITY_VALUES}; dropped to None."
+        )
+        return None, warnings
+    return raw, warnings
+
+
+def _check_intent_description_quality(upstream_desc: str, fork_desc: str) -> list[str]:
+    """Flag vague / boilerplate intent descriptions.
+
+    PR-B Slice 3: short descriptions are a strong signal the LLM didn't
+    actually engage with the diff (the "comparable changes" anti-pattern
+    seen on the zod E2E). We surface this to the reviewer rather than
+    silently accept it.
+    """
+    warnings: list[str] = []
+    if len(upstream_desc.strip()) < _INTENT_DESCRIPTION_MIN_LEN:
+        warnings.append(
+            f"upstream_intent.description is short/vague ({upstream_desc!r}) — "
+            "analyst likely did not engage with the specific change."
+        )
+    if len(fork_desc.strip()) < _INTENT_DESCRIPTION_MIN_LEN:
+        warnings.append(
+            f"fork_intent.description is short/vague ({fork_desc!r}) — "
+            "analyst likely did not engage with the specific change."
+        )
+    return warnings
 
 
 def _normalize_plan_judge_json(data: dict[str, Any]) -> dict[str, Any]:
@@ -141,9 +225,16 @@ def parse_plan_judge_verdict(
 
 
 def parse_conflict_analysis(
-    raw: str | dict[str, Any], file_path: str, model: str = "unknown"
+    raw: "str | dict[str, Any] | LLMResponseLike",
+    file_path: str,
+    model: str = "unknown",
+    strict_json: bool = False,
 ) -> ConflictAnalysis:
-    data = _extract_json(raw)
+    # W2: under strict_json a provider-truncated LLMResponse raises ParseError;
+    # the analyst's caller catches it and escalates (rather than accepting a
+    # partial-but-salvageable answer as a genuine low-confidence one). Default
+    # False preserves every legacy caller.
+    data = _extract_json(_stop_reason_gate(raw, strict_json))
 
     conflict_type_raw = data.get("conflict_type", "unknown")
     try:
@@ -165,16 +256,22 @@ def parse_conflict_analysis(
     fork_data = data.get("fork_intent", {})
 
     upstream_intent = ChangeIntent(
-        description=upstream_data.get("description", ""),
+        description=sanitize_hedging(upstream_data.get("description", "")),
         intent_type=upstream_data.get("intent_type", "unknown"),
         confidence=float(upstream_data.get("confidence", 0.5)),
     )
     fork_intent = ChangeIntent(
-        description=fork_data.get("description", ""),
+        description=sanitize_hedging(fork_data.get("description", "")),
         intent_type=fork_data.get("intent_type", "unknown"),
         confidence=float(fork_data.get("confidence", 0.5)),
     )
 
+    sanitized_rationale = sanitize_hedging(data.get("rationale", ""))
+    semantic_compat, compat_warnings = _read_semantic_compatibility(data)
+    intent_warnings = _check_intent_description_quality(
+        upstream_intent.description, fork_intent.description
+    )
+    grounding_warnings = compat_warnings + intent_warnings
     conflict_point = ConflictPoint(
         file_path=file_path,
         hunk_id=str(uuid4()),
@@ -184,7 +281,8 @@ def parse_conflict_analysis(
         can_coexist=bool(data.get("can_coexist", False)),
         suggested_decision=recommended,
         confidence=confidence,
-        rationale=data.get("rationale", ""),
+        rationale=sanitized_rationale,
+        semantic_compatibility=semantic_compat,  # type: ignore[arg-type]
     )
 
     return ConflictAnalysis(
@@ -195,8 +293,10 @@ def parse_conflict_analysis(
         conflict_type=conflict_type,
         can_coexist=bool(data.get("can_coexist", False)),
         is_security_sensitive=bool(data.get("is_security_sensitive", False)),
-        rationale=data.get("rationale", ""),
+        rationale=sanitized_rationale,
         confidence=confidence,
+        grounding_warnings=grounding_warnings,
+        semantic_compatibility=semantic_compat,  # type: ignore[arg-type]
     )
 
 
@@ -262,25 +362,106 @@ def parse_judge_verdict(
     )
 
 
-def parse_merge_result(raw: str | dict[str, Any]) -> str:
-    if isinstance(raw, dict):
-        result = str(raw.get("content", ""))
+def parse_merge_result(
+    raw: "str | dict[str, Any] | LLMResponseLike",
+    *,
+    current_size: int | None = None,
+    target_size: int | None = None,
+) -> str:
+    """Strip code fences and run the merge-output quality gate.
+
+    Quality gate order (any single failure raises ``ParseError`` —
+    callers route to ``create_escalate_record``):
+
+    1. ``stop_reason in {"max_tokens", "length"}`` — provider signalled
+       truncation. The text is incomplete by definition; don't even
+       look at it.
+    2. ``has_prose_preamble`` — the first non-empty line is narrative
+       ("Looking at the current content..."). The LLM ignored the
+       "return ONLY the merged content" instruction.
+    3. ``has_elision`` — explicit ``# ... (N sections omitted)`` style
+       markers echoed back in the output.
+    4. ``looks_truncated`` (when sizes are provided) — last line ends
+       mid-token AND output is < 60% of the smaller input.
+
+    Accepts three input shapes for backward compatibility:
+
+    - ``LLMResponse`` (new) — carries ``stop_reason`` for gate #1
+    - ``dict`` (legacy) — older callers passing an envelope
+    - ``str`` (legacy) — gate #1 is skipped, the rest still run
+
+    ``current_size`` / ``target_size`` enable gate #4. Pass them as
+    ``len(current_content)`` / ``len(target_content)`` from
+    ``execute_semantic_merge`` so the heuristic has the reference
+    point it needs to flag suspiciously short output.
+    """
+    stop_reason: str | None = None
+    if hasattr(raw, "text") and hasattr(raw, "stop_reason"):
+        # LLMResponse — duck-type so we don't pull a circular import.
+        stop_reason = getattr(raw, "stop_reason", None)
+        raw_text = getattr(raw, "text")
+        text = str(raw_text).strip()
+    elif isinstance(raw, dict):
+        text = str(raw.get("content", "")).strip()
     else:
-        text = raw.strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            start = 1
-            end = len(lines)
-            for i in range(len(lines) - 1, 0, -1):
-                if lines[i].strip() == "```":
-                    end = i
-                    break
-            result = "\n".join(lines[start:end])
-        else:
-            result = text
+        text = str(raw).strip()
 
-    from src.tools.elision_detector import has_elision
+    # Gate 1: provider-side truncation — refuse before anything else,
+    # the bytes after the cut are missing by definition.
+    if stop_reason in {"max_tokens", "length"}:
+        raise ParseError(
+            f"Refusing LLM merge result truncated at provider boundary "
+            f"(stop_reason={stop_reason!r}). The output ran past the "
+            f"``max_tokens`` ceiling; the trailing bytes are not in the "
+            f"response. Escalate to human review and bump max_tokens or "
+            f"split the file before retrying."
+        )
 
+    # Gate 1b: cooperative truncation — the prompt asks the LLM to emit
+    # the sentinel ``OUTPUT_TOO_LARGE`` instead of producing a truncated
+    # file when it can't fit the full content. Treat as a refuse the
+    # same way provider-side truncation is treated; the caller will
+    # route to chunked merging.
+    if text.strip() == "OUTPUT_TOO_LARGE":
+        raise ParseError(
+            "LLM signalled OUTPUT_TOO_LARGE — the merged file would exceed "
+            "the model's output buffer. Caller should fall back to chunked "
+            "semantic merge."
+        )
+
+    # Gate 2: prose preamble before any fence stripping — the
+    # ``has_prose_preamble`` detector itself skips fenced output.
+    from src.tools.elision_detector import (
+        has_elision,
+        has_prose_preamble,
+        looks_truncated,
+    )
+
+    prose_hit, prose_line = has_prose_preamble(text)
+    if prose_hit:
+        raise ParseError(
+            f"Refusing merge result that opens with conversational preamble "
+            f"(LLM ignored 'return ONLY the merged content' instruction): "
+            f"{prose_line!r}. Escalate to human review instead of writing "
+            f"chain-of-thought into the file."
+        )
+
+    # Strip the code fence wrapper if present — same logic as before,
+    # but only after the preamble gate so a fenced preamble (extremely
+    # rare) is still caught by gate 3 against the unwrapped text.
+    if text.startswith("```"):
+        lines = text.splitlines()
+        start = 1
+        end = len(lines)
+        for i in range(len(lines) - 1, 0, -1):
+            if lines[i].strip() == "```":
+                end = i
+                break
+        result = "\n".join(lines[start:end])
+    else:
+        result = text
+
+    # Gate 3: explicit elision markers in the body.
     hit, sample = has_elision(result)
     if hit:
         raise ParseError(
@@ -288,13 +469,32 @@ def parse_merge_result(raw: str | dict[str, Any]) -> str:
             f"truncated LLM output): {sample!r}. Escalate to human review "
             f"instead of writing a partial file."
         )
+
+    # Gate 4: heuristic truncation check — only when caller passed
+    # input sizes so the length sanity guard can run.
+    trunc_hit, trunc_sample = looks_truncated(
+        result, current_size=current_size, target_size=target_size
+    )
+    if trunc_hit:
+        raise ParseError(
+            f"Refusing merge result that appears truncated mid-line "
+            f"(tail looks unfinished, output dramatically shorter than "
+            f"inputs): {trunc_sample!r}. Escalate to human review."
+        )
+
     return result
+
+
+# Forward-ref for the duck-typed ``LLMResponse`` argument above —
+# avoids a hard import cycle (llm.client → models.diff → ...).
+LLMResponseLike = Any
 
 
 _GROUNDING_REQUIRED_LEVELS: frozenset[IssueSeverity] = frozenset(
     {IssueSeverity.CRITICAL, IssueSeverity.HIGH}
 )
 _DOWNGRADE_SUFFIX = " [downgraded: ungrounded]"
+_HALLUCINATED_SUFFIX = " [downgraded: hallucinated evidence]"
 
 
 def _apply_grounding_rule(
@@ -318,10 +518,66 @@ def _apply_grounding_rule(
     return IssueSeverity.MEDIUM, description + _DOWNGRADE_SUFFIX
 
 
+def _validate_evidence_grounded(
+    level: IssueSeverity,
+    evidence_excerpt: str | None,
+    merged_content: str | None,
+    description: str,
+    fork_content: str | None = None,
+) -> tuple[IssueSeverity, str]:
+    """P-γ-4 F-judge-source-of-truth: when merged_content is supplied and the
+    LLM's evidence_excerpt does not appear in it, the issue is hallucinated.
+    Downgrade CRITICAL/HIGH to MEDIUM and annotate the description so the
+    trail is visible in reports. Skipped when merged_content is None or the
+    stripped excerpt is empty (legacy grounding rule already handles those).
+
+    Bug-fix (zod validation, 2026-05-28): when the file is still the unmodified
+    fork blob (a real merge failure mode — part1 surfaced item dispatch gap,
+    take_target user choice never actualized), a correct Judge finding that
+    cites upstream content (e.g. "Upstream changes have not been applied") was
+    incorrectly downgraded as hallucinated because the cited upstream lines are
+    legitimately absent from merged_content. With ``fork_content`` supplied,
+    treat the evidence as grounded when (a) merged_content equals fork_content
+    (file is verbatim fork blob — the finding is provably true) or (b) the
+    stripped excerpt appears in fork_content (Judge is citing real fork-side
+    content that should have been overwritten but wasn't).
+    """
+    if merged_content is None:
+        return level, description
+    if level not in _GROUNDING_REQUIRED_LEVELS:
+        return level, description
+    if evidence_excerpt is None:
+        return level, description
+    stripped = evidence_excerpt.strip()
+    if not stripped:
+        return level, description
+    if stripped in merged_content:
+        return level, description
+    if fork_content is not None:
+        if merged_content == fork_content:
+            return level, description
+        if stripped in fork_content:
+            return level, description
+    return IssueSeverity.MEDIUM, description + _HALLUCINATED_SUFFIX
+
+
 def parse_file_review_issues(
-    raw: str | dict[str, Any], default_file_path: str
+    raw: "str | dict[str, Any] | LLMResponseLike",
+    default_file_path: str,
+    merged_content: str | None = None,
+    fork_content: str | None = None,
+    strict_json: bool = False,
 ) -> list[JudgeIssue]:
-    data = _extract_json(raw)
+    try:
+        data = _extract_json(_stop_reason_gate(raw, strict_json))
+    except ParseError:
+        # P2: fail CLOSED when asked. A truncated/malformed per-file Judge review
+        # silently became "no issues" — the broken file passed review and rolled
+        # into a PASS verdict. With strict_json the caller turns it into a
+        # blocking veto instead. Default False preserves the legacy contract.
+        if strict_json:
+            raise
+        return []
     issues: list[JudgeIssue] = []
 
     for item in data.get("issues", []):
@@ -337,6 +593,9 @@ def parse_file_review_issues(
         description = item.get("description", "")
         level, description = _apply_grounding_rule(
             level, affected_lines, evidence_excerpt, description
+        )
+        level, description = _validate_evidence_grounded(
+            level, evidence_excerpt, merged_content, description, fork_content
         )
 
         issues.append(
@@ -356,14 +615,21 @@ def parse_file_review_issues(
 
 
 def parse_commit_round_analyses(
-    raw: str | dict[str, Any], file_paths: list[str]
+    raw: "str | dict[str, Any] | LLMResponseLike",
+    file_paths: list[str],
+    strict_json: bool = False,
 ) -> dict[str, "ConflictAnalysis"]:
     from uuid import uuid4 as _uuid4
 
     result: dict[str, ConflictAnalysis] = {}
     try:
-        data = _extract_json(raw)
+        data = _extract_json(_stop_reason_gate(raw, strict_json))
     except ParseError:
+        # P2: fail CLOSED when asked. A truncated commit-round analysis silently
+        # became an empty dict → the affected files dropped out of the analysis
+        # with no signal. strict_json lets the caller escalate instead.
+        if strict_json:
+            raise
         return result
 
     for entry in data.get("files", []):
@@ -393,15 +659,21 @@ def parse_commit_round_analyses(
         up_data = entry.get("upstream_intent", {})
         fk_data = entry.get("fork_intent", {})
         upstream_intent = ChangeIntent(
-            description=up_data.get("description", ""),
+            description=sanitize_hedging(up_data.get("description", "")),
             intent_type=up_data.get("intent_type", "unknown"),
             confidence=float(up_data.get("confidence", 0.5)),
         )
         fork_intent = ChangeIntent(
-            description=fk_data.get("description", ""),
+            description=sanitize_hedging(fk_data.get("description", "")),
             intent_type=fk_data.get("intent_type", "unknown"),
             confidence=float(fk_data.get("confidence", 0.5)),
         )
+        sanitized_rationale = sanitize_hedging(entry.get("rationale", ""))
+        semantic_compat, compat_warnings = _read_semantic_compatibility(entry)
+        intent_warnings = _check_intent_description_quality(
+            upstream_intent.description, fork_intent.description
+        )
+        grounding_warnings = compat_warnings + intent_warnings
         conflict_point = ConflictPoint(
             file_path=fp,
             hunk_id=str(_uuid4()),
@@ -411,7 +683,8 @@ def parse_commit_round_analyses(
             can_coexist=bool(entry.get("can_coexist", False)),
             suggested_decision=recommended,
             confidence=confidence,
-            rationale=entry.get("rationale", ""),
+            rationale=sanitized_rationale,
+            semantic_compatibility=semantic_compat,  # type: ignore[arg-type]
         )
         result[fp] = ConflictAnalysis(
             file_path=fp,
@@ -421,26 +694,55 @@ def parse_commit_round_analyses(
             conflict_type=conflict_type,
             can_coexist=bool(entry.get("can_coexist", False)),
             is_security_sensitive=bool(entry.get("is_security_sensitive", False)),
-            rationale=entry.get("rationale", ""),
+            rationale=sanitized_rationale,
             confidence=confidence,
+            grounding_warnings=grounding_warnings,
+            semantic_compatibility=semantic_compat,  # type: ignore[arg-type]
         )
 
     return result
 
 
 def parse_batch_file_review_issues(
-    raw: str | dict[str, Any], file_paths: list[str]
+    raw: "str | dict[str, Any] | LLMResponseLike",
+    file_paths: list[str],
+    merged_contents: dict[str, str] | None = None,
+    fork_contents: dict[str, str] | None = None,
+    strict_json: bool = False,
 ) -> dict[str, list[JudgeIssue]]:
+    if merged_contents is not None and not isinstance(merged_contents, dict):
+        raise TypeError(
+            "merged_contents must be a dict[str, str] or None; "
+            f"got {type(merged_contents).__name__}"
+        )
+    if fork_contents is not None and not isinstance(fork_contents, dict):
+        raise TypeError(
+            "fork_contents must be a dict[str, str] or None; "
+            f"got {type(fork_contents).__name__}"
+        )
+
     result: dict[str, list[JudgeIssue]] = {fp: [] for fp in file_paths}
     try:
-        data = _extract_json(raw)
+        data = _extract_json(_stop_reason_gate(raw, strict_json))
     except ParseError:
+        # #3A: fail CLOSED when the caller asks for it. An unparseable batch
+        # verdict (truncated / malformed JSON) silently became "no issues found"
+        # for EVERY file in the chunk → the broken merge passed Judge review and
+        # reached COMPLETED. With strict_json the caller turns the unparseable
+        # response into a blocking CRITICAL instead of a free pass. Default stays
+        # False to preserve the legacy best-effort contract for other callers.
+        if strict_json:
+            raise
         return result
 
     for file_entry in data.get("files", []):
         fp = file_entry.get("file_path", "")
         if fp not in result:
             continue
+        per_file_content = (
+            merged_contents.get(fp) if merged_contents is not None else None
+        )
+        per_file_fork = fork_contents.get(fp) if fork_contents is not None else None
         for item in file_entry.get("issues", []):
             level_raw = item.get("issue_level", "medium")
             try:
@@ -453,6 +755,9 @@ def parse_batch_file_review_issues(
             description = item.get("description", "")
             level, description = _apply_grounding_rule(
                 level, affected_lines, evidence_excerpt, description
+            )
+            level, description = _validate_evidence_grounded(
+                level, evidence_excerpt, per_file_content, description, per_file_fork
             )
             result[fp].append(
                 JudgeIssue(

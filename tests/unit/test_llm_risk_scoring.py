@@ -6,7 +6,7 @@ from src.llm.prompts.risk_scoring_prompts import (
     RISK_SCORING_SYSTEM,
 )
 from src.models.diff import FileDiff, FileStatus, RiskLevel, DiffHunk
-from src.models.config import LLMRiskScoringConfig
+from src.models.config import LLMAssistConfig
 
 
 def _make_file_diff(
@@ -75,28 +75,31 @@ class TestRiskScoringPrompt:
         assert "risk" in RISK_SCORING_SYSTEM.lower()
 
 
-class TestLLMRiskScoringConfig:
+class TestLLMAssistConfig:
     def test_defaults(self) -> None:
-        config = LLMRiskScoringConfig()
-        assert config.enabled is False
-        assert config.gray_zone_low == 0.25
-        assert config.gray_zone_high == 0.65
+        config = LLMAssistConfig()
+        assert config.mode == "auto"
+        assert config.budget_max_files == 200
+        assert config.uncertainty_low == 0.30
+        assert config.uncertainty_high == 0.70
         assert config.rule_weight == 0.6
 
     def test_custom_values(self) -> None:
-        config = LLMRiskScoringConfig(
-            enabled=True, gray_zone_low=0.3, gray_zone_high=0.7, rule_weight=0.5
+        config = LLMAssistConfig(
+            mode="always", uncertainty_low=0.3, uncertainty_high=0.7, rule_weight=0.5
         )
-        assert config.enabled is True
+        assert config.mode == "always"
         assert config.rule_weight == 0.5
 
     def test_validation_bounds(self) -> None:
         with pytest.raises(Exception):
-            LLMRiskScoringConfig(gray_zone_low=-0.1)
+            LLMAssistConfig(uncertainty_low=-0.1)
         with pytest.raises(Exception):
-            LLMRiskScoringConfig(gray_zone_high=1.5)
+            LLMAssistConfig(uncertainty_high=1.5)
         with pytest.raises(Exception):
-            LLMRiskScoringConfig(rule_weight=2.0)
+            LLMAssistConfig(rule_weight=2.0)
+        with pytest.raises(Exception):
+            LLMAssistConfig(mode="sometimes")
 
 
 class TestBlendedScoring:
@@ -115,11 +118,11 @@ class TestBlendedScoring:
         result = rule_weight * rule_score + (1.0 - rule_weight) * llm_score
         assert abs(result - 0.5) < 0.001
 
-    def test_gray_zone_detection(self) -> None:
-        config = LLMRiskScoringConfig(gray_zone_low=0.25, gray_zone_high=0.65)
-        assert config.gray_zone_low <= 0.4 <= config.gray_zone_high
-        assert not (config.gray_zone_low <= 0.1 <= config.gray_zone_high)
-        assert not (config.gray_zone_low <= 0.9 <= config.gray_zone_high)
+    def test_uncertainty_band_detection(self) -> None:
+        config = LLMAssistConfig(uncertainty_low=0.25, uncertainty_high=0.65)
+        assert config.uncertainty_low <= 0.4 <= config.uncertainty_high
+        assert not (config.uncertainty_low <= 0.1 <= config.uncertainty_high)
+        assert not (config.uncertainty_low <= 0.9 <= config.uncertainty_high)
 
 
 class TestComputeLLMRiskScore:

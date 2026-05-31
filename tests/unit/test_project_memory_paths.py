@@ -113,5 +113,7 @@ def test_memory_db_accumulates_entries_across_runs(fake_repo: Path) -> None:
     )
     assert store_run2.entry_count == 2
 
-    contents = sorted(e.content for e in store_run2.query_by_path("a.py", limit=10))
+    contents = sorted(
+        e.content for e in store_run2.to_memory().entries if "a.py" in e.file_paths
+    )
     assert "run1 entry" in contents

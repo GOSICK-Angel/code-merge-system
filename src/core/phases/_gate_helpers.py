@@ -112,6 +112,21 @@ def build_layer_index(state: MergeState) -> dict[int, MergeLayer]:
     return {layer.layer_id: layer for layer in state.merge_plan.layers}
 
 
+def vacuously_complete_layers(
+    layer_index: dict[int, MergeLayer],
+    layers_with_batches: set[int | None],
+) -> set[int]:
+    """Identify plan-declared layers that have no AUTO-class batches.
+
+    Such layers (empty placeholders, or layers whose files all route to
+    HUMAN_REQUIRED / cherry-pick replay) cannot block downstream
+    ``depends_on`` checks — there is nothing to merge in them, so the
+    dep is vacuously satisfied. Without this, downstream layers
+    false-cascade every file into ``layer_dep_gate`` escalate records.
+    """
+    return {lid for lid in layer_index if lid not in layers_with_batches}
+
+
 def get_layer_gates(
     layer_id: int,
     layer_index: dict[int, MergeLayer],

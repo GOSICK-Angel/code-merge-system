@@ -1,0 +1,13 @@
+diff --git a/tools/google/requirements.txt b/tools/google/requirements.txt
+index 29ae6d24..1682684d 100644
+--- a/tools/google/requirements.txt
++++ b/tools/google/requirements.txt
+@@ -98,7 +98,7 @@ typing-inspection==0.4.2
+     # via
+     #   pydantic
+     #   pydantic-settings
+-urllib3==2.5.0
++urllib3==2.6.0
+     # via requests
+ werkzeug==3.0.6
+     # via

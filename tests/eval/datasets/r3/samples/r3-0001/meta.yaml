@@ -1,0 +1,13 @@
+sample_id: r3-0001
+tier: 2
+category: B
+loss_class: null
+expected_human: false
+description: |
+  OpenHands fork SmartManoj/Kevin (Python AI agent framework, ~2019 files):
+  PR-style merge `f551b741e` (Jul 20, 2025) — `Merge branch 'main' into kevin`.
+  Merge itself touches 8 files (frontend test + j2 templates); sample_import
+  captured 347 files (base→fork∪upstream∪golden union including all kevin
+  fork divergence). base=aea37e52, upstream=124361269, fork=c58b5562b,
+  golden=f551b741. Tests R3 acceptance on a real third-party Python fork
+  (plan §3.2 candidate #5).

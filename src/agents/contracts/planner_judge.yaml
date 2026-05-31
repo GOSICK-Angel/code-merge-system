@@ -1,12 +1,15 @@
 name: planner_judge
+version: 1
 inputs:
   - merge_plan
   - file_diffs
   - config
+  - dependency_graph
 output_schema: PlanJudgeVerdict
 gates:
   - PJ-SYSTEM
   - PJ-PLAN-REVIEW
+  - PJ-PLAN-REVIEW-SEGMENT
 forbidden:
   - writes_state
   - direct_llm_call

@@ -1,0 +1,10 @@
+sample_id: r2-0004
+tier: 2
+category: B
+loss_class: null
+expected_human: false
+description: |
+  dify-plugin-daemon PR #136 (whhe/mysql-compatible) merged 2025-03-28.
+  Refactors internal/db to support mysql/pgsql via dialector abstraction
+  and renames pgsql.go -> executor.go. 20 files captured; touches go.mod
+  and CI workflow. base=af760dd5, golden=90c5dc19.

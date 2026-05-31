@@ -1,0 +1,119 @@
+diff --git a/tools/bing/manifest.yaml b/tools/bing/manifest.yaml
+index 102233a1..8ac5f8a6 100644
+--- a/tools/bing/manifest.yaml
++++ b/tools/bing/manifest.yaml
+@@ -1,4 +1,4 @@
+-version: 0.0.4
++version: 0.0.5
+ type: plugin
+ author: "langgenius"
+ name: "bing"
+diff --git a/tools/bing/requirements.txt b/tools/bing/requirements.txt
+index 5e06c37a..b267cded 100644
+--- a/tools/bing/requirements.txt
++++ b/tools/bing/requirements.txt
+@@ -1 +1 @@
+-dify_plugin==0.0.1b65
++dify_plugin>=0.3.0,<0.5.0
+diff --git a/tools/bing/tools/bing_web_search.py b/tools/bing/tools/bing_web_search.py
+index d12bc7c0..1217fffb 100644
+--- a/tools/bing/tools/bing_web_search.py
++++ b/tools/bing/tools/bing_web_search.py
+@@ -83,7 +83,41 @@ class BingWebSearchTool(Tool):
+                     yield self.create_text_message(
+                         text=f'{related.get("displayText", "")}{url}'
+                     )
++        elif result_type == "json":
++            result = {}
++            if search_results:
++                result["organic"] = [
++                    {
++                        "title": item.get("name", ""),
++                        "snippet": item.get("snippet", ""),
++                        "url": item.get("url", ""),
++                        "siteName": item.get("siteName", ""),
++                    }
++                    for item in search_results
++                ]
++
++            if computation and "expression" in computation and "value" in computation:
++                result["computation"] = {"expression": computation["expression"], "value": computation["value"]}
++
++            if entities:
++                result["entities"] = [
++                    {
++                        "name": item.get("name", ""),
++                        "url": item.get("url", ""),
++                        "description": item.get("description", ""),
++                    }
++                    for item in entities
++                ]
++
++            if news:
++                result["news"] = [{"name": item.get("name", ""), "url": item.get("url", "")} for item in news]
++
++            if related_searches:
++                result["related searches"] = [
++                    {"displayText": item.get("displayText", ""), "url": item.get("webSearchUrl", "")} for item in news
++                ]
+ 
++            yield self.create_json_message(result)
+         else:
+             # construct text
+             text = ""
+@@ -136,7 +170,7 @@ class BingWebSearchTool(Tool):
+         if not query:
+             raise Exception("query is required")
+ 
+-        limit = min(tool_parameters.get("limit", 5), 10)
++        limit = min(tool_parameters.get("limit", 5), 100)
+         result_type = tool_parameters.get("result_type", "text") or "text"
+ 
+         market = tool_parameters.get("market", "US")
+@@ -193,7 +227,7 @@ class BingWebSearchTool(Tool):
+         if not query:
+             raise Exception("query is required")
+ 
+-        limit = min(tool_parameters.get("limit", 5), 10)
++        limit = min(tool_parameters.get("limit", 5), 100)
+         result_type = tool_parameters.get("result_type", "text") or "text"
+ 
+         market = tool_parameters.get("market", "US")
+diff --git a/tools/bing/tools/bing_web_search.yaml b/tools/bing/tools/bing_web_search.yaml
+index 8ac35f85..a4e95608 100644
+--- a/tools/bing/tools/bing_web_search.yaml
++++ b/tools/bing/tools/bing_web_search.yaml
+@@ -103,7 +103,7 @@ parameters:
+       zh_Hans: 限制返回结果的数量
+       pt_BR: limit the number of results
+     min: 1
+-    max: 10
++    max: 100
+     default: 5
+   - name: result_type
+     type: select
+@@ -113,9 +113,9 @@ parameters:
+       zh_Hans: 结果类型
+       pt_BR: result type
+     human_description:
+-      en_US: return a list of links or texts
+-      zh_Hans: 返回一个连接列表还是纯文本内容
+-      pt_BR: return a list of links or texts
++      en_US: return a list of links, json or texts
++      zh_Hans: 返回一个列表，内容是链接、json还是纯文本
++      pt_BR: return a list of links, json or texts
+     default: text
+     options:
+       - value: link
+@@ -128,6 +128,11 @@ parameters:
+           en_US: Text
+           zh_Hans: 文本
+           pt_BR: Text
++      - value: json
++        label:
++          en_US: JSON
++          zh_Hans: JSON
++          pt_BR: JSON
+     form: form
+   - name: market
+     type: select

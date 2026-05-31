@@ -1,0 +1,13 @@
+diff --git a/models/openrouter/requirements.txt b/models/openrouter/requirements.txt
+index cd9b8c76..e6189ec9 100644
+--- a/models/openrouter/requirements.txt
++++ b/models/openrouter/requirements.txt
+@@ -91,7 +91,7 @@ typing-inspection==0.4.2
+     # via
+     #   pydantic
+     #   pydantic-settings
+-urllib3==2.5.0
++urllib3==2.6.0
+     # via requests
+ werkzeug==3.0.6
+     # via

@@ -86,7 +86,7 @@ mypy src                        # 应全绿（strict mode）
 | 确定性工具（Gate/扫描器/Git） | [`tools.md`](tools.md) |
 | LLM 路由/压缩/缓存 | [`llm.md`](llm.md) |
 | 三层记忆系统 | [`memory.md`](memory.md) |
-| CLI + TUI + Web UI | [`cli.md`](cli.md) |
+| CLI + Web UI | [`cli.md`](cli.md) |
 | 六大丢失模式 + P0/P1/P2 加固项 | [`../multi-agent-optimization-from-merge-experience.md`](../multi-agent-optimization-from-merge-experience.md) |
 | 迁移感知合并 | [`../migration-aware-merge.md`](../migration-aware-merge.md) |
 | 风险等级枚举 | [`../risk-levels.md`](../risk-levels.md) |
@@ -107,7 +107,7 @@ git checkout -b fork main && echo "hello fork" > a.py && git commit -am fk
 
 # 在 demo 根目录
 cd /path/to/CodeMergeSystem
-merge upstream --no-tui --dry-run
+merge upstream --no-web --dry-run
 ```
 
 看 `outputs/debug/` 或 `.merge/runs/<id>/` 目录下的 checkpoint 与 plan 报告。
@@ -119,7 +119,7 @@ merge upstream --no-tui --dry-run
 | 想改 | 从哪里入手 |
 |---|---|
 | 新增一个 Agent | `agents.md` §6 |
-| 新增一个 Phase | `core.md` §10 |
+| 新增一个 Phase | `core.md` §8 |
 | 新增一个加固扫描器 | `tools.md` §5 |
 | 新增 baseline parser（比如新语言的 test runner） | 加文件到 `src/tools/baseline_parsers/`，文件名作为 `GateCommandConfig.baseline_parser` |
 | 接入新 LLM Provider | `llm.md` §12 |

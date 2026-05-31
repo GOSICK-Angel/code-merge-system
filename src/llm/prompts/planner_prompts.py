@@ -21,12 +21,52 @@ def get_planner_system(language: str = "en") -> str:
 PLANNER_SYSTEM = get_planner_system("en")
 
 
+# P1-1: few-shot worked examples anchor the classification rules on the three
+# boundaries that drift most (B-class bias, the C-class hard rule, and the
+# security-sensitive escalation). Each maps one manifest line to its expected
+# risk_level + a one-line justification, mirroring the manifest format emitted
+# above. Claude-only agent — executor / planner_judge stay zero-shot per the
+# §五 B-class guardrail in doc/bugfix/0528-agent-prompt-engineering-review.md.
+_CLASSIFICATION_EXAMPLES = """## Worked Examples
+
+<examples>
+<example>
+Input manifest line:
+- src/utils/format.py | status=modified | category=upstream_only | fork_lines_added=0 | fork_lines_deleted=0 | upstream_lines_added=18 | upstream_lines_deleted=4 | conflicts=0 | security_sensitive=false
+Expected risk_level: auto_safe
+Why: category=upstream_only (B-class), no conflicts, not security-sensitive,
+both deltas < 200. Upstream-only change the fork never touched — bias toward
+auto_safe.
+</example>
+
+<example>
+Input manifest line:
+- src/core/router.py | status=modified | category=both_changed | fork_lines_added=40 | fork_lines_deleted=12 | upstream_lines_added=33 | upstream_lines_deleted=9 | conflicts=0 | security_sensitive=false
+Expected risk_level: auto_risky
+Why: category=both_changed (C-class) — the hard rule forbids auto_safe even
+with conflicts=0. Upstream delta < 200 so it does not force human_required;
+auto_risky routes it through ConflictAnalyst.
+</example>
+
+<example>
+Input manifest line:
+- src/auth/session.py | status=modified | category=both_changed | fork_lines_added=15 | fork_lines_deleted=3 | upstream_lines_added=22 | upstream_lines_deleted=7 | conflicts=0 | security_sensitive=true
+Expected risk_level: human_required
+Why: security_sensitive=true forces human_required regardless of conflict
+count — auth/session logic needs human sign-off.
+</example>
+</examples>
+
+"""
+
+
 def build_classification_prompt(
     file_diffs: list[FileDiff],
     project_context: str,
     batch_index: int = 0,
     total_batches: int = 1,
     rename_pairs: list[tuple[str, str]] | None = None,
+    large_diff_lines: int = 200,
 ) -> str:
     file_list_lines: list[str] = []
     for fd in file_diffs:
@@ -70,14 +110,14 @@ Changed files ({len(file_diffs)} total):
 **auto_safe** — DEFAULT for most files. Use when ALL of:
   - conflicts = 0
   - security_sensitive = false
-  - fork_lines_added + fork_lines_deleted < 200
-  - upstream_lines_added + upstream_lines_deleted < 200
+  - fork_lines_added + fork_lines_deleted < {large_diff_lines}
+  - upstream_lines_added + upstream_lines_deleted < {large_diff_lines}
   - category != both_changed (C-class needs at minimum auto_risky)
   - Routine changes: deps, config, docs, tests, minor refactors
 
 **auto_risky** — Use when ANY of:
-  - Large fork diffs (fork_lines_added + fork_lines_deleted >= 200) touching shared interfaces
-  - Large upstream diffs (upstream_lines_added + upstream_lines_deleted >= 200) — even if fork delta is small, a big upstream refactor risks silently dropping fork edits
+  - Large fork diffs (fork_lines_added + fork_lines_deleted >= {large_diff_lines}) touching shared interfaces
+  - Large upstream diffs (upstream_lines_added + upstream_lines_deleted >= {large_diff_lines}) — even if fork delta is small, a big upstream refactor risks silently dropping fork edits
   - category = both_changed (both sides modified the file — must go through ConflictAnalyst)
   - Cross-cutting changes that affect many callers
   - Database schema or migration files (even without conflicts)
@@ -85,13 +125,6 @@ Changed files ({len(file_diffs)} total):
 **human_required** — Use ONLY when at least ONE of:
   - conflicts > 0  (actual merge conflict markers present)
   - security_sensitive = true  (auth, crypto, secrets, permissions)
-  - Path obviously implements an authentication / verification / OTP / 2FA / MFA /
-    OAuth / signin / signout / signature / permission / API-key flow — even when
-    `security_sensitive=false`, prefer `human_required` for these. Examples:
-    `auth.py`, `*verify*.py`, `*otp*.py`, `oauth_*`, `signin_*`, `*signature*`,
-    `*permission*`, `*api_key*`. Env-template files (`.env.example`,
-    `.env.sample`, `.env.template`) are placeholders; classify them
-    `auto_risky`, NOT `human_required`.
   - Core business logic with both sides making semantic changes
 
 **deleted_only** — file_status is deleted, no conflicts
@@ -99,11 +132,11 @@ Changed files ({len(file_diffs)} total):
 **excluded** — generated files, lock files, .gitignore patterns
 
 ⚠️  HARD RULE: If category=both_changed, you MUST NOT classify auto_safe. Choose at least auto_risky so ConflictAnalyst can inspect the file.
-⚠️  HARD RULE: If upstream_lines_added + upstream_lines_deleted >= 200 AND category=both_changed, choose human_required (large upstream refactor over fork edits is high-risk).
+⚠️  HARD RULE: If upstream_lines_added + upstream_lines_deleted >= {large_diff_lines} AND category=both_changed, choose human_required (large upstream refactor over fork edits is high-risk).
 ⚠️  BIAS TOWARD AUTO_SAFE for category=upstream_only files (B-class). When in doubt between auto_safe and auto_risky for B-class, choose auto_safe.
 ⚠️  NEVER use human_required for a file with conflicts=0 and security_sensitive=false unless category=both_changed with large upstream delta.
 
-Create a phased merge plan with the following structure:
+{_CLASSIFICATION_EXAMPLES}Create a phased merge plan with the following structure:
 1. Classify each file by risk level using the rules above
 2. Group files into batches by phase
 3. Summarize risk distribution
@@ -135,6 +168,11 @@ Return JSON with this structure:
 }}"""
 
 
+# P3-3: cap on judge issues listed verbatim in a single revision prompt. This
+# is a prompt-size guard (not a merge-policy threshold), so it stays a module
+# constant rather than a config field. Issues beyond the cap are handled in the
+# next revision round; the prompt scopes reclassification to exactly the listed
+# files (P1-4) so truncation never silently drops a file's correction.
 MAX_REVISION_ISSUES = 50
 
 
@@ -159,9 +197,13 @@ def build_revision_prompt(
         for issue in capped_issues
     )
     if len(judge_issues) > MAX_REVISION_ISSUES:
+        remaining = len(judge_issues) - MAX_REVISION_ISSUES
         issues_text += (
-            f"\n\n(Showing {MAX_REVISION_ISSUES} of {len(judge_issues)} issues. "
-            f"Apply the same reclassification pattern to similar files.)"
+            f"\n\n(Showing the first {MAX_REVISION_ISSUES} of "
+            f"{len(judge_issues)} issues. Reclassify ONLY the files listed "
+            f"above. Do not infer or extrapolate changes to files that are not "
+            f"explicitly listed — the remaining {remaining} issues are "
+            f"truncated here and will be handled in a separate revision pass.)"
         )
 
     phases_text = "\n".join(
@@ -196,6 +238,8 @@ PLANNER_EVALUATION_SYSTEM = """You are a code merge planning expert evaluating r
 For each issue raised by the reviewer, you must independently assess whether it is valid based on
 the file's actual characteristics (diff size, conflict count, security sensitivity, language).
 You are allowed to REJECT suggestions you disagree with — provide a clear technical reason.
+If a file has conflict_count=0 AND is_security_sensitive=false, path-name alone is NOT a valid reason
+to upgrade its risk level — REJECT such suggestions.
 Respond with ONLY a JSON object. No markdown, no extra text."""
 
 
@@ -203,8 +247,13 @@ def build_evaluation_prompt(
     plan: MergePlan,
     judge_issues: list[PlanIssue],
     lang: str = "en",
+    file_diffs: list[FileDiff] | None = None,
 ) -> str:
     capped = judge_issues[:MAX_REVISION_ISSUES]
+
+    file_meta: dict[str, FileDiff] = {}
+    if file_diffs:
+        file_meta = {fd.file_path: fd for fd in file_diffs}
 
     def _render_curr(issue: PlanIssue) -> str:
         return (
@@ -213,9 +262,20 @@ def build_evaluation_prompt(
             else "(not in plan)"
         )
 
+    def _render_meta(issue: PlanIssue) -> str:
+        fd = file_meta.get(issue.file_path)
+        if fd is None:
+            return ""
+        return (
+            f"  conflict_count: {fd.conflict_count}\n"
+            f"  is_security_sensitive: {fd.is_security_sensitive}\n"
+            f"  lines_changed: +{fd.lines_added}/-{fd.lines_deleted}\n"
+        )
+
     issues_text = "\n".join(
         f"- issue_id: {issue.issue_id}\n"
         f"  file_path: {issue.file_path}\n"
+        f"{_render_meta(issue)}"
         f"  current_classification: {_render_curr(issue)}\n"
         f"  suggested_classification: {issue.suggested_classification.value}\n"
         f"  reason: {issue.reason}\n"
@@ -254,6 +314,19 @@ For EACH issue, decide:
 - "accept": You agree the file should be reclassified as suggested. State why you agree.
 - "reject": You disagree and want to keep the current classification. Give a clear technical reason.
 - "discuss": You partially agree or need clarification. Propose an alternative.
+
+REJECT CRITERIA — you MAY reject (but are NOT required to) when ALL of the following hold:
+- conflict_count = 0 (no merge conflicts)
+- is_security_sensitive = false (not in the security-sensitive config)
+- The reviewer's reason cites ONLY the file's path/name (e.g. "the path contains auth", "this is a credential file") and does NOT cite any concrete evidence from the diff.
+
+EVIDENCE-BACKED REASONS must NOT be auto-rejected. A reviewer reason that cites any of the following is evidence-backed:
+- Specific line numbers, hunk regions, or `regions=L-L` flags from the manifest
+- Specific function names, struct field names, identifier names
+- Concrete fork=+A/-D vs upstream=+A/-D deltas showing both sides touched non-trivial line counts
+- C-class (`category=both_changed`) with non-trivial deltas on BOTH sides — even if conflict_count=0, the file is a real three-way conflict candidate.
+
+When in doubt between reject and discuss, prefer DISCUSS with a counter-proposal — it keeps the negotiation going. Auto-rejecting an evidence-backed concern wastes the Judge's signal.
 
 Return JSON:
 {{

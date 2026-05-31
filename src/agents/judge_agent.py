@@ -1,8 +1,12 @@
+import difflib
 import fnmatch
 import re
 from datetime import datetime
 from src.agents.base_agent import BaseAgent
-from src.core.parallel_file_runner import ParallelFileRunner
+from src.core.parallel_file_runner import (
+    ParallelFileRunner,
+    assert_disjoint_file_shards,
+)
 from src.models.config import AgentLLMConfig
 from src.models.message import AgentType, AgentMessage, MessageType
 from src.models.plan import MergePhase
@@ -21,8 +25,10 @@ from src.models.judge import (
 )
 from src.models.config import CustomizationEntry, CustomizationVerification
 from src.models.diff import FileChangeCategory, ForkDivergence
+from src.models.dependency import ConfidenceLabel
 from src.models.state import MergeState
 from src.llm.prompt_builders import AgentPromptBuilder
+from src.llm.relevance import weights_from_fanin
 from src.core.read_only_state_view import ReadOnlyStateView
 from src.llm.prompts.judge_prompts import (
     JUDGE_SYSTEM,
@@ -34,14 +40,25 @@ from src.llm.response_parser import (
     parse_file_review_issues,
     parse_judge_verdict,
 )
+from src.llm.structured_schemas import (
+    BATCH_FILE_REVIEW,
+    FILE_REVIEW,
+    JUDGE_RE_EVALUATE,
+    JUDGE_VERDICT,
+    META_REVIEW,
+)
 from src.tools.file_classifier import matches_any_pattern
+from src.tools.conflict_markers import find_conflict_marker
 from src.tools.forks_profile_loader import (
     find_removed_domain_match,
     find_rewritten_module_match,
 )
-from src.tools.git_tool import GitTool
+from src.tools.git_tool import GitReadStatus, GitTool
 from src.tools.three_way_diff import ThreeWayDiff, _safe_read_text
 from src.tools.syntax_checker import check_syntax as check_file_syntax
+from src.tools.syntax_checker import has_real_checker
+from src.tools.duplicate_symbol_check import find_duplicate_symbols
+from src.tools.hallucinated_symbol_guard import find_invented_member_accesses
 
 
 class JudgeAgent(BaseAgent):
@@ -51,9 +68,15 @@ class JudgeAgent(BaseAgent):
     def __init__(self, llm_config: AgentLLMConfig, git_tool: GitTool | None = None):
         super().__init__(llm_config)
         self.git_tool = git_tool
+        # P1: the Judge is read-only (ReadOnlyStateView) and may not write
+        # state.errors. It accumulates "deterministic gate could not run"
+        # records here and hands them to the phase via the completion payload,
+        # which writes them to state.errors on the Orchestrator side.
+        self._gate_skips: list[dict[str, str]] = []
 
     async def run(self, state: ReadOnlyStateView) -> AgentMessage:
         state = self.restricted_view(state)
+        self._gate_skips = []
         all_issues: list[JudgeIssue] = []
         reviewed_files: list[str] = []
 
@@ -62,6 +85,8 @@ class JudgeAgent(BaseAgent):
             file_diffs_map[fd.file_path] = fd
 
         deterministic_issues = self._run_deterministic_pipeline(state, file_diffs_map)
+        deterministic_issues.extend(self._check_duplicate_symbols(state))
+        deterministic_issues.extend(self._check_invented_symbols(state))
         all_issues.extend(deterministic_issues)
 
         deterministic_veto_files = {
@@ -149,6 +174,11 @@ class JudgeAgent(BaseAgent):
                 abs_path = self.git_tool.repo_path / file_path
                 if abs_path.exists():
                     merged_content = _safe_read_text(abs_path) or ""
+            fork_content: str | None = None
+            if self.git_tool is not None:
+                fork_content = self.git_tool.get_file_content(
+                    state.config.fork_ref, file_path
+                )
             check_strategy = _resolve_check_strategy(
                 file_path,
                 record,
@@ -162,8 +192,18 @@ class JudgeAgent(BaseAgent):
                 project_context=state.config.project_context,
                 check_strategy=check_strategy,
                 prior_round_issues=prior_issues_by_file.get(file_path, []),
+                referenced_names=state.dependency_graph.referenced_symbols(file_path),
+                symbol_weights=weights_from_fanin(
+                    state.dependency_graph.symbol_fanin(file_path)
+                ),
+                fork_content=fork_content,
+                lang=state.config.output.language,
             )
 
+        # U5: per-file fan-out — dict.keys() is nominally disjoint, but
+        # asserting catches upstream callers that ever pass duplicate keys
+        # (which would double-bill the judge LLM for the same file).
+        assert_disjoint_file_shards([[fp] for fp in high_risk_records.keys()])
         runner = ParallelFileRunner.from_api_key_env_list(
             self.llm_config.api_key_env_list,
             override=state.config.parallel_file_concurrency,
@@ -203,7 +243,10 @@ class JudgeAgent(BaseAgent):
             phase=MergePhase.JUDGE_REVIEW,
             message_type=MessageType.PHASE_COMPLETED,
             subject=f"Judge review completed: {verdict.verdict.value}",
-            payload={"verdict": verdict.model_dump(mode="json")},
+            payload={
+                "verdict": verdict.model_dump(mode="json"),
+                "gates_skipped": list(self._gate_skips),
+            },
         )
 
     async def review_file(
@@ -215,6 +258,10 @@ class JudgeAgent(BaseAgent):
         project_context: str = "",
         check_strategy: JudgeCheckStrategy = JudgeCheckStrategy.UPSTREAM_MATCH,
         prior_round_issues: list[JudgeIssue] | None = None,
+        referenced_names: frozenset[str] = frozenset(),
+        symbol_weights: dict[str, float] | None = None,
+        fork_content: str | None = None,
+        lang: str = "en",
     ) -> list[JudgeIssue]:
         issues: list[JudgeIssue] = []
 
@@ -235,28 +282,48 @@ class JudgeAgent(BaseAgent):
                     )
                 )
 
+        # U1.A parity: staging must run regardless of memory_store so a large
+        # merged file is chunked/degraded before the LLM call. Gating it behind
+        # memory_store (as this once did) let the Judge ship whole large files
+        # raw when memory was off — the forgejo "tokens=309/98789 then false
+        # truncated-content verdict" failure. Only the memory-text injection
+        # stays gated.
+        builder = AgentPromptBuilder(
+            self.llm_config, self._memory_store, self._memory_hit_tracker
+        )
         memory_context = ""
-        max_content_chars: int | None = None
         if self._memory_store:
-            builder = AgentPromptBuilder(
-                self.llm_config, self._memory_store, self._memory_hit_tracker
-            )
             memory_context = builder.build_memory_context_text(
                 [file_path], current_phase=self._current_phase
             )
-            max_content_chars = builder.compute_content_budget(
-                JUDGE_SYSTEM + memory_context
-            )
 
-            diff_ranges = _extract_diff_ranges(original_diff)
-            budget_tokens = max_content_chars // 4 if max_content_chars else 2000
-            if merged_content:
-                merged_content = builder.build_staged_content(
-                    merged_content,
-                    file_path,
-                    diff_ranges,
-                    budget_tokens,
-                )
+        max_content_chars = builder.compute_content_budget(
+            JUDGE_SYSTEM + memory_context
+        )
+        # Prefer ranges derived from the merged file itself (merged coords);
+        # fall back to the fork-side hunk ranges when no snapshot is available.
+        diff_ranges = _merged_content_diff_ranges(
+            decision_record.original_snapshot, merged_content
+        ) or _extract_diff_ranges(original_diff)
+        budget_tokens = max_content_chars // 4 if max_content_chars else 2000
+        # #12: preserve the FULL on-disk merged blob. Evidence grounding and the
+        # conflict-marker scan must run against the raw content, not the
+        # budget-trimmed staged view below — otherwise a real CRITICAL whose
+        # evidence_excerpt was elided out of the staged window is wrongly
+        # downgraded as "hallucinated evidence", and a conflict marker outside
+        # the staged window is silently missed. The LLM prompt still sees the
+        # staged view (that is what must fit the token budget).
+        raw_merged_content = merged_content
+        if merged_content:
+            merged_content = builder.build_staged_content(
+                merged_content,
+                file_path,
+                diff_ranges,
+                budget_tokens,
+                is_security_sensitive=original_diff.is_security_sensitive,
+                referenced_names=referenced_names,
+                symbol_weights=symbol_weights,
+            )
 
         # O-M1: dispute-round prior review block. Append before LLM call so
         # the Judge knows which issues were already reported and can focus on
@@ -284,29 +351,66 @@ class JudgeAgent(BaseAgent):
             max_content_chars=max_content_chars,
             memory_context=memory_context,
             check_strategy=check_strategy,
+            fork_content=fork_content,
+            lang=lang,
+            high_recall=self.llm_config.high_recall_review,
         )
         messages = [{"role": "user", "content": prompt}]
 
         try:
-            raw = await self._call_llm_with_retry(messages, system=JUDGE_SYSTEM)
-            llm_issues = parse_file_review_issues(str(raw), file_path)
+            raw = await self._call_llm_with_retry(
+                messages,
+                system=JUDGE_SYSTEM,
+                _return_meta=True,
+                **self._structured_kwargs(FILE_REVIEW),
+            )
+            llm_issues = parse_file_review_issues(
+                raw,
+                file_path,
+                merged_content=raw_merged_content or merged_content,
+                fork_content=fork_content,
+                strict_json=True,
+            )
             issues.extend(llm_issues)
         except Exception as e:
-            self.logger.error(f"File review failed for {file_path}: {e}")
-
-        conflict_markers = ["<<<<<<<", "=======", ">>>>>>>"]
-        for marker in conflict_markers:
-            if marker in merged_content:
-                issues.append(
-                    JudgeIssue(
-                        file_path=file_path,
-                        issue_level=IssueSeverity.CRITICAL,
-                        issue_type="unresolved_conflict",
-                        description=f"Conflict marker '{marker}' found in merged content",
-                        must_fix_before_merge=True,
-                    )
+            # P2: fail CLOSED. A per-file review that could not be obtained or
+            # parsed (truncated/malformed output, transport failure after
+            # retries) previously just logged → the file passed review with zero
+            # issues and rolled into a PASS verdict. Mirror the #3A batch path:
+            # synthesize a CRITICAL veto so the verdict deterministically FAILs
+            # and the file routes to escalation/repair instead of silent pass.
+            self.logger.error(
+                "File review failed for %s: %s — failing closed "
+                "(synthesizing review-unavailable veto)",
+                file_path,
+                e,
+            )
+            issues.append(
+                JudgeIssue(
+                    file_path=file_path,
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="review_unavailable",
+                    description=(
+                        "Judge review could not be obtained or parsed "
+                        f"(likely truncated/malformed output): {e!r}. Failing "
+                        "closed — this file was not actually reviewed."
+                    ),
+                    must_fix_before_merge=True,
+                    veto_condition="Judge review unavailable",
                 )
-                break
+            )
+
+        marker = find_conflict_marker(raw_merged_content or merged_content)
+        if marker is not None:
+            issues.append(
+                JudgeIssue(
+                    file_path=file_path,
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="unresolved_conflict",
+                    description=f"Conflict marker '{marker}' found in merged content",
+                    must_fix_before_merge=True,
+                )
+            )
 
         return issues
 
@@ -393,8 +497,26 @@ class JudgeAgent(BaseAgent):
                 expected_ref = fork_ref
             else:
                 continue
-            expected_sha = self.git_tool.get_file_hash(expected_ref, fp)
-            worktree_sha = self.git_tool.get_worktree_blob_sha(fp)
+            expected_sha, exp_status = self.git_tool.get_file_hash_checked(
+                expected_ref, fp
+            )
+            worktree_sha, wt_status = self.git_tool.get_worktree_blob_sha_checked(fp)
+            if GitReadStatus.GIT_ERROR in (exp_status, wt_status):
+                # W1: read-only Judge — a genuine git error disabled the take_*
+                # byte-verification for this file. Accumulate on self._gate_skips
+                # (shipped via the PHASE_COMPLETED payload, persisted to
+                # state.errors by judge_review); a legitimately-absent blob
+                # (ABSENT) stays silent.
+                from src.tools.gate_skip import gate_skip_entry
+
+                self._gate_skips.append(
+                    gate_skip_entry(
+                        "judge_take_verification",
+                        fp,
+                        f"{expected_ref} / worktree sha read failed",
+                    )
+                )
+                continue
             if expected_sha is None or worktree_sha is None:
                 continue
             if expected_sha == worktree_sha:
@@ -425,6 +547,11 @@ class JudgeAgent(BaseAgent):
         """
         if self.git_tool is None:
             return False
+        # #5A: only let a file take the high-confidence skip when its language
+        # is GENUINELY checkable. An unsupported extension returns valid=True
+        # vacuously — skipping it on that basis waves an unreviewed file through.
+        if not has_real_checker(file_path):
+            return False
         abs_path = self.git_tool.repo_path / file_path
         if not abs_path.exists():
             return False
@@ -440,6 +567,18 @@ class JudgeAgent(BaseAgent):
         file_diffs_map: dict[str, FileDiff],
     ) -> list[JudgeIssue]:
         if self.git_tool is None:
+            # P1: the entire deterministic veto pipeline (B/C/D, invented- and
+            # duplicate-symbol checks, signature splits, dep-graph impacts) is
+            # disabled when git is unavailable — an unambiguous total skip.
+            from src.tools.gate_skip import gate_skip_entry
+
+            self._gate_skips.append(
+                gate_skip_entry(
+                    "judge_deterministic_pipeline",
+                    "(all)",
+                    "git_tool unavailable — all deterministic vetoes skipped",
+                )
+            )
             return []
 
         issues: list[JudgeIssue] = []
@@ -451,6 +590,16 @@ class JudgeAgent(BaseAgent):
         upstream_ref = state.config.upstream_ref
 
         if not merge_base or not upstream_ref:
+            from src.tools.gate_skip import gate_skip_entry
+
+            self._gate_skips.append(
+                gate_skip_entry(
+                    "judge_deterministic_pipeline",
+                    "(all)",
+                    "merge_base or upstream_ref missing — all deterministic "
+                    "vetoes skipped",
+                )
+            )
             return []
 
         # P0-1: read fork-pinned / upstream-pinned glob whitelists from
@@ -721,9 +870,95 @@ class JudgeAgent(BaseAgent):
         issues.extend(self._check_top_level_invocations(state, categories))
         issues.extend(self._check_cross_layer_assertions(state))
         issues.extend(self._check_reverse_impacts(state))
+        issues.extend(self._check_cross_decision_signature_split(state))
+        issues.extend(self._check_dependency_graph_impacts(state))
         issues.extend(self._check_sentinel_hits(state))
         issues.extend(self._check_config_retention(state))
 
+        return issues
+
+    def _check_cross_decision_signature_split(
+        self, state: ReadOnlyStateView
+    ) -> list[JudgeIssue]:
+        """Flag a symbol whose upstream signature changed when its definition
+        file and a referencing file landed on opposite take_target /
+        take_current sides of the merge.
+
+        The per-file review sees each file as internally consistent, so a
+        definition kept on the fork's old signature (take_current) paired with
+        callers pulled from upstream's new signature (take_target) — or the
+        reverse — slips through as a cross-file compile break. Text-grep based
+        and conservative: semantic_merge definitions are skipped because their
+        merged direction is indeterminate.
+        """
+        if self.git_tool is None:
+            return []
+        if not getattr(state.config, "judge_cross_file_signature_check", True):
+            return []
+        interface_changes = getattr(state, "interface_changes", []) or []
+        if not interface_changes:
+            return []
+
+        sig_changes = [
+            ic
+            for ic in interface_changes
+            if ic.change_kind in ("method_signature", "constructor_signature")
+            and ic.before != ic.after
+            and ic.symbol
+        ]
+        if not sig_changes:
+            return []
+
+        records = state.file_decision_records
+        directional = {MergeDecision.TAKE_TARGET, MergeDecision.TAKE_CURRENT}
+        content_cache: dict[str, str | None] = {}
+        seen: set[tuple[str, str]] = set()
+        issues: list[JudgeIssue] = []
+
+        for ic in sig_changes:
+            def_record = records.get(ic.file_path)
+            if def_record is None or def_record.decision not in directional:
+                continue
+            opposite = (
+                MergeDecision.TAKE_CURRENT
+                if def_record.decision == MergeDecision.TAKE_TARGET
+                else MergeDecision.TAKE_TARGET
+            )
+            pattern = re.compile(rf"\b{re.escape(ic.symbol)}\b")
+            for caller_path, caller_record in records.items():
+                if caller_path == ic.file_path:
+                    continue
+                if caller_record.decision != opposite:
+                    continue
+                key = (ic.symbol, caller_path)
+                if key in seen:
+                    continue
+                if caller_path not in content_cache:
+                    abs_path = self.git_tool.repo_path / caller_path
+                    content_cache[caller_path] = (
+                        _safe_read_text(abs_path) if abs_path.exists() else None
+                    )
+                content = content_cache[caller_path]
+                if not content or not pattern.search(content):
+                    continue
+                seen.add(key)
+                issues.append(
+                    JudgeIssue(
+                        file_path=caller_path,
+                        issue_level=IssueSeverity.HIGH,
+                        issue_type="cross_file_signature_split",
+                        description=(
+                            f"Symbol '{ic.symbol}' changed signature upstream "
+                            f"('{ic.before}' -> '{ic.after}'). Its definition "
+                            f"'{ic.file_path}' took {def_record.decision.value} "
+                            f"while this caller took {caller_record.decision.value} "
+                            f"— opposite merge sides likely produce a compile "
+                            f"mismatch the per-file review cannot detect."
+                        ),
+                        must_fix_before_merge=True,
+                        veto_condition="Cross-file signature split unresolved",
+                    )
+                )
         return issues
 
     def _check_reverse_impacts(self, state: ReadOnlyStateView) -> list[JudgeIssue]:
@@ -764,6 +999,98 @@ class JudgeAgent(BaseAgent):
             )
         return issues
 
+    def _check_dependency_graph_impacts(
+        self, state: ReadOnlyStateView
+    ) -> list[JudgeIssue]:
+        """Precise (AST-edge) counterpart to ``_check_reverse_impacts``.
+
+        For each upstream signature change on a symbol defined in file ``F``,
+        walk the dependency graph's EXTRACTED in-edges to find files ``D`` that
+        import ``F``. If ``D`` still references the changed symbol (text-grep
+        confirmation, to guard against coarse file-level edges) and ``D`` was
+        not pulled wholesale from upstream (``decision != TAKE_TARGET``), flag a
+        missed-update. Only EXTRACTED edges raise a hard issue (risk
+        monotonicity §5); INFERRED / AMBIGUOUS edges are ignored here. Dependents
+        already reported by the fork-only reverse-impact grep are skipped to
+        avoid duplicate issues.
+        """
+        if self.git_tool is None:
+            return []
+        graph = getattr(state, "dependency_graph", None)
+        if graph is None or not graph.edges:
+            return []
+
+        interface_changes = getattr(state, "interface_changes", []) or []
+        sig_changes = [
+            ic
+            for ic in interface_changes
+            if ic.change_kind in ("method_signature", "constructor_signature")
+            and ic.before != ic.after
+            and ic.symbol
+        ]
+        if not sig_changes:
+            return []
+
+        reverse_impacts = getattr(state, "reverse_impacts", {}) or {}
+        records = state.file_decision_records
+        content_cache: dict[str, str | None] = {}
+        seen: set[tuple[str, str]] = set()
+        issues: list[JudgeIssue] = []
+
+        for ic in sig_changes:
+            dependents = sorted(
+                {
+                    e.source_file
+                    for e in graph.edges
+                    if e.target_file == ic.file_path
+                    and e.confidence == ConfidenceLabel.EXTRACTED
+                    and e.source_file != ic.file_path
+                }
+            )
+            if not dependents:
+                continue
+            already_grepped = set(reverse_impacts.get(ic.symbol, []))
+            pattern = re.compile(rf"\b{re.escape(ic.symbol)}\b")
+
+            for dep in dependents:
+                key = (ic.symbol, dep)
+                if key in seen or dep in already_grepped:
+                    continue
+                dep_record = records.get(dep)
+                if dep_record is not None and (
+                    dep_record.decision == MergeDecision.TAKE_TARGET
+                ):
+                    continue
+                if dep not in content_cache:
+                    abs_path = self.git_tool.repo_path / dep
+                    content_cache[dep] = (
+                        _safe_read_text(abs_path) if abs_path.exists() else None
+                    )
+                content = content_cache[dep]
+                if not content or not pattern.search(content):
+                    continue
+                seen.add(key)
+                issues.append(
+                    JudgeIssue(
+                        file_path=dep,
+                        issue_level=IssueSeverity.HIGH,
+                        issue_type="dependency_missed_update",
+                        description=(
+                            f"'{dep}' imports '{ic.file_path}' (EXTRACTED dependency) "
+                            f"and still references '{ic.symbol}', whose signature "
+                            f"changed upstream ('{ic.before}' -> '{ic.after}'). The "
+                            f"dependent was not taken from upstream, so it may not be "
+                            f"updated for the new signature."
+                        ),
+                        must_fix_before_merge=True,
+                        veto_condition=(
+                            "Dependency-graph missed update for upstream "
+                            "signature change"
+                        ),
+                    )
+                )
+        return issues
+
     def _check_top_level_invocations(
         self,
         state: ReadOnlyStateView,
@@ -797,6 +1124,109 @@ class JudgeAgent(BaseAgent):
                         ),
                         must_fix_before_merge=True,
                         veto_condition="Top-level invocation/decorator lost after merge",
+                    )
+                )
+        return issues
+
+    def _check_duplicate_symbols(self, state: ReadOnlyStateView) -> list[JudgeIssue]:
+        """方案5: deterministic duplicate-top-level-symbol veto over merged files.
+
+        A chunked semantic merge can emit the same top-level declaration twice
+        (the zod failure: ``ZodNumberFormat`` / ``ZodIntersection`` each declared
+        2x → uncompilable). Detection is purely static, so this is the right
+        place to enforce two of the plan's rules at once:
+
+        - the file cannot take the O-J1 high-confidence skip — emitting a
+          ``veto_condition`` issue moves it into ``deterministic_veto_files``,
+          which ``run`` excludes from the skip candidates;
+        - the resulting CRITICAL forces FAIL deterministically (``verdict`` is
+          computed from issue counts, ignoring the LLM), and no fork-aware
+          downgrade is applied here — a duplicate declaration is uncompilable
+          regardless of fork intent, so it must never be softened to INFO.
+        """
+        if self.git_tool is None:
+            return []
+        issues: list[JudgeIssue] = []
+        for fp in state.file_decision_records:
+            abs_path = self.git_tool.repo_path / fp
+            if not abs_path.exists():
+                continue
+            content = _safe_read_text(abs_path)
+            if not content:
+                continue
+            for dup in find_duplicate_symbols(content, fp):
+                issues.append(
+                    JudgeIssue(
+                        file_path=fp,
+                        issue_level=IssueSeverity.CRITICAL,
+                        issue_type="duplicate_top_level_symbol",
+                        description=(
+                            f"{dup.kind} '{dup.name}' declared {dup.count}x at "
+                            f"top level (lines {dup.lines}) — cannot redeclare; "
+                            f"likely a chunk-merge duplication"
+                        ),
+                        affected_lines=dup.lines,
+                        must_fix_before_merge=True,
+                        veto_condition="Duplicate top-level symbol declaration",
+                    )
+                )
+        return issues
+
+    def _check_invented_symbols(self, state: ReadOnlyStateView) -> list[JudgeIssue]:
+        """#5: deterministic hallucinated-cross-module-symbol veto over merged files.
+
+        Mirrors ``_check_duplicate_symbols`` (iterates ``file_decision_records``,
+        reads the merged worktree blob) so the invented-symbol guard becomes a
+        Judge-side blocking veto that is **path-independent** — it fires for
+        single-shot, chunked, AND native-3way merges, and crucially it runs in
+        the deterministic pipeline BEFORE the O-J1 high-confidence skip, so a
+        native-3way C-class file committed at 0.95 confidence cannot wave a
+        fabricated symbol through as "reviewed clean".
+
+        Scope: only files actually MERGED (semantic_merge / manual_patch). A
+        take_target / take_current blob is a verbatim copy of a ref and cannot
+        introduce a symbol absent from that ref, so checking it is pointless and
+        risks the substring-heuristic firing on legitimately-recombined code.
+        The merged blob is read in full (no staging), so the lexical guard's
+        false-negative risk is lowest here.
+        """
+        if self.git_tool is None:
+            return []
+        merged_decisions = {
+            MergeDecision.SEMANTIC_MERGE,
+            MergeDecision.MANUAL_PATCH,
+        }
+        issues: list[JudgeIssue] = []
+        for fp, record in state.file_decision_records.items():
+            if record.decision not in merged_decisions:
+                continue
+            abs_path = self.git_tool.repo_path / fp
+            if not abs_path.exists():
+                continue
+            merged = _safe_read_text(abs_path)
+            if not merged:
+                continue
+            fork_content = self.git_tool.get_file_content(state.config.fork_ref, fp)
+            upstream_content = self.git_tool.get_file_content(
+                state.config.upstream_ref, fp
+            )
+            invented = find_invented_member_accesses(
+                merged, [fork_content or "", upstream_content or ""], fp
+            )
+            if invented:
+                issues.append(
+                    JudgeIssue(
+                        file_path=fp,
+                        issue_level=IssueSeverity.CRITICAL,
+                        issue_type="hallucinated_symbol",
+                        description=(
+                            f"Merged file references cross-module symbol(s) "
+                            f"{invented} present in neither fork nor upstream — "
+                            f"likely a hallucinated member access that will not "
+                            f"compile."
+                        ),
+                        must_fix_before_merge=True,
+                        veto_condition="Hallucinated cross-module symbol",
                     )
                 )
         return issues
@@ -958,7 +1388,11 @@ class JudgeAgent(BaseAgent):
         messages = [{"role": "user", "content": prompt}]
 
         try:
-            raw = await self._call_llm_with_retry(messages, system=JUDGE_SYSTEM)
+            raw = await self._call_llm_with_retry(
+                messages,
+                system=JUDGE_SYSTEM,
+                **self._structured_kwargs(JUDGE_VERDICT),
+            )
             verdict = parse_judge_verdict(
                 str(raw),
                 reviewed_files,
@@ -1361,18 +1795,17 @@ class JudgeAgent(BaseAgent):
                     )
                 )
 
-        for marker in ("<<<<<<<", "=======", ">>>>>>>"):
-            if marker in merged_content:
-                issues.append(
-                    JudgeIssue(
-                        file_path=file_path,
-                        issue_level=IssueSeverity.CRITICAL,
-                        issue_type="unresolved_conflict",
-                        description=f"Conflict marker '{marker}' found in merged content",
-                        must_fix_before_merge=True,
-                    )
+        marker = find_conflict_marker(merged_content)
+        if marker is not None:
+            issues.append(
+                JudgeIssue(
+                    file_path=file_path,
+                    issue_level=IssueSeverity.CRITICAL,
+                    issue_type="unresolved_conflict",
+                    description=f"Conflict marker '{marker}' found in merged content",
+                    must_fix_before_merge=True,
                 )
-                break
+            )
 
         return issues
 
@@ -1380,6 +1813,7 @@ class JudgeAgent(BaseAgent):
         self,
         chunk: list[tuple[str, str, "FileDecisionRecord", FileDiff]],
         state: ReadOnlyStateView,
+        fork_contents: dict[str, str] | None = None,
     ) -> list[JudgeIssue]:
         from src.llm.prompts.judge_prompts import build_batch_file_review_prompt
 
@@ -1402,6 +1836,7 @@ class JudgeAgent(BaseAgent):
         prompt = build_batch_file_review_prompt(
             file_reviews,
             project_context=state.config.project_context,
+            high_recall=self.llm_config.high_recall_review,
         )
         file_paths = [fp for fp, _, _, _ in chunk]
         memory_text = self.get_memory_context(self._current_phase, file_paths)
@@ -1409,15 +1844,49 @@ class JudgeAgent(BaseAgent):
             prompt = f"{prompt}\n\n# Prior Knowledge\n{memory_text}"
         try:
             raw = await self._call_llm_with_retry(
-                [{"role": "user", "content": prompt}], system=JUDGE_SYSTEM
+                [{"role": "user", "content": prompt}],
+                system=JUDGE_SYSTEM,
+                _return_meta=True,
+                **self._structured_kwargs(BATCH_FILE_REVIEW),
             )
-            per_file = parse_batch_file_review_issues(str(raw), file_paths)
+            merged_contents = {fp: content for fp, content, _, _ in chunk}
+            per_file = parse_batch_file_review_issues(
+                raw,
+                file_paths,
+                merged_contents=merged_contents,
+                fork_contents=fork_contents,
+                strict_json=True,
+            )
             for issues_list in per_file.values():
                 all_issues.extend(issues_list)
         except Exception as e:
+            # #3A: fail CLOSED. A batch review that could not be obtained or
+            # parsed (truncated/malformed JSON, transport failure after retries)
+            # must NOT silently pass the chunk as defect-free — that is the worst
+            # fail-open: a broken merge reaching COMPLETED unreviewed. Synthesize
+            # a per-file CRITICAL so the verdict deterministically FAILs and the
+            # files route to escalation/repair instead.
             self.logger.error(
-                "Batch LLM review failed for chunk of %d: %s", len(chunk), e
+                "Batch LLM review failed for chunk of %d: %s — failing closed "
+                "(synthesizing per-file review-unavailable issues)",
+                len(chunk),
+                e,
             )
+            for fp, _content, _record, _fd in chunk:
+                all_issues.append(
+                    JudgeIssue(
+                        file_path=fp,
+                        issue_level=IssueSeverity.CRITICAL,
+                        issue_type="batch_review_unavailable",
+                        description=(
+                            "Judge batch review could not be obtained or parsed "
+                            f"(likely truncated/malformed output): {e!r}. Failing "
+                            "closed — this file was not actually reviewed."
+                        ),
+                        must_fix_before_merge=True,
+                        veto_condition="Judge review unavailable",
+                    )
+                )
 
         return all_issues
 
@@ -1441,6 +1910,15 @@ class JudgeAgent(BaseAgent):
             if fd is None or record is None:
                 continue
 
+            # SKIP means Executor intentionally left the worktree path
+            # untouched — running deterministic syntax checks on the
+            # (often empty / missing) file produces false-positive
+            # critical issues (e.g. _check_json("") → "Expecting value"
+            # at line 1 col 1) that exhaust the dispute loop and leak
+            # placeholder HumanDecisionRequest entries to the user.
+            if record.decision == MergeDecision.SKIP:
+                continue
+
             merged_content = ""
             if self.git_tool is not None:
                 abs_path = self.git_tool.repo_path / file_path
@@ -1462,9 +1940,22 @@ class JudgeAgent(BaseAgent):
             for i in range(0, len(risky_files), self._BATCH_SIZE)
         ]
 
-        async def _process_chunk(idx: int) -> list[JudgeIssue]:
-            return await self._review_files_batch_llm(chunks[idx], state)
+        fork_contents: dict[str, str] = {}
+        if self.git_tool is not None:
+            for fp, _, _, _ in risky_files:
+                fc = self.git_tool.get_file_content(state.config.fork_ref, fp)
+                if fc is not None:
+                    fork_contents[fp] = fc
 
+        async def _process_chunk(idx: int) -> list[JudgeIssue]:
+            return await self._review_files_batch_llm(
+                chunks[idx], state, fork_contents=fork_contents
+            )
+
+        # U5: judge batches chunks risky_files by size, so each chunk's
+        # file_path set should be disjoint from every other chunk's; assert
+        # so a future chunking change can't silently introduce overlap.
+        assert_disjoint_file_shards([[entry[0] for entry in chunk] for chunk in chunks])
         chunk_runner = ParallelFileRunner.from_api_key_env_list(
             self.llm_config.api_key_env_list,
             override=state.config.parallel_file_concurrency,
@@ -1534,7 +2025,9 @@ class JudgeAgent(BaseAgent):
 
         try:
             raw = await self._call_llm_with_retry(
-                [{"role": "user", "content": prompt}], system=JUDGE_SYSTEM
+                [{"role": "user", "content": prompt}],
+                system=JUDGE_SYSTEM,
+                **self._structured_kwargs(JUDGE_RE_EVALUATE),
             )
             raw_str = str(raw).strip()
             if raw_str.startswith("```"):
@@ -1552,6 +2045,22 @@ class JudgeAgent(BaseAgent):
             status = entry.get("status", "maintained")
             if status == "maintained" and issue_id in issue_map:
                 remaining_issues.append(issue_map[issue_id])
+
+        # Deterministic blocking findings are authoritative: the executor↔judge
+        # negotiation may resolve soft/advisory issues, but it must never erase
+        # a must_fix or veto-bearing deterministic check (cross_file_signature_split,
+        # b_class_mismatch, sentinel_hit, …). Without this, the LLM's rebuttal can
+        # silently drop a structural veto and flip the verdict to PASS — which let
+        # genuinely incompatible merges through. Repairable issues that the
+        # Executor actually fixed disappear from the next round's pipeline output,
+        # so force-retain here does not trap a closed issue.
+        retained_ids = {i.issue_id for i in remaining_issues}
+        for issue in current_verdict.issues:
+            if issue.issue_id in retained_ids:
+                continue
+            if issue.must_fix_before_merge or issue.veto_condition:
+                remaining_issues.append(issue)
+                retained_ids.add(issue.issue_id)
 
         # O-M2: even if LLM claims overall_approved=true, any remaining issue
         # whose severity is in the configured blocking levels must block the
@@ -1594,6 +2103,7 @@ class JudgeAgent(BaseAgent):
         raw = await self._call_llm_with_retry(
             [{"role": "user", "content": prompt}],
             system=system,
+            **self._structured_kwargs(META_REVIEW),
         )
         return _parse_meta_review_json(str(raw))
 
@@ -1612,6 +2122,48 @@ def _extract_diff_ranges(original_diff: FileDiff) -> list[tuple[int, int]]:
         ranges.append(
             (1, original_diff.lines_added + original_diff.lines_deleted + 100)
         )
+    return ranges
+
+
+# Above this line count the O(n*m) line diff is skipped in favour of the
+# coarse hunk-based ranges — a guard against pathological large-file cost.
+_MERGED_DIFF_MAX_LINES = 6000
+
+
+def _merged_content_diff_ranges(
+    before: str | None, after: str
+) -> list[tuple[int, int]]:
+    """Changed-line ranges (1-based inclusive) in ``after`` coordinates.
+
+    Judge stages the *merged* file, so chunk line numbers live in the merged
+    coordinate system. The original (fork-side) diff hunks describe pre-merge
+    line numbers, which drift after the merge inserts/removes lines — scoring
+    chunks against them mis-anchors relevance. Diffing the pre-merge snapshot
+    (``before``) against the merged content (``after``) yields the lines the
+    merge actually touched, in the same coordinates the chunker uses.
+
+    Returns ``[]`` when there is no snapshot, nothing changed, or either side
+    is too large to diff cheaply — callers fall back to the hunk-based ranges.
+    """
+    if not before or not after:
+        return []
+    before_lines = before.splitlines()
+    after_lines = after.splitlines()
+    if (
+        len(before_lines) > _MERGED_DIFF_MAX_LINES
+        or len(after_lines) > _MERGED_DIFF_MAX_LINES
+    ):
+        return []
+    matcher = difflib.SequenceMatcher(a=before_lines, b=after_lines, autojunk=False)
+    ranges: list[tuple[int, int]] = []
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        # j1/j2 are 0-based half-open in ``after``; a pure deletion (j2 == j1)
+        # still anchors the boundary line so adjacent chunks score.
+        start = j1 + 1
+        end = j2 if j2 > j1 else j1 + 1
+        ranges.append((start, end))
     return ranges
 
 

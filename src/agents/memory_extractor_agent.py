@@ -9,6 +9,8 @@ from src.agents.registry import AgentRegistry
 from src.llm.client import ModelOutputError
 from src.llm.prompts.gate_registry import get_gate
 from src.memory.models import ConfidenceLevel, MemoryEntry, MemoryEntryType
+from src.models.dependency import ConfidenceLabel
+from src.models.diff import FileChangeCategory
 from src.models.message import AgentMessage, AgentType, MessageType
 from src.models.plan import MergePhase
 from src.models.state import MergeState
@@ -58,19 +60,29 @@ class MemoryExtractorAgent(BaseAgent):
             except Exception:
                 pass
 
-        system = get_gate("M-SYSTEM").render()
-        prompt = get_gate("M-EXTRACT-INSIGHT").render(phase, events, max_insights)
+        # Phase C §6.4 / §4: deterministic, AST-confident graph insights
+        # (God Node hubs + cross-directory "surprising connections") take
+        # priority and share the per-phase budget; the LLM fills the rest.
+        graph_entries = _graph_insights(view, phase, existing_hashes, max_insights)
+        remaining = max_insights - len(graph_entries)
 
-        raw = await self._call_llm_with_retry(
-            [{"role": "user", "content": prompt}],
-            system=system,
-        )
+        llm_entries: list[MemoryEntry] = []
+        if remaining > 0:
+            system = get_gate("M-SYSTEM").render()
+            prompt = get_gate("M-EXTRACT-INSIGHT").render(phase, events, remaining)
+            raw = await self._call_llm_with_retry(
+                [{"role": "user", "content": prompt}],
+                system=system,
+            )
+            llm_entries = _parse_entries(str(raw), phase, existing_hashes, remaining)
 
-        entries = _parse_entries(str(raw), phase, existing_hashes, max_insights)
+        entries = graph_entries + llm_entries
         logger.info(
-            "MemoryExtractorAgent: phase=%s, %d new insights extracted",
+            "MemoryExtractorAgent: phase=%s, %d new insights (%d graph, %d llm)",
             phase,
             len(entries),
+            len(graph_entries),
+            len(llm_entries),
         )
         return entries
 
@@ -86,6 +98,107 @@ class MemoryExtractorAgent(BaseAgent):
             subject="MemoryExtractorAgent invoked via extract(), not run()",
             payload={},
         )
+
+
+_GRAPH_ACTIONABLE = {
+    FileChangeCategory.B,
+    FileChangeCategory.C,
+    FileChangeCategory.D_MISSING,
+}
+
+
+def _top_dir(path: str) -> str:
+    norm = path.replace("\\", "/")
+    return norm.split("/", 1)[0] if "/" in norm else ""
+
+
+def _graph_insights(
+    view: Any,
+    phase: str,
+    existing_hashes: set[str],
+    max_insights: int,
+) -> list[MemoryEntry]:
+    """Deterministic dependency-graph memories (Phase C).
+
+    Persists two AST-confident facts about changed files so future runs
+    inherit them: God Node hubs (high direct-dependent count) as
+    CODEBASE_INSIGHT, and cross-top-directory EXTRACTED couplings (a
+    "surprising connection" proxy that does not need community detection) as
+    RELATIONSHIP. Empty graph -> ``[]`` (safe degrade)."""
+    graph = getattr(view, "dependency_graph", None)
+    if graph is None or not graph.edges:
+        return []
+    categories = getattr(view, "file_categories", None) or {}
+    changed = sorted(fp for fp, cat in categories.items() if cat in _GRAPH_ACTIONABLE)
+    if not changed:
+        return []
+
+    cfg = getattr(view.config, "dependency_graph", None)
+    min_dep = getattr(cfg, "god_node_min_dependents", 8)
+    max_depth = getattr(cfg, "max_depth", 3)
+
+    entries: list[MemoryEntry] = []
+
+    def _add(entry: MemoryEntry) -> bool:
+        if entry.content_hash in existing_hashes:
+            return False
+        existing_hashes.add(entry.content_hash)
+        entries.append(entry)
+        return len(entries) >= max_insights
+
+    for fp in changed:
+        hint = graph.impact_hint(
+            fp, max_depth=max_depth, god_node_min_dependents=min_dep
+        )
+        if hint.is_god_node:
+            entry = MemoryEntry(
+                entry_type=MemoryEntryType.CODEBASE_INSIGHT,
+                phase=phase,
+                content=(
+                    f"Dependency hub: {fp} has {hint.direct_dependents} direct "
+                    f"dependents (impact radius {hint.impact_radius}). Changes "
+                    "here ripple widely — review and preserve its interface."
+                )[:120],
+                confidence=0.9,
+                confidence_level=ConfidenceLevel.EXTRACTED,
+                file_paths=[fp],
+                tags=["dependency_graph", "god_node"],
+            )
+            if _add(entry):
+                return entries
+
+    changed_set = set(changed)
+    seen_pairs: set[tuple[str, str]] = set()
+    for edge in graph.edges:
+        # ConfidenceLabel is a StrEnum; only EXTRACTED edges are reliable
+        # enough to persist as a fact (plan §5).
+        if edge.confidence != ConfidenceLabel.EXTRACTED:
+            continue
+        src, tgt = edge.source_file, edge.target_file
+        if src not in changed_set or src == tgt:
+            continue
+        if _top_dir(src) == _top_dir(tgt) or not _top_dir(src) or not _top_dir(tgt):
+            continue
+        key = (src, tgt)
+        if key in seen_pairs:
+            continue
+        seen_pairs.add(key)
+        entry = MemoryEntry(
+            entry_type=MemoryEntryType.RELATIONSHIP,
+            phase=phase,
+            content=(
+                f"Cross-directory coupling: {src} imports {tgt} "
+                f"({_top_dir(src)} -> {_top_dir(tgt)}). Verify both move together."
+            )[:120],
+            confidence=0.9,
+            confidence_level=ConfidenceLevel.EXTRACTED,
+            file_paths=[src, tgt],
+            tags=["dependency_graph", "surprising_connection"],
+        )
+        if _add(entry):
+            return entries
+
+    return entries
 
 
 def _parse_entries(

@@ -1,0 +1,21 @@
+diff --git a/models/user/user.go b/models/user/user.go
+index 2c20cd977d..7fe8f256cf 100644
+--- a/models/user/user.go
++++ b/models/user/user.go
+@@ -359,10 +359,15 @@ func (u *User) OrganisationLink() string {
+ 	return setting.AppSubURL + "/org/" + url.PathEscape(u.Name)
+ }
+ 
++// EmailAuthCodeExpiry returns the absolute expiry timestamp for email authorization codes.
++func EmailAuthCodeExpiry() timeutil.TimeStamp {
++	return timeutil.TimeStampNow().Add(int64(setting.Service.ActiveCodeLives) * 60)
++}
++
+ // GenerateEmailAuthorizationCode generates an activation code based for the user for the specified purpose.
+ // The standard expiry is ActiveCodeLives minutes.
+ func (u *User) GenerateEmailAuthorizationCode(ctx context.Context, purpose auth.AuthorizationPurpose) (string, error) {
+-	lookup, validator, err := auth.GenerateAuthToken(ctx, u.ID, timeutil.TimeStampNow().Add(int64(setting.Service.ActiveCodeLives)*60), purpose)
++	lookup, validator, err := auth.GenerateAuthToken(ctx, u.ID, EmailAuthCodeExpiry(), purpose)
+ 	if err != nil {
+ 		return "", err
+ 	}

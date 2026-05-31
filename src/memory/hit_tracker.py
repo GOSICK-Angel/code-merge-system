@@ -94,6 +94,16 @@ class MemoryHitTracker:
             if self._persist_path is not None:
                 self._persist_unsafe()
 
+    def injected_file_paths(self) -> frozenset[str]:
+        """O-M4 / P0: file_paths that received ≥1 memory injection this run.
+
+        Run-local — the injection map is not persisted — so this reflects the
+        current process only. Used by the P0 memory-effectiveness analyzer to
+        intersect injected files with the Judge's final verdict.
+        """
+        with self._lock:
+            return frozenset(self._injections_by_file.keys())
+
     def _load_unsafe(self) -> None:
         try:
             assert self._persist_path is not None
@@ -202,13 +212,24 @@ class MemoryHitTracker:
             "top_harmful": harmful,
         }
 
-    def entry_outcome(self, entry_id: str) -> dict[str, int]:
-        """Return per-entry counters; useful for tests / external scoring."""
+    def outcome_scores(self, min_observations: int = 3) -> dict[str, float]:
+        """Per-entry outcome score for entries with enough observations.
+
+        Score is ``(pass - fail) / (pass + fail)`` in ``[-1, 1]``; only entries
+        with at least ``min_observations`` total observations are returned.
+        Drives the OPP-5 confidence write-back (helpful entries score > 0,
+        harmful < 0). Unlike ``harmful_entry_ids`` this returns BOTH signs so
+        the orchestrator can boost helpful entries too."""
         with self._lock:
-            counters = self._entry_outcomes.get(entry_id)
-            if counters is None:
-                return {"pass": 0, "fail": 0}
-            return dict(counters)
+            scores: dict[str, float] = {}
+            for eid, counters in self._entry_outcomes.items():
+                p = counters.get("pass", 0)
+                f = counters.get("fail", 0)
+                total = p + f
+                if total < min_observations:
+                    continue
+                scores[eid] = (p - f) / total
+            return scores
 
     def harmful_entry_ids(
         self,

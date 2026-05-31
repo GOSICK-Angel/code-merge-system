@@ -281,22 +281,27 @@ def test_record_injection_then_outcome_credits_pass():
     tracker.record_injection(["a.py", "b.py"], ["entry-1", "entry-2"])
     tracker.record_outcome("a.py", success=True)
 
-    assert tracker.entry_outcome("entry-1") == {"pass": 1, "fail": 0}
-    assert tracker.entry_outcome("entry-2") == {"pass": 1, "fail": 0}
-    assert tracker.entry_outcome("never-injected") == {"pass": 0, "fail": 0}
+    outcomes = tracker.summary()["outcomes"]
+    assert outcomes["tracked_entries"] == 2
+    by_id = {h["entry_id"]: h for h in outcomes["top_helpful"]}
+    assert by_id["entry-1"]["pass"] == 1 and by_id["entry-1"]["fail"] == 0
+    assert by_id["entry-2"]["pass"] == 1 and by_id["entry-2"]["fail"] == 0
+    assert "never-injected" not in by_id
 
 
 def test_record_outcome_credits_fail():
     tracker = MemoryHitTracker()
     tracker.record_injection(["a.py"], ["entry-1"])
     tracker.record_outcome("a.py", success=False)
-    assert tracker.entry_outcome("entry-1") == {"pass": 0, "fail": 1}
+    harmful = tracker.summary()["outcomes"]["top_harmful"]
+    assert harmful[0]["entry_id"] == "entry-1"
+    assert harmful[0]["pass"] == 0 and harmful[0]["fail"] == 1
 
 
 def test_record_outcome_with_no_injection_is_noop():
     tracker = MemoryHitTracker()
     tracker.record_outcome("a.py", success=True)  # never injected for a.py
-    assert tracker.entry_outcome("entry-1") == {"pass": 0, "fail": 0}
+    assert tracker.summary()["outcomes"]["tracked_entries"] == 0
 
 
 def test_outcome_persists_to_sidecar(tmp_path):
@@ -323,7 +328,11 @@ def test_outcome_loads_from_sidecar(tmp_path):
         )
     )
     tracker = MemoryHitTracker(persist_path=sidecar)
-    assert tracker.entry_outcome("entry-1") == {"pass": 3, "fail": 1}
+    outcomes = tracker.summary()["outcomes"]
+    assert outcomes["tracked_entries"] == 1
+    helpful = outcomes["top_helpful"][0]
+    assert helpful["entry_id"] == "entry-1"
+    assert helpful["pass"] == 3 and helpful["fail"] == 1
 
 
 def test_summary_outcomes_ranks_helpful_and_harmful():

@@ -1,9 +1,40 @@
 import logging
+from enum import Enum
 from pathlib import Path
 import git
 from git import Repo, InvalidGitRepositoryError
 
 logger = logging.getLogger(__name__)
+
+
+class GitReadStatus(Enum):
+    """Outcome of a best-effort git blob read (W5 W1).
+
+    Distinguishes a path that is *legitimately absent* at a ref (``ABSENT`` —
+    the fork added/deleted it; nothing to read, no alarm) from a *genuine git
+    failure* (``GIT_ERROR`` — a broken ref / misconfigured ``git_tool``). The
+    two were previously conflated into a bare ``None``, forcing the P1 gate-skip
+    alarm to stay silent on every ``None`` to avoid over-firing on absent files.
+    With the status split, a degrade-to-skip gate can alarm ONLY on
+    ``GIT_ERROR`` and stay silent on ``ABSENT``.
+    """
+
+    OK = "ok"
+    ABSENT = "absent"
+    GIT_ERROR = "git_error"
+
+
+# git's exit code is 128 for BOTH an absent path and a broken ref; the only
+# reliable signal is stderr text. ``<ref>:<path>`` (the colon form this module
+# uses) yields "path '…' does not exist in '<ref>'" for an absent path.
+_GIT_ABSENT_MARKERS = ("does not exist in", "exists on disk, but not in")
+
+
+def _classify_git_read_error(exc: git.GitCommandError) -> GitReadStatus:
+    text = f"{getattr(exc, 'stderr', '') or ''} {exc}".lower()
+    if any(marker in text for marker in _GIT_ABSENT_MARKERS):
+        return GitReadStatus.ABSENT
+    return GitReadStatus.GIT_ERROR
 
 
 class GitTool:
@@ -66,6 +97,36 @@ class GitTool:
             return result.encode("utf-8", errors="surrogateescape")
         return None
 
+    def get_file_content_checked(
+        self, ref: str, file_path: str
+    ) -> tuple[str | None, GitReadStatus]:
+        """W1: like :meth:`get_file_content` but also returns whether a ``None``
+        means the file is legitimately absent at ``ref`` or git genuinely failed.
+        """
+        raw, status = self.get_file_bytes_checked(ref, file_path)
+        if raw is None:
+            return None, status
+        return raw.decode("utf-8", errors="surrogateescape"), status
+
+    def get_file_bytes_checked(
+        self, ref: str, file_path: str
+    ) -> tuple[bytes | None, GitReadStatus]:
+        """W1 status-returning twin of :meth:`get_file_bytes` (same git call /
+        ``strip_newline_in_stdout=False`` contract)."""
+        try:
+            result = self.repo.git.show(
+                f"{ref}:{file_path}",
+                stdout_as_string=False,
+                strip_newline_in_stdout=False,
+            )
+        except git.GitCommandError as exc:
+            return None, _classify_git_read_error(exc)
+        if isinstance(result, bytes):
+            return result, GitReadStatus.OK
+        if isinstance(result, str):
+            return result.encode("utf-8", errors="surrogateescape"), GitReadStatus.OK
+        return None, GitReadStatus.GIT_ERROR
+
     def get_three_way_diff(
         self, base: str, current: str, target: str, file_path: str
     ) -> tuple[str | None, str | None, str | None]:
@@ -74,12 +135,139 @@ class GitTool:
         target_content = self.get_file_content(target, file_path)
         return base_content, current_content, target_content
 
+    def three_way_merge_file(
+        self,
+        base_ref: str,
+        ours_ref: str,
+        theirs_ref: str,
+        file_path: str,
+    ) -> str | None:
+        """Attempt git's native line-level 3-way merge for one file.
+
+        Returns the merged content on a clean merge (no conflict markers,
+        git exit 0). Returns ``None`` on any conflict, missing ref, or
+        error — caller must then fall back to LLM-driven semantic merge.
+
+        Side-effect free: operates on temp files; does not touch the
+        worktree or the index.
+
+        Calibrated via P-γ-1.5: covers C-class files where fork and
+        upstream edited disjoint line ranges (e.g. fork edits manifest
+        ``author`` line 1, upstream edits ``version`` line 37) — git's
+        3-way merge resolves these deterministically without LLM.
+        """
+        import tempfile
+
+        base_content = self.get_file_content(base_ref, file_path)
+        ours_content = self.get_file_content(ours_ref, file_path)
+        theirs_content = self.get_file_content(theirs_ref, file_path)
+        if base_content is None or ours_content is None or theirs_content is None:
+            return None
+
+        with tempfile.TemporaryDirectory() as td:
+            base_p = Path(td) / "base"
+            ours_p = Path(td) / "ours"
+            theirs_p = Path(td) / "theirs"
+            base_p.write_text(base_content, encoding="utf-8")
+            ours_p.write_text(ours_content, encoding="utf-8")
+            theirs_p.write_text(theirs_content, encoding="utf-8")
+            try:
+                output = self.repo.git.merge_file(
+                    "--stdout",
+                    "-L",
+                    "fork",
+                    "-L",
+                    "base",
+                    "-L",
+                    "upstream",
+                    str(ours_p),
+                    str(base_p),
+                    str(theirs_p),
+                    strip_newline_in_stdout=False,
+                )
+            except git.GitCommandError:
+                # exit code > 0 = conflicts; defer to LLM.
+                return None
+
+        text = (
+            output
+            if isinstance(output, str)
+            else output.decode("utf-8", errors="surrogateescape")
+        )
+        if "<<<<<<< " in text or "\n=======\n" in text or ">>>>>>> " in text:
+            return None
+        return text
+
+    def three_way_merge_file_union(
+        self,
+        base_ref: str,
+        ours_ref: str,
+        theirs_ref: str,
+        file_path: str,
+    ) -> str | None:
+        """Union merge: keep all changes from BOTH sides, ordered by
+        position. Drives the ``union_additions`` user decision — both
+        fork and upstream only added lines, so concatenation in place
+        of conflict markers is what the reviewer wants.
+
+        Returns the merged content, or ``None`` if any input ref is
+        missing or git refuses to merge (e.g. binary).
+        """
+        import tempfile
+
+        base_content = self.get_file_content(base_ref, file_path)
+        ours_content = self.get_file_content(ours_ref, file_path)
+        theirs_content = self.get_file_content(theirs_ref, file_path)
+        if base_content is None or ours_content is None or theirs_content is None:
+            return None
+
+        with tempfile.TemporaryDirectory() as td:
+            base_p = Path(td) / "base"
+            ours_p = Path(td) / "ours"
+            theirs_p = Path(td) / "theirs"
+            base_p.write_text(base_content, encoding="utf-8")
+            ours_p.write_text(ours_content, encoding="utf-8")
+            theirs_p.write_text(theirs_content, encoding="utf-8")
+            try:
+                output = self.repo.git.merge_file(
+                    "--union",
+                    "--stdout",
+                    "-L",
+                    "fork",
+                    "-L",
+                    "base",
+                    "-L",
+                    "upstream",
+                    str(ours_p),
+                    str(base_p),
+                    str(theirs_p),
+                    strip_newline_in_stdout=False,
+                )
+            except git.GitCommandError:
+                return None
+
+        return (
+            output
+            if isinstance(output, str)
+            else output.decode("utf-8", errors="surrogateescape")
+        )
+
     def create_working_branch(self, branch_name: str, base_ref: str) -> str:
         from datetime import datetime
 
         resolved = branch_name.replace(
             "{timestamp}", datetime.now().strftime("%Y%m%d-%H%M%S")
         )
+        unmerged = self.repo.git.ls_files("--unmerged")
+        if unmerged.strip():
+            self.repo.git.reset("--hard", "HEAD")
+        # Remove .merge/ from the index before checkout. If a previous run
+        # committed .merge/ to this branch (pre-fix), the tracked state would
+        # cause "changes would be overwritten" and block the checkout.
+        try:
+            self.repo.git.rm("--cached", "-r", "--ignore-unmatch", "--", ".merge/")
+        except Exception as exc:
+            logger.warning("create_working_branch: untrack .merge/ failed: %s", exc)
         self.repo.git.checkout(base_ref)
         self.repo.git.checkout("-b", resolved)
         return resolved
@@ -96,6 +284,21 @@ class GitTool:
         target = self.repo_path / file_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+
+    def checkout_file(self, ref: str, file_path: str) -> bool:
+        """Restore one path to its content at ``ref`` in BOTH the index and
+        the working tree, clearing any unmerged (conflict) state left by a
+        cherry-pick fall-back.
+
+        Used to drop conflict markers on C-class files before routing them to
+        conflict analysis (which reads clean content from refs anyway), so the
+        interim auto_merge commit never captures marker-laden content.
+        """
+        try:
+            self.repo.git.checkout(ref, "--", file_path)
+            return True
+        except git.GitCommandError:
+            return False
 
     def get_commit_messages(
         self, file_path: str, ref: str, limit: int = 10
@@ -181,6 +384,16 @@ class GitTool:
         except git.GitCommandError:
             return None
 
+    def get_file_hash_checked(
+        self, ref: str, file_path: str
+    ) -> tuple[str | None, GitReadStatus]:
+        """W1 status-returning twin of :meth:`get_file_hash`."""
+        try:
+            sha = str(self.repo.git.rev_parse(f"{ref}:{file_path}")).strip()
+            return sha, GitReadStatus.OK
+        except git.GitCommandError as exc:
+            return None, _classify_git_read_error(exc)
+
     def get_head_sha(self) -> str:
         return str(self.repo.git.rev_parse("HEAD")).strip()
 
@@ -192,6 +405,21 @@ class GitTool:
             return str(self.repo.git.hash_object(str(abs_path))).strip()
         except git.GitCommandError:
             return None
+
+    def get_worktree_blob_sha_checked(
+        self, file_path: str
+    ) -> tuple[str | None, GitReadStatus]:
+        """W1 status-returning twin of :meth:`get_worktree_blob_sha`. A file not
+        on disk is ``ABSENT`` (not a git failure); a ``hash_object`` failure is a
+        genuine ``GIT_ERROR``."""
+        abs_path = self.repo_path / file_path
+        if not abs_path.exists():
+            return None, GitReadStatus.ABSENT
+        try:
+            sha = str(self.repo.git.hash_object(str(abs_path))).strip()
+            return sha, GitReadStatus.OK
+        except git.GitCommandError as exc:
+            return None, _classify_git_read_error(exc)
 
     def diff_files_between(self, before_sha: str, after_sha: str) -> list[str]:
         if before_sha == after_sha:
@@ -368,15 +596,48 @@ class GitTool:
             return ""
 
     def cherry_pick_abort(self) -> bool:
+        """Clean up after a failed cherry-pick so the next op starts clean.
+
+        Two failure shapes need different handling:
+          * full ``cherry-pick`` → leaves CHERRY_PICK_HEAD / a sequencer
+            dir; ``--abort`` is the correct unwind.
+          * ``cherry-pick -n`` (O-R1 per-file) → never creates sequencer
+            state, so ``--abort`` errors with "no cherry-pick in progress"
+            while the partial application still dirties the index/worktree.
+            Left uncleaned, the next commit's cherry-pick starts from a
+            dirty tree and cascades into spurious O-R4 bail-outs. Discard
+            the partial with ``reset --hard`` instead.
+        """
+        git_dir = Path(self.repo.git_dir)
+        sequencer_active = (git_dir / "CHERRY_PICK_HEAD").exists() or (
+            git_dir / "sequencer"
+        ).is_dir()
+        if sequencer_active:
+            # Full cherry-pick failure: ``--abort`` is the only correct
+            # unwind (``reset --hard`` would NOT clear CHERRY_PICK_HEAD, so
+            # the next cherry-pick would still hit "previous cherry-pick
+            # still in progress"). If ``--abort`` fails the sequencer is
+            # genuinely stuck — return False so the strategy ladder bails
+            # out instead of cascading (Run 6dd6a513 P0 hang vector).
+            try:
+                self.repo.git.cherry_pick("--abort")
+                return True
+            except git.GitCommandError as exc:
+                logger.warning(
+                    "cherry_pick_abort failed (sequencer stuck, worktree "
+                    "still holds CHERRY_PICK_HEAD or unmerged paths): %s",
+                    exc,
+                )
+                return False
+        # No sequencer state — a failed ``cherry-pick -n`` (O-R1 per-file)
+        # never creates one, so ``--abort`` would error with "no cherry-pick
+        # in progress" while its partial application still dirties the tree.
+        # Discard the partial with reset --hard so the next op starts clean.
         try:
-            self.repo.git.cherry_pick("--abort")
+            self.repo.git.reset("--hard", "HEAD")
             return True
         except git.GitCommandError as exc:
-            logger.warning(
-                "cherry_pick_abort failed (worktree may still hold "
-                "CHERRY_PICK_HEAD or unmerged paths): %s",
-                exc,
-            )
+            logger.warning("cherry_pick_abort: reset --hard cleanup failed: %s", exc)
             return False
 
     def commit_staged(self, message: str) -> str:

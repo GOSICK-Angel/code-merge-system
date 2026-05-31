@@ -1,0 +1,10 @@
+diff --git a/models/anthropic/manifest.yaml b/models/anthropic/manifest.yaml
+index b47d11e8..b5d2ed72 100644
+--- a/models/anthropic/manifest.yaml
++++ b/models/anthropic/manifest.yaml
+@@ -25,4 +25,4 @@ resource:
+     model:
+       enabled: false
+ type: plugin
+-version: 0.2.2
++version: 0.2.3

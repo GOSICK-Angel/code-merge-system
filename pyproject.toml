@@ -59,7 +59,6 @@ fail_under = 80
 [tool.coverage.run]
 source = ["src"]
 omit = [
-    "src/web/*",
     "src/cli/*",
     "src/integrations/*",
     "src/tools/chunk_processor.py",
@@ -70,6 +69,13 @@ omit = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
+
+# Bundle the built Web UI assets into the wheel under src/web/dist so that
+# ``importlib.resources.files("src.web") / "dist"`` resolves at runtime
+# regardless of install mode. The CI ``web-build`` job runs ``npm run
+# build`` to produce ``web/dist/`` before the Python package is built.
+[tool.hatch.build.targets.wheel.force-include]
+"web/dist" = "src/web/dist"
 
 [tool.mypy]
 python_version = "3.11"

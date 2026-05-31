@@ -89,8 +89,10 @@ def resume_command_impl(
     checkpoint_path: str | None,
     decisions: str | None = None,
     reload_config: bool = False,
-    tui: bool = False,
+    web: bool = False,
     ws_port: int = 8765,
+    web_port: int = 5173,
+    open_browser: bool = True,
 ) -> None:
     if checkpoint_path:
         cp_path = Path(checkpoint_path)
@@ -208,10 +210,15 @@ def resume_command_impl(
         )
         state.dry_run = False
 
-    if tui:
-        from src.cli.commands.tui import tui_resume_impl
+    if web:
+        from src.cli.commands.web import web_resume_impl
 
-        tui_resume_impl(state, ws_port)
+        web_resume_impl(
+            state,
+            ws_port=ws_port,
+            web_port=web_port,
+            open_browser=open_browser,
+        )
         return
 
     orchestrator = Orchestrator(state.config)
@@ -227,6 +234,22 @@ def resume_command_impl(
         else str(final_state.status)
     )
     if final_state.status == SystemStatus.COMPLETED:
+        # #7B: a COMPLETED run that recorded errors (deterministic findings,
+        # report-write failures, partial-failure signals) is NOT a clean green.
+        # The interactive/resume path is the one actually reachable in
+        # production (browser mode also lands here), and it previously printed
+        # "completed successfully!" regardless of state.errors, hiding
+        # partial_failure unless --ci was used. Surface it and exit non-zero.
+        if final_state.errors:
+            from src.cli.exit_codes import EXIT_PARTIAL_FAILURE
+
+            console.print(
+                "[yellow]Merge completed WITH WARNINGS "
+                f"({len(final_state.errors)} recorded issue(s)):[/yellow]"
+            )
+            for err in final_state.errors[-5:]:
+                console.print(f"  - {err.get('message', err)}")
+            sys.exit(EXIT_PARTIAL_FAILURE)
         console.print("[green]Merge completed successfully![/green]")
     elif final_state.status == SystemStatus.AWAITING_HUMAN:
         console.print("[yellow]Still awaiting human decisions[/yellow]")

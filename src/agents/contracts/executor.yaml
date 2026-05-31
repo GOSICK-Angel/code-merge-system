@@ -1,4 +1,5 @@
 name: executor
+version: 1
 inputs:
   - config
   - current_phase

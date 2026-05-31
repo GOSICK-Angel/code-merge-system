@@ -6,7 +6,6 @@ Validates the interplay between:
   - Phase C: FileDependencyGraph + DependencyExtractor
 """
 
-import os
 
 from src.llm.context import estimate_tokens
 from src.memory.layered_loader import LayeredMemoryLoader

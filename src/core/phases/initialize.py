@@ -5,6 +5,7 @@ import fnmatch
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.models.decision import (
@@ -39,6 +40,8 @@ from src.tools.commit_replayer import CommitReplayer
 from src.tools.sync_point_detector import SyncPointDetector
 from src.tools.interface_change_extractor import InterfaceChangeExtractor
 from src.tools.reverse_impact_scanner import ReverseImpactScanner
+from src.tools.three_way_diff import _safe_read_text
+from src.models.dependency import ConfidenceLabel
 from src.tools.forks_profile_loader import (
     ForksProfileError,
     build_effective_profile,
@@ -138,6 +141,26 @@ def _parse_file_status(status_char: str) -> FileStatus:
         "R": FileStatus.RENAMED,
     }
     return mapping.get(status_char.upper(), FileStatus.MODIFIED)
+
+
+def _log_security_summary(
+    file_diffs: list[Any],
+    fc_config: Any,
+    log: Any,
+) -> None:
+    patterns = fc_config.security_sensitive.patterns
+    log.info(
+        "Security patterns loaded: %d — first: %s",
+        len(patterns),
+        patterns[0] if patterns else "none",
+    )
+    sensitive = sum(1 for fd in file_diffs if fd.is_security_sensitive)
+    conflict = sum(1 for fd in file_diffs if fd.conflict_count > 0)
+    log.info(
+        "is_security_sensitive=True: %d file(s); conflict_count>0: %d file(s)",
+        sensitive,
+        conflict,
+    )
 
 
 def _count_diff_lines(
@@ -291,6 +314,11 @@ class InitializePhase(Phase):
         )
 
     def _run_sync(self, state: MergeState, ctx: PhaseContext) -> None:
+        # U2/lock #27 path A: snapshot config.thresholds onto state.thresholds
+        # so agents (e.g. ConflictAnalystAgent) can read a stable per-run
+        # view via restricted_view without reaching into config mid-flight.
+        state.thresholds = state.config.thresholds.model_copy()
+
         self._resolve_project_context(state, ctx)
         self._check_untracked_files(state, ctx)
         ctx.notify("orchestrator", "Computing merge base")
@@ -506,6 +534,8 @@ class InitializePhase(Phase):
 
         state.file_diffs = file_diffs
 
+        _log_security_summary(file_diffs, state.config.file_classifier, logger)
+
         upstream_renames = ctx.git_tool.detect_renames(
             merge_base, state.config.upstream_ref
         )
@@ -580,6 +610,9 @@ class InitializePhase(Phase):
 
         if state.config.reverse_impact.enabled:
             self._run_reverse_impact(state, ctx, merge_base)
+
+        if state.config.dependency_graph.enabled:
+            self._build_dependency_graph(state, ctx)
 
     def _apply_forced_decisions(
         self,
@@ -1280,3 +1313,129 @@ class InitializePhase(Phase):
                 "Phase 0.5: %d upstream symbols still referenced in fork-only scope",
                 len(reverse_impacts),
             )
+
+    def _build_dependency_graph(self, state: MergeState, ctx: PhaseContext) -> None:
+        """Build the focused file dependency subgraph and store it on state.
+
+        Scope = changed files (B/C/D_MISSING) plus the reverse-impact
+        fork-only/glob scope, capped at ``max_files``. Content is read from
+        the working tree; the graph is the precise AST counterpart to the
+        text-grep reverse-impact scan and is consumed read-only by planner
+        (ordering + fanout) and judge (missed-update detection).
+        """
+        from src.tools.dependency_extractor import DependencyExtractor
+
+        cfg = state.config.dependency_graph
+        ctx.notify("orchestrator", "Building file dependency graph")
+
+        from src.tools.dep_extractors.treesitter_extractor import (
+            missing_grammar_languages,
+        )
+
+        missing_grammars = missing_grammar_languages(cfg.languages)
+        if missing_grammars:
+            warning = (
+                "Dependency graph enabled but tree-sitter grammar(s) "
+                f"missing for {missing_grammars} — edges for these languages "
+                'will be empty (graph degraded). Install with: pip install ".[ast]"'
+            )
+            logger.warning(warning)
+            ctx.notify("orchestrator", f"⚠ {warning}")
+
+        actionable = {
+            FileChangeCategory.B,
+            FileChangeCategory.C,
+            FileChangeCategory.D_MISSING,
+        }
+        changed_files = {
+            fp for fp, cat in state.file_categories.items() if cat in actionable
+        }
+
+        fork_only = {
+            fp
+            for fp, cat in state.file_categories.items()
+            if cat == FileChangeCategory.D_EXTRA
+        }
+        for entry in state.config.customizations:
+            fork_only.update(entry.files)
+
+        repo_path = Path(state.config.repo_path).resolve()
+        scanner = ReverseImpactScanner(repo_path=repo_path)
+        scope_files = set(scanner._resolve_scope(fork_only, cfg.extra_scan_globs))
+        scope_files |= changed_files
+
+        if not scope_files:
+            return
+
+        sources: dict[str, str] = {}
+        for fp in sorted(scope_files):
+            if len(sources) >= cfg.max_files:
+                break
+            content = _safe_read_text(repo_path / fp)
+            if content is not None:
+                sources[fp] = content
+
+        if not sources:
+            return
+
+        alias_map = None
+        if cfg.resolve_aliases:
+            from src.tools.dep_extractors.alias_resolver import build_alias_map
+
+            configs = _collect_alias_configs(repo_path)
+            alias_map = build_alias_map(configs)
+            if alias_map.is_empty:
+                alias_map = None
+            else:
+                logger.info(
+                    "Dependency graph: alias resolution on (%d config file(s), "
+                    "go_module=%s, %d tsconfig path(s), %d workspace pkg(s))",
+                    len(configs),
+                    alias_map.go_module or "-",
+                    len(alias_map.ts_paths),
+                    len(alias_map.pkg_names),
+                )
+
+        graph = DependencyExtractor.extract_from_sources(
+            sources, languages=cfg.languages, alias_map=alias_map
+        )
+        state.dependency_graph = graph
+        logger.info(
+            "Dependency graph: %d edges across %d files (%d EXTRACTED)",
+            len(graph.edges),
+            graph.file_count,
+            sum(1 for e in graph.edges if e.confidence == ConfidenceLabel.EXTRACTED),
+        )
+
+
+_ALIAS_CONFIG_SKIP_DIRS = {
+    "node_modules",
+    ".git",
+    "vendor",
+    "dist",
+    "build",
+    ".venv",
+    "__pycache__",
+}
+
+
+def _collect_alias_configs(repo_path: Path, *, cap: int = 400) -> dict[str, str]:
+    """Collect tsconfig/jsconfig/go.mod/package.json contents repo-wide for
+    alias resolution (Phase C §6.3). Prunes vendored / build dirs and caps the
+    count to bound the opt-in walk. Returns ``{repo-relative path: content}``."""
+    configs: dict[str, str] = {}
+    for root, dirs, files in os.walk(repo_path):
+        dirs[:] = [d for d in dirs if d not in _ALIAS_CONFIG_SKIP_DIRS]
+        for fn in files:
+            if len(configs) >= cap:
+                return configs
+            if fn in ("go.mod", "package.json") or fn.startswith(
+                ("tsconfig", "jsconfig")
+            ):
+                content = _safe_read_text(Path(root) / fn)
+                if content is not None:
+                    rel = str((Path(root) / fn).relative_to(repo_path)).replace(
+                        os.sep, "/"
+                    )
+                    configs[rel] = content
+    return configs

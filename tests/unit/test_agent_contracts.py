@@ -12,6 +12,8 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from src.agents.contract import (
     AgentContract,
@@ -23,6 +25,20 @@ from src.agents.contract import (
 )
 from src.core.read_only_state_view import ReadOnlyStateView
 from src.llm.prompts.gate_registry import get_gate, registered_gate_ids
+
+
+# Resolve contracts dir from this test file's location (not cwd) so the
+# sanity gate cannot silently pass under an unexpected cwd.
+CONTRACTS_DIR = Path(__file__).resolve().parents[2] / "src/agents/contracts"
+EXPECTED_CONTRACT_STEMS = {
+    "conflict_analyst",
+    "executor",
+    "human_interface",
+    "judge",
+    "memory_extractor",
+    "planner",
+    "planner_judge",
+}
 
 
 # ---------- contract loading & schema ----------
@@ -254,6 +270,84 @@ def test_restricted_view_enforces_each_contract(name: str) -> None:
         _ = getattr(view, field)  # allowed — must not raise
     with pytest.raises(FieldNotInContract):
         _ = view.__not_in_contract__xyz
+
+
+# ---------- Phase 0: AgentContract.version (U-P0.2 ~ U-P0.7) ----------
+
+
+def _minimal_contract_kwargs(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "name": "x",
+        "inputs": [],
+        "output_schema": "X",
+        "gates": [],
+        "forbidden": [],
+        "collaboration": "compute",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_agent_contract_version_default_is_zero() -> None:
+    """U-P0.2 — default version is 0 for backward compat with future yaml omissions."""
+    contract = AgentContract(**_minimal_contract_kwargs())  # type: ignore[arg-type]
+    assert contract.version == 0
+    assert contract.model_dump()["version"] == 0
+
+
+def test_agent_contract_version_explicit_zero_is_legal() -> None:
+    """U-P0.3 — explicit version=0 must not raise (ge=0 not gt=0)."""
+    contract = AgentContract(**_minimal_contract_kwargs(version=0))  # type: ignore[arg-type]
+    assert contract.version == 0
+
+
+def test_agent_contract_version_rejects_negative() -> None:
+    """U-P0.4 — version < 0 raises ValidationError with a 'greater than or equal to 0' hint."""
+    with pytest.raises(ValidationError) as excinfo:
+        AgentContract(**_minimal_contract_kwargs(version=-1))  # type: ignore[arg-type]
+    assert "greater than or equal to 0" in str(excinfo.value)
+
+
+def test_seven_contract_yaml_files_declare_version_one() -> None:
+    """U-P0.5 — 7 shipped yaml files must declare version: 1 (int)."""
+    yaml_files = sorted(CONTRACTS_DIR.glob("*.yaml"))
+    assert len(yaml_files) == 7, (
+        f"expected 7 contract yaml files, got {[p.name for p in yaml_files]}"
+    )
+    stems = {p.stem for p in yaml_files}
+    assert stems == EXPECTED_CONTRACT_STEMS
+    for yf in yaml_files:
+        data = yaml.safe_load(yf.read_text(encoding="utf-8"))
+        assert isinstance(data.get("version"), int), (
+            f"{yf.name}: missing or non-int 'version' field (got {data.get('version')!r})"
+        )
+        assert data["version"] == 1, (
+            f"{yf.name}: expected version=1, got {data['version']!r}"
+        )
+
+
+def test_seven_contract_yaml_files_load_as_version_one_via_pydantic() -> None:
+    """U-P0.6 — each yaml deserializes through AgentContract with .version == 1."""
+    yaml_files = sorted(CONTRACTS_DIR.glob("*.yaml"))
+    assert len(yaml_files) == 7
+    for yf in yaml_files:
+        data = yaml.safe_load(yf.read_text(encoding="utf-8"))
+        contract = AgentContract(**data)
+        assert contract.version == 1, f"{yf.name}: expected loaded .version == 1"
+
+
+def test_agent_contract_loads_when_version_field_absent() -> None:
+    """U-P0.7 — yaml without 'version' key still loads (default=0); future fallback only."""
+    mock_data = {
+        "name": "future_agent",
+        "inputs": ["config"],
+        "output_schema": "FutureOutput",
+        "gates": [],
+        "forbidden": [],
+        "collaboration": "compute",
+    }
+    contract = AgentContract(**mock_data)
+    assert contract.version == 0
 
 
 def test_agent_without_contract_name_returns_none() -> None:

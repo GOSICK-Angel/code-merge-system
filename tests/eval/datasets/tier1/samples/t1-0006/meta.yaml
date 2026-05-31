@@ -1,0 +1,10 @@
+sample_id: t1-0006
+tier: 1
+category: C
+loss_class: null         # null or M1-M6 for Tier-3 / M-injected samples
+expected_human: true     # bool — should the system escalate?
+description: |
+  C-class: models/xinference — upstream + fork both touch
+  requirements.txt (overlapping hunk). `git merge` conflicts on that
+  file, so the system is correct to escalate (expected_human=true).
+  Backfilled 2026-05-16 from real 3-way merge dry-run.

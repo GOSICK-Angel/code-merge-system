@@ -1,0 +1,25 @@
+diff --git a/models/volcengine_maas/manifest.yaml b/models/volcengine_maas/manifest.yaml
+index 7d4d2aae..10d86ee5 100644
+--- a/models/volcengine_maas/manifest.yaml
++++ b/models/volcengine_maas/manifest.yaml
+@@ -1,4 +1,4 @@
+-author: langgenius
++author: cvte
+ created_at: '2024-09-20T00:13:50.29298939-04:00'
+ description:
+   en_US: Volcengine Ark models.
+diff --git a/models/volcengine_maas/models/llm/llm.py b/models/volcengine_maas/models/llm/llm.py
+index aac17443..6719d060 100644
+--- a/models/volcengine_maas/models/llm/llm.py
++++ b/models/volcengine_maas/models/llm/llm.py
+@@ -271,6 +271,10 @@ class VolcengineMaaSLargeLanguageModel(LargeLanguageModel):
+         stream: bool = True,
+         user: str | None = None,
+     ) -> LLMResult | Generator:
++        if model and not credentials.get("endpoint_id"):
++            credentials["endpoint_id"] = [d for d in credentials.get("endpoint_ids") if d.get("model") == model][0].get(
++                "endpoint_id"
++            )
+         client = ArkClientV3.from_credentials(credentials)
+         req_params = get_v3_req_params(credentials, model_parameters, stop)
+         if tools:

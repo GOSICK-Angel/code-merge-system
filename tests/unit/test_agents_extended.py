@@ -13,6 +13,7 @@ from src.models.judge import JudgeIssue, IssueSeverity, VerdictType, JudgeVerdic
 from src.models.plan import MergePlan, MergePhase, PhaseFileBatch, RiskSummary
 from src.models.plan_judge import PlanIssue
 from src.core.read_only_state_view import ReadOnlyStateView
+from src.tools.git_tool import GitReadStatus
 
 
 def _make_config() -> MergeConfig:
@@ -205,7 +206,7 @@ class TestConflictAnalystAgent:
 
     def test_run_uses_git_tool_for_three_way_diff(self):
         state = _make_state()
-        state._merge_base = "abc123"
+        state.merge_base_commit = "abc123"
         fd = _make_file_diff("src/auth.py", RiskLevel.AUTO_RISKY)
         state.file_diffs = [fd]
 
@@ -750,6 +751,70 @@ class TestExecutorAgent:
             )
 
         assert record.decision_source == DecisionSource.HUMAN
+
+    def test_execute_human_decision_semantic_merge_routes_to_semantic(self):
+        """Regression: a reviewer choosing semantic_merge must NOT be sent to
+        execute_auto_merge (whose SEMANTIC_MERGE guard escalates back to
+        human). It must run execute_semantic_merge with the existing
+        ConflictAnalysis, otherwise the choice silently degrades to
+        escalate_human and the file is left at fork baseline."""
+        import asyncio
+
+        state = _make_state()
+        state.current_phase = MergePhase.HUMAN_REVIEW
+        fd = _make_file_diff("src/auth.py")
+        state.file_diffs = [fd]
+        state.conflict_analyses["src/auth.py"] = _make_conflict_analysis("src/auth.py")
+
+        request = _make_human_request(
+            "src/auth.py", human_decision=MergeDecision.SEMANTIC_MERGE
+        )
+        sem_record = FileDecisionRecord(
+            file_path="src/auth.py",
+            file_status=FileStatus.MODIFIED,
+            decision=MergeDecision.SEMANTIC_MERGE,
+            decision_source=DecisionSource.AUTO_EXECUTOR,
+            rationale="merged",
+        )
+
+        with (
+            patch.object(
+                self.agent,
+                "execute_semantic_merge",
+                new=AsyncMock(return_value=sem_record),
+            ) as sem_mock,
+            patch.object(
+                self.agent, "execute_auto_merge", new=AsyncMock()
+            ) as auto_mock,
+        ):
+            record = asyncio.get_event_loop().run_until_complete(
+                self.agent.execute_human_decision(request, state)
+            )
+
+        sem_mock.assert_awaited_once()
+        auto_mock.assert_not_awaited()
+        assert record.decision == MergeDecision.SEMANTIC_MERGE
+        assert record.decision_source == DecisionSource.HUMAN
+
+    def test_execute_human_decision_semantic_merge_escalates_without_analysis(self):
+        """If the reviewer picks semantic_merge but no ConflictAnalysis exists,
+        the merge genuinely cannot run — escalate explicitly rather than
+        crashing or silently taking a side."""
+        import asyncio
+
+        state = _make_state()
+        state.current_phase = MergePhase.HUMAN_REVIEW
+        fd = _make_file_diff("src/auth.py")
+        state.file_diffs = [fd]
+        # no entry in state.conflict_analyses
+
+        request = _make_human_request(
+            "src/auth.py", human_decision=MergeDecision.SEMANTIC_MERGE
+        )
+        record = asyncio.get_event_loop().run_until_complete(
+            self.agent.execute_human_decision(request, state)
+        )
+        assert record.decision == MergeDecision.ESCALATE_HUMAN
 
     def test_raise_plan_dispute_appends_to_state(self):
         state = _make_state()
@@ -1371,6 +1436,233 @@ class TestPlannerAgent:
         assert self.agent.can_handle(state) is False
 
 
+class TestPlannerClassifyChunking:
+    """Forgejo regression: 500 files in one classification prompt (~125KB
+    input + ~25KB output) skirted the long-request envelope. The fix
+    sub-chunks each outer batch at ``_CLASSIFY_FILE_CHUNK_SIZE=100`` and
+    runs the chunks concurrently, then re-uses ``_merge_batch_plans``.
+    No file is ever dropped — every file is classified by some LLM call.
+    """
+
+    def setup_method(self):
+        with patch.dict("os.environ", {"TEST_KEY": "fake-key"}):
+            from src.agents.planner_agent import PlannerAgent
+
+            self.agent = PlannerAgent(
+                _make_llm_config(provider="anthropic", key_env="TEST_KEY")
+            )
+
+    @staticmethod
+    def _make_chunk_response(file_diffs: list[FileDiff]) -> str:
+        return json.dumps(
+            {
+                "phases": [
+                    {
+                        "batch_id": "b",
+                        "phase": "auto_merge",
+                        "file_paths": [fd.file_path for fd in file_diffs],
+                        "risk_level": "auto_safe",
+                        "can_parallelize": True,
+                    }
+                ],
+                "risk_summary": {
+                    "total_files": len(file_diffs),
+                    "auto_safe_count": len(file_diffs),
+                    "auto_risky_count": 0,
+                    "human_required_count": 0,
+                    "deleted_only_count": 0,
+                    "binary_count": 0,
+                    "excluded_count": 0,
+                    "estimated_auto_merge_rate": 1.0,
+                    "top_risk_files": [],
+                },
+                "project_context_summary": "",
+                "special_instructions": [],
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_classify_small_batch_keeps_single_call(self):
+        from src.agents.planner_agent import _CLASSIFY_FILE_CHUNK_SIZE
+
+        file_diffs = [
+            _make_file_diff(f"src/f{i}.py", RiskLevel.AUTO_SAFE)
+            for i in range(_CLASSIFY_FILE_CHUNK_SIZE)
+        ]
+        response = self._make_chunk_response(file_diffs)
+
+        with patch.object(
+            self.agent,
+            "_call_llm_with_retry",
+            new=AsyncMock(return_value=response),
+        ) as mocked:
+            await self.agent._classify_batch(
+                file_diffs,
+                project_context="",
+                system_prompt="sys",
+                batch_index=0,
+                total_batches=1,
+            )
+        assert mocked.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_classify_large_batch_sub_chunks_and_covers_every_file(self):
+        from src.agents.planner_agent import _CLASSIFY_FILE_CHUNK_SIZE
+
+        total = _CLASSIFY_FILE_CHUNK_SIZE * 2 + 50  # 250 with default 100
+        file_diffs = [
+            _make_file_diff(f"src/f{i}.py", RiskLevel.AUTO_SAFE) for i in range(total)
+        ]
+
+        seen_paths: list[str] = []
+
+        async def fake_call(messages, system=None):
+            prompt = messages[0]["content"]
+            chunk_paths = [
+                line.split("|")[0].strip("- ").strip()
+                for line in prompt.splitlines()
+                if line.startswith("- src/f")
+            ]
+            seen_paths.extend(chunk_paths)
+            chunk_diffs = [_make_file_diff(p, RiskLevel.AUTO_SAFE) for p in chunk_paths]
+            return self._make_chunk_response(chunk_diffs)
+
+        with patch.object(
+            self.agent,
+            "_call_llm_with_retry",
+            new=AsyncMock(side_effect=fake_call),
+        ) as mocked:
+            result = await self.agent._classify_batch(
+                file_diffs,
+                project_context="",
+                system_prompt="sys",
+                batch_index=0,
+                total_batches=1,
+            )
+
+        expected_chunks = (
+            total + _CLASSIFY_FILE_CHUNK_SIZE - 1
+        ) // _CLASSIFY_FILE_CHUNK_SIZE
+        assert mocked.call_count == expected_chunks, (
+            f"expected exactly {expected_chunks} chunked LLM calls, got {mocked.call_count}"
+        )
+        assert set(seen_paths) == {fd.file_path for fd in file_diffs}, (
+            "every file must be routed to exactly one chunk"
+        )
+        merged_paths: set[str] = set()
+        for phase in result["phases"]:
+            merged_paths.update(phase["file_paths"])
+        assert merged_paths == {fd.file_path for fd in file_diffs}
+        assert result["risk_summary"]["total_files"] == total
+
+    @pytest.mark.asyncio
+    async def test_classify_sub_chunk_fallback_does_not_drop_files(self):
+        """If a single sub-chunk's LLM call fails, fallback fills its slot —
+        all other chunks still produce real classifications and merged
+        output still covers every input file."""
+        from src.agents.planner_agent import _CLASSIFY_FILE_CHUNK_SIZE
+
+        total = _CLASSIFY_FILE_CHUNK_SIZE * 2
+        file_diffs = [
+            _make_file_diff(f"src/f{i}.py", RiskLevel.AUTO_SAFE) for i in range(total)
+        ]
+
+        call_count = {"n": 0}
+
+        async def fake_call(messages, system=None):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise RuntimeError("simulated LLM transport error")
+            prompt = messages[0]["content"]
+            chunk_paths = [
+                line.split("|")[0].strip("- ").strip()
+                for line in prompt.splitlines()
+                if line.startswith("- src/f")
+            ]
+            chunk_diffs = [_make_file_diff(p, RiskLevel.AUTO_SAFE) for p in chunk_paths]
+            return self._make_chunk_response(chunk_diffs)
+
+        with patch.object(
+            self.agent,
+            "_call_llm_with_retry",
+            new=AsyncMock(side_effect=fake_call),
+        ):
+            result = await self.agent._classify_batch(
+                file_diffs,
+                project_context="",
+                system_prompt="sys",
+                batch_index=0,
+                total_batches=1,
+            )
+
+        merged_paths: set[str] = set()
+        for phase in result["phases"]:
+            merged_paths.update(phase["file_paths"])
+        assert merged_paths == {fd.file_path for fd in file_diffs}, (
+            "fallback path must still produce classifications for files in the failed chunk"
+        )
+
+    @pytest.mark.asyncio
+    async def test_classify_sub_chunk_filters_rename_pairs_per_chunk(self):
+        """When sub-chunking, each chunk's LLM prompt should only reference
+        renames whose old or new path lives in that chunk — not the full
+        outer batch's rename list, which would balloon the prompt and
+        defeat the point."""
+        from src.agents.planner_agent import _CLASSIFY_FILE_CHUNK_SIZE
+
+        chunk_size = _CLASSIFY_FILE_CHUNK_SIZE
+        file_diffs = [
+            _make_file_diff(f"src/f{i}.py", RiskLevel.AUTO_SAFE)
+            for i in range(chunk_size * 2)
+        ]
+        rename_pairs = [
+            (f"src/f{i}_old.py", f"src/f{i}.py") for i in range(chunk_size * 2)
+        ]
+
+        rename_chars_per_call: list[int] = []
+
+        async def fake_call(messages, system=None):
+            prompt = messages[0]["content"]
+            rename_section_marker = "## Detected File Renames"
+            if rename_section_marker in prompt:
+                section = prompt.split(rename_section_marker, 1)[1]
+                end = section.find("\n##")
+                if end != -1:
+                    section = section[:end]
+                rename_chars_per_call.append(section.count("→"))
+            else:
+                rename_chars_per_call.append(0)
+            chunk_paths = [
+                line.split("|")[0].strip("- ").strip()
+                for line in prompt.splitlines()
+                if line.startswith("- src/f")
+            ]
+            chunk_diffs = [_make_file_diff(p, RiskLevel.AUTO_SAFE) for p in chunk_paths]
+            return self._make_chunk_response(chunk_diffs)
+
+        with patch.object(
+            self.agent,
+            "_call_llm_with_retry",
+            new=AsyncMock(side_effect=fake_call),
+        ):
+            await self.agent._classify_batch(
+                file_diffs,
+                project_context="",
+                system_prompt="sys",
+                batch_index=0,
+                total_batches=1,
+                rename_pairs=rename_pairs,
+            )
+
+        assert all(count <= chunk_size for count in rename_chars_per_call), (
+            f"per-chunk renames should be ≤chunk_size ({chunk_size}); "
+            f"got {rename_chars_per_call}"
+        )
+        assert sum(rename_chars_per_call) == len(rename_pairs), (
+            "every rename pair must surface in exactly one chunk's prompt"
+        )
+
+
 class TestJudgeAgent:
     def setup_method(self):
         with patch.dict("os.environ", {"TEST_KEY": "fake-key"}):
@@ -1525,7 +1817,11 @@ class TestJudgeAgent:
         assert any(i.issue_type == "unresolved_conflict" for i in issues)
         assert any(i.issue_level == IssueSeverity.CRITICAL for i in issues)
 
-    def test_review_file_returns_empty_on_llm_error(self):
+    def test_review_file_fails_closed_on_llm_error(self):
+        # P2: a per-file review that cannot complete (LLM error after retries, or
+        # truncated/unparseable output) must NOT pass the file with zero issues —
+        # that silently rolled a never-reviewed file into a PASS verdict. It now
+        # synthesizes a CRITICAL review-unavailable veto (mirrors #3A batch path).
         fd = _make_file_diff("src/main.py")
         record = self._make_decision_record("src/main.py")
 
@@ -1540,7 +1836,10 @@ class TestJudgeAgent:
                 self.agent.review_file("src/main.py", "x = 1\n", record, fd)
             )
 
-        assert issues == []
+        vetoes = [i for i in issues if i.issue_type == "review_unavailable"]
+        assert len(vetoes) == 1
+        assert vetoes[0].issue_level == IssueSeverity.CRITICAL
+        assert vetoes[0].veto_condition
 
     def test_compute_verdict_pass_when_no_issues(self):
         result = self.agent.compute_verdict([])
@@ -1680,10 +1979,15 @@ class TestJudgeAgent:
         mock_git = MagicMock()
         mock_git.repo_path.__truediv__ = MagicMock(return_value=mock_path)
         # O-J3: keep this test focused on the LLM review path by making the
-        # take-decision short-circuit fall through (returning None forces the
-        # check to skip rather than verify+skip the file).
-        mock_git.get_file_hash = MagicMock(return_value=None)
-        mock_git.get_worktree_blob_sha = MagicMock(return_value=None)
+        # take-decision short-circuit fall through (an ABSENT read forces the
+        # check to skip rather than verify+skip the file). W1: the checked
+        # readers return (value, status) tuples.
+        mock_git.get_file_hash_checked = MagicMock(
+            return_value=(None, GitReadStatus.ABSENT)
+        )
+        mock_git.get_worktree_blob_sha_checked = MagicMock(
+            return_value=(None, GitReadStatus.ABSENT)
+        )
         self.agent.git_tool = mock_git
 
         readonly = ReadOnlyStateView(state)

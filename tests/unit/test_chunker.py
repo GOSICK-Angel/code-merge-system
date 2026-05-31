@@ -12,6 +12,7 @@ from src.llm.chunker import (
     CodeChunk,
     IndentChunker,
     _HAS_TREE_SITTER,
+    _signature_cutoff,
     detect_language,
     render_chunk,
     render_file_staged,
@@ -115,6 +116,29 @@ class TestASTChunker:
         assert len(class_chunks) == 1
         assert "Foo" in class_chunks[0].name
         assert len(class_chunks[0].children) >= 2
+
+    @needs_tree_sitter
+    def test_ast_chunk_typescript_loads_parser(self) -> None:
+        # Regression: the combined tree_sitter_typescript binding exposes
+        # language_typescript()/language_tsx() (no single language(name)).
+        # A broken loader silently degrades to the indent fallback; assert
+        # real AST chunks (a function node) are produced instead.
+        source = (
+            'import { x } from "./util";\n\n'
+            "function compute(a: number): number {\n"
+            "  return a + x;\n"
+            "}\n"
+        )
+        chunks = ASTChunker.chunk(source, "typescript")
+        kinds = {c.kind for c in chunks}
+        assert ChunkKind.FUNCTION in kinds
+        assert ChunkKind.IMPORT in kinds
+
+    @needs_tree_sitter
+    def test_ast_chunk_tsx_loads_parser(self) -> None:
+        source = 'import React from "react";\n\nfunction App() {\n  return null;\n}\n'
+        chunks = ASTChunker.chunk(source, "tsx")
+        assert any(c.kind == ChunkKind.FUNCTION for c in chunks)
 
     def test_ast_chunk_imports_merged(self) -> None:
         source = "import os\nimport sys\nfrom pathlib import Path\n"
@@ -263,6 +287,50 @@ class TestRenderChunk:
         assert result == ""
 
 
+class TestSignatureCutoff:
+    def test_python_param_type_annotation_not_truncated(self) -> None:
+        text = "def f(a: int, b: str) -> None:\n    return None"
+        idx = _signature_cutoff(text)
+        assert idx is not None
+        assert text[: idx + 1] == "def f(a: int, b: str) -> None:"
+
+    def test_typescript_return_type_colon(self) -> None:
+        text = "function f(x: number): T {\n}"
+        idx = _signature_cutoff(text)
+        assert idx is not None
+        # depth-0 colon is the return-type colon, never the parameter colon
+        assert text[: idx + 1] == "function f(x: number):"
+
+    def test_go_body_brace(self) -> None:
+        text = "func F(a int) error {\n\treturn nil\n}"
+        idx = _signature_cutoff(text)
+        assert idx is not None
+        assert text[: idx + 1] == "func F(a int) error {"
+
+    def test_default_value_with_colon_inside_brackets(self) -> None:
+        text = "def f(a={1: 2}): pass"
+        idx = _signature_cutoff(text)
+        assert idx is not None
+        assert text[: idx + 1] == "def f(a={1: 2}):"
+
+    def test_no_terminator_returns_none(self) -> None:
+        assert _signature_cutoff("def f(a, b") is None
+
+
+class TestSignatureExtractionEndToEnd:
+    def test_indent_chunker_keeps_full_annotated_signature(self) -> None:
+        source = "def f(a: int, b: str) -> None:\n    return None\n"
+        chunks = IndentChunker.chunk(source, "python")
+        assert chunks[0].signature == "def f(a: int, b: str) -> None:"
+
+    @needs_tree_sitter
+    def test_ast_chunker_keeps_full_annotated_signature(self) -> None:
+        source = "def f(a: int, b: str) -> None:\n    return None\n"
+        chunks = ASTChunker.chunk(source, "python")
+        fn = next(c for c in chunks if c.kind == ChunkKind.FUNCTION)
+        assert fn.signature == "def f(a: int, b: str) -> None:"
+
+
 class TestRenderSignature:
     def test_function_signature(self) -> None:
         chunk = CodeChunk(
@@ -333,7 +401,7 @@ class TestRenderFileStaged:
                 signature="def a():",
             ),
         ]
-        levels = {"a": RenderLevel.FULL, "b": RenderLevel.FULL}
+        levels = {(1, 5): RenderLevel.FULL, (10, 15): RenderLevel.FULL}
         result = render_file_staged(chunks, levels)
         assert result.index("def a()") < result.index("def b()")
 
@@ -373,10 +441,10 @@ class TestRenderFileStaged:
             ),
         ]
         levels = {
-            "keep": RenderLevel.FULL,
-            "drop1": RenderLevel.DROP,
-            "drop2": RenderLevel.DROP,
-            "keep2": RenderLevel.FULL,
+            (1, 5): RenderLevel.FULL,
+            (6, 8): RenderLevel.DROP,
+            (9, 11): RenderLevel.DROP,
+            (12, 15): RenderLevel.FULL,
         }
         result = render_file_staged(chunks, levels)
         assert "2 sections omitted" in result
@@ -400,7 +468,7 @@ class TestRenderFileStaged:
                 signature="def b():",
             ),
         ]
-        levels = {"a": RenderLevel.FULL, "b": RenderLevel.FULL}
+        levels = {(1, 3): RenderLevel.FULL, (5, 8): RenderLevel.FULL}
         result = render_file_staged(chunks, levels)
         assert "omitted" not in result
         assert "def a()" in result
@@ -417,6 +485,6 @@ class TestRenderFileStaged:
                 signature="x = 1",
             ),
         ]
-        levels = {"x": RenderLevel.DROP}
+        levels = {(1, 1): RenderLevel.DROP}
         result = render_file_staged(chunks, levels)
         assert "1 sections omitted" in result

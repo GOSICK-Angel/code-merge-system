@@ -70,7 +70,20 @@ class Checkpoint:
 
     def register_signal_handler(self, state: MergeState) -> None:
         def handler(signum: int, frame: object) -> None:
-            self.save(state, "interrupt")
+            # Restore default disposition first so a second ^C during
+            # cleanup (e.g. while ``static_server.stop()`` is blocked on
+            # ``threading.Event.wait``) is a clean kernel SIGINT instead
+            # of re-entering this handler and re-raising ``SystemExit``
+            # on top of a partially-torn-down asyncio loop.
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    signal.signal(sig, signal.SIG_DFL)
+                except (OSError, ValueError):
+                    pass
+            try:
+                self.save(state, "interrupt")
+            except Exception as exc:
+                logger.error("Checkpoint save failed during interrupt: %s", exc)
             raise SystemExit(0)
 
         try:

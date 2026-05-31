@@ -8,6 +8,42 @@ if TYPE_CHECKING:
 
 _DEFAULT_MAX_CONTENT_CHARS = 5000
 
+# P2-2: single strong JSON-only instruction shared by every judge prompt.
+# Weak "Return JSON:" wording let some models emit a markdown preamble; this
+# matches the planner_judge contract (parseable by json.loads, first char `{`).
+_JSON_ONLY_INSTRUCTION = (
+    "Respond with ONLY a single JSON object matching the schema — it will be "
+    "parsed directly by json.loads(). The first character of your reply must "
+    "be `{`. No markdown fences, no preamble, no trailing prose."
+)
+
+# P2-3: find/filter separation, injected only when high_recall=True (opt-in,
+# Judge-on-Opus-4.8 only — see AgentLLMConfig.high_recall_review). Opus 4.8
+# follows "be conservative" more literally, which suppresses lower-severity
+# findings and lowers defect recall. This block reframes the review as a find
+# pass and pushes severity/confidence judgement to the downstream gate instead
+# of having the model omit the issue. Empty string when disabled keeps every
+# other run byte-for-byte identical.
+_FIND_FILTER_NOTE = (
+    "\n\nRECALL MODE (P2-3): treat this as a find pass, not a filter pass. "
+    "Report every plausible defect you observe — dropped fork logic, missing "
+    "upstream changes, suspect merges — rather than staying silent because an "
+    "issue looks minor or you are unsure it matters. Do not trim the list to "
+    "keep it short. Express severity through issue_level "
+    "(critical/high vs medium/low/info), confidence, and must_fix_before_merge "
+    "instead of omitting a finding; a downstream gate filters on those fields. "
+    "The grounding rule above still applies to every issue you raise."
+)
+
+# P2-4: human-facing fields (issue description, suggested_fix, overall
+# assessment) follow the run's output language. Injected only when lang ==
+# "zh"; English runs are unchanged.
+_ZH_LANG_NOTE = (
+    "\n\n语言要求：每个 issue 的 description、suggested_fix 以及 "
+    "overall_assessment 字段必须使用中文撰写（文件路径、函数名、枚举值等技术"
+    "标识保留原文）。"
+)
+
 
 def _truncate_content(content: str, max_chars: int | None) -> str:
     limit = max_chars if max_chars is not None else _DEFAULT_MAX_CONTENT_CHARS
@@ -20,6 +56,24 @@ def _memory_section(memory_context: str) -> str:
     if not memory_context:
         return ""
     return f"\n{memory_context}\n\n"
+
+
+def _fork_section(
+    fork_content: str | None,
+    merged_content: str,
+    language: str,
+    max_content_chars: int | None,
+) -> str:
+    if fork_content is None or fork_content == merged_content:
+        return ""
+    return (
+        f"\n# Fork Original (pre-merge content of this file on fork_ref)\n"
+        f"Use this to distinguish intentional fork customisations (e.g. \n"
+        f"fork-only fields, renamed identifiers) from real merge defects.\n"
+        f"```{language}\n"
+        f"{_truncate_content(fork_content, max_content_chars)}\n"
+        f"```\n"
+    )
 
 
 _UPSTREAM_MATCH_TASKS = """\
@@ -51,6 +105,59 @@ You do not know the Executor's decision process; you only look at the final merg
 and independently assess quality. Be thorough and critical."""
 
 
+# P1-1: two worked examples anchor the verdict on its two failure modes — a
+# clean merge (empty issues array, not an invented nitpick) and a real defect
+# carrying the grounding the rule above demands (evidence_excerpt quoting a
+# verbatim merged line). Claude-only — executor / planner_judge stay zero-shot
+# per the §五 B-class guardrail.
+_REVIEW_EXAMPLES = """<examples>
+<example>
+The merged file integrates upstream's new `parseConfig` call while keeping the
+fork's `cacheTtl` field intact. No conflict markers, nothing dropped.
+{
+  "issues": [],
+  "overall_assessment": "Clean merge: upstream's parseConfig integration is present and the fork's cacheTtl customisation is preserved. No conflict markers, no missing logic.",
+  "confidence": 0.9
+}
+</example>
+
+<example>
+The merged file still contains an unresolved conflict marker and dropped the
+fork's `retryCount` guard.
+{
+  "issues": [
+    {
+      "file_path": "src/client/http.py",
+      "issue_level": "critical",
+      "issue_type": "unresolved_conflict",
+      "description": "Leftover conflict marker in the merged output — the merge was not completed.",
+      "affected_lines": [42],
+      "evidence_excerpt": "<<<<<<< HEAD",
+      "suggested_fix": "Resolve the conflict region and remove the <<<<<<< / ======= / >>>>>>> markers.",
+      "must_fix_before_merge": true,
+      "resolvability": "fixable"
+    },
+    {
+      "file_path": "src/client/http.py",
+      "issue_level": "high",
+      "issue_type": "missing_logic",
+      "description": "The fork's retryCount guard before send() was dropped during the merge.",
+      "affected_lines": [],
+      "evidence_excerpt": "    def send(self, req):",
+      "suggested_fix": "Re-introduce the `if self.retryCount > 0` guard ahead of the send() call.",
+      "must_fix_before_merge": true,
+      "resolvability": "fixable"
+    }
+  ],
+  "overall_assessment": "Merge failed: an unresolved conflict marker remains and a fork-side retry guard was lost.",
+  "confidence": 0.85
+}
+</example>
+</examples>
+
+"""
+
+
 def build_file_review_prompt(
     file_path: str,
     merged_content: str,
@@ -60,8 +167,13 @@ def build_file_review_prompt(
     max_content_chars: int | None = None,
     memory_context: str = "",
     check_strategy: "JudgeCheckStrategy | None" = None,
+    fork_content: str | None = None,
+    lang: str = "en",
+    high_recall: bool = False,
 ) -> str:
     language = original_diff.language or "unknown"
+    lang_note = _ZH_LANG_NOTE if lang == "zh" else ""
+    recall_note = _FIND_FILTER_NOTE if high_recall else ""
     decision_val = (
         decision_record.decision.value
         if hasattr(decision_record.decision, "value")
@@ -73,12 +185,23 @@ def build_file_review_prompt(
         else decision_record.decision_source
     )
 
-    return f"""Review the following merged file for correctness and completeness.
+    fork_section = _fork_section(
+        fork_content, merged_content, language, max_content_chars
+    )
 
-# Project Context
-{project_context or "No project context provided."}
+    return f"""<task>
+Review the merged file below for correctness and completeness. The merged
+content (and the fork's pre-merge original, when shown) come first; the merge
+decision, review tasks, grounding rule and required JSON output follow.
+</task>
 
-# File: {file_path}
+<merged_content language="{language}">
+```{language}
+{_truncate_content(merged_content, max_content_chars)}
+```
+</merged_content>
+{fork_section}{_memory_section(memory_context)}<file_info>
+File: {file_path}
 Language: {language}
 
 # Merge Decision Applied
@@ -91,12 +214,13 @@ Language: {language}
 - Lines deleted: {original_diff.lines_deleted}
 - Conflicts: {original_diff.conflict_count}
 - Security sensitive: {original_diff.is_security_sensitive}
+</file_info>
 
-# Merged Content
-```{language}
-{_truncate_content(merged_content, max_content_chars)}
-```
-{_memory_section(memory_context)}
+<project_context>
+{project_context or "No project context provided."}
+</project_context>
+
+<instructions>
 # Review Tasks
 {_review_tasks_section(check_strategy)}
 
@@ -109,9 +233,11 @@ GROUNDING RULE (P1-3): every CRITICAL or HIGH issue MUST include either a
 non-empty "affected_lines" array OR a non-empty "evidence_excerpt" string
 quoting a verbatim line from the merged content. Ungrounded CRITICAL/HIGH
 issues will be auto-downgraded to MEDIUM by the parser, so failing to cite
-evidence weakens your verdict.
+evidence weakens your verdict.{recall_note}{lang_note}
+</instructions>
 
-Return JSON:
+{_REVIEW_EXAMPLES}<output_format>
+{_JSON_ONLY_INSTRUCTION}
 {{
   "issues": [
     {{
@@ -128,7 +254,8 @@ Return JSON:
   ],
   "overall_assessment": "Brief overall quality assessment",
   "confidence": 0.8
-}}"""
+}}
+</output_format>"""
 
 
 def build_verdict_prompt(
@@ -157,7 +284,7 @@ Provide a final verdict:
 - conditional: Has medium/low issues that should be addressed
 - fail: Has critical or high issues that must be fixed
 
-Return JSON:
+{_JSON_ONLY_INSTRUCTION}
 {{
   "verdict": "{verdict_hint}",
   "summary": "Overall merge quality assessment",
@@ -171,6 +298,7 @@ _BATCH_PER_FILE_CONTENT_CHARS = 2000
 def build_batch_file_review_prompt(
     file_reviews: list[dict[str, Any]],
     project_context: str = "",
+    high_recall: bool = False,
 ) -> str:
     sections: list[str] = []
     for i, fr in enumerate(file_reviews, 1):
@@ -211,9 +339,13 @@ For each issue set "resolvability":
 GROUNDING RULE (P1-3): every CRITICAL or HIGH issue MUST include either a
 non-empty "affected_lines" array OR a non-empty "evidence_excerpt" string
 quoting a verbatim line from the merged content. Ungrounded CRITICAL/HIGH
-issues are auto-downgraded to MEDIUM by the parser.
+issues are auto-downgraded to MEDIUM by the parser."""
+        + (_FIND_FILTER_NOTE if high_recall else "")
+        + """
 
-Return JSON:
+"""
+        + _JSON_ONLY_INSTRUCTION
+        + """
 {
   "files": [
     {
@@ -252,7 +384,7 @@ Re-evaluate each disputed issue. For each issue:
 - If the executor's counter-evidence is convincing, WITHDRAW the issue.
 - If the issue stands despite the rebuttal, MAINTAIN it.
 
-Return JSON:
+{_JSON_ONLY_INSTRUCTION}
 {{
   "remaining_issues": [
     {{

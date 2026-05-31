@@ -1,0 +1,12 @@
+{
+  "eval_version": "0.1.0",
+  "generated_at": "2026-05-17T00:37:42.182685Z",
+  "samples": [
+    {
+      "content_sha256": "ec7958015f7b67c8609ecc6de94b09ad4536199bd55ef6bf08af13c6e3988cf6",
+      "relative_path": "samples/r3-0001",
+      "sample_id": "r3-0001",
+      "tier": 2
+    }
+  ]
+}

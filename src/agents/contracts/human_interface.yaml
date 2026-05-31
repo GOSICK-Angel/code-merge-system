@@ -1,4 +1,5 @@
 name: human_interface
+version: 1
 inputs:
   - human_decision_requests
   - status

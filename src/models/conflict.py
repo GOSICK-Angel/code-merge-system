@@ -1,7 +1,12 @@
 from enum import Enum
+from typing import Literal
 from uuid import uuid4
+
 from pydantic import BaseModel, Field
+
 from src.models.decision import MergeDecision
+
+SemanticCompatibility = Literal["compatible", "incompatible", "orthogonal"]
 
 
 class ConflictType(str, Enum):
@@ -35,6 +40,7 @@ class ConflictPoint(BaseModel):
     rationale: str
     risk_factors: list[str] = Field(default_factory=list)
     similar_conflicts: list[str] = Field(default_factory=list)
+    semantic_compatibility: SemanticCompatibility | None = None
 
 
 class ConflictAnalysis(BaseModel):
@@ -49,3 +55,9 @@ class ConflictAnalysis(BaseModel):
     rationale: str = ""
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     analysis_notes: str = ""
+    is_chunked: bool = False
+    chunk_count: int = Field(default=1, ge=1)
+    grounding_warnings: list[str] = Field(default_factory=list)
+    fabricated_symbols: list[str] = Field(default_factory=list)
+    required_new_apis: list[str] = Field(default_factory=list)
+    semantic_compatibility: SemanticCompatibility | None = None
