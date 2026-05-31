@@ -94,6 +94,16 @@ class MemoryHitTracker:
             if self._persist_path is not None:
                 self._persist_unsafe()
 
+    def injected_file_paths(self) -> frozenset[str]:
+        """O-M4 / P0: file_paths that received ≥1 memory injection this run.
+
+        Run-local — the injection map is not persisted — so this reflects the
+        current process only. Used by the P0 memory-effectiveness analyzer to
+        intersect injected files with the Judge's final verdict.
+        """
+        with self._lock:
+            return frozenset(self._injections_by_file.keys())
+
     def _load_unsafe(self) -> None:
         try:
             assert self._persist_path is not None

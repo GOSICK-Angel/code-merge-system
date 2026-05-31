@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from pathlib import Path
 
 from src.cli.paths import get_report_dir
 from src.core.phases.base import Phase, PhaseContext, PhaseOutcome
 from src.models.decision import DecisionSource, MergeDecision
 from src.models.plan import MergePhase
 from src.models.state import MergeState, PhaseResult, SystemStatus
+from src.tools.memory_eval import compute_memory_effectiveness
 from src.tools.merge_verification import gather_findings_from_git
 from src.tools.report_writer import (
     write_json_report,
@@ -16,6 +18,38 @@ from src.tools.report_writer import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_memory_effectiveness(
+    state: MergeState, ctx: PhaseContext, output_dir: str
+) -> dict[str, object] | None:
+    """P0: compute the memory-effectiveness report, persist it as a JSON
+    artifact, and return its dump for the markdown report.
+
+    Read-only and best-effort: any failure logs and returns ``None`` without
+    affecting the merge outcome. The Judge verdict supplies the same
+    execution-grounded pass/fail signal that feeds ``record_outcome``.
+    """
+    if ctx.memory_hit_tracker is None:
+        return None
+    try:
+        verdict = state.judge_verdict
+        report = compute_memory_effectiveness(
+            ctx.memory_hit_tracker,
+            verdict.passed_files if verdict else [],
+            verdict.failed_files if verdict else [],
+            state.run_id,
+        )
+        try:
+            (Path(output_dir) / "memory_effectiveness.json").write_text(
+                report.model_dump_json(indent=2), encoding="utf-8"
+            )
+        except OSError:
+            logger.debug("memory_effectiveness.json write failed", exc_info=True)
+        return report.model_dump()
+    except Exception:  # noqa: BLE001 - diagnostics must never break reporting
+        logger.debug("compute_memory_effectiveness failed", exc_info=True)
+        return None
 
 
 def _run_deterministic_verification(state: MergeState, ctx: PhaseContext) -> None:
@@ -262,6 +296,7 @@ class ReportGenerationPhase(Phase):
             memory_summary = (
                 ctx.memory_hit_tracker.summary() if ctx.memory_hit_tracker else None
             )
+            memory_effectiveness = _compute_memory_effectiveness(state, ctx, output_dir)
 
             if "json" in state.config.output.formats:
                 write_json_report(state, output_dir)
@@ -272,6 +307,7 @@ class ReportGenerationPhase(Phase):
                     cost_summary=cost_summary,
                     utilization_summary=utilization_summary,
                     memory_summary=memory_summary,
+                    memory_effectiveness=memory_effectiveness,
                 )
 
             write_living_plan_report(state, output_dir)

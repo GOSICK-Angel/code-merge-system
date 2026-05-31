@@ -111,6 +111,19 @@ _I18N: dict[str, dict[str, str]] = {
         "memory_entries_l2": "L2 file-relevant entries",
         "memory_by_phase": "By phase",
         "phase_label": "Phase",
+        "memory_effectiveness": "Memory Effectiveness",
+        "memory_overall_correct": "Overall judged-correct rate",
+        "memory_influenced": "Memory-influenced decisions",
+        "memory_correct_after": "Correct after influence (PASS)",
+        "memory_harmful_count": "Harmful after influence (FAIL)",
+        "memory_correct_rate": "Correct rate (influenced)",
+        "memory_harmful_rate": "Harmful influence rate",
+        "memory_top_helpful": "Top helpful entries",
+        "memory_top_harmful": "Top harmful entries",
+        "entry_id_col": "Entry ID",
+        "pass_col": "Pass",
+        "fail_col": "Fail",
+        "score_col": "Score",
         "planner_response_hdr": "Planner Responses",
         "response_accept": "Accept",
         "response_reject": "Reject",
@@ -230,6 +243,19 @@ _I18N: dict[str, dict[str, str]] = {
         "memory_entries_l2": "L2 文件相关 entries",
         "memory_by_phase": "按阶段统计",
         "phase_label": "阶段",
+        "memory_effectiveness": "Memory 有效性",
+        "memory_overall_correct": "总体判决正确率",
+        "memory_influenced": "受记忆影响的决策数",
+        "memory_correct_after": "其中正确 (judge PASS)",
+        "memory_harmful_count": "其中有害 (judge FAIL)",
+        "memory_correct_rate": "影响内正确率",
+        "memory_harmful_rate": "有害影响率",
+        "memory_top_helpful": "Top 有益条目",
+        "memory_top_harmful": "Top 有害条目",
+        "entry_id_col": "条目 ID",
+        "pass_col": "Pass",
+        "fail_col": "Fail",
+        "score_col": "Score",
         "planner_response_hdr": "Planner 逐条回应",
         "response_accept": "接受",
         "response_reject": "拒绝",
@@ -252,11 +278,68 @@ def _t(language: str, key: str) -> str:
     return _I18N.get(language, _I18N["en"]).get(key, _I18N["en"].get(key, key))
 
 
+def _has_memory_effectiveness(memory_effectiveness: dict[str, Any] | None) -> bool:
+    if not memory_effectiveness:
+        return False
+    influenced = int(memory_effectiveness.get("memory_influenced_decisions", 0) or 0)
+    tracked = int(memory_effectiveness.get("total_tracked_entries", 0) or 0)
+    return influenced > 0 or tracked > 0
+
+
+def _build_memory_effectiveness_lines(
+    t: partial[str], memory_effectiveness: dict[str, Any] | None
+) -> list[str]:
+    """P0: render the memory-effectiveness subsection (influenced decisions +
+    top helpful/harmful entries) from a ``MemoryEffectivenessReport`` dump."""
+    if not _has_memory_effectiveness(memory_effectiveness):
+        return []
+    assert memory_effectiveness is not None
+    me = memory_effectiveness
+
+    lines: list[str] = [
+        f"### {t('memory_effectiveness')}",
+        "",
+        f"| {t('metric')} | {t('value')} |",
+        "|--------|-------|",
+        f"| {t('memory_overall_correct')} | {float(me.get('overall_correct_rate', 0.0)):.1%} |",
+        f"| {t('memory_influenced')} | {int(me.get('memory_influenced_decisions', 0))} |",
+        f"| {t('memory_correct_after')} | {int(me.get('correct_after_influence', 0))} |",
+        f"| {t('memory_harmful_count')} | {int(me.get('harmful_influence_count', 0))} |",
+        f"| {t('memory_correct_rate')} | {float(me.get('correct_rate_after_influence', 0.0)):.1%} |",
+        f"| {t('memory_harmful_rate')} | {float(me.get('harmful_influence_rate', 0.0)):.1%} |",
+        "",
+    ]
+
+    for title_key, rows in (
+        ("memory_top_helpful", me.get("top_helpful") or []),
+        ("memory_top_harmful", me.get("top_harmful") or []),
+    ):
+        if not rows:
+            continue
+        lines += [
+            f"#### {t(title_key)}",
+            "",
+            f"| {t('entry_id_col')} | {t('pass_col')} | {t('fail_col')} | {t('score_col')} |",
+            "|-------|------|------|-------|",
+        ]
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"| `{item.get('entry_id', '')}` | {int(item.get('pass_count', 0))} "
+                f"| {int(item.get('fail_count', 0))} | {float(item.get('score', 0.0)):.3f} |"
+            )
+        lines.append("")
+
+    return lines
+
+
 def _build_run_insights_lines(
     t: partial[str],
     cost_summary: dict[str, Any],
     utilization_summary: dict[str, Any] | None = None,
     memory_summary: dict[str, Any] | None = None,
+    memory_effectiveness: dict[str, Any] | None = None,
 ) -> list[str]:
     """Build the Run Insights markdown section from CostTracker and TraceLogger summaries."""
     has_cost = bool(cost_summary) and cost_summary.get("total_calls", 0) > 0
@@ -264,7 +347,8 @@ def _build_run_insights_lines(
         memory_summary is not None
         and int(memory_summary.get("total_calls", 0) or 0) > 0
     )
-    if not has_cost and not has_memory:
+    has_effectiveness = _has_memory_effectiveness(memory_effectiveness)
+    if not has_cost and not has_memory and not has_effectiveness:
         return []
 
     lines: list[str] = [f"## {t('run_insights')}", ""]
@@ -355,6 +439,8 @@ def _build_run_insights_lines(
                 lines.append(f"| {phase_name} | {p_calls} | {p_hits} | {p_rate:.1%} |")
             lines.append("")
 
+    lines += _build_memory_effectiveness_lines(t, memory_effectiveness)
+
     return lines
 
 
@@ -414,6 +500,7 @@ def write_markdown_report(
     cost_summary: dict[str, Any] | None = None,
     utilization_summary: dict[str, Any] | None = None,
     memory_summary: dict[str, Any] | None = None,
+    memory_effectiveness: dict[str, Any] | None = None,
 ) -> Path:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -524,10 +611,14 @@ def write_markdown_report(
             lines.append(f"- `{err.get('phase', '?')}`: {err.get('message', '')}")
         lines.append("")
 
-    if cost_summary:
+    if cost_summary or memory_summary or memory_effectiveness:
         lines.extend(
             _build_run_insights_lines(
-                t, cost_summary, utilization_summary, memory_summary
+                t,
+                cost_summary or {},
+                utilization_summary,
+                memory_summary,
+                memory_effectiveness,
             )
         )
 
