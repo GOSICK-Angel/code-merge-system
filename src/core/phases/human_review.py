@@ -247,6 +247,22 @@ class HumanReviewPhase(Phase):
                 if req.human_decision is None
             ]
             if not pending:
+                # UX: once every conflict decision is in, the phase is about
+                # to spend a long time applying them (chunked semantic merges
+                # on large files can run for minutes). Leaving status at
+                # AWAITING_HUMAN throughout makes the Web UI keep showing the
+                # decision gate — operators think the run is stuck waiting on
+                # them when it is actually busy executing. Flip to AUTO_MERGING
+                # before the loop so the transition observer pushes a fresh
+                # snapshot and the UI moves off the gate to live progress. The
+                # terminal transition (JUDGE_REVIEWING / ANALYZING_CONFLICTS)
+                # below is still valid from AUTO_MERGING.
+                if state.status != SystemStatus.AUTO_MERGING:
+                    ctx.state_machine.transition(
+                        state,
+                        SystemStatus.AUTO_MERGING,
+                        "executing human conflict decisions",
+                    )
                 executor = ctx.agents["executor"]
                 executed = 0
                 for req in state.human_decision_requests.values():
