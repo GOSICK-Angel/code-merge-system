@@ -154,6 +154,15 @@
 
 ### Phase 1 —— 闭合执行接地反馈环（最高 ROI）
 
+> **落地状态（2026-05-31，feat/web）**：A/B/C 全部实装（`b83d142`/`6b4f905`/`6bc77c3`）。
+> A、B 的反馈环按 P2「先度量再激活」默认 **opt-in（False）**——`memory.persist_suppress`、
+> `memory.writeback_signal_sources` 默认 `["judge"]`（=旧行为），需 `merge eval-memory`
+> 多 run 基线证明净收益为正（§3 激活门：`MDL>0` 且 `memory_harmed=0`）方可翻默认。
+> C 为纯加性、执行接地，默认 **True**（`memory.repair_recipe_enabled`）。
+> **B 偏差**：CI/partial_failure 信号有意延后——它在 `report_generation` 产出，晚于
+> judge_review 记忆钩子；完整融合需把写回迁到 report 阶段（未做）。故 B 现仅
+> `judge + compile` 两源。
+
 > 对应研究最强三条证据：选择性 add+**delete** +10%（F2）、执行接地 >> 自反思（范式2）、Experience 抽象（范式5）。拆三个可独立评审的子项。
 
 #### P1-A 把临时软删（O-M6）巩固为持久、可审计的 suppress（原则 P3）
