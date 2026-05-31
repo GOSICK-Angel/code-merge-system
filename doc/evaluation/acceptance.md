@@ -104,6 +104,19 @@
 
 每次发布更新该表，至少记录 `OA / MMR / WMR / cost_p95 / wall_time_p95`。
 
+### 5.1 记忆有效性基线（§3 激活门）
+
+> 由 `merge eval-memory` 对同数据集 memory=on/off 两 run 产出（metrics.md §9）。
+
+| 评估时间 | 数据集 | on/off run_id | `MDL` | `HIR`(on) | 激活判定 |
+|---|---|---|---|---|---|
+| 2026-05-31 | forgejo `test/fork` ← `origin/forgejo`（124 文件，judge 复审 16）| `a0563230` / `81ce3475` | **0.0000** | 0.20 | **不默认开启**（MDL 未 > 0）|
+
+口径与 caveat（务必随基线一并阅读，避免误用）：
+- 模型 `deepseek-v4-pro`（temperature：executor/judge=0.1，余默认）；两臂同一 `ablation_decisions.yaml`（plan_review 15×`take_target` + judge_review `accept`），唯一变量为 `memory.inject_enabled`。
+- off 臂 `memory_influenced_decisions=0`，证实 `inject_enabled=false` 完全抑制注入（开关有效）。on 臂注入影响 15/16 判决，但 `overall_correct_rate` 与 off 持平（均 81.25%，13/16 pass）→ 本 run 记忆对总体正确率净中性。
+- 单 run、单数据集、`judge_verdict=fail`/`partial_failure`（确定性 reverse_impact veto），样本量小（judged=16）；**不足以作收紧/默认开启依据**，仅为首组可搬动基线。需多 run / 多数据集复算（procedure 待补）方能据 §3 翻默认开启。
+
 ---
 
 ## 6. 阈值修改流程
