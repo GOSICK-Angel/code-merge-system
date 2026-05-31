@@ -530,7 +530,7 @@ migration_policy:
 
 **追加日期**：2026-05-07
 **来源会话**：forks-profile-init 设计阶段对「profile 是否应为 planner 产物」的讨论
-**关联文档**：[`doc/forks-profile-init.md`](../forks-profile-init.md) §3 启发式 / §8 不做的事 / §9 已知局限
+**关联文档**：[`doc/forks-profile-init.md`](../modules/forks-profile.md) §3 启发式 / §8 不做的事 / §9 已知局限
 
 #### 9.10.1 动机
 
@@ -620,7 +620,7 @@ forks_profile_suggestions:
 ### 9.11 P3 增强：`forks-profile diff` 半自动 apply 模式（草案）
 
 **追加日期**：2026-05-07
-**关联文档**：[`doc/forks-profile-init.md`](../forks-profile-init.md) §4.2 `diff` 子命令 / §8 「不做的事」第 2 项
+**关联文档**：[`doc/forks-profile-init.md`](../modules/forks-profile.md) §4.2 `diff` 子命令 / §8 「不做的事」第 2 项
 
 #### 9.11.1 动机
 

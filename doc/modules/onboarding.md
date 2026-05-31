@@ -87,9 +87,9 @@ mypy src                        # 应全绿（strict mode）
 | LLM 路由/压缩/缓存 | [`llm.md`](llm.md) |
 | 三层记忆系统 | [`memory.md`](memory.md) |
 | CLI + Web UI | [`cli.md`](cli.md) |
-| 六大丢失模式 + P0/P1/P2 加固项 | [`../multi-agent-optimization-from-merge-experience.md`](../multi-agent-optimization-from-merge-experience.md) |
-| 迁移感知合并 | [`../migration-aware-merge.md`](../migration-aware-merge.md) |
-| 风险等级枚举 | [`../risk-levels.md`](../risk-levels.md) |
+| 六大丢失模式 + P0/P1/P2 加固项 | [`../references/multi-agent-optimization.md`](../references/multi-agent-optimization.md) |
+| 迁移感知合并 | [`migration-aware-merge.md`](migration-aware-merge.md) |
+| 风险等级枚举 | [`risk-levels.md`](risk-levels.md) |
 | 参考开源项目分析 | [`../references/`](../references/) |
 
 ---
@@ -168,5 +168,5 @@ ruff format src/ --check
 ## 10. 遇到问题找谁
 
 - 架构类问题 → 先翻 `CLAUDE.md` 和 `../architecture.md`
-- 设计演进 / 加固项背景 → `../multi-agent-optimization-from-merge-experience.md`
+- 设计演进 / 加固项背景 → `../references/multi-agent-optimization.md`
 - 参考外部项目的思路 → `../references/` 三篇分析文档
