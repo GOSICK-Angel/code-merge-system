@@ -232,6 +232,15 @@
 
 ### Phase 3 —— 离线提示/策略自动优化（opt-in，后期，成本透明）
 
+> **落地状态（2026-05-31，feat/web）**：确定性可测核心已实装（`f540613`）——
+> `src/tools/prompt_optimizer.py` + `merge optimize-prompts` CLI。生成具名候选变体
+> （GEPA 确定性子集=反思指令注入）、按 golden 决策准确率排名、产**人工评审报告**，
+> **永不自动写回 gate_registry**。**有意外移的部分**：① 昂贵的 LLM rollout 抽象为注入的
+> `rollouts` 映射（操作者自担成本产出），harness 保持纯离线可单测；② 仅支持
+> no-arg/`*-SYSTEM` gate（参数化 gate 无静态基线文本）；③ LLM-反思式变体生成（GEPA
+> 完整形态）留待后续，当前为确定性指令注入。这是 opt-in 子命令、默认不跑，符合
+> 「上界增益、不应早于 0–1」定位。
+
 **目标**：用 Phase 0 的评估器当 metric，离线对 gate 提示（`gate_registry` P-*/J-*/CA-*…）做 GEPA/MIPROv2 式进化。
 
 **强约束（来自调研成本警示）**
