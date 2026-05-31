@@ -178,6 +178,13 @@
 - 触发**默认 opt-in**，因 Phase 0 已能度量净收益，可在基线为正后转默认开启。
 
 **防护**：只固化满足 `min_observations` 且 effectiveness≤阈值的条目；豁免 HUMAN/bootstrap（同 OPP-5 现有豁免）；软删可经 CLI 复活。
+
+> **固化判据加固（`918c194`，eval-memory 分析驱动）**：持久软删不可逆、跨 run，
+> 判据须远严于读取期 O-M6 过滤。真实 forgejo 累积 sidecar 上，旧的单臂
+> `harmful_entry_ids(-0.5)` 会误删 8 条薄样本（≤4 fail）——正是 PR-0d 修过的相关性
+> 假阳性。已升级：`suppress_harmful_threshold=-0.8` + `suppress_min_fail_count=5`
+> + 确定性混淆守卫（条目仅关联本 run veto 失败文件且不沾 passed → 跳过）。实证旧
+> 判据选 8 条、新判据选 0 条。
 **验收**：Phase 0 harness 显示 `harmful_influence_rate` 在"tracker 重置"场景下仍不回升（=证明持久化的增量价值），且总决策质量不降。
 
 #### P1-B 激活并加固 OPP-5 写回，融合 compile/CI 信号（原则 P1）
