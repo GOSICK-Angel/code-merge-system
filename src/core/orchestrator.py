@@ -54,6 +54,7 @@ from src.core.phases.base import ActivityEvent, OnActivityCallback
 from src.core.coordinator import Coordinator
 from src.core.state_machine import StateMachine
 from src.memory.bootstrap import _BOOTSTRAP_TAG, bootstrap_from_claude_md
+from src.memory.content_quality import enforce_actionable
 from src.memory.hit_tracker import MemoryHitTracker
 from src.memory.sqlite_store import SQLiteMemoryStore
 from src.memory.store import MemoryStore
@@ -496,7 +497,7 @@ class Orchestrator:
             phase_summary, entries = method(state)
             store = self._memory_store.record_phase_summary(phase_summary)
             for entry in entries:
-                store = store.add_entry(entry)
+                store = store.add_entry(enforce_actionable(entry))
             count_before = store.entry_count
             store = store.remove_superseded(phase)
             removed = count_before - store.entry_count
@@ -517,7 +518,7 @@ class Orchestrator:
                 llm_entries = await self.memory_extractor.extract(phase, state)  # type: ignore[attr-defined]
                 store = self._memory_store
                 for entry in llm_entries:
-                    store = store.add_entry(entry)
+                    store = store.add_entry(enforce_actionable(entry))
                 self._memory_store = store
                 self._phases_since_last_extract = 0
             except Exception as exc:
