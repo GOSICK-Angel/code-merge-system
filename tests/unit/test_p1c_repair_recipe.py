@@ -44,6 +44,7 @@ class _State:
         self.applied_repairs = applied_repairs
         self.judge_verdicts_log = []
         self.judge_repair_rounds = 0
+        self.file_decision_records = {}
 
 
 # --- executor recording -----------------------------------------------------

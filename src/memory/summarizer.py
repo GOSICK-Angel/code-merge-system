@@ -11,7 +11,7 @@ from src.memory.models import (
     MemoryEntryType,
     PhaseSummary,
 )
-from src.models.decision import FileDecisionRecord
+from src.models.decision import DecisionSource, FileDecisionRecord
 from src.models.state import MergeState
 
 logger = logging.getLogger(__name__)
@@ -335,6 +335,14 @@ class PhaseSummarizer:
         # future runs see which files needed repair and why.
         if state.judge_verdict is not None:
             ref_tag = f"upstream_ref:{self._upstream_ref}" if self._upstream_ref else ""
+            # P2-B: pin human-decided files so consolidation cannot drift the
+            # record of an explicit operator decision (F1).
+            human_files = {
+                fp
+                for fp, rec in state.file_decision_records.items()
+                if rec.decision_source
+                in (DecisionSource.HUMAN, DecisionSource.BATCH_HUMAN)
+            }
             issues_by_file: dict[str, list[str]] = {}
             for issue in state.judge_verdict.issues:
                 issues_by_file.setdefault(issue.file_path, []).append(issue.issue_type)
@@ -355,6 +363,7 @@ class PhaseSummarizer:
                         tags=tags,
                         confidence=0.85,
                         confidence_level=ConfidenceLevel.EXTRACTED,
+                        pinned=fp in human_files,
                     )
                 )
 
@@ -416,6 +425,7 @@ class PhaseSummarizer:
                     tags=tags,
                     confidence=0.9,
                     confidence_level=ConfidenceLevel.EXTRACTED,
+                    pinned=True,
                 )
             )
             if len(recipes) >= _MAX_REPAIR_RECIPES:

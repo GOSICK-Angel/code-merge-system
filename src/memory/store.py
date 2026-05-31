@@ -354,7 +354,9 @@ def _consolidate_entries(entries: list[MemoryEntry]) -> list[MemoryEntry]:
         # P1-A: suppressed entries pass through untouched — they must not be
         # merged into a live blob (that would resurrect harmful content) nor
         # silently dropped (audit trail must survive consolidation).
-        if entry.suppressed:
+        # P2-B: pinned entries (verified REPAIR_RECIPE / human decisions) also
+        # pass through verbatim so consolidation cannot drift their content (F1).
+        if entry.suppressed or entry.pinned:
             ungroupable.append(entry)
             continue
         primary_tag = entry.tags[0] if entry.tags else ""

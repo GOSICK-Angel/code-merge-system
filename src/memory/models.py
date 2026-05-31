@@ -37,6 +37,7 @@ class MemoryEntry(BaseModel, frozen=True):
     created_at: datetime = Field(default_factory=datetime.now)
     suppressed: bool = Field(default=False)
     suppressed_reason: str | None = Field(default=None)
+    pinned: bool = Field(default=False)
 
     def model_post_init(self, __context: Any) -> None:
         if not self.content_hash:

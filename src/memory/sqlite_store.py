@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS memory_entries (
     content_hash      TEXT NOT NULL,
     created_at        TEXT NOT NULL,
     suppressed        INTEGER NOT NULL DEFAULT 0,
-    suppressed_reason TEXT
+    suppressed_reason TEXT,
+    pinned            INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_content_hash
     ON memory_entries (content_hash);
@@ -55,8 +56,8 @@ _INSERT_ENTRY = """
 INSERT OR IGNORE INTO memory_entries
     (entry_id, entry_type, phase, content, file_paths, tags,
      confidence, confidence_level, content_hash, created_at,
-     suppressed, suppressed_reason)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     suppressed, suppressed_reason, pinned)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 # P1-A: columns added after the original schema shipped; older memory.db files
@@ -70,6 +71,10 @@ _MIGRATIONS = (
     (
         "suppressed_reason",
         "ALTER TABLE memory_entries ADD COLUMN suppressed_reason TEXT",
+    ),
+    (
+        "pinned",
+        "ALTER TABLE memory_entries ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
     ),
 )
 
@@ -95,6 +100,7 @@ def _entry_to_row(entry: MemoryEntry) -> tuple[str | int | None, ...]:
         entry.created_at.isoformat(),
         1 if entry.suppressed else 0,
         entry.suppressed_reason,
+        1 if entry.pinned else 0,
     )
 
 
@@ -115,6 +121,7 @@ def _row_to_entry(row: sqlite3.Row) -> MemoryEntry:
         suppressed_reason=(
             row["suppressed_reason"] if "suppressed_reason" in keys else None
         ),
+        pinned=bool(row["pinned"]) if "pinned" in keys else False,
     )
 
 
