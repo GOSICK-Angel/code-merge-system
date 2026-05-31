@@ -211,6 +211,13 @@
 
 ### Phase 2 —— 记忆质量加固（中等 ROI，便宜）
 
+> **落地状态（2026-05-31，feat/web）**：A/B 全部实装（`4525008`/`2af4890`）。
+> A（`content_quality.is_actionable_content`/`enforce_actionable`）保守降级而非删，
+> 默认随入库即生效；B（`MemoryEntry.pinned`）锚定 REPAIR_RECIPE + 人工决策条目，
+> consolidation 对其 passthrough。**B 偏差**：security-sensitive 锚定延后——
+> summarizer 无 config 的 `security_sensitive.patterns`；`pinned` 字段已就位，
+> 需后续在有 config 的入库点补标。
+
 **P2-A 高信息条目强制**（范式2，GPT-4 0.79→0.93 的直接杠杆）
 - 扩展 `_is_epistemically_empty` 的对偶：`_has_actionable_content()`——DECISION/REPAIR_RECIPE 类条目若缺"具体动作/修复"则降级或拒写。
 - 接入 `summarizer.py` 各 `summarize_*` 与 `memory_extractor` 出口。
