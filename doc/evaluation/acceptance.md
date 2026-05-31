@@ -42,7 +42,33 @@
 
 ---
 
-## 3. 报告必备元数据
+## 3. 自学习反馈环激活门（Phase 1 前置）
+
+> 这组门**不**判定一次合并 run 的好坏，而是决定自学习方案
+> （`doc/plan/self-learning-system.md`）的反馈环——OPP-5 写回（P1-B）、持久化
+> suppress（P1-A）——能否从 opt-in 翻为**默认开启**。设计原则 P2「先度量再激活」：
+> 任一反馈环默认开启前，必须先用 `merge eval-memory` 在固定数据集上跑出消融基线
+> 证明净收益为正。指标定义见 metrics.md §9。
+
+| 门 | 阈值 | 数据源 | 作用 |
+|---|---|---|---|
+| `MDL` 记忆决策增益 | **> 0** | `merge eval-memory`（on/off 消融）| 任一反馈环默认开启的**硬前置**；≤ 0 则保持 opt-in |
+| `HIR` 有害影响率 | **不高于同数据集 off 基线** | `memory_effectiveness.json` | 上升即说明记忆在污染决策，禁止默认开启 |
+| `CRI` 影响后正确率 | **≥ off 基线 overall_correct_rate** | `memory_effectiveness.json` | 被记忆改变的决策不得比无记忆更差 |
+| `MCPD` 单决策记忆成本 | **≤ off 基线 × 1.15** | `CostTracker` | 防止记忆注入让 prompt 成本悄悄回退 |
+
+**判定流程**：
+1. 同数据集跑 `memory=on`（默认）与 `memory=off`（config `memory.inject_enabled: false`）两 run；
+2. `merge eval-memory --on <on_run> --off <off_run>` 产出 `MemoryAblationComparison`；
+3. `MDL > 0` 且 `HIR` 不升 → 允许把对应反馈环 default 翻为 `True`，并在本文件 §5 历史区记录基线数；
+4. 任一门未过 → 反馈环维持 opt-in，记录原因。
+
+> 这是"默认开启"的闸口，不是合并质量的一票否决；故归为独立章节，与 §1/§2 的合并
+> 质量门互不替代。
+
+---
+
+## 4. 报告必备元数据
 
 `eval_acceptance_<version>.json` 必须含：
 
@@ -70,7 +96,7 @@
 
 ---
 
-## 4. 版本基线历史
+## 5. 版本基线历史
 
 | 版本 | 评估时间 | 数据集 lock | 主要结果 | 备注 |
 |---|---|---|---|---|
@@ -80,7 +106,7 @@
 
 ---
 
-## 5. 阈值修改流程
+## 6. 阈值修改流程
 
 修改任何阈值必须：
 
@@ -91,7 +117,7 @@
 
 ---
 
-## 6. 用户对外承诺模板
+## 7. 用户对外承诺模板
 
 通过 acceptance gate 后，可向用户输出如下承诺（示例）：
 

@@ -320,3 +320,86 @@ BCP = | 配置了 build_check 且退出码 0 的 run | / | 配置了 build_check
 数据源：judge 阶段 `_run_build_check`（command 由 setup 自动探测填充，方案1）。非零退出
 把 Judge PASS 降级 FAIL+veto。Acceptance（Soft）: **BCP = 100%**（仅统计已配置 command 的
 run；未探测到工具链的目标不计入分母）。
+
+---
+
+## 9. 记忆有效性指标（自学习度量，P0 底座）
+
+这一组指标量化"注入的跨 run 记忆是否真的让合并决策更好"——自学习方案
+（`doc/plan/self-learning-system.md`）的开放问题 1。全部**只读、执行接地**：正确/有害
+信号取自 Judge 终判的 `passed_files` / `failed_files`（与 `record_outcome` 同源），不取
+LLM 自报。
+
+> 信号通路：`MemoryHitTracker` 记录本 run 每个文件的记忆注入 → report 阶段
+> `compute_memory_effectiveness`（`src/tools/memory_eval.py`）与 Judge verdict 求交集 →
+> 持久化 `runs/<id>/memory_effectiveness.json`。两次 run（`memory=on` vs
+> `memory=off`，由 `memory.inject_enabled` 切换）的报告经 `merge eval-memory`
+> （`src/tools/memory_replay.py`）对比产出 §9.1。
+>
+> **影响决策口径**：`influenced = injected_files ∩ (passed_files ∪ failed_files)`。
+> 注入图为 run-local（不持久化），故 §9.2–§9.4 是单 run 量；§9.5 的 per-entry 功过
+> 经 tracker sidecar 跨 run 累计。
+
+### 9.1 记忆决策增益（Memory Decision Lift, MDL）
+
+> 消融口径：同一数据集、同配置跑两遍，仅 `memory.inject_enabled` 不同。
+
+```
+MDL = overall_correct_rate(memory=on) − overall_correct_rate(memory=off)
+overall_correct_rate = |passed_files| / (|passed_files| + |failed_files|)
+```
+
+数据源：`MemoryAblationComparison.memory_decision_lift`。**MDL > 0 是"学到了"的
+最小证据**，也是 Phase 1 任一反馈环默认开启的硬前置（见 acceptance.md §3）。
+
+### 9.2 有害影响率（Harmful Influence Rate, HIR）
+
+> 被记忆注入"影响"且最终 fail 的决策占比——F2（检索污染/有害记忆）的直接度量。
+
+```
+HIR = |injected ∩ failed_files| / |influenced|        （influenced=0 时记 0）
+```
+
+数据源：`MemoryEffectivenessReport.harmful_influence_rate`。P1-A（持久化 suppress）的
+优化目标是在"tracker 重置"场景下 HIR 不回升。
+
+### 9.3 影响后正确率（Correct Rate After Influence, CRI）
+
+```
+CRI = |injected ∩ passed_files| / |influenced|        （influenced=0 时记 0）
+```
+
+数据源：`MemoryEffectivenessReport.correct_rate_after_influence`。P1-B（激活并加固
+OPP-5 写回）的优化目标是 CRI 上升、per-entry 分布右移。
+
+### 9.4 影响决策数（Memory Influenced Decisions, MID）
+
+```
+MID = |injected_files ∩ (passed_files ∪ failed_files)|
+```
+
+数据源：`MemoryEffectivenessReport.memory_influenced_decisions`。MID 是 §9.2/§9.3 的
+分母——MID 过小（如 < 5）时，HIR/CRI 抽样不足，MDL 才是更稳的总体判据。
+
+### 9.5 单条目有效性（Per-Entry Effectiveness, PEE）
+
+```
+PEE[e] = (pass[e] − fail[e]) / (pass[e] + fail[e])   ∈ [−1, +1]
+```
+
+数据源：`MemoryHitTracker.outcome_scores()` / `summary()['outcomes']` 的 top_helpful /
+top_harmful 榜（跨 run 累计）。`PEE ≤ −0.5 且 min_observations 满足` 即 `harmful_entry_ids`
+判据——O-M6 注入期过滤的依据，也是 P1-A 固化 suppress 的输入。
+
+### 9.6 单决策记忆成本（Memory Cost Per Decision, MCPD）
+
+```
+MCPD = cost_usd_per_run / F_eval
+```
+
+数据源：`CostTracker` + `F_eval`。记忆注入增大 prompt，开启反馈环不得让 MCPD 显著上升
+（acceptance.md §3）。
+
+> **后续指标（Phase 1-C / 2-B 落地后补充）**：`repeat_error_repair_rounds`（同
+> error_signature 平均修复轮数，需 P1-C 的 `summarize_judge_repair_rounds` 按签名聚合）、
+> `memory_drift_loss`（consolidation 前后 pinned 条目内容差异，P2-B，期望 = 0）。
