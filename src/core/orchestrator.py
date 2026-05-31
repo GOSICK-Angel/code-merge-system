@@ -522,6 +522,10 @@ class Orchestrator:
 
         if phase == "judge_review":
             try:
+                self._record_memory_outcomes(state)
+            except Exception as exc:
+                logger.warning("Memory outcome recording failed: %s", exc)
+            try:
                 self._apply_outcome_confidence_writeback(state)
             except Exception as exc:
                 logger.warning("Outcome confidence write-back failed: %s", exc)
@@ -529,6 +533,35 @@ class Orchestrator:
                 self._apply_suppress_harmful_entries(state)
             except Exception as exc:
                 logger.warning("Harmful-entry suppression failed: %s", exc)
+
+    def _record_memory_outcomes(self, state: MergeState) -> None:
+        """P1-B: fuse deterministic signals into the per-file memory outcome
+        that feeds OPP-5 write-back and P1-A suppression, then credit/blame the
+        entries injected for each file.
+
+        Runs once after judge_review — the verdict already reflects the
+        post-judge build check. With the default ``["judge"]`` this reproduces
+        the prior passed/failed split byte-for-byte. Adding ``"compile"`` demotes
+        a judge-passed compiled-language file to a failure when the build check
+        failed this run, so memory that produced an uncompilable merge earns no
+        credit. Deterministic only — no LLM self-report."""
+        verdict = state.judge_verdict
+        if verdict is None:
+            return
+        cfg = getattr(self.config, "memory", None)
+        sources = list(getattr(cfg, "writeback_signal_sources", None) or ["judge"])
+        tracker = self._memory_hit_tracker
+        demoted: frozenset[str] = frozenset()
+        if "compile" in sources and any(
+            issue.issue_type == "build_check_failed" for issue in verdict.issues
+        ):
+            from src.tools.compile_gate import compiled_language_paths
+
+            demoted = frozenset(compiled_language_paths(verdict.passed_files))
+        for fp in verdict.passed_files:
+            tracker.record_outcome(fp, success=fp not in demoted)
+        for fp in verdict.failed_files:
+            tracker.record_outcome(fp, success=False)
 
     def _apply_outcome_confidence_writeback(self, state: MergeState) -> None:
         """OPP-5: nudge persisted memory confidence toward judge outcomes.

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -960,6 +960,19 @@ class MemoryExtractionConfig(BaseModel):
         ge=1,
         description="OPP-5: minimum pass+fail observations before an entry's "
         "confidence is nudged, so a single run cannot move it.",
+    )
+    writeback_signal_sources: list[Literal["judge", "compile"]] = Field(
+        default_factory=lambda: cast(list[Literal["judge", "compile"]], ["judge"]),
+        description="P1-B: deterministic signals fused into the per-file memory "
+        "outcome that drives OPP-5 write-back and P1-A suppression. 'judge' = "
+        "the Judge verdict's passed/failed split (default — byte-identical to "
+        "prior behaviour). Adding 'compile' demotes a judge-passed "
+        "compiled-language file to a failure when the post-judge build check "
+        "failed this run, so memory that produced an uncompilable merge is not "
+        "credited. All sources are deterministic — no LLM self-report. "
+        "CI/partial_failure fusion is deferred: the post-merge deterministic "
+        "findings land in report_generation, after this hook (see "
+        "doc/plan/self-learning-system.md P1-B).",
     )
     inject_enabled: bool = Field(
         default=True,

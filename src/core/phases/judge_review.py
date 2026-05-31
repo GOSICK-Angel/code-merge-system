@@ -217,14 +217,12 @@ class JudgeReviewPhase(Phase):
         )
         state.phase_results[MergePhase.JUDGE_REVIEW.value] = phase_result
 
-        # O-M4: credit/blame memory entries based on the final verdict's
-        # passed/failed file lists. Outcomes accumulate across runs via the
-        # tracker's sidecar JSON; future runs use them to bias confidence.
-        if state.judge_verdict is not None and ctx.memory_hit_tracker is not None:
-            for fp in state.judge_verdict.passed_files:
-                ctx.memory_hit_tracker.record_outcome(fp, success=True)
-            for fp in state.judge_verdict.failed_files:
-                ctx.memory_hit_tracker.record_outcome(fp, success=False)
+        # O-M4 / P1-B: credit/blame memory entries by the final verdict's
+        # passed/failed files. Recording is centralised in the orchestrator's
+        # post-judge_review memory hook (``_record_memory_outcomes``) so it sees
+        # the verdict AFTER the post-judge build check ran and can fuse the
+        # compile signal — recording here would run before build_check and
+        # credit a judge-passed but uncompilable file.
 
         gate_ok = await run_gates(state, ctx, "judge_review")
         if not gate_ok:
