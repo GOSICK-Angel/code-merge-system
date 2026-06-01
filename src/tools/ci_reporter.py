@@ -112,6 +112,7 @@ def build_ci_summary(state: MergeState) -> dict[str, Any]:
         "human_decided": human_decided,
         "failed_count": failed,
         "judge_verdict": judge_verdict,
+        "build_check_passed": state.build_check_passed,
         "errors": [err.get("message", "") for err in state.errors[-5:]],
         "by_category": _escalation_by_category(state),
     }

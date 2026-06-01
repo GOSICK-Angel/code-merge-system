@@ -174,6 +174,16 @@ class MergeState(BaseModel):
     )
 
     judge_verdict: JudgeVerdict | None = None
+    build_check_passed: bool | None = Field(
+        default=None,
+        description=(
+            "Tri-state outcome of the Phase 5.5 build_check gate (BCP metric, "
+            "metrics.md §8.5): None when build_check did not run (disabled, no "
+            "command, or the run escalated before judge), True when it ran and "
+            "exited 0, False when it ran and failed. None is excluded from the "
+            "BCP denominator."
+        ),
+    )
     judge_repair_rounds: int = 0
     judge_verdicts_log: list[dict[str, Any]] = Field(default_factory=list)
     applied_repairs: list[dict[str, str]] = Field(

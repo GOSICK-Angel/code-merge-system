@@ -46,6 +46,7 @@ def _minimal_context(**overrides: Any) -> dict[str, Any]:
             "JA": "N/A",
             "DET": "N/A",
             "CPC": "N/A",
+            "BCP": "N/A",
             "cost_usd_per_run_p95": "0.0",
             "wall_time_seconds_p95": "0.0",
             "plan_revision_rounds_p95": "N/A",

@@ -608,3 +608,71 @@ class TestSkipPaths:
         )
         assert cost["pass"] is None
         assert "not numeric" in cost["skipped_reason"]
+
+
+# ---------------------------------------------------------------------------
+# BCP (build-check pass rate, metrics.md §8.5) — enforced soft gate
+# ---------------------------------------------------------------------------
+
+
+def _bcp_thresholds() -> dict[str, Any]:
+    payload = _full_pass_thresholds()
+    payload["soft_gates"].append(
+        {
+            "id": "BCP",
+            "kind": "absolute",
+            "threshold": 1.0,
+            "operator": "==",
+            "source": "configured build_check runs",
+        }
+    )
+    return payload
+
+
+class TestBCP:
+    def test_bcp_pass_at_one(self, workspace: tuple[Path, Path, Path]) -> None:
+        report, yml, out = workspace
+        metrics = _full_pass_report()
+        metrics["BCP"] = 1.0
+        report.write_text(_build_report(metrics), encoding="utf-8")
+        _write_yaml(yml, _bcp_thresholds())
+        rc = _run_gate(
+            "--report", str(report), "--acceptance", str(yml), "--output", str(out)
+        )
+        assert rc == 0
+        bcp = next(
+            g for g in json.loads(out.read_text())["soft_gates"] if g["id"] == "BCP"
+        )
+        assert bcp["pass"] is True
+
+    def test_bcp_soft_fail_below_one(self, workspace: tuple[Path, Path, Path]) -> None:
+        report, yml, out = workspace
+        metrics = _full_pass_report()
+        metrics["BCP"] = 0.5  # one configured run failed to build
+        report.write_text(_build_report(metrics), encoding="utf-8")
+        _write_yaml(yml, _bcp_thresholds())
+        rc = _run_gate(
+            "--report", str(report), "--acceptance", str(yml), "--output", str(out)
+        )
+        # Soft breach → NEEDS_REVIEW / exit 2, not a hard fail.
+        assert rc == 2
+        bcp = next(
+            g for g in json.loads(out.read_text())["soft_gates"] if g["id"] == "BCP"
+        )
+        assert bcp["pass"] is False
+
+    def test_bcp_skips_when_na(self, workspace: tuple[Path, Path, Path]) -> None:
+        report, yml, out = workspace
+        metrics = _full_pass_report()
+        metrics["BCP"] = "N/A (no run executed build_check)"
+        report.write_text(_build_report(metrics), encoding="utf-8")
+        _write_yaml(yml, _bcp_thresholds())
+        rc = _run_gate(
+            "--report", str(report), "--acceptance", str(yml), "--output", str(out)
+        )
+        assert rc == 0  # SKIP never fails the verdict
+        bcp = next(
+            g for g in json.loads(out.read_text())["soft_gates"] if g["id"] == "BCP"
+        )
+        assert bcp["pass"] is None
+        assert "not numeric" in bcp["skipped_reason"]

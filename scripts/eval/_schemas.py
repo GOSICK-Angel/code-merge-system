@@ -263,6 +263,10 @@ class RunMeta(BaseModel):
     status: Literal["success", "failed"] = "success"
     memory_clean_check: Literal["passed", "skipped"] = "passed"
     exit_code: int = 0
+    # Tri-state build_check (BCP, metrics.md §8.5): None = build_check did not
+    # run (not configured, or escalated before judge) → excluded from the BCP
+    # denominator; True = ran and passed; False = ran and failed.
+    build_check_passed: bool | None = None
 
 
 # ---------------------------------------------------------------------------

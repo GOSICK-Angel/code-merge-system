@@ -439,8 +439,10 @@ class JudgeReviewPhase(Phase):
             output = f"build check failed to launch: {exc!r}"
 
         if returncode == 0:
+            state.build_check_passed = True
             return
 
+        state.build_check_passed = False
         tail = "\n".join(output.strip().splitlines()[-20:])
         new_issue = JudgeIssue(
             file_path="(build)",
