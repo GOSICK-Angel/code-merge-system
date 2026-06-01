@@ -380,12 +380,34 @@ class AcceptanceThresholds(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class GoldenDecision(BaseModel):
+    """One ``(gate, expected_decision)`` pair declared by a sample.
+
+    Lets a single judgment-intensive sample contribute a golden case to
+    several ``*-SYSTEM`` gates at once (e.g. the same C-class conflict is a
+    ``human_required`` risk case and an ``escalate_human`` conflict-analyst
+    case). ``expected_decision`` is validated against the gate's real
+    decision vocabulary in ``_golden.py`` — never here, so this schema stays
+    free of a src import.
+    """
+
+    model_config = _FROZEN
+
+    gate_id: str
+    expected_decision: str
+
+
 class SampleMeta(BaseModel):
     """Parsed contents of one sample's ``meta.yaml``.
 
     Mirrors the keys produced by the Phase 1 reference samples
     (``tests/eval/datasets/.../meta.yaml``). Tier-3 entries additionally
     set ``loss_class`` to one of M1..M6; Tier-1/2 leave it ``None``.
+
+    ``judgment_intensive`` + ``golden_decisions`` opt a sample into the
+    LLM-judgment golden set consumed by ``merge optimize-prompts --golden``
+    (see ``doc/evaluation/golden.md``). They are absent on most samples and
+    default to "not a golden case".
     """
 
     model_config = _FROZEN
@@ -396,6 +418,8 @@ class SampleMeta(BaseModel):
     loss_class: str | None = None
     expected_human: bool = False
     description: str | None = None
+    judgment_intensive: bool = False
+    golden_decisions: tuple[GoldenDecision, ...] = ()
 
 
 class GoldenFileEntry(BaseModel):
@@ -431,6 +455,7 @@ __all__ = [
     "GateOperator",
     "GateResult",
     "GateVerdict",
+    "GoldenDecision",
     "GoldenFileEntry",
     "GroundTruthBundle",
     "ManifestEntry",

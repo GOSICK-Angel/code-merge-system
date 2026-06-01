@@ -16,3 +16,10 @@ description: |
   additions are load-bearing; a directional take_current/take_target would
   silently drop one feature. Under single-shot Tier-1 eval the expected
   outcome is escalation (no human present).
+judgment_intensive: true     # auth/** only hits the weak risk-hint nudge, not the
+                             # strict security_sensitive floor — decision stays LLM-driven
+golden_decisions:
+  - gate_id: P-RISK-SCORE-SYSTEM
+    expected_decision: human_required
+  - gate_id: CA-SYSTEM
+    expected_decision: escalate_human

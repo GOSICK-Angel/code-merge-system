@@ -1,0 +1,13 @@
+diff --git a/models/auth/auth_token.go b/models/auth/auth_token.go
+index d01ddbca1e..e9a461ee66 100644
+--- a/models/auth/auth_token.go
++++ b/models/auth/auth_token.go
+@@ -111,3 +111,8 @@ func HashValidator(validator []byte) string {
+ 	h.Write(validator)
+ 	return hex.EncodeToString(h.Sum(nil))
+ }
++
++// PurposeIsLongTerm reports whether the purpose is the long-term variant.
++func PurposeIsLongTerm(p AuthorizationPurpose) bool {
++	return p == LongTermAuthorization
++}

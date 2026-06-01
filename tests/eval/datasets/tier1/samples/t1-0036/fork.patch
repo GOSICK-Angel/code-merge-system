@@ -1,0 +1,14 @@
+diff --git a/models/auth/auth_token.go b/models/auth/auth_token.go
+index d01ddbca1e..bd3dd47a89 100644
+--- a/models/auth/auth_token.go
++++ b/models/auth/auth_token.go
+@@ -26,6 +26,9 @@ var (
+ 
+ 	// Used to reset the password.
+ 	PasswordReset AuthorizationPurpose = "password_reset"
++
++	// Used to store API-only long term tokens.
++	APIAuthorization AuthorizationPurpose = "api_authorization"
+ )
+ 
+ // Used to activate the specified email address for a user.

@@ -2,6 +2,11 @@
 
 > 评估集**质量决定结论可信度**。本章定义三层数据集的构造原则、维护机制、防过拟合规则。
 > 数据集所在路径：`tests/eval/datasets/`（待建）。
+>
+> 逐 gate 的**决策 oracle**（`merge optimize-prompts --golden` 用的
+> LLM-判断密集 golden 集，与下文的 `golden.tar` 黄金树不是一回事）见
+> [golden.md](golden.md)：它从样本 `meta.yaml` 的 `judgment_intensive` /
+> `golden_decisions` 字段派生，单一真相源。
 
 ---
 

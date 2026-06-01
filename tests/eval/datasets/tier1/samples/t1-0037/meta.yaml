@@ -1,0 +1,31 @@
+sample_id: t1-0037
+tier: 1
+category: B
+loss_class: null         # organic clean-merge sample; the loss lives in the rollout
+                         # fixture tree (§5), NOT in the sample artifacts
+expected_human: false    # the correct merge (golden.tar) auto-merges cleanly
+description: |
+  J-SYSTEM=fail fixture: models/auth/auth_token.go — fork and upstream make
+  INDEPENDENT, NON-overlapping additions that git 3-way merges cleanly:
+    * fork adds `const DefaultTokenTTLHours` below the AuthorizationPurpose
+      type declaration.
+    * upstream appends a SECURITY-relevant `BelongsTo(userID)` ownership
+      check ("Callers MUST gate token operations on this to prevent
+      cross-user use").
+  golden.tar keeps BOTH (deterministic `git merge`, `go build ./models/auth/`
+  verified) — it is the CORRECT merge, like t1-0034..0036.
+
+  Unlike the pass anchors, this sample seeds the judge-FAIL face. Per the §5
+  rollout contract, the J-SYSTEM rollout feeds judge the *broken* tree, which
+  for this sample is `prepare`'s `working_tree` (= base + fork.patch): a
+  directional take_current merge that DROPS upstream's `BelongsTo` ownership
+  check entirely. With upstream.patch in context (showing the addition), a
+  calibrated judge must flag the missing security check as semantic loss and
+  return `fail`. A prompt that rubber-stamps the fork-only tree is exactly
+  what this negative penalises.
+judgment_intensive: true     # judge verdict is LLM-driven: detecting that the merged
+                             # tree silently dropped upstream's addition is the
+                             # discrimination signal (a weak prompt passes it)
+golden_decisions:
+  - gate_id: J-SYSTEM
+    expected_decision: fail      # fed the fork-only working_tree (upstream dropped) → fail (golden.md §5)

@@ -8,3 +8,9 @@ description: |
   requirements.txt (overlapping hunk). `git merge` conflicts on that
   file, so the system is correct to escalate (expected_human=true).
   Backfilled 2026-05-16 from real 3-way merge dry-run.
+judgment_intensive: true     # LLM-driven: no security_sensitive force / deterministic veto
+golden_decisions:
+  - gate_id: P-RISK-SCORE-SYSTEM
+    expected_decision: human_required
+  - gate_id: CA-SYSTEM
+    expected_decision: escalate_human

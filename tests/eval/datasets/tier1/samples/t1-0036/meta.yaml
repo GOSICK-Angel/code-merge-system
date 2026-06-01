@@ -1,0 +1,30 @@
+sample_id: t1-0036
+tier: 1
+category: B
+loss_class: null         # organic clean-merge sample (not M-injected)
+expected_human: false    # disjoint additive changes 3-way merge cleanly → auto-merge, no escalation
+description: |
+  B-class clean auto-merge: models/auth/auth_token.go — fork and upstream
+  make INDEPENDENT, NON-overlapping additions that git 3-way merges with no
+  conflict:
+    * fork adds an `APIAuthorization` value to the AuthorizationPurpose enum
+      block (mid-file `var (...)`).
+    * upstream appends a package-level `PurposeIsLongTerm()` helper at the
+      end of the file.
+  Golden keeps BOTH (deterministic `git merge`, `go build ./models/auth/`
+  verified); the obvious correct clean merge, NOT the merge system's own
+  output (dataset.md §1.4). Additive enum + helper, no signature or behavior
+  change → low risk. A second auto_safe / semantic_merge / judge-pass anchor
+  (alongside t1-0034) so the optimizer can reward "dares to auto-merge"
+  prompts rather than only penalising over-merge.
+judgment_intensive: true     # risk is the LLM hybrid score (no deterministic short-
+                             # circuit: additive, not security_sensitive); a weaker
+                             # prompt could over-escalate this clean merge or drop one
+                             # side (cf. t1-0003 executor take_target, IMPL_REPORT)
+golden_decisions:
+  - gate_id: P-RISK-SCORE-SYSTEM
+    expected_decision: auto_safe
+  - gate_id: CA-SYSTEM
+    expected_decision: semantic_merge   # keep both disjoint additions, don't take one side
+  - gate_id: J-SYSTEM
+    expected_decision: pass             # judge fed the golden (both-sides) tree → pass (golden.md §5)

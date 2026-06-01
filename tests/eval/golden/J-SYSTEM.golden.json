@@ -1,0 +1,18 @@
+[
+  {
+    "case_id": "t1-0034",
+    "expected_decision": "pass"
+  },
+  {
+    "case_id": "t1-0035",
+    "expected_decision": "pass"
+  },
+  {
+    "case_id": "t1-0036",
+    "expected_decision": "pass"
+  },
+  {
+    "case_id": "t1-0037",
+    "expected_decision": "fail"
+  }
+]
