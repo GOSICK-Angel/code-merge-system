@@ -37,9 +37,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/angel/code-merge-system"
-Repository = "https://github.com/angel/code-merge-system"
-Issues = "https://github.com/angel/code-merge-system/issues"
+Homepage = "https://github.com/GOSICK-Angel/code-merge-system"
+Repository = "https://github.com/GOSICK-Angel/code-merge-system"
+Issues = "https://github.com/GOSICK-Angel/code-merge-system/issues"
 
 [project.scripts]
 merge = "src.cli.main:cli"
