@@ -96,6 +96,13 @@ packages = ["src"]
 [tool.hatch.build.targets.wheel.force-include]
 "web/dist" = "src/web/dist"
 
+# The sdist is gitignore-driven and would otherwise drop the built Web UI
+# (web/dist is gitignored). Force-include it so the source distribution is
+# self-contained and `pip install` from sdist (or --no-binary) still ships
+# the UI assets without requiring a Node toolchain at install time.
+[tool.hatch.build.targets.sdist.force-include]
+"web/dist" = "web/dist"
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
