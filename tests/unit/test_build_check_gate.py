@@ -64,6 +64,8 @@ async def test_build_failure_vetoes_pass(tmp_path) -> None:
     assert state.judge_verdict.critical_issues_count == 1
     issue_types = {i.issue_type for i in state.judge_verdict.issues}
     assert "build_check_failed" in issue_types
+    # BCP source: a build that ran and failed records False (counted, fails BCP).
+    assert state.build_check_passed is False
 
 
 @pytest.mark.asyncio
@@ -73,6 +75,8 @@ async def test_build_success_keeps_pass(tmp_path) -> None:
     assert state.judge_verdict is not None
     assert state.judge_verdict.verdict == VerdictType.PASS
     assert not state.judge_verdict.veto_triggered
+    # BCP source: a build that ran and passed records True.
+    assert state.build_check_passed is True
 
 
 @pytest.mark.asyncio
@@ -81,6 +85,8 @@ async def test_build_check_disabled_noop(tmp_path) -> None:
     await JudgeReviewPhase()._run_build_check(state, MagicMock())
     assert state.judge_verdict is not None
     assert state.judge_verdict.verdict == VerdictType.PASS
+    # Did not run → None → excluded from the BCP denominator.
+    assert state.build_check_passed is None
 
 
 @pytest.mark.asyncio
@@ -89,6 +95,7 @@ async def test_empty_command_noop(tmp_path) -> None:
     await JudgeReviewPhase()._run_build_check(state, MagicMock())
     assert state.judge_verdict is not None
     assert state.judge_verdict.verdict == VerdictType.PASS
+    assert state.build_check_passed is None
 
 
 @pytest.mark.asyncio
@@ -98,6 +105,8 @@ async def test_build_timeout_vetoes_pass(tmp_path) -> None:
     assert state.judge_verdict is not None
     assert state.judge_verdict.verdict == VerdictType.FAIL
     assert state.judge_verdict.veto_triggered
+    # Timeout is a build failure → False (counted, fails BCP).
+    assert state.build_check_passed is False
 
 
 def test_build_check_config_defaults() -> None:

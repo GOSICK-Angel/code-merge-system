@@ -156,6 +156,16 @@ async def test_human_override_executes_over_stale_auto_record() -> None:
     assert state.file_decision_records["auto.go"].decision == MergeDecision.TAKE_TARGET
     assert outcome.target_status == SystemStatus.JUDGE_REVIEWING
 
+    # UX: executing the decisions must first flip status off the AWAITING_HUMAN
+    # gate to AUTO_MERGING so the Web UI stops showing the decision form while
+    # the (potentially minutes-long) merges run. The AUTO_MERGING transition
+    # must precede the terminal JUDGE_REVIEWING transition.
+    transitioned = [c.args[1] for c in ctx.state_machine.transition.call_args_list]
+    assert SystemStatus.AUTO_MERGING in transitioned
+    assert transitioned.index(SystemStatus.AUTO_MERGING) < transitioned.index(
+        SystemStatus.JUDGE_REVIEWING
+    )
+
 
 # --------------------------------------------------------------------------- #
 # Bug B sibling — judge dispute-round repair must not overwrite a human record

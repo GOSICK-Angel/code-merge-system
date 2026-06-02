@@ -1,0 +1,14 @@
+diff --git a/models/auth/auth_token.go b/models/auth/auth_token.go
+index d01ddbca1e..0f7a3d07aa 100644
+--- a/models/auth/auth_token.go
++++ b/models/auth/auth_token.go
+@@ -111,3 +111,9 @@ func HashValidator(validator []byte) string {
+ 	h.Write(validator)
+ 	return hex.EncodeToString(h.Sum(nil))
+ }
++
++// BelongsTo reports whether the token is owned by the given user.
++// Callers MUST gate token operations on this to prevent cross-user use.
++func (authToken *AuthorizationToken) BelongsTo(userID int64) bool {
++	return authToken.UID == userID
++}

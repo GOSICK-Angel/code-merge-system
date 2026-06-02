@@ -345,8 +345,48 @@ class TestInternalHelpers:
             "OverEscalationRate",
         ):
             assert metrics[k] == "N/A"
+        # BCP renders its own N/A reason and must be present so the report
+        # template / gate always find the key.
+        assert metrics["BCP"].startswith("N/A")
         # Silence the import-only-for-name lint when ruff inspects this.
         _ = _DE
+
+    def _meta(self, sid: str, build_check_passed: bool | None) -> "RunMeta":
+        from scripts.eval._schemas import RunMeta
+
+        return RunMeta(
+            sample_id=sid,
+            run_id=f"r-{sid}",
+            seed=0,
+            concurrency=1,
+            wall_time_seconds=0.0,
+            cost_usd=0.0,
+            git_sha="sha",
+            build_check_passed=build_check_passed,
+        )
+
+    def test_bcp_na_when_no_run_executed_build_check(self) -> None:
+        from scripts.eval.summarize import _compute_bcp
+
+        metas = {"a": self._meta("a", None), "b": self._meta("b", None)}
+        assert _compute_bcp(metas) == "N/A (no run executed build_check)"
+
+    def test_bcp_excludes_none_from_denominator(self) -> None:
+        from scripts.eval.summarize import _compute_bcp
+
+        # 1 passed, 1 failed, 1 not-run → 1/2, not 1/3.
+        metas = {
+            "a": self._meta("a", True),
+            "b": self._meta("b", False),
+            "c": self._meta("c", None),
+        }
+        assert _compute_bcp(metas) == 0.5
+
+    def test_bcp_all_passed_is_one(self) -> None:
+        from scripts.eval.summarize import _compute_bcp
+
+        metas = {"a": self._meta("a", True), "b": self._meta("b", True)}
+        assert _compute_bcp(metas) == 1.0
 
     def test_failure_rows_sorted_by_sample_id(self) -> None:
         from scripts.eval._schemas import (

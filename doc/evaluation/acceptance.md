@@ -42,7 +42,33 @@
 
 ---
 
-## 3. 报告必备元数据
+## 3. 自学习反馈环激活门（Phase 1 前置）
+
+> 这组门**不**判定一次合并 run 的好坏，而是决定自学习方案
+> （`doc/plan/self-learning-system.md`）的反馈环——OPP-5 写回（P1-B）、持久化
+> suppress（P1-A）——能否从 opt-in 翻为**默认开启**。设计原则 P2「先度量再激活」：
+> 任一反馈环默认开启前，必须先用 `merge eval-memory` 在固定数据集上跑出消融基线
+> 证明净收益为正。指标定义见 metrics.md §9。
+
+| 门 | 阈值 | 数据源 | 作用 |
+|---|---|---|---|
+| `MDL` 记忆决策增益 | **> 0** | `merge eval-memory`（on/off 消融）| 任一反馈环默认开启的**硬前置**；≤ 0 则保持 opt-in |
+| `memory_harmed`（因果，PR-0d）| **= 0** | `merge eval-memory` 跨臂逐文件 diff | 跨臂判决翻坏的文件数；> 0 即记忆**导致**退化，禁止默认开启。取代单臂 `HIR`（相关性、会假阳性，metrics §9.7）|
+| `CRI` 影响后正确率 | **≥ off 基线 overall_correct_rate** | `memory_effectiveness.json` | 被记忆改变的决策不得比无记忆更差 |
+| `MCPD` 单决策记忆成本 | **≤ off 基线 × 1.15** | `CostTracker` | 防止记忆注入让 prompt 成本悄悄回退 |
+
+**判定流程**：
+1. 同数据集跑 `memory=on`（默认）与 `memory=off`（config `memory.inject_enabled: false`）两 run；
+2. `merge eval-memory --on <on_run> --off <off_run>` 产出 `MemoryAblationComparison`；
+3. `MDL > 0` 且 `memory_harmed = 0`（因果，PR-0d）→ 允许把对应反馈环 default 翻为 `True`，并在本文件 §5 历史区记录基线数；
+4. 任一门未过 → 反馈环维持 opt-in，记录原因。
+
+> 这是"默认开启"的闸口，不是合并质量的一票否决；故归为独立章节，与 §1/§2 的合并
+> 质量门互不替代。
+
+---
+
+## 4. 报告必备元数据
 
 `eval_acceptance_<version>.json` 必须含：
 
@@ -70,7 +96,7 @@
 
 ---
 
-## 4. 版本基线历史
+## 5. 版本基线历史
 
 | 版本 | 评估时间 | 数据集 lock | 主要结果 | 备注 |
 |---|---|---|---|---|
@@ -78,9 +104,23 @@
 
 每次发布更新该表，至少记录 `OA / MMR / WMR / cost_p95 / wall_time_p95`。
 
+### 5.1 记忆有效性基线（§3 激活门）
+
+> 由 `merge eval-memory` 对同数据集 memory=on/off 两 run 产出（metrics.md §9）。
+
+| 评估时间 | 数据集 | on/off run_id | `MDL` | `memory_harmed`(因果) | `HIR`(on,相关) | 激活判定 |
+|---|---|---|---|---|---|---|
+| 2026-05-31 | forgejo `test/fork` ← `origin/forgejo`（124 文件，judge 复审 16）| `a0563230` / `81ce3475` | **0.0000** | **0** | 0.20 | **不默认开启**（MDL 未 > 0）|
+
+口径与 caveat（务必随基线一并阅读，避免误用）：
+- 模型 `deepseek-v4-pro`（temperature：executor/judge=0.1，余默认）；两臂同一 `ablation_decisions.yaml`（plan_review 15×`take_target` + judge_review `accept`），唯一变量为 `memory.inject_enabled`。
+- off 臂 `memory_influenced_decisions=0`，证实 `inject_enabled=false` 完全抑制注入（开关有效）。on 臂注入影响 15/16 判决，但**两臂 per-file 判决逐字节相同**（同 13 pass / 同 3 fail，失败均为 `auth_token.go`/`oauth.go`/`build-release.yml` 的确定性 reverse_impact veto）→ 记忆对本 run 任何判决**零作用**。
+- **因果归因（PR-0d）`memory_harmed=0`、`memory_helped=0`**；单臂 `HIR(on)=0.2` 是**假阳性**——它把"记忆恰好注入到本就确定性失败的文件"误算成有害，跨臂 diff 证伪（metrics §9.7）。激活门以因果 harmed 为准。
+- 本 run 由确定性机制（take_target + veto）主导，记忆无用武之地；不证明记忆无价值，需 **LLM 判断密集**数据集才能测出。单 run、judged=16、样本小，**仅首组可搬动基线**，需多 run / 多数据集复算（procedure 待补）方可据 §3 翻默认开启。
+
 ---
 
-## 5. 阈值修改流程
+## 6. 阈值修改流程
 
 修改任何阈值必须：
 
@@ -91,7 +131,7 @@
 
 ---
 
-## 6. 用户对外承诺模板
+## 7. 用户对外承诺模板
 
 通过 acceptance gate 后，可向用户输出如下承诺（示例）：
 

@@ -1,0 +1,12 @@
+diff --git a/models/auth/auth_token.go b/models/auth/auth_token.go
+index d01ddbca1e..0f7d96086d 100644
+--- a/models/auth/auth_token.go
++++ b/models/auth/auth_token.go
+@@ -40,6 +40,7 @@ type AuthorizationToken struct {
+ 	LookupKey       string `xorm:"INDEX UNIQUE"`
+ 	HashedValidator string
+ 	Purpose         AuthorizationPurpose `xorm:"NOT NULL DEFAULT 'long_term_authorization'"`
++	RevokedUnix     timeutil.TimeStamp
+ 	Expiry          timeutil.TimeStamp
+ }
+ 

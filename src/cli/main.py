@@ -462,6 +462,161 @@ def validate_config_and_env(config: MergeConfig) -> list[str]:
     return errors
 
 
+@cli.command("eval-memory")
+@click.option(
+    "--on",
+    "on_path",
+    required=True,
+    type=click.Path(exists=True),
+    help="memory=on run: a memory_effectiveness.json file or its run directory",
+)
+@click.option(
+    "--off",
+    "off_path",
+    required=True,
+    type=click.Path(exists=True),
+    help="memory=off run: a memory_effectiveness.json file or its run directory "
+    "(produce one by setting memory.inject_enabled: false in config.yaml)",
+)
+@click.option(
+    "--out",
+    "out_path",
+    required=False,
+    default=None,
+    type=click.Path(),
+    help="optional path to write the ablation comparison as JSON",
+)
+def eval_memory_command(on_path: str, off_path: str, out_path: str | None) -> None:
+    """P0: compare a memory=on vs memory=off run and report the decision lift.
+
+    Offline and read-only — consumes the memory_effectiveness.json each run
+    persists at report time. The acceptance gate (lift > 0 AND harmful rate
+    not rising) is defined in doc/evaluation/acceptance.md.
+    """
+    from src.tools.memory_replay import (
+        build_ablation_comparison,
+        load_effectiveness_report,
+        render_ablation_table,
+    )
+
+    try:
+        report_on = load_effectiveness_report(on_path)
+        report_off = load_effectiveness_report(off_path)
+    except (FileNotFoundError, ValueError) as e:
+        console.print(f"[red]Failed to load effectiveness report: {e}[/red]")
+        sys.exit(1)
+
+    comparison = build_ablation_comparison(report_on, report_off)
+    console.print(render_ablation_table(comparison))
+
+    if out_path:
+        try:
+            Path(out_path).write_text(
+                comparison.model_dump_json(indent=2), encoding="utf-8"
+            )
+            console.print(f"[green]Wrote ablation comparison to {out_path}[/green]")
+        except OSError as e:
+            console.print(f"[red]Failed to write {out_path}: {e}[/red]")
+            sys.exit(1)
+
+
+@cli.command("optimize-prompts")
+@click.option("--gate", "gate_id", required=True, help="gate ID, e.g. J-SYSTEM")
+@click.option(
+    "--golden",
+    "golden_path",
+    required=False,
+    default=None,
+    type=click.Path(exists=True),
+    help="JSON list of {case_id, expected_decision}; omit to only generate variants",
+)
+@click.option(
+    "--rollouts",
+    "rollouts_path",
+    required=False,
+    default=None,
+    type=click.Path(exists=True),
+    help="JSON {candidate_id: {case_id: decision}} from running each candidate "
+    "(the cost-bearing step you run offline); omit to leave candidates unscored",
+)
+@click.option(
+    "--strategies",
+    "strategies",
+    required=False,
+    default=None,
+    help="comma list of mutation strategies (default: all)",
+)
+@click.option("--margin", "margin", default=0.02, type=float, help="win margin")
+@click.option("--out", "out_path", required=False, default=None, type=click.Path())
+def optimize_prompts_command(
+    gate_id: str,
+    golden_path: str | None,
+    rollouts_path: str | None,
+    strategies: str | None,
+    margin: float,
+    out_path: str | None,
+) -> None:
+    """Phase 3 (opt-in, offline): generate + rank prompt variants for a gate.
+
+    Read-only w.r.t. production: candidates are emitted for HUMAN REVIEW and are
+    never written back to the gate registry. Supply --golden + --rollouts to
+    rank by decision accuracy; otherwise it just generates variants. See
+    doc/plan/self-learning-system.md Phase 3 for the cost model.
+    """
+    import json
+
+    from src.llm.prompts.gate_registry import get_gate, registered_gate_ids
+    from src.tools.prompt_optimizer import (
+        GoldenCase,
+        build_report,
+        propose_variants,
+        render_report_markdown,
+    )
+
+    try:
+        gate = get_gate(gate_id)
+    except KeyError:
+        console.print(
+            f"[red]Unknown gate {gate_id!r}.[/red] Registered: "
+            f"{', '.join(registered_gate_ids())}"
+        )
+        sys.exit(1)
+
+    try:
+        base_prompt = gate.render()
+    except TypeError:
+        console.print(
+            f"[red]Gate {gate_id!r} needs render arguments[/red] — only "
+            "no-arg / *-SYSTEM gates are supported for offline optimization."
+        )
+        sys.exit(1)
+
+    strat_list = [s.strip() for s in strategies.split(",")] if strategies else None
+    candidates = propose_variants(gate_id, base_prompt, strat_list)
+
+    golden: list[GoldenCase] = []
+    if golden_path:
+        raw = json.loads(Path(golden_path).read_text(encoding="utf-8"))
+        golden = [GoldenCase.model_validate(item) for item in raw]
+
+    rollouts: dict[str, dict[str, str]] = {}
+    if rollouts_path:
+        rollouts = json.loads(Path(rollouts_path).read_text(encoding="utf-8"))
+
+    report = build_report(gate_id, candidates, golden, rollouts, margin=margin)
+    console.print(render_report_markdown(report))
+
+    if out_path:
+        try:
+            Path(out_path).write_text(
+                report.model_dump_json(indent=2), encoding="utf-8"
+            )
+            console.print(f"[green]Wrote optimization report to {out_path}[/green]")
+        except OSError as e:
+            console.print(f"[red]Failed to write {out_path}: {e}[/red]")
+            sys.exit(1)
+
+
 cli.add_command(_forks_profile_group)
 
 

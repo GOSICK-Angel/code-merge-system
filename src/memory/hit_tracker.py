@@ -235,6 +235,7 @@ class MemoryHitTracker:
         self,
         threshold: float = -0.5,
         min_observations: int = 2,
+        min_fail_count: int = 0,
     ) -> frozenset[str]:
         """O-M6: entry_ids whose outcome score is at/below ``threshold``.
 
@@ -242,6 +243,12 @@ class MemoryHitTracker:
         an entry is consistently associated with judge failures. Requires
         at least ``min_observations`` total observations to avoid pruning
         entries on a single bad run.
+
+        ``min_fail_count`` (P1-A固化) additionally requires that absolute
+        failure count — a 0-pass/3-fail entry has score -1.0 but only three
+        fails, too thin to justify a *persistent* prune. The transient
+        read-time filter leaves this at 0 (loose is fine — it is recomputed
+        and reversible); the durable suppress path raises it.
         """
         with self._lock:
             harmful: set[str] = set()
@@ -249,7 +256,7 @@ class MemoryHitTracker:
                 p = counters.get("pass", 0)
                 f = counters.get("fail", 0)
                 total = p + f
-                if total < min_observations:
+                if total < min_observations or f < min_fail_count:
                     continue
                 score = (p - f) / total
                 if score <= threshold:

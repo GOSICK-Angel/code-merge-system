@@ -1,0 +1,16 @@
+diff --git a/models/auth/auth_token.go b/models/auth/auth_token.go
+index d01ddbca1e..9c86827a3a 100644
+--- a/models/auth/auth_token.go
++++ b/models/auth/auth_token.go
+@@ -57,6 +57,11 @@ func (authToken *AuthorizationToken) IsExpired() bool {
+ 	return authToken.Expiry.AsLocalTime().Before(time.Now())
+ }
+ 
++// IsLongTerm reports whether the token is a long-term authorization token.
++func (authToken *AuthorizationToken) IsLongTerm() bool {
++	return authToken.Purpose == LongTermAuthorization
++}
++
+ // GenerateAuthToken generates a new authentication token for the given user.
+ // It returns the lookup key and validator values that should be passed to the
+ // user via a long-term cookie.

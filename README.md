@@ -1,309 +1,412 @@
-# CodeMergeSystem
+<div align="center">
 
-一个面向"长期分叉 fork ↔ upstream"场景的多 Agent 代码合并系统。通过 LLM 做语义理解、通过确定性工具做**可证伪**的加固扫描，把原本需要人工逐文件处理的大规模合并变成一条 **可审计、可暂停、可恢复** 的流水线。
+[中文](README_zh.md) | **English**
 
-> 中文文档为权威版本。英文文档将在后续补充。
+# 🔀 Code Merge System
+
+### Ship upstream upgrades to long-lived forks — without the 500-file conflict nightmare.
+
+A multi-agent pipeline that turns months of upstream drift into an **auditable, resumable, and safe** merge — preserving every fork customization along the way.
+
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB.svg?logo=python&logoColor=white)](https://python.org)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](#development)
+[![Coverage](https://img.shields.io/badge/coverage-80%25+-brightgreen.svg)](#development)
+[![License](https://img.shields.io/badge/license-TBD-lightgrey.svg)](#license)
+[![Anthropic](https://img.shields.io/badge/powered%20by-Claude%20%2B%20GPT-orange.svg)](https://anthropic.com)
+
+![Code Merge System Dashboard](doc/project-1.png)
+
+</div>
 
 ---
 
-## 这是为了解决什么问题
+## The Problem
 
-在长期维护的软件项目中，下游团队常常基于某个历史版本做了大量私有改动，同时 upstream 持续迭代新功能、重构接口、升级依赖。分叉时间一长，直接 `git merge` 会出现：
+Teams that maintain a long-lived fork face a brutal reality when syncing with upstream:
 
-- 数百到数千个文件级冲突，人工无法逐一处理；
-- 行级 diff 无法表达语义，LLM/人都容易判错；
-- fork 独有的定制（API、路由、哨兵、CI job）被整文件覆盖而不被察觉；
-- 合并错一处可能导致运行时漏洞或功能失踪，且难以回滚。
+- **Hundreds to thousands of file conflicts** — impossible to handle manually, one by one
+- **Line-level diffs hide semantic intent** — LLMs and humans both make the wrong call
+- **Fork-only customizations get silently overwritten** — APIs, routes, CI jobs, sentinels disappear without a trace
+- **One wrong merge creates runtime vulnerabilities or missing features** — and they're hard to roll back
 
-CodeMergeSystem 用 **七个专门化 Agent + 五十余个确定性工具 + 三层记忆 + 完整 Checkpoint** 提供一条通用合并流水线。
+`git merge` gives you a list of conflicts. Code Merge System gives you a **decision pipeline**.
 
-## 核心能力
+---
 
-- **六大丢失模式识别**：shadow 冲突 / 接口反向影响 / 顶层调用丢失 / 配置行保留 / Scar 自学习 / 业务哨兵扫描
-- **Planner ↔ Judge 协商**：审查 Agent 与 Executor 使用不同 LLM 提供商，避免共谋偏差
-- **写入即快照**：任何文件写入前自动保存原内容，失败即回滚
-- **全阶段 Checkpoint**：任意时刻 SIGINT 可安全中断，`merge resume` 从上次停下处继续
-- **门禁 baseline-diff**：只看"新引入的失败"，而非简单 exit 0，避免合入隐性 regression
-- **显式人工决策**：决策无默认回退，避免"超时即接受"的隐患
-- **多语言 AST 分块**：Python/TS/JS/Go/Rust/Java/C 均走 tree-sitter
-
-## 前置准备
-
-| 项 | 说明 |
-|---|---|
-| Python 3.11+ | mypy strict / Pydantic v2 / async 全程 |
-| `ANTHROPIC_API_KEY` | Planner / ConflictAnalyst / Judge / HumanInterface 用 |
-| `OPENAI_API_KEY` | PlannerJudge / Executor 用（双 provider 是为了避免共谋偏差） |
-| `GITHUB_TOKEN`（可选） | 启用 GitHub 集成（拉取 PR 评论 / 推合并结果到 PR）时需要 |
-| Node.js（可选） | 仅 Web UI 开发（`cd web && npm install / npm run build`）需要；pip install 安装的 wheel 已内置 `src/web/dist/`，运行 `merge` 本身无需 Node |
-
-**目标仓库需满足**：
-
-- 是个 git 仓库，且当前 HEAD 是你的 fork 主分支
-- 工作树干净（`git status` 无未提交更改）—— 系统会写文件，脏树会被拒
-- upstream 那一端可访问：要么是本地分支（如 `upstream/main`、`origin/upstream-main`），要么 `git fetch <remote>` 已拉到本地
-
-如果你 fork 还没接 upstream 远端：
+## Quick Start
 
 ```bash
+pip install code-merge-system
+
+export ANTHROPIC_API_KEY=sk-ant-...
+export OPENAI_API_KEY=sk-...
+
 cd /path/to/your-fork-repo
+merge upstream/main --dry-run    # preview the plan before touching any files
+```
+
+> First run opens a browser UI and walks you through a one-time setup wizard. Your config is saved to `.merge/config.yaml` — no wizard on subsequent runs.
+
+---
+
+## See It In Action
+
+<table>
+<tr>
+<td width="50%">
+
+**Plan Review** — 124 files analyzed, 87.9% auto-merge confidence, risk distribution across A–E change categories.
+
+![Plan Review](doc/project-2.png)
+
+</td>
+<td width="50%">
+
+**Conflict Resolution** — Side-by-side intent analysis of fork vs. upstream changes, with LLM-recommended merge strategy (SEMANTIC_MERGE 85% confidence).
+
+![Conflict Resolution](doc/project-4.png)
+
+</td>
+</tr>
+<tr>
+<td width="50%">
+
+**Judge Verdict** — Independent review agent audits every merged file; CRITICAL/HIGH/MEDIUM/LOW issue breakdown with repair rounds.
+
+![Judge Verdict](doc/project-5.png)
+
+</td>
+<td width="50%">
+
+**Run Report** — Full cost accounting ($0.04 for 124 files), per-agent token breakdown, learned memory entries for future runs.
+
+![Run Report](doc/project-6.png)
+
+</td>
+</tr>
+</table>
+
+---
+
+## How It Works
+
+Eight phases driven by a state machine. Seven specialized agents. Every write is snapshotted. Any `Ctrl+C` is safe.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  CLI / Web UI                                               │
+│         │                                                   │
+│   Orchestrator ── 8-phase state machine                    │
+│         │                                                   │
+│  ┌──────┴───────┐                                          │
+│  │              │                                           │
+│ Agents        Tools              Memory                     │
+│ (7 roles)   (50+ deterministic   (L0/L1/L2                  │
+│              + AST parsers)       cross-run store)          │
+│  │                                                          │
+│ LLM layer (Anthropic + OpenAI, credential pool, routing)   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+| Phase | What happens |
+|-------|-------------|
+| `INITIALIZE` | 3-way classification, risk scoring, fork-profile routing |
+| `PLANNING` | Planner generates merge plan with per-file strategy |
+| `PLAN_REVIEW` | PlannerJudge audits the plan; up to 2 revision rounds |
+| `AWAITING_HUMAN` | You review the plan report; fill in any `HUMAN_REQUIRED` decisions |
+| `AUTO_MERGING` | Executor applies auto-safe files with snapshot-before-write |
+| `CONFLICT_ANALYSIS` | ConflictAnalyst does semantic analysis on risky conflicts |
+| `JUDGE_REVIEW` | Judge + 50+ deterministic scanners audit all merged output |
+| `COMPLETED` | Full report generated; you decide when to `git commit` |
+
+| Agent | Role | Default Model |
+|-------|------|---------------|
+| Planner | Generates merge plan | Claude Opus |
+| PlannerJudge | Reviews plan (read-only) | GPT-4o |
+| ConflictAnalyst | Semantic analysis of high-risk conflicts | Claude Sonnet |
+| Executor | **Sole write authority** — applies merges | GPT-4o |
+| Judge | Reviews merged output + runs deterministic checks | Claude Opus |
+| HumanInterface | Generates decision templates | Claude Haiku |
+| SmokeTest | Post-merge smoke testing | — |
+
+> **Why two LLM providers?** Planner/Judge use Anthropic; Executor/PlannerJudge use OpenAI. Different providers for reviewer vs. writer eliminates collusion bias.
+
+---
+
+## Features
+
+### [Six Lost-Pattern Detectors](doc/modules/tools.md)
+Shadow conflicts, interface reverse impacts, top-level call drops, config line preservation, scar auto-learning, and business sentinel scanning — the failure modes that `git merge` misses entirely.
+
+### [Snapshot-Before-Write](doc/modules/core.md)
+Every file write creates a snapshot of the original. Any failure triggers automatic rollback. You never end up with a half-merged file.
+
+### [Full-Run Checkpointing](doc/modules/core.md)
+State is persisted after every phase. `merge resume --run-id <id>` picks up exactly where you left off — useful for large merges that take hours.
+
+### [Explicit Human Decisions](doc/modules/agents.md)
+No `TIMEOUT_DEFAULT`. No silent fallbacks. Files that need human judgment generate a `decisions.yaml` template; skipped decisions stay as `AWAITING_HUMAN` until explicitly resolved.
+
+### [Multi-Language AST Chunking](doc/modules/tools.md)
+Python, TypeScript, JavaScript, Go, Rust, Java, and C all use tree-sitter for semantic-level diff — not just line-level.
+
+### [Cross-Run Memory](doc/modules/memory.md)
+Decisions, disputes, and metrics are summarized into a SQLite store. Future runs on the same repo load relevant history to inform planning.
+
+### [Baseline-Diff Gate](doc/modules/tools.md)
+CI validation only flags *newly introduced* failures — not pre-existing ones. Merging into a repo with a known broken test won't block you.
+
+### [Browser Web UI](doc/modules/web-ui.md)
+Real-time pipeline progress, conflict resolution UI, plan review, judge verdict — all in a local browser app. Use `--no-web` for pure terminal output or `--ci` for JSON output in CI.
+
+---
+
+## Compared to Alternatives
+
+| | Code Merge System | `git merge` / `git rebase` | GitHub/GitLab UI | LLM chat (ChatGPT etc.) |
+|--|--|--|--|--|
+| Handles 500+ file conflicts | ✅ | ❌ Manual, one-by-one | ❌ | ❌ Context limit |
+| Preserves fork-only features | ✅ Auto-detected via scar/sentinel | ❌ Easy to overwrite | ❌ | ❌ No repo context |
+| Auditable decision trail | ✅ Per-file, with rationale | ❌ | Partial (PR comments) | ❌ |
+| Resumable after interrupt | ✅ Checkpoint after every phase | ❌ | ❌ | ❌ |
+| Deterministic safety checks | ✅ 50+ scanners post-merge | ❌ | ❌ | ❌ |
+| Cost | ~$0.04 for 124 files | Free | Free | Per-token, no automation |
+
+---
+
+## Can You Trust the Output?
+
+A merge tool is only worth as much as the evidence that its output is correct. This project ships a **formal evaluation framework** and an **auditable self-learning loop** — and reports their results honestly, including where the numbers are not yet impressive.
+
+### Evaluation against human golden merges
+
+We do **not** ask the LLM judge to grade its own verdict. The framework under [`doc/evaluation/`](doc/evaluation/README.md) measures system output against **expert human golden merges as ground truth**, scoring five trust dimensions at once — a system that blindly takes upstream and scores 100% "coverage" while losing half the fork's work must still fail:
+
+| Dimension | Question it answers | Key metrics |
+|-----------|--------------------|-------------|
+| **Correctness** | Did it merge what should merge, correctly? | miss-merge rate, wrong-merge rate, conflict-resolution accuracy |
+| **Safety** | Did it silently drop private changes? | M1–M6 semantic-loss recall, security-sensitive escalation rate, snapshot rollback rate |
+| **Process Trust** | Does it escalate uncertainty instead of guessing? | over-escalation rate, plan-dispute hit rate, Judge↔ground-truth agreement |
+| **Explainability** | Can every decision be replayed? | rationale completeness, `discarded_content` retention, trace replayability |
+| **Operational** | Stable across re-runs and models? Cost bounded? | decision consistency, $/run, wall-time P95 |
+
+Three dataset tiers feed it: **Tier-1** micro-bench (30–60 PRs, runs in CI), **Tier-2** real long-span replays (human merge diff = oracle), **Tier-3** adversarial injections (does it actually catch M1–M6?). The harness lives in [`scripts/eval/`](scripts/eval/) (`prepare.py → run.py → diff_against_golden.py → summarize.py → gate.py`).
+
+**Hard gates that veto a release** ([`acceptance.md`](doc/evaluation/acceptance.md)): wrong-merge rate **= 0%**, security-sensitive escalation **= 100%**, private-content retention **= 100%**, snapshot rollback **= 100%**, duplicate top-level symbols **= 0**, hallucinated cross-module references **= 0**; miss-merge **≤ 2%** (Tier-1), each M1–M6 recall **≥ 95%**. Soft gates track overall accuracy (≥ 92% Tier-1), determinism (≥ 90% across 3 runs), cross-model consistency (≥ 85%), and cost/latency drift caps.
+
+> **Honesty over marketing:** the version-baseline table in `acceptance.md` is still seeded with a template row — no release has cleared the full gate yet, so we make **no "evaluated & trusted" claim**. The framework exists precisely so that claim, when made, is backed by lockable dataset SHAs and per-file golden diffs rather than a "99% merge success" headline.
+
+### Self-learning — measured, not assumed
+
+The system improves across runs **without weight fine-tuning and without embeddings** — a deliberate choice backed by a 24-source survey (see [`doc/plan/self-learning-system.md`](doc/plan/self-learning-system.md)): non-parametric, auditable SQLite memory + execution-grounded reflection beats opaque RL on cost and deletability.
+
+| Phase | What it does | Status |
+|-------|-------------|--------|
+| **P0** Effectiveness metric | Ablation harness: `memory=on` vs `memory=off` decision lift | **Landed** — `merge eval-memory` |
+| **P1** Grounded feedback loop | Persistent auditable suppression of harmful entries · confidence write-back from `judge`+`compile`+`ci` signals · verified-repair recipe library | **Landed**, feedback loops **opt-in** until ablation proves net gain |
+| **P2** Memory-quality hardening | High-information entries enforced · key invariants pinned against summarization drift | **Landed** |
+| **P3** Offline prompt optimization | `merge optimize-prompts` ranks gate-prompt variants against a golden set, emits a **human-review report — never auto-applies** | **Landed**, opt-in |
+
+The governing rule is **measure before you activate**: a feedback loop only flips to on-by-default after `merge eval-memory` shows lift **> 0** *and* causally-attributed harm **= 0** on a fixed dataset. First baseline (forgejo, 124 files): lift measured at **0.0000** — so the loops stay opt-in. That run was dominated by deterministic mechanisms (take-target + veto), leaving memory no room to act; it does **not** prove memory worthless, and an LLM-judgment-dense dataset is needed to measure real lift. We report the zero rather than hide it — that *is* the trust signal.
+
+---
+
+## Prerequisites
+
+| | |
+|--|--|
+| Python 3.11+ | mypy strict / Pydantic v2 / async throughout |
+| `ANTHROPIC_API_KEY` | Planner, ConflictAnalyst, Judge, HumanInterface |
+| `OPENAI_API_KEY` | PlannerJudge, Executor (dual-provider anti-collusion) |
+| `GITHUB_TOKEN` *(optional)* | GitHub integration — pull PR comments, push merge results |
+| Node.js *(optional)* | Web UI development only; the installed wheel bundles `web/dist/` |
+
+**Target repo must:**
+- Be a git repo with a clean working tree (`git status` shows no uncommitted changes)
+- Have upstream accessible locally — either as a branch or via `git fetch <remote>`
+
+```bash
+# If you haven't added upstream yet:
 git remote add upstream https://github.com/<owner>/<repo>.git
 git fetch upstream
 ```
 
-## 安装
+---
 
-```bash
-git clone <repo-url> && cd CodeMergeSystem
-python3.11 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+## Full Workflow
 
-export ANTHROPIC_API_KEY=sk-ant-...
-export OPENAI_API_KEY=sk-...
-```
-
-## 首次合并：完整流程
-
-下面是一次真实合并里你**会依次看到的内容 + 每步要做的判断**。第一次跑建议先来一遍 `--dry-run` 摸清规模再决定真合。
-
-### 1. 启动 + 首次配置向导
+### 1. Plan (dry-run)
 
 ```bash
 cd /path/to/your-fork-repo
 merge upstream/main --dry-run
 ```
 
-首次运行进入交互向导，依次问你：
-
-- **项目背景描述**（一句话即可，会喂给 Planner 帮它理解上下文）
-- **API Key 确认**（已 export 的会显示掩码，回车跳过表示沿用）
-- **阈值**（默认 `auto_merge=0.85 / risk_low=0.30 / risk_high=0.60`，新手直接默认）
-
-之后系统在 `<repo>/.merge/` 写入 `config.yaml` + `.env`（后者自动加进 `.gitignore`），下次运行不再问。
-
-> **如果你的 fork 删过整片功能域**（例如砍掉了 payments 子树）：当系统检测到 ≥30 个被 fork 删除的文件时，向导会**主动提示生成 `forks-profile.yaml` 草稿**并打开 `$EDITOR` 让你审阅。低于阈值则完全静默 —— `fork_only_features` 与 `migration_policy` 已在每次 run 时自动从 git 推算，无需手工维护。
-
-### 2. dry-run 跑出合并计划
-
-向导通过后系统在浏览器打开 Web UI（`--no-web` 切纯文本输出）。你会看到 8 个 phase 依次推进：
+The browser UI opens and runs through `INITIALIZE → PLANNING → PLAN_REVIEW → AWAITING_HUMAN` then stops. Check the output reports:
 
 ```
-INITIALIZE  → 三方分类、风险打分、forks-profile 路由
-PLANNING    → Planner 出合并计划
-PLAN_REVIEW → PlannerJudge 审查；最多 2 轮修订
-AWAITING_HUMAN → 你审阅计划报告
-...（dry-run 在此停止）
+.merge/plans/MERGE_PLAN_<run_id>.md   # file-by-file merge strategy
+.merge/runs/<run_id>/plan_review.md   # PlannerJudge audit record
 ```
 
-dry-run 结束后**重点看这两个文件**：
-
-```
-.merge/plans/MERGE_PLAN_<upstream>_<run_id>.md
-.merge/runs/<run_id>/plan_review.md
-```
-
-报告会告诉你：
-
-- 触及多少文件、按 ABCDE 五类分布
-- auto_merge / conflict_analysis / human_required 的占比
-- forks-profile drift 附录（如果 yaml 老化）
-- Planner-Judge 审查记录
-
-### 3. 决定继续真合并还是先调整
-
-如果计划合理：
+### 2. Merge
 
 ```bash
-merge upstream/main          # 不带 --dry-run，正式跑
+merge upstream/main     # remove --dry-run to run for real
 ```
 
-系统会从 `INITIALIZE` 开始重新走一遍直到 `AUTO_MERGING` / `CONFLICT_ANALYSIS`，写入文件、做快照、跑门禁。
+Any `Ctrl+C` is safe — resume with `merge resume --run-id <id>`.
 
-> **任意时刻 Ctrl+C 都安全** —— 已经写盘的 checkpoint 让你下次用 `merge resume --run-id <id>` 续跑。
+### 3. Handle Human Decisions
 
-### 4. 处理人工决策（AWAITING_HUMAN）
-
-当系统遇到 risk_score 高于 `human_escalation` 的文件、或 Judge 判定不通过时，会暂停在 `AWAITING_HUMAN`，并在 `.merge/runs/<run_id>/` 下生成一个待填的 `decisions.yaml` 模板：
+When the system pauses at `AWAITING_HUMAN`, fill in `.merge/runs/<id>/decisions.yaml`:
 
 ```yaml
-# decisions.yaml — 系统生成模板，你填决定
 - file_path: "backend/services/auth/auth.service.ts"
-  decision: take_current        # 可选：take_target / take_current / semantic_merge / escalate_human
-  rationale: "fork 用 SSO，必须保留"
+  decision: take_current          # take_target / take_current / semantic_merge / escalate_human
+  rationale: "Fork uses SSO — must preserve"
 ```
 
-填完续跑：
+Then resume:
 
 ```bash
 merge resume --run-id <id> --decisions .merge/runs/<id>/decisions.yaml
 ```
 
-### 5. 最终产出
+### 4. Review and commit
 
-合并跑完后看：
+```
+.merge/runs/<run_id>/merge_report.md    # final report
+.merge/runs/<run_id>/checkpoint.json    # full state
+.merge/runs/<run_id>/logs/run_<id>.log  # complete execution log
+```
 
-| 路径 | 说明 |
-|---|---|
-| `.merge/runs/<run_id>/merge_report.md` | 最终合并报告（变更摘要、Judge verdict、未解决项） |
-| `.merge/runs/<run_id>/checkpoint.json` | 完整状态，可继续 resume |
-| `.merge/runs/<run_id>/logs/run_<id>.log` | 全量执行日志 |
-| 工作树本身 | 合并产物已落到当前分支；`git status` 看具体改了什么；自己决定是否 `git commit` |
+The system stops at the working tree. **It never auto-commits or auto-pushes** — you review, then decide.
 
-> **系统不自动 commit / push** —— 写到工作树就停手，让你 review 完再提交。
+---
 
-## 常用命令
-
-按使用场景分组：
+## All Commands
 
 ```bash
-# === 首次接入 / 日常合并 ===
-merge <target-branch>                         # 一站式（默认浏览器 Web UI）
-merge <target-branch> --dry-run               # 只跑到 plan，不动文件
-merge <target-branch> --no-web                # 纯文本输出
-merge <target-branch> -r                      # 强制重新跑配置向导
+# Daily use
+merge <target-branch>                         # default: browser Web UI
+merge <target-branch> --dry-run               # plan only, no file writes
+merge <target-branch> --no-web                # terminal output
+merge <target-branch> -r                      # re-run setup wizard
 
-# === 续跑 / 决策 ===
-merge resume --run-id <id>                    # 从 checkpoint 续跑
-merge resume --run-id <id> --decisions decisions.yaml   # 带人工决策续跑
-merge resume --run-id <id> --web              # 在浏览器 Web UI 中续跑 / 查看历史 run 状态
+# Resume / decisions
+merge resume --run-id <id>
+merge resume --run-id <id> --decisions decisions.yaml
+merge resume --run-id <id> --web              # view history in browser
 
-# === 校验 ===
-merge validate --config <path>                # 校验 config.yaml + 所有 api_key_env
+# Validate
+merge validate --config <path>                # check config + all API keys
 
-# === forks-profile（仅在做 fork 整域裁剪时用）===
-merge forks-profile init -o .merge/forks-profile.yaml   # 起草草稿
-merge forks-profile diff                                # 检查 yaml 是否过时
-merge forks-profile validate                            # 校验 yaml 语法
+# Fork profile (only needed when fork deleted ≥30 files)
+merge forks-profile init -o .merge/forks-profile.yaml
+merge forks-profile diff
+merge forks-profile validate
 
-# === CI ===
-merge <target-branch> --ci                    # 无交互，JSON 摘要到 stdout
+# CI
+merge <target-branch> --ci                    # non-interactive, JSON summary to stdout
+merge <target-branch> --ci --auto-decisions <yaml>
 ```
 
-## 卡住了？
+---
 
-| 现象 | 排查 |
-|---|---|
-| 向导报 "API Key not set" | 检查 `merge validate --config .merge/config.yaml`；shell env > `.merge/.env` > `~/.config/code-merge-system/.env` |
-| 启动报 "working tree dirty" | `git status` 看到未提交改动；`git stash` 或 `git commit` 后再跑 |
-| 启动报 "upstream ref not found" | 没 `git fetch upstream`，或者 `target-branch` 拼错（要写 `upstream/main` 不是 `main`） |
-| dry-run 卡在 PLAN_REVIEW 多轮 | Planner 与 PlannerJudge 在博弈；正常 1-2 轮，`max_plan_revision_rounds=2` 后会转 `AWAITING_HUMAN`，去看 `plan_review.md` |
-| 跑了一半中断 | 重新跑 `merge resume --run-id <id>`（`run_id` 在 `.merge/runs/` 下能看到） |
-| 想丢弃这次 run 重来 | `rm -rf .merge/runs/<id>/`，再 `merge <target-branch>` |
+## Troubleshooting
 
-## 架构一览
+| Symptom | Fix |
+|---------|-----|
+| `API Key not set` | Run `merge validate --config .merge/config.yaml`; check shell env → `.merge/.env` → `~/.config/code-merge-system/.env` |
+| `working tree dirty` | `git stash` or `git commit`, then re-run |
+| `upstream ref not found` | Run `git fetch upstream`; use `upstream/main` not `main` |
+| Plan review stuck in multiple rounds | Normal — Planner and PlannerJudge are negotiating; after `max_plan_revision_rounds=2` it transitions to `AWAITING_HUMAN`. Check `plan_review.md`. |
+| Run interrupted mid-way | `merge resume --run-id <id>` (find `run_id` under `.merge/runs/`) |
+| Want to start over | `rm -rf .merge/runs/<id>/`, then re-run |
 
-```
-CLI / Web UI
-       │
-  Orchestrator ── 状态机驱动 8 个 Phase
-       │
-  ┌────┴─────┐
-  │          │
-Agents     Tools            Memory
-(7 角色)  (50+ 工具 +         (L0/L1/L2
-         baseline parsers)   三层记忆)
-  │
-LLM 层（anthropic / openai，凭据池、智能路由、压缩）
-```
+---
 
-| Agent | 角色 | 默认模型 |
-|-------|------|----------|
-| Planner | 生成合并计划 | Claude Opus |
-| PlannerJudge | 审查计划 | GPT-4o |
-| ConflictAnalyst | 高风险冲突语义分析 | Claude Sonnet |
-| Executor | **唯一写权限**，应用合并 | GPT-4o |
-| Judge | 审查合并结果 + 确定性复检 | Claude Opus |
-| HumanInterface | 决策模板生成 | Claude Haiku |
-| SmokeTest | 合并后冒烟测试 | — |
-
-每个 Agent 的模型、API Key、降档策略均可在 `config.yaml` 中独立配置。
-
-## `.merge/` 生产目录布局
-
-pip 安装后在目标仓库运行时，所有产物写入 `<repo>/.merge/`：
-
-```
-.merge/
-  config.yaml        # 首次运行自动生成
-  .env               # API Keys，自动 gitignore
-  .gitignore         # 自动生成
-  plans/             # MERGE_PLAN_<id>.md 报告
-  runs/<run_id>/
-    checkpoint.json
-    merge_report.md
-    plan_review.md
-    logs/run_<id>.log
-```
-
-API Key 解析顺序：**Shell env → `.merge/.env` → `~/.config/code-merge-system/.env`**
-
-## 文档
-
-完整中文文档索引见 [`doc/README.md`](doc/README.md)。关键入口：
-
-- [**新人上手指南**](doc/modules/onboarding.md) — 第一次接触本项目必读
-- [系统架构](doc/architecture.md) — 分层 / 数据流 / 持久化 / 扩展点
-- [执行流程与状态机](doc/flow.md) — 13 个状态、8 个 Phase
-- [六大丢失模式 + P0/P1/P2 加固项](doc/multi-agent-optimization-from-merge-experience.md)
-- [迁移感知合并](doc/migration-aware-merge.md) — bulk-copy 场景
-- [风险等级](doc/risk-levels.md)
-
-模块技术文档（`doc/modules/`）：
-
-| 模块 | 文档 |
-|---|---|
-| 数据模型（Pydantic v2） | [data-models.md](doc/modules/data-models.md) |
-| Agents | [agents.md](doc/modules/agents.md) |
-| Core（Orchestrator / Phases / Checkpoint） | [core.md](doc/modules/core.md) |
-| Tools（扫描器 / 门禁 / Git） | [tools.md](doc/modules/tools.md) |
-| LLM 层（路由 / 压缩 / 凭据池） | [llm.md](doc/modules/llm.md) |
-| 记忆系统（L0/L1/L2） | [memory.md](doc/modules/memory.md) |
-| CLI / Web UI | [cli.md](doc/modules/cli.md) |
-| Web UI 浏览器端用户旅程 | [web-ui.md](doc/web-ui.md) |
-
-## 参考开源项目
-
-本项目在设计过程中参考了多个开源实现，相关分析文档位于 [`doc/references/`](doc/references/)：
-
-| 项目 | 类型 | 借鉴点 |
-|---|---|---|
-| [Weave](https://github.com/ataraxy-labs/weave) | 语义合并引擎 | tree-sitter entity-level merge；函数/类粒度三方合并 |
-| [merge-engine](https://docs.rs/merge-engine/) | Rust 合并库 | 4 层合并策略（Pattern DSL → CST → VSA → Genetic） |
-| [Mergiraf](https://mergiraf.org/) | AST 结构化合并 | AST 级语法感知合并 |
-| [git-machete](https://github.com/VirtusLab/git-machete) | 分支工作流 | Fork-point 推断 + `--override-to` 手动校正 |
-| [mergefix](https://pypi.org/project/mergefix/) | AI 冲突修复 | LLM 后处理冲突标记 |
-| [reconcile-ai](https://github.com/kailashchanel/reconcile-ai) | 批量冲突修复 | 批量提示节省成本 |
-| [clash](https://github.com/clash-sh/clash) | 并行 Agent | Worktree 级冲突检测 |
-| [NousResearch/hermes-agent](https://github.com/nousresearch/hermes-agent) | Agent 架构 | 工具抽象与 Agent 协作模式 |
-| Graphify | 代码知识图谱 | 用图谱压缩代码上下文 |
-| MemPalace | 记忆系统 | 语义索引 + 分层记忆 |
-
-详细对照见 [`doc/references/opensource-comparison.md`](doc/references/opensource-comparison.md) 与各 `*-analysis.md`。
-
-## 开发
+## Development
 
 ```bash
-pytest tests/unit/ -q              # 单元测试（不打 LLM API）
-pytest tests/integration/ -v       # 集成测试（打真 API，本地跑，不进 CI）
-mypy src                           # 类型检查（strict 模式）
-ruff check src/                    # Lint
-ruff format src/                   # 格式化
+git clone <repo-url> && cd code-merge-system
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
 
-# Web UI 开发（pip 安装的 wheel 已内置 src/web/dist；下面命令仅开发时需要）
-cd web && npm install              # 装依赖
-cd web && npm run start            # 启动 Vite dev server
-cd web && npm run build            # tsc + vite build → web/dist/
-cd web && npm test                 # vitest
+pytest tests/unit/ -q               # unit tests (no LLM calls)
+pytest tests/integration/ -v        # integration tests (real API, local only)
+mypy src                            # type check (strict)
+ruff check src/ && ruff format src/ # lint + format
+
+# Web UI (only needed for frontend changes)
+cd web && npm install
+cd web && npm run dev               # Vite dev server at localhost:5173
+cd web && npm run build             # tsc + build → web/dist/
+cd web && npm test                  # vitest
 ```
 
-关键约束（PR review 会检查）：
+**Architecture constraints enforced by unit tests — do not violate:**
 
-- 不要给 `DecisionSource` 加 `TIMEOUT_DEFAULT`
-- Judge / PlannerJudge 只接收 `ReadOnlyStateView`
-- Executor 写文件必须走 `apply_with_snapshot()`
-- `plan_revision_rounds >= max` 时转 `AWAITING_HUMAN`，不是 `FAILED`
-- HumanInterface 不填默认值
+- No `TIMEOUT_DEFAULT` on `DecisionSource` — human decisions must be explicit
+- `Judge` / `PlannerJudge` receive `ReadOnlyStateView` — no state writes from reviewer agents
+- `Executor` uses `apply_with_snapshot()` — no direct file writes
+- `plan_revision_rounds >= max` → `AWAITING_HUMAN`, not `FAILED`
+- `HumanInterface` never fills in default decisions
 
-## 许可证
+---
 
-TBD
+## Contributing
+
+Contributions are welcome — whether it's a bug report, a feature idea, or a pull request.
+
+**Good places to start:**
+
+- 🐛 **[Report a bug](../../issues/new?template=bug_report.md)** — include your Python version, the command you ran, and the relevant log from `.merge/runs/<id>/logs/`
+- 💡 **[Request a feature](../../issues/new?template=feature_request.md)** — describe your fork/upstream scenario and what the system currently gets wrong
+- 🔧 **[Browse open issues](../../issues)** — look for `good first issue` labels if you want a guided starting point
+
+**Before submitting a PR:**
+
+1. Run `pytest tests/unit/` — all tests must pass
+2. Run `mypy src` — no new type errors
+3. Run `ruff check src/` — no lint errors
+4. Keep new files under 800 lines; organize by feature layer (`models → tools → llm → agents → core → cli`)
+5. New agents require a contract yaml under `src/agents/contracts/` — see [`src/agents/contracts/_schema.md`](src/agents/contracts/_schema.md)
+
+**Key docs for contributors:**
+
+- [System Architecture](doc/architecture.md) — layers, data flow, persistence, extension points
+- [State Machine & Phases](doc/flow.md) — all 13 states and 8 phases
+- [Agent Contracts](src/agents/contracts/_schema.md) — how to add a new agent correctly
+- [Adding a New Agent](doc/modules/agents.md) — step-by-step recipe
+
+---
+
+## Documentation
+
+Full index: [`doc/README.md`](doc/README.md)
+
+| | |
+|--|--|
+| [Onboarding Guide](doc/modules/onboarding.md) | Start here if you're new to the project |
+| [Architecture](doc/architecture.md) | Layers, data flow, persistence, extension points |
+| [Flow & State Machine](doc/flow.md) | 13 states, 8 phases |
+| [Six Lost Patterns + P0/P1/P2 Hardening](doc/multi-agent-optimization-from-merge-experience.md) | How we catch what `git merge` misses |
+| [Evaluation Framework](doc/evaluation/README.md) | Golden-merge ground truth, 5 trust dimensions, 3 dataset tiers, acceptance gates |
+| [Self-Learning System](doc/plan/self-learning-system.md) | Non-parametric memory + grounded feedback loop, phased rollout |
+| [Migration-Aware Merge](doc/migration-aware-merge.md) | Handling bulk-copy scenarios |
+| [Risk Levels](doc/risk-levels.md) | How files are classified A–E |
+| [Web UI User Journey](doc/web-ui.md) | Browser-side walkthrough |
+
+---
+
+## License
+
+MIT
+
+---
+
+<div align="center">
+  <sub>Built for teams that maintain long-lived forks and need more than <code>git merge</code>.</sub>
+</div>

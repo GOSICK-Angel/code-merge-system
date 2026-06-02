@@ -222,6 +222,71 @@ describe("ConflictResolution submit payload (H3)", () => {
   });
 });
 
+describe("ConflictResolution auto-advance after submit", () => {
+  it("selects the next still-pending file after a single submit", () => {
+    act(() => {
+      const store = useConflictDraftStore.getState();
+      store.setDraftDecision("a.py", "take_current");
+      store.selectFile("a.py");
+    });
+
+    const ref = makeClientRef();
+    const { getByText } = render(
+      <ConflictResolution
+        clientRef={
+          ref as unknown as React.MutableRefObject<
+            ReturnType<typeof useWsClient>["current"]
+          >
+        }
+      />,
+    );
+    act(() => {
+      getByText("Submit decision").click();
+    });
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    // a.py was resolved; the view must move the operator onto b.py so the
+    // remaining decision is never silently skipped.
+    expect(useConflictDraftStore.getState().selectedFile).toBe("b.py");
+  });
+
+  it("stays put when the submitted file is the last pending one", () => {
+    const lastPendingSnapshot: MergeStateSnapshot = {
+      ...baseSnapshot,
+      humanDecisionRequests: {
+        "a.py": {
+          ...baseSnapshot.humanDecisionRequests["a.py"],
+          human_decision: "take_current",
+        },
+        "b.py": baseSnapshot.humanDecisionRequests["b.py"],
+      },
+    };
+    useRunStore.setState({ snapshot: lastPendingSnapshot });
+    act(() => {
+      const store = useConflictDraftStore.getState();
+      store.setDraftDecision("b.py", "take_target");
+      store.selectFile("b.py");
+    });
+
+    const ref = makeClientRef();
+    const { getByText } = render(
+      <ConflictResolution
+        clientRef={
+          ref as unknown as React.MutableRefObject<
+            ReturnType<typeof useWsClient>["current"]
+          >
+        }
+      />,
+    );
+    act(() => {
+      getByText("Submit decision").click();
+    });
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect(useConflictDraftStore.getState().selectedFile).toBe("b.py");
+  });
+});
+
 describe("ConflictResolution submit feedback", () => {
   it("shows a submitted banner + Resubmit label once the file is decided", () => {
     const decidedSnapshot: MergeStateSnapshot = {

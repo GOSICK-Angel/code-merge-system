@@ -15,6 +15,7 @@ class MemoryEntryType(str, Enum):
     RELATIONSHIP = "relationship"
     PHASE_SUMMARY = "phase_summary"
     CODEBASE_INSIGHT = "codebase_insight"
+    REPAIR_RECIPE = "repair_recipe"
 
 
 class ConfidenceLevel(str, Enum):
@@ -34,6 +35,9 @@ class MemoryEntry(BaseModel, frozen=True):
     confidence_level: ConfidenceLevel = Field(default=ConfidenceLevel.INFERRED)
     content_hash: str = Field(default="")
     created_at: datetime = Field(default_factory=datetime.now)
+    suppressed: bool = Field(default=False)
+    suppressed_reason: str | None = Field(default=None)
+    pinned: bool = Field(default=False)
 
     def model_post_init(self, __context: Any) -> None:
         if not self.content_hash:

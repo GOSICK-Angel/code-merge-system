@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -960,6 +960,70 @@ class MemoryExtractionConfig(BaseModel):
         ge=1,
         description="OPP-5: minimum pass+fail observations before an entry's "
         "confidence is nudged, so a single run cannot move it.",
+    )
+    writeback_signal_sources: list[Literal["judge", "compile"]] = Field(
+        default_factory=lambda: cast(list[Literal["judge", "compile"]], ["judge"]),
+        description="P1-B: deterministic signals fused into the per-file memory "
+        "outcome that drives OPP-5 write-back and P1-A suppression. 'judge' = "
+        "the Judge verdict's passed/failed split (default — byte-identical to "
+        "prior behaviour). Adding 'compile' demotes a judge-passed "
+        "compiled-language file to a failure when the post-judge build check "
+        "failed this run, so memory that produced an uncompilable merge is not "
+        "credited. All sources are deterministic — no LLM self-report. "
+        "CI/partial_failure fusion is deferred: the post-merge deterministic "
+        "findings land in report_generation, after this hook (see "
+        "doc/plan/self-learning-system.md P1-B).",
+    )
+    repair_recipe_enabled: bool = Field(
+        default=True,
+        description="P1-C: at judge_review summarization, mint a verified "
+        "REPAIR_RECIPE memory entry for each deterministic repair operator "
+        "(e.g. duplicate-symbol dedup) that fired AND whose file the Judge "
+        "passed. Execution-grounded and additive — no LLM decides success — so "
+        "default ON, unlike the harm-capable P1-A/P1-B loops. Future runs that "
+        "open a sibling file retrieve the recipe via the existing memory "
+        "channel. Set False to ablate in the eval-memory harness.",
+    )
+    inject_enabled: bool = Field(
+        default=True,
+        description="P0 ablation switch: when False, no memory context is "
+        "injected into any agent prompt (the orchestrator skips wiring the "
+        "store onto agents, so get_memory_context returns empty). Used to "
+        "produce the 'memory=off' arm of the memory-effectiveness ablation "
+        "(merge eval-memory). Extraction/write-back are unaffected — only "
+        "read-time injection is suppressed. Default True (normal behaviour).",
+    )
+    persist_suppress: bool = Field(
+        default=False,
+        description="P1-A: at run end, persistently soft-delete (suppress) "
+        "memory entries judged stably harmful (>= suppress_min_observations "
+        "pass/fail observations with a net-negative outcome). Default OFF — "
+        "like OPP-5 write-back, suppression is cross-run durable and should "
+        "prove out on the eval-memory ablation before enabling. Never touches "
+        "human-decided or bootstrap (human-authored) entries.",
+    )
+    suppress_min_observations: int = Field(
+        default=3,
+        ge=1,
+        description="P1-A: minimum pass+fail observations before a harmful "
+        "entry is persistently suppressed, so a single run cannot prune it.",
+    )
+    suppress_harmful_threshold: float = Field(
+        default=-0.8,
+        ge=-1.0,
+        le=0.0,
+        description="P1-A固化: outcome-score ceiling for *persistent* suppress "
+        "(score=(pass-fail)/total). Stricter than the transient read-time "
+        "filter's -0.5 because suppression is durable and cross-run — require "
+        "near-universal failure, not a slim majority.",
+    )
+    suppress_min_fail_count: int = Field(
+        default=5,
+        ge=1,
+        description="P1-A固化: minimum absolute fail count before persistent "
+        "suppress — a 0-pass/3-fail entry is too thin to durably prune. Guards "
+        "the PR-0d false-positive where a few deterministic-file failures look "
+        "harmful by ratio alone.",
     )
 
 

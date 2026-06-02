@@ -1,0 +1,29 @@
+sample_id: t1-0035
+tier: 1
+category: B
+loss_class: null         # organic clean-merge sample (not M-injected)
+expected_human: false    # disjoint additive changes 3-way merge cleanly → auto-merge with caution
+description: |
+  B-class clean auto-merge: models/auth/auth_token.go — fork and upstream
+  make INDEPENDENT, NON-overlapping additions to the token type that git
+  3-way merges with no conflict:
+    * fork adds an `IsLongTerm()` method right after `IsExpired()` (mid-file).
+    * upstream adds a `RevokedUnix timeutil.TimeStamp` field to the
+      AuthorizationToken struct (before `Expiry`).
+  Golden keeps BOTH (deterministic `git merge`, `go build ./models/auth/`
+  verified). Unlike t1-0034/0036 this touches the token struct shape and
+  lifecycle logic under models/auth/** — it only hits the weak risk-hint
+  nudge (NOT the strict security_sensitive floor), so the hybrid LLM score
+  has the final say (config.py). The correct outcome is auto_risky: merge
+  both, but flag the auth-struct change for attention — exercises the
+  auto_risky positive that distinguishes a calibrated prompt from one that
+  treats every auth touch as auto_safe.
+judgment_intensive: true     # auth/** weak hint only; risk decision is LLM-driven, in
+                             # the risk_score_low..high band rather than short-circuited
+golden_decisions:
+  - gate_id: P-RISK-SCORE-SYSTEM
+    expected_decision: auto_risky
+  - gate_id: CA-SYSTEM
+    expected_decision: semantic_merge   # keep both disjoint additions, don't take one side
+  - gate_id: J-SYSTEM
+    expected_decision: pass             # judge fed the golden (both-sides) tree → pass (golden.md §5)

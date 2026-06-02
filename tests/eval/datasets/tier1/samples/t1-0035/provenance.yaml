@@ -1,0 +1,15 @@
+# Capture provenance — sibling of meta.yaml, not consumed by prepare.
+# Kept for audit trail (dataset.md §2.4 maintenance rules) so reviewers
+# can re-derive the sample from the original git history.
+repo: /Users/angel/AI/merge-test/forgejo
+base_ref: 160377405c53145e56dd0aab6ee05fce9764c184
+upstream_ref: b176f1ce49adab083d987e3e0fa034b03b0994c1
+fork_ref: d0523cc96b39b5ff27d7abaa53e51a257cc9e465
+golden_ref: 47b9b9619040f22617135330bfd586deddb07afd
+paths: ['models/auth/auth_token.go']
+# F8: files touched in base→golden but in neither base→upstream nor
+# base→fork — content the human added directly during the merge commit.
+# Reviewers should weigh whether to keep the sample (the merge system
+# cannot reconstruct these files from the two patches alone, so they
+# surface as MISS_UPSTREAM / MISS_FORK in eval diffs).
+noisy_paths: []

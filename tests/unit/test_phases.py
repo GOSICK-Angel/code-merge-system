@@ -678,6 +678,18 @@ class TestReportGenerationPhase:
         state.status = SystemStatus.COMPLETED
         assert build_ci_summary(state)["status"] == "partial_failure"
 
+    def test_ci_summary_surfaces_build_check_passed(self):
+        # BCP (metrics.md §8.5) is sourced from the CI summary by the eval
+        # harness; the tri-state must round-trip verbatim (None excluded from
+        # the BCP denominator, True/False counted).
+        from src.tools.ci_reporter import build_ci_summary
+
+        for value in (None, True, False):
+            state = _make_state(
+                status=SystemStatus.GENERATING_REPORT, build_check_passed=value
+            )
+            assert build_ci_summary(state)["build_check_passed"] is value
+
     @pytest.mark.asyncio
     async def test_report_skips_verification_in_dry_run(self):
         state = _make_state(status=SystemStatus.GENERATING_REPORT, dry_run=True)

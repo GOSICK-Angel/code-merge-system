@@ -1,0 +1,14 @@
+diff --git a/models/auth/auth_token.go b/models/auth/auth_token.go
+index d01ddbca1e..33a8d710cc 100644
+--- a/models/auth/auth_token.go
++++ b/models/auth/auth_token.go
+@@ -17,6 +17,9 @@ import (
+ 
+ type AuthorizationPurpose string
+ 
++// DefaultTokenTTLHours is the fork's default long-term token lifetime.
++const DefaultTokenTTLHours = 720
++
+ var (
+ 	// Used to store long term authorization tokens.
+ 	LongTermAuthorization AuthorizationPurpose = "long_term_authorization"

@@ -35,7 +35,10 @@ CREATE TABLE IF NOT EXISTS memory_entries (
     confidence        REAL NOT NULL,
     confidence_level  TEXT NOT NULL,
     content_hash      TEXT NOT NULL,
-    created_at        TEXT NOT NULL
+    created_at        TEXT NOT NULL,
+    suppressed        INTEGER NOT NULL DEFAULT 0,
+    suppressed_reason TEXT,
+    pinned            INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_content_hash
     ON memory_entries (content_hash);
@@ -52,9 +55,28 @@ CREATE TABLE IF NOT EXISTS kv_store (
 _INSERT_ENTRY = """
 INSERT OR IGNORE INTO memory_entries
     (entry_id, entry_type, phase, content, file_paths, tags,
-     confidence, confidence_level, content_hash, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     confidence, confidence_level, content_hash, created_at,
+     suppressed, suppressed_reason, pinned)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
+
+# P1-A: columns added after the original schema shipped; older memory.db files
+# predate them. ALTER TABLE ADD COLUMN is a no-op-safe, data-preserving
+# migration run on every open.
+_MIGRATIONS = (
+    (
+        "suppressed",
+        "ALTER TABLE memory_entries ADD COLUMN suppressed INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "suppressed_reason",
+        "ALTER TABLE memory_entries ADD COLUMN suppressed_reason TEXT",
+    ),
+    (
+        "pinned",
+        "ALTER TABLE memory_entries ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0",
+    ),
+)
 
 _PHASE_ORDER = {
     "planning": 0,
@@ -64,7 +86,7 @@ _PHASE_ORDER = {
 }
 
 
-def _entry_to_row(entry: MemoryEntry) -> tuple[str, ...]:
+def _entry_to_row(entry: MemoryEntry) -> tuple[str | int | None, ...]:
     return (
         entry.entry_id,
         entry.entry_type.value,
@@ -76,10 +98,14 @@ def _entry_to_row(entry: MemoryEntry) -> tuple[str, ...]:
         entry.confidence_level.value,
         entry.content_hash,
         entry.created_at.isoformat(),
+        1 if entry.suppressed else 0,
+        entry.suppressed_reason,
+        1 if entry.pinned else 0,
     )
 
 
 def _row_to_entry(row: sqlite3.Row) -> MemoryEntry:
+    keys = row.keys()
     return MemoryEntry(
         entry_id=row["entry_id"],
         entry_type=MemoryEntryType(row["entry_type"]),
@@ -91,6 +117,11 @@ def _row_to_entry(row: sqlite3.Row) -> MemoryEntry:
         confidence_level=ConfidenceLevel(row["confidence_level"]),
         content_hash=row["content_hash"],
         created_at=datetime.fromisoformat(row["created_at"]),
+        suppressed=bool(row["suppressed"]) if "suppressed" in keys else False,
+        suppressed_reason=(
+            row["suppressed_reason"] if "suppressed_reason" in keys else None
+        ),
+        pinned=bool(row["pinned"]) if "pinned" in keys else False,
     )
 
 
@@ -129,6 +160,7 @@ class SQLiteMemoryStore:
                 conn.execute("PRAGMA busy_timeout=5000")
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.executescript(_CREATE_SCHEMA)
+                self._apply_migrations(conn)
                 return
             except sqlite3.OperationalError as exc:
                 last_exc = exc
@@ -137,6 +169,15 @@ class SQLiteMemoryStore:
                 conn.close()
         assert last_exc is not None
         raise last_exc
+
+    def _apply_migrations(self, conn: sqlite3.Connection) -> None:
+        existing = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(memory_entries)").fetchall()
+        }
+        for column, ddl in _MIGRATIONS:
+            if column not in existing:
+                conn.execute(ddl)
 
     @contextmanager
     def _conn(self) -> Generator[sqlite3.Connection, None, None]:
@@ -221,6 +262,19 @@ class SQLiteMemoryStore:
                 )
         return self
 
+    def suppress_entry(self, entry_id: str, reason: str) -> "SQLiteMemoryStore":
+        """P1-A: persistently soft-delete an entry (audit-preserving).
+
+        Sets ``suppressed=1`` + ``suppressed_reason`` via UPDATE; the row stays
+        for audit/reversal. Already-suppressed or unknown ids are no-ops."""
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE memory_entries SET suppressed = 1, suppressed_reason = ? "
+                "WHERE entry_id = ? AND suppressed = 0",
+                (reason, entry_id),
+            )
+        return self
+
     def set_codebase_profile(self, key: str, value: str) -> "SQLiteMemoryStore":
         with self._conn() as conn:
             conn.execute(
@@ -274,6 +328,8 @@ class SQLiteMemoryStore:
         scored: dict[str, tuple[float, MemoryEntry]] = {}
         for row in rows:
             entry = _row_to_entry(row)
+            if entry.suppressed:
+                continue
             entry_fps: list[str] = json.loads(row["file_paths"])
             path_score = score_path_overlap(file_paths, entry_fps)
 

@@ -140,6 +140,7 @@ def _build_run_meta(
     memory_clean_check: str,
     exit_code: int,
     cache_disabled: bool,
+    build_check_passed: bool | None,
 ) -> RunMeta:
     return RunMeta(
         sample_id=sample_id,
@@ -153,6 +154,7 @@ def _build_run_meta(
         status=status,  # type: ignore[arg-type]
         memory_clean_check=memory_clean_check,  # type: ignore[arg-type]
         exit_code=exit_code,
+        build_check_passed=build_check_passed,
     )
 
 
@@ -223,6 +225,9 @@ async def _run_one_sample(
     )
     status = "success" if exit_code == 0 else "failed"
 
+    bcp_raw = ci_payload.get("build_check_passed")
+    build_check_passed = bcp_raw if isinstance(bcp_raw, bool) else None
+
     meta = _build_run_meta(
         sample_id=sample_id,
         run_id=run_id,
@@ -235,6 +240,7 @@ async def _run_one_sample(
         memory_clean_check="passed",
         exit_code=exit_code,
         cache_disabled=False,
+        build_check_passed=build_check_passed,
     )
     write_json(sample_out / "run_meta.json", meta.model_dump(mode="json"))
     return exit_code

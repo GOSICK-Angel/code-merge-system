@@ -5,6 +5,20 @@ build-backend = "hatchling.build"
 [project]
 name = "code-merge-system"
 version = "0.1.0"
+description = "AI-powered code merge agent with browser UI — plan, review, and resolve conflicts across long fork histories"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Angel", email = "angel.gosick@gmail.com" }]
+keywords = ["merge", "git", "ai", "llm", "code-review", "conflict-resolution"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Version Control :: Git",
+]
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.5",
@@ -21,6 +35,11 @@ dependencies = [
     "websockets>=14.0",
     "platformdirs>=4.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/GOSICK-Angel/code-merge-system"
+Repository = "https://github.com/GOSICK-Angel/code-merge-system"
+Issues = "https://github.com/GOSICK-Angel/code-merge-system/issues"
 
 [project.scripts]
 merge = "src.cli.main:cli"

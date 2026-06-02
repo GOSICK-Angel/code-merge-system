@@ -111,6 +111,21 @@ def _format_pct(value: float | str, decimals: int = 4) -> str:
     return str(value)
 
 
+def _compute_bcp(metas: dict[str, RunMeta]) -> float | str:
+    """Build-Check Pass Rate (metrics.md §8.5): passed / ran.
+
+    Only runs that actually executed build_check (``build_check_passed`` is
+    not None) count toward the denominator — a run that never configured a
+    build command, or escalated before judge, is excluded ("未探测到工具链
+    的目标不计入分母"). Returns ``"N/A"`` when no run executed build_check so
+    gate.py SKIPs the BCP gate instead of failing it.
+    """
+    ran = [m for m in metas.values() if m.build_check_passed is not None]
+    if not ran:
+        return "N/A (no run executed build_check)"
+    return sum(1 for m in ran if m.build_check_passed) / len(ran)
+
+
 def _compute_sser(samples: tuple[DiffEntry, ...]) -> float:
     """SSER per metrics.md §3.2: of all security-sensitive samples, how
     many were routed to human review (``system_decision.human == True``).
@@ -246,6 +261,7 @@ def _compute_metrics(
         "JA": "N/A (follow-up)",
         "DET": "N/A (multi-run)",
         "CPC": "N/A (multi-provider)",
+        "BCP": _format_pct(_compute_bcp(metas)),
         "cost_usd_per_run_p95": _format_pct(
             _percentile([m.cost_usd for m in metas.values()], 95)
         ),
@@ -292,6 +308,7 @@ def _empty_metrics() -> dict[str, Any]:
         "JA": "N/A (follow-up)",
         "DET": "N/A (multi-run)",
         "CPC": "N/A (multi-provider)",
+        "BCP": "N/A (no run executed build_check)",
         "cost_usd_per_run_p95": "N/A",
         "wall_time_seconds_p95": "N/A",
         "plan_revision_rounds_p95": "N/A",

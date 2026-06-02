@@ -350,7 +350,7 @@ God Node（高 degree 节点）→ 命中的改动文件风险提升。
 1. **冒烟**：forgejo 上各跑一次 Control / Treatment-core，diff 三份报告，确认每个消费方 ≥1 次触发（§11.3 计数）——先证「活」。
 2. **小集 A/B**：3 个 C-class + `t1-0031..0033` 各跑 N=3（`DET` 口径），算聚焦指标位移。
 3. **归因**（若收益显著）：按 §11.1 单开关回退定位主要贡献者。
-4. **记录**：结果落 `eval_acceptance_<sha>.json`（acceptance.md §3 schema），基线历史表追加一行；
+4. **记录**：结果落 `eval_acceptance_<sha>.json`（acceptance.md §4 schema），基线历史表追加一行；
    用本轮真实数据回填 §7.3/§8.5 标注「未标定」的阈值（`god_node_min_dependents=8` / `god_node_risk_bump=0.15` /
    `_MAX_TOPO_ISSUES=25`）的标定建议。
 

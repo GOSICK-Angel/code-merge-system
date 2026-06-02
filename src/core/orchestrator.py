@@ -54,6 +54,7 @@ from src.core.phases.base import ActivityEvent, OnActivityCallback
 from src.core.coordinator import Coordinator
 from src.core.state_machine import StateMachine
 from src.memory.bootstrap import _BOOTSTRAP_TAG, bootstrap_from_claude_md
+from src.memory.content_quality import enforce_actionable
 from src.memory.hit_tracker import MemoryHitTracker
 from src.memory.sqlite_store import SQLiteMemoryStore
 from src.memory.store import MemoryStore
@@ -183,7 +184,10 @@ class Orchestrator:
         # --- memory ---
         self._memory_store: MemoryStore | SQLiteMemoryStore = MemoryStore()
         self._memory_hit_tracker = MemoryHitTracker()
-        self._summarizer = PhaseSummarizer(upstream_ref=config.upstream_ref)
+        self._summarizer = PhaseSummarizer(
+            upstream_ref=config.upstream_ref,
+            repair_recipe_enabled=getattr(config.memory, "repair_recipe_enabled", True),
+        )
         self._phases_since_last_extract: int = 0
 
         # --- hooks (C1) ---
@@ -493,7 +497,7 @@ class Orchestrator:
             phase_summary, entries = method(state)
             store = self._memory_store.record_phase_summary(phase_summary)
             for entry in entries:
-                store = store.add_entry(entry)
+                store = store.add_entry(enforce_actionable(entry))
             count_before = store.entry_count
             store = store.remove_superseded(phase)
             removed = count_before - store.entry_count
@@ -514,7 +518,7 @@ class Orchestrator:
                 llm_entries = await self.memory_extractor.extract(phase, state)  # type: ignore[attr-defined]
                 store = self._memory_store
                 for entry in llm_entries:
-                    store = store.add_entry(entry)
+                    store = store.add_entry(enforce_actionable(entry))
                 self._memory_store = store
                 self._phases_since_last_extract = 0
             except Exception as exc:
@@ -522,9 +526,46 @@ class Orchestrator:
 
         if phase == "judge_review":
             try:
+                self._record_memory_outcomes(state)
+            except Exception as exc:
+                logger.warning("Memory outcome recording failed: %s", exc)
+            try:
                 self._apply_outcome_confidence_writeback(state)
             except Exception as exc:
                 logger.warning("Outcome confidence write-back failed: %s", exc)
+            try:
+                self._apply_suppress_harmful_entries(state)
+            except Exception as exc:
+                logger.warning("Harmful-entry suppression failed: %s", exc)
+
+    def _record_memory_outcomes(self, state: MergeState) -> None:
+        """P1-B: fuse deterministic signals into the per-file memory outcome
+        that feeds OPP-5 write-back and P1-A suppression, then credit/blame the
+        entries injected for each file.
+
+        Runs once after judge_review — the verdict already reflects the
+        post-judge build check. With the default ``["judge"]`` this reproduces
+        the prior passed/failed split byte-for-byte. Adding ``"compile"`` demotes
+        a judge-passed compiled-language file to a failure when the build check
+        failed this run, so memory that produced an uncompilable merge earns no
+        credit. Deterministic only — no LLM self-report."""
+        verdict = state.judge_verdict
+        if verdict is None:
+            return
+        cfg = getattr(self.config, "memory", None)
+        sources = list(getattr(cfg, "writeback_signal_sources", None) or ["judge"])
+        tracker = self._memory_hit_tracker
+        demoted: frozenset[str] = frozenset()
+        if "compile" in sources and any(
+            issue.issue_type == "build_check_failed" for issue in verdict.issues
+        ):
+            from src.tools.compile_gate import compiled_language_paths
+
+            demoted = frozenset(compiled_language_paths(verdict.passed_files))
+        for fp in verdict.passed_files:
+            tracker.record_outcome(fp, success=fp not in demoted)
+        for fp in verdict.failed_files:
+            tracker.record_outcome(fp, success=False)
 
     def _apply_outcome_confidence_writeback(self, state: MergeState) -> None:
         """OPP-5: nudge persisted memory confidence toward judge outcomes.
@@ -566,6 +607,73 @@ class Orchestrator:
                 len(deltas),
             )
 
+    def _apply_suppress_harmful_entries(self, state: MergeState) -> None:
+        """P1-A: persistently soft-delete stably-harmful memory entries.
+
+        Default OFF. Persistent suppress is durable and cross-run, so its bar
+        is deliberately stricter than the transient read-time O-M6 filter:
+        ``suppress_harmful_threshold`` (≈ near-universal failure, not a slim
+        majority) AND ``suppress_min_fail_count`` absolute fails. A
+        deterministic-confound guard further skips entries whose only judged
+        file association is with files that failed via a *deterministic* veto
+        this run — a deterministic gate ignores memory, so blaming the injected
+        entry is the PR-0d single-arm false positive (metrics §9.7). Human and
+        bootstrap entries are exempt, mirroring OPP-5."""
+        cfg = getattr(self.config, "memory", None)
+        if cfg is None or not getattr(cfg, "persist_suppress", False):
+            return
+        harmful_ids = self._memory_hit_tracker.harmful_entry_ids(
+            threshold=getattr(cfg, "suppress_harmful_threshold", -0.8),
+            min_observations=cfg.suppress_min_observations,
+            min_fail_count=getattr(cfg, "suppress_min_fail_count", 5),
+        )
+        if not harmful_ids:
+            return
+        human_files = {
+            fp
+            for fp, record in state.file_decision_records.items()
+            if record.decision_source
+            in (DecisionSource.HUMAN, DecisionSource.BATCH_HUMAN)
+        }
+        verdict = getattr(state, "judge_verdict", None)
+        passed_files = set(verdict.passed_files) if verdict else set()
+        # Files that failed via a deterministic veto this run — their failure is
+        # independent of injected memory, so an entry tied only to them is a
+        # correlational (not causal) "harm".
+        det_fail_files = (
+            {
+                issue.file_path
+                for issue in verdict.issues
+                if issue.veto_condition and issue.file_path in set(verdict.failed_files)
+            }
+            if verdict
+            else set()
+        )
+        suppressed = 0
+        for entry in self._memory_store.to_memory().entries:
+            if entry.entry_id not in harmful_ids or entry.suppressed:
+                continue
+            if _BOOTSTRAP_TAG in entry.tags:
+                continue
+            if human_files and any(fp in human_files for fp in entry.file_paths):
+                continue
+            entry_files = set(entry.file_paths)
+            if (
+                det_fail_files
+                and entry_files & det_fail_files
+                and not (entry_files & passed_files)
+            ):
+                continue
+            self._memory_store = self._memory_store.suppress_entry(
+                entry.entry_id, reason="P1-A: stably-harmful judge outcomes"
+            )
+            suppressed += 1
+        if suppressed:
+            logger.info(
+                "P1-A: persistently suppressed %d stably-harmful memory entries",
+                suppressed,
+            )
+
     def _should_llm_extract(self, phase: str, state: MergeState) -> bool:
         cfg = getattr(self.config, "memory", None)
         if cfg is None or not cfg.llm_extraction:
@@ -597,8 +705,14 @@ class Orchestrator:
 
     def _inject_memory(self) -> None:
         memory_cfg = getattr(self.config, "memory", None)
+        # P0 ablation: when inject_enabled is False, leave each agent's store
+        # at None so get_memory_context() returns "" — the "memory=off" arm.
+        # Extraction/write-back still run at the orchestrator level; only
+        # read-time prompt injection is suppressed.
+        inject_enabled = getattr(memory_cfg, "inject_enabled", True)
         for agent in self._all_agents:
-            agent.set_memory_store(self._memory_store)  # type: ignore[arg-type]
+            if inject_enabled:
+                agent.set_memory_store(self._memory_store)  # type: ignore[arg-type]
             agent.set_memory_hit_tracker(self._memory_hit_tracker)
             agent.set_memory_config(memory_cfg)
             agent.set_upstream_ref(self.config.upstream_ref)

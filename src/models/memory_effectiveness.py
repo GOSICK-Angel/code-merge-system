@@ -42,6 +42,12 @@ class MemoryEffectivenessReport(BaseModel, frozen=True):
     top_harmful: list[EntryEffectivenessItem] = Field(default_factory=list)
     total_tracked_entries: int = Field(ge=0)
     effective_observations: int = Field(ge=0)
+    # PR-0d: per-file Judge verdict, persisted so an offline on/off comparison
+    # can attribute help/harm causally (cross-arm set diff) instead of relying
+    # on the single-arm ``injected ∩ failed`` correlation. Default empty keeps
+    # older artifacts (counts only) loadable.
+    passed_files: list[str] = Field(default_factory=list)
+    failed_files: list[str] = Field(default_factory=list)
 
 
 class MemoryAblationComparison(BaseModel, frozen=True):
@@ -61,3 +67,14 @@ class MemoryAblationComparison(BaseModel, frozen=True):
     memory_decision_lift: float
     harmful_influence_rate_on: float = Field(ge=0.0, le=1.0)
     memory_beneficial: bool
+    # PR-0d: causal cross-arm attribution — a file counts as helped/harmed only
+    # if its verdict actually flipped between the arms, so a deterministic
+    # failure that happens identically with and without memory is NOT blamed on
+    # memory (the single-arm ``harmful_influence_rate`` over-attributes it).
+    memory_helped_files: list[str] = Field(default_factory=list)
+    memory_harmed_files: list[str] = Field(default_factory=list)
+    memory_helped_count: int = Field(default=0, ge=0)
+    memory_harmed_count: int = Field(default=0, ge=0)
+    # False when neither report carries per-file lists (e.g. pre-PR-0d
+    # artifacts) — then helped/harmed are unknowable, not zero.
+    causal_attribution_available: bool = False

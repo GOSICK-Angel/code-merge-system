@@ -154,6 +154,15 @@
 
 ### Phase 1 —— 闭合执行接地反馈环（最高 ROI）
 
+> **落地状态（2026-05-31，feat/web）**：A/B/C 全部实装（`b83d142`/`6b4f905`/`6bc77c3`）。
+> A、B 的反馈环按 P2「先度量再激活」默认 **opt-in（False）**——`memory.persist_suppress`、
+> `memory.writeback_signal_sources` 默认 `["judge"]`（=旧行为），需 `merge eval-memory`
+> 多 run 基线证明净收益为正（§3 激活门：`MDL>0` 且 `memory_harmed=0`）方可翻默认。
+> C 为纯加性、执行接地，默认 **True**（`memory.repair_recipe_enabled`）。
+> **B 偏差**：CI/partial_failure 信号有意延后——它在 `report_generation` 产出，晚于
+> judge_review 记忆钩子；完整融合需把写回迁到 report 阶段（未做）。故 B 现仅
+> `judge + compile` 两源。
+
 > 对应研究最强三条证据：选择性 add+**delete** +10%（F2）、执行接地 >> 自反思（范式2）、Experience 抽象（范式5）。拆三个可独立评审的子项。
 
 #### P1-A 把临时软删（O-M6）巩固为持久、可审计的 suppress（原则 P3）
@@ -169,6 +178,13 @@
 - 触发**默认 opt-in**，因 Phase 0 已能度量净收益，可在基线为正后转默认开启。
 
 **防护**：只固化满足 `min_observations` 且 effectiveness≤阈值的条目；豁免 HUMAN/bootstrap（同 OPP-5 现有豁免）；软删可经 CLI 复活。
+
+> **固化判据加固（`918c194`，eval-memory 分析驱动）**：持久软删不可逆、跨 run，
+> 判据须远严于读取期 O-M6 过滤。真实 forgejo 累积 sidecar 上，旧的单臂
+> `harmful_entry_ids(-0.5)` 会误删 8 条薄样本（≤4 fail）——正是 PR-0d 修过的相关性
+> 假阳性。已升级：`suppress_harmful_threshold=-0.8` + `suppress_min_fail_count=5`
+> + 确定性混淆守卫（条目仅关联本 run veto 失败文件且不沾 passed → 跳过）。实证旧
+> 判据选 8 条、新判据选 0 条。
 **验收**：Phase 0 harness 显示 `harmful_influence_rate` 在"tracker 重置"场景下仍不回升（=证明持久化的增量价值），且总决策质量不降。
 
 #### P1-B 激活并加固 OPP-5 写回，融合 compile/CI 信号（原则 P1）
@@ -202,6 +218,13 @@
 
 ### Phase 2 —— 记忆质量加固（中等 ROI，便宜）
 
+> **落地状态（2026-05-31，feat/web）**：A/B 全部实装（`4525008`/`2af4890`）。
+> A（`content_quality.is_actionable_content`/`enforce_actionable`）保守降级而非删，
+> 默认随入库即生效；B（`MemoryEntry.pinned`）锚定 REPAIR_RECIPE + 人工决策条目，
+> consolidation 对其 passthrough。**B 偏差**：security-sensitive 锚定延后——
+> summarizer 无 config 的 `security_sensitive.patterns`；`pinned` 字段已就位，
+> 需后续在有 config 的入库点补标。
+
 **P2-A 高信息条目强制**（范式2，GPT-4 0.79→0.93 的直接杠杆）
 - 扩展 `_is_epistemically_empty` 的对偶：`_has_actionable_content()`——DECISION/REPAIR_RECIPE 类条目若缺"具体动作/修复"则降级或拒写。
 - 接入 `summarizer.py` 各 `summarize_*` 与 `memory_extractor` 出口。
@@ -215,6 +238,15 @@
 ---
 
 ### Phase 3 —— 离线提示/策略自动优化（opt-in，后期，成本透明）
+
+> **落地状态（2026-05-31，feat/web）**：确定性可测核心已实装（`f540613`）——
+> `src/tools/prompt_optimizer.py` + `merge optimize-prompts` CLI。生成具名候选变体
+> （GEPA 确定性子集=反思指令注入）、按 golden 决策准确率排名、产**人工评审报告**，
+> **永不自动写回 gate_registry**。**有意外移的部分**：① 昂贵的 LLM rollout 抽象为注入的
+> `rollouts` 映射（操作者自担成本产出），harness 保持纯离线可单测；② 仅支持
+> no-arg/`*-SYSTEM` gate（参数化 gate 无静态基线文本）；③ LLM-反思式变体生成（GEPA
+> 完整形态）留待后续，当前为确定性指令注入。这是 opt-in 子命令、默认不跑，符合
+> 「上界增益、不应早于 0–1」定位。
 
 **目标**：用 Phase 0 的评估器当 metric，离线对 gate 提示（`gate_registry` P-*/J-*/CA-*…）做 GEPA/MIPROv2 式进化。
 

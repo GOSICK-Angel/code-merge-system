@@ -1,10 +1,13 @@
 # acceptance_thresholds.yaml — eval-impl Phase 6 fixture
 #
-# Authoritative source: doc/evaluation/acceptance.md @ 2026-05-15.
+# Authoritative source: doc/evaluation/acceptance.md @ 2026-05-31.
 # Schema enforced by scripts/eval/_schemas.AcceptanceThresholds.
 #
-# Keep ``synced_with_sha`` aligned with doc/evaluation/acceptance.md via:
-#     python -m scripts.eval.lock --update-acceptance-sync
+# Keep ``synced_with_sha`` aligned with doc/evaluation/acceptance.md. NOTE:
+# ``lock --update-acceptance-sync`` re-serialises this file via yaml.safe_dump
+# and STRIPS every comment below. To preserve this header, instead hand-edit
+# the two ``synced_*`` fields with the new ``sha256(acceptance.md)`` (compute:
+# ``python -c "import hashlib;print(hashlib.sha256(open('doc/evaluation/acceptance.md','rb').read()).hexdigest())"``).
 #
 # Hard gates: always absolute. WDR is intentionally OMITTED in this
 # release — the diff classifier currently collapses MISS_FORK into
@@ -13,10 +16,21 @@
 # work will reinstate a true MISS_FORK distinction; WDR moves back to
 # hard once that lands.
 #
-# Soft gates: 6 absolute + 3 relative. Relative gates SKIP when the
+# Soft gates: 7 absolute + 3 relative. Relative gates SKIP when the
 # caller omits ``gate.py --baseline`` (plan-amend / decision C).
-synced_with_sha: "6355be87e619edb1ac9c081622c106a8457dc53e5407ec45bdad56b3b7144a48"
-synced_at: "2026-05-15T12:00:00+00:00"
+#
+# BCP (build-check pass rate, acceptance.md §2 / metrics.md §8.5) is
+# ENFORCED: summarize.py emits it from each run's tri-state
+# ``build_check_passed``; runs that never executed build_check are excluded
+# from the denominator, so on a dataset where no run configured a build
+# command BCP renders ``N/A`` and gate.py SKIPs it (never a false fail).
+#
+# §3 自学习反馈环激活门 (MDL / memory_harmed / CRI / MCPD, acceptance.md §3)
+# are NOT eval gates: they gate the self-learning loop's default-on switch
+# via ``merge eval-memory``, deliberately separate from §1/§2 merge-quality
+# gates, so they never appear here.
+synced_with_sha: "3a5fa06d89b38f3eb5e4817d29ed07ec638e783124e1f685e3b1d0ed6f9ea914"
+synced_at: "2026-05-31T00:00:00+00:00"
 hard_gates:
   - id: WMR
     kind: absolute
@@ -114,6 +128,11 @@ soft_gates:
     threshold: 0.85
     operator: ">="
     source: "切换 reviewer/executor provider"
+  - id: BCP
+    kind: absolute
+    threshold: 1.0
+    operator: "=="
+    source: "配置了 build_check 的 run（metrics.md §8.5；未配置/未运行的 run 不计入分母 → 全量未配置时 SKIP）"
   - id: cost_usd_per_run_p95
     kind: relative
     multiplier: 1.15

@@ -37,7 +37,21 @@ merge validate --config <path>   # validate config + env vars
 merge init [--repo-path .]       # generate per-target CLAUDE.md for merge decisions
 merge plan-suggest [--target ... --candidates ...]   # enumerate baseline commit-windows
 merge forks-profile init         # scaffold .merge/forks-profile.yaml (recommended ≥30 fork-deleted files)
+merge eval-memory --on <run|json> --off <run|json> [--out <path>]   # P0 memory ablation: compare memory=on vs memory=off effectiveness reports
+merge optimize-prompts --gate <ID> [--golden <json> --rollouts <json> --strategies a,b --margin 0.02 --out <path>]   # Phase 3 (opt-in, offline): generate + rank prompt variants for a *-SYSTEM gate; emits a HUMAN-REVIEW report, never auto-applies
 ```
+
+`merge optimize-prompts` is offline and read-only w.r.t. production prompts:
+gates are code builders, so a winning candidate is applied by a human editing
+the gate's prompt source after reviewing the report. Scoring needs `--golden`
+(JSON `[{case_id, expected_decision}]`) plus `--rollouts` (JSON
+`{candidate_id: {case_id: decision}}` produced by running each candidate — the
+cost-bearing step you run yourself). See `doc/plan/self-learning-system.md`
+Phase 3 for the cost model.
+
+To produce a `memory=off` run for the ablation, set `memory.inject_enabled: false`
+in `.merge/config.yaml` and re-run on the same dataset; each run persists a
+`memory_effectiveness.json` under its run dir that `merge eval-memory` consumes.
 
 ## Required Environment Variables
 
