@@ -101,3 +101,7 @@ python_version = "3.11"
 strict = true
 mypy_path = "."
 explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = "tree_sitter.*"
+ignore_missing_imports = true
