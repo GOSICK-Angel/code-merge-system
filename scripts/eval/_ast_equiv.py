@@ -100,7 +100,7 @@ def _has_tree_sitter() -> bool:
     path independently of the host environment.
     """
     try:
-        import tree_sitter  # type: ignore[import-not-found]  # noqa: F401
+        import tree_sitter  # noqa: F401
 
         return True
     except ImportError:
