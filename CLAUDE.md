@@ -200,6 +200,48 @@ API key resolution order: shell env vars → `.merge/.env` → `~/.config/code-m
 
 Branches: `feature/<name>`, `fix/<name>`, `chore/<name>`. PRs squash-merged into `main`.
 
+## Releasing (PyPI)
+
+The package publishes to PyPI as `code-merge-system` via **Trusted Publishing
+(OIDC)** — no API token is stored anywhere. `.github/workflows/release.yml`
+triggers on any `v*` tag, builds the wheel + sdist (after `npm run build` bakes
+`web/dist` into the package), and publishes through the `pypi` GitHub
+environment.
+
+One-time setup (already configured for this repo): a PyPI *trusted publisher*
+must exist with project `code-merge-system`, owner `GOSICK-Angel`, repository
+`code-merge-system`, workflow `release.yml`, environment `pypi`. Set it up at
+https://pypi.org/manage/account/publishing/ before the first release.
+
+To cut a release:
+
+```bash
+# 1. Bump the version in pyproject.toml ([project].version) and merge to main.
+# 2. Make sure main CI is green (the tag-triggered release runs independently,
+#    so a red CI won't block it — but don't ship a broken main).
+# 3. Tag the release commit and push the tag:
+git tag -a vX.Y.Z -m "release: vX.Y.Z" <commit-on-main>
+git push origin vX.Y.Z
+# 4. Watch the publish workflow:
+gh run watch "$(gh run list --workflow release.yml --limit 1 --json databaseId -q '.[0].databaseId')" --exit-status
+# 5. Verify it is live:
+curl -s https://pypi.org/pypi/code-merge-system/json | python -c "import sys,json;print(json.load(sys.stdin)['info']['version'])"
+```
+
+PyPI versions are immutable — a given `X.Y.Z` can never be re-uploaded, so bump
+the version for every retry. Packaging note: `web/dist` is gitignored, so both
+the wheel and sdist targets `force-include` it in `pyproject.toml`; the release
+job rebuilds the Web UI first so the bundled assets resolve at runtime via
+`importlib.resources.files("src.web") / "dist"`.
+
+To build/validate the artifacts locally before tagging:
+
+```bash
+cd web && npm run build && cd ..   # produce web/dist (required by force-include)
+python -m build                    # builds sdist + wheel into dist/
+python -m twine check dist/*       # PyPI metadata sanity check
+```
+
 ## Testing Notes
 
 `asyncio_mode = "auto"` is set globally — all async test functions run without explicit `@pytest.mark.asyncio`. Unit tests use `patch_llm_factory` to mock LLM calls; integration tests (`tests/integration/`) make real API calls and require valid `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
