@@ -11,10 +11,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tests.eval.manifests import _r2_sha
 
 
-def test_TB_U_05_lock_round_trip_matches_disk(tmp_path) -> None:
+def test_TB_U_05_lock_round_trip_matches_disk(tmp_path: Path) -> None:
     """Build lock entries, write them, then re-verify — must report match."""
     # use real on-disk samples; manifest may live in tmp_path so we don't
     # disturb the committed lock.
@@ -30,7 +32,9 @@ def test_TB_U_05_lock_round_trip_matches_disk(tmp_path) -> None:
     assert rc_verify == 0
 
 
-def test_TB_U_08_tampered_sample_reports_mismatch(tmp_path, capsys) -> None:
+def test_TB_U_08_tampered_sample_reports_mismatch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Copy r2-0001 to tmp, tamper meta.yaml, lock then alter — verify fails."""
     repo_root = Path(__file__).resolve().parents[3]
     src = repo_root / "tests" / "eval" / "datasets" / "r2" / "samples"

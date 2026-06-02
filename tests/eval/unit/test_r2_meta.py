@@ -13,6 +13,7 @@ import subprocess
 import pytest
 import yaml
 from pydantic import ValidationError
+from pytest_mock import MockerFixture
 
 from scripts.eval._schemas import SampleMeta
 
@@ -60,7 +61,7 @@ def test_TB_U_07_tier_below_range_rejected() -> None:
     assert "greater_than_equal" in str(exc.value) or ">=" in str(exc.value)
 
 
-def test_TB_U_04_from_merge_ref_derivation(mocker) -> None:
+def test_TB_U_04_from_merge_ref_derivation(mocker: MockerFixture) -> None:
     """Mock subprocess.run to verify the 4-ref derivation rule:
 
         base = git merge-base ^1 ^2
@@ -71,7 +72,9 @@ def test_TB_U_04_from_merge_ref_derivation(mocker) -> None:
     (sample_import.py:11-21 docstring contract; locks v1 [plan] §C1)
     """
 
-    def fake_git_run(cmd, **kwargs):
+    def fake_git_run(
+        cmd: list[str] | str, **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         args = cmd if isinstance(cmd, list) else cmd.split()
         verb_idx = next(i for i, a in enumerate(args) if a == "git") + 3
         verb = args[verb_idx]

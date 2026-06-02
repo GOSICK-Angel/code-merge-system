@@ -78,7 +78,7 @@ def test_docs_no_no_tui_except_deprecation_note() -> None:
 
     Scanned: CLAUDE.md, README*.md, doc/*.md (recursive).
     Excluded:
-      - doc/web-ui-redesign-handoff.md — frozen historical record
+      - doc/modules/web-ui-redesign-handoff.md — frozen historical record
       - doc/test-report/** — historical test reports
       - docs/web-ui-redesign-tests.md — test matrix references --no-tui for
         historical context (location pointer for the cleanup)
@@ -90,7 +90,7 @@ def test_docs_no_no_tui_except_deprecation_note() -> None:
             candidates.append(path)
 
     excluded_paths = {
-        REPO_ROOT / "doc" / "web-ui-redesign-handoff.md",
+        REPO_ROOT / "doc" / "modules" / "web-ui-redesign-handoff.md",
         REPO_ROOT / "docs" / "web-ui-redesign-tests.md",
     }
     for doc_root in (REPO_ROOT / "doc", REPO_ROOT / "docs"):
